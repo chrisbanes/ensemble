@@ -143,6 +143,45 @@ pub struct DeliveryObservationFacts {
     pub checks: Vec<DeliveryCheck>,
     pub check_summary: CheckSummary,
     pub review_decision: ReviewDecision,
+    /// Complete head-associated feedback retained for a possible delivery repair.
+    #[serde(default)]
+    pub feedback: DeliveryFeedback,
+}
+
+/// Bounded review evidence read with a pull-request observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeliveryFeedback {
+    /// Bodies of submitted change requests for this pull request.
+    pub change_request_bodies: Vec<String>,
+    /// Unresolved, non-outdated inline review threads.
+    pub unresolved_threads: Vec<DeliveryFeedbackThread>,
+}
+
+/// A single actionable inline discussion, represented by its latest visible comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeliveryFeedbackThread {
+    pub path: Option<String>,
+    pub line: Option<u64>,
+    pub body: String,
+}
+
+/// Frozen evidence that may safely be given to a delivery-repair agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ActionableDeliveryFeedback {
+    pub terminal_failed_checks: Vec<String>,
+    pub change_request_bodies: Vec<String>,
+    pub unresolved_threads: Vec<DeliveryFeedbackThread>,
+}
+
+/// Classifies fresh feedback for delivery repair without silently treating an
+/// unmergeable pull request as ordinary waiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeliveryRepairFeedback {
+    Actionable(ActionableDeliveryFeedback),
+    RequiresOperator {
+        feedback: ActionableDeliveryFeedback,
+        mergeability: Mergeability,
+    },
 }
 
 impl DeliveryObservationFacts {
@@ -167,6 +206,63 @@ impl DeliveryObservationFacts {
         self.head_diverged = !self.matches_delivery;
         self.check_summary = CheckSummary::from_checks(&self.checks);
         self
+    }
+
+    /// Returns only feedback that is safe to act on for the observed delivery head.
+    /// Pending checks and general pull-request conversation are deliberately absent here.
+    pub(crate) fn actionable_feedback(&self) -> Option<ActionableDeliveryFeedback> {
+        match self.repair_feedback()? {
+            DeliveryRepairFeedback::Actionable(feedback) => Some(feedback),
+            DeliveryRepairFeedback::RequiresOperator { .. } => None,
+        }
+    }
+
+    /// Classifies otherwise actionable feedback that cannot safely start an automated repair.
+    pub(crate) fn repair_feedback(&self) -> Option<DeliveryRepairFeedback> {
+        if self.terminal_state != PullRequestTerminalState::Open
+            || !self.matches_delivery
+            || self.head_diverged
+        {
+            return None;
+        }
+        let terminal_failed_checks = self
+            .checks
+            .iter()
+            .filter(|check| {
+                check.status == CheckStatus::Completed
+                    && matches!(
+                        check.conclusion,
+                        Some(
+                            CheckConclusion::Failure
+                                | CheckConclusion::TimedOut
+                                | CheckConclusion::Cancelled
+                                | CheckConclusion::ActionRequired
+                                | CheckConclusion::StartupFailure
+                        )
+                    )
+            })
+            .map(|check| check.name.clone())
+            .collect::<Vec<_>>();
+        let feedback = ActionableDeliveryFeedback {
+            terminal_failed_checks,
+            change_request_bodies: self.feedback.change_request_bodies.clone(),
+            unresolved_threads: self.feedback.unresolved_threads.clone(),
+        };
+        let has_feedback = !feedback.terminal_failed_checks.is_empty()
+            || !feedback.change_request_bodies.is_empty()
+            || !feedback.unresolved_threads.is_empty();
+        if !has_feedback {
+            return None;
+        }
+        Some(match self.mergeability {
+            Mergeability::Mergeable => DeliveryRepairFeedback::Actionable(feedback),
+            Mergeability::Conflicting | Mergeability::Unknown => {
+                DeliveryRepairFeedback::RequiresOperator {
+                    feedback,
+                    mergeability: self.mergeability,
+                }
+            }
+        })
     }
 }
 
@@ -290,6 +386,7 @@ mod tests {
             checks: vec![],
             check_summary: CheckSummary::Pending,
             review_decision: ReviewDecision::ReviewRequired,
+            feedback: DeliveryFeedback::default(),
         }
     }
 
@@ -325,6 +422,85 @@ mod tests {
     #[test]
     fn a_complete_empty_check_rollup_is_passing() {
         assert_eq!(CheckSummary::from_checks(&[]), CheckSummary::Passing);
+    }
+
+    #[test]
+    fn actionable_feedback_accepts_terminal_failure_even_when_other_checks_are_pending() {
+        let mut facts = facts().for_delivery("expected");
+        facts.checks = vec![
+            DeliveryCheck {
+                name: "test".to_string(),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Failure),
+            },
+            DeliveryCheck {
+                name: "deploy".to_string(),
+                status: CheckStatus::InProgress,
+                conclusion: None,
+            },
+        ];
+
+        let feedback = facts.actionable_feedback().unwrap();
+
+        assert_eq!(feedback.terminal_failed_checks, vec!["test"]);
+    }
+
+    #[test]
+    fn actionable_feedback_requires_a_mergeable_pull_request() {
+        let mut facts = facts().for_delivery("expected");
+        facts.checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Failure),
+        }];
+
+        facts.mergeability = Mergeability::Conflicting;
+        assert!(facts.actionable_feedback().is_none());
+
+        facts.mergeability = Mergeability::Unknown;
+        assert!(facts.actionable_feedback().is_none());
+    }
+
+    #[test]
+    fn repair_feedback_routes_nonmergeable_actionable_evidence_to_an_operator() {
+        let mut facts = facts().for_delivery("expected");
+        facts.feedback.change_request_bodies = vec!["please fix this".to_string()];
+        facts.mergeability = Mergeability::Conflicting;
+
+        assert!(matches!(
+            facts.repair_feedback(),
+            Some(DeliveryRepairFeedback::RequiresOperator {
+                mergeability: Mergeability::Conflicting,
+                ..
+            })
+        ));
+
+        facts.mergeability = Mergeability::Unknown;
+        assert!(matches!(
+            facts.repair_feedback(),
+            Some(DeliveryRepairFeedback::RequiresOperator {
+                mergeability: Mergeability::Unknown,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn actionable_feedback_excludes_diverged_heads_and_resolved_or_outdated_threads() {
+        let mut facts = facts().for_delivery("expected");
+        facts.feedback.unresolved_threads = vec![DeliveryFeedbackThread {
+            path: Some("src/lib.rs".to_string()),
+            line: Some(7),
+            body: "fix this".to_string(),
+        }];
+        assert!(facts.actionable_feedback().is_some());
+
+        facts.head_diverged = true;
+        assert!(facts.actionable_feedback().is_none());
+
+        facts.head_diverged = false;
+        facts.feedback.unresolved_threads.clear();
+        assert!(facts.actionable_feedback().is_none());
     }
 
     #[test]

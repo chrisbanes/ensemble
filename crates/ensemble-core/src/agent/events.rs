@@ -249,6 +249,13 @@ pub enum WorkerEvent {
         result: WorkerResult,
         timestamp: DateTime<Utc>,
     },
+    /// Completion of a delivery-owned repair. It is deliberately separate from
+    /// `WorkerExited`: no pipeline step can consume or account for this result.
+    DeliveryRepairExited {
+        issue_id: String,
+        result: WorkerResult,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// Outcome of a worker task.

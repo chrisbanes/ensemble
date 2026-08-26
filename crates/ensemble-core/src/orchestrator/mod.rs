@@ -81,7 +81,9 @@ use crate::observability::events_contract::{
 use crate::orchestrator::delivery::{
     canonical_marker, DeliveryMode, DeliveryRecord, DeliveryRepository,
 };
-use crate::orchestrator::delivery::{CliDeliveryRemote, DeliveryPhase, DeliveryRemote};
+use crate::orchestrator::delivery::{
+    CliDeliveryRemote, DeliveryPhase, DeliveryRemote, DeliveryRepairPhase,
+};
 use crate::orchestrator::pipeline_journal::{
     PendingTerminalTransition, PipelineRunJournal, PipelineTransitionInput, PipelineTransitionKind,
     PipelineTransitionRecord, TerminalOutcome,
@@ -697,6 +699,9 @@ pub struct Orchestrator {
         Box<std::sync::Mutex<HashMap<String, PendingRunStartedTransition>>>,
     /// Immutable workers waiting for exact `StepLaunched` reconciliation.
     pending_immutable_launches: std::sync::Mutex<HashMap<WorkerIdentity, PendingImmutableLaunch>>,
+    /// Freshly journaled repair intents. This in-memory gate distinguishes a
+    /// new launch from an ambiguous `dispatch_in_flight` restored after restart.
+    pending_delivery_repair_dispatches: std::sync::Mutex<HashSet<String>>,
     pending_acceptance_transitions: std::sync::Mutex<HashMap<String, PendingAcceptanceTransition>>,
     /// Remote claims held only until their first synchronous `RunStarted` journal append.
     pending_ownership_leases: std::sync::Mutex<HashMap<String, OwnershipLease>>,
@@ -1056,6 +1061,7 @@ impl Orchestrator {
             pipeline_journal_restored: AtomicBool::new(false),
             pending_run_started_transitions: Box::new(std::sync::Mutex::new(HashMap::new())),
             pending_immutable_launches: std::sync::Mutex::new(HashMap::new()),
+            pending_delivery_repair_dispatches: std::sync::Mutex::new(HashSet::new()),
             pending_acceptance_transitions: std::sync::Mutex::new(HashMap::new()),
             pending_ownership_leases: std::sync::Mutex::new(HashMap::new()),
             event_bus: parts.event_bus,
@@ -4763,7 +4769,10 @@ impl Orchestrator {
             event,
             workspace_capture,
         } = owned_event;
-        let worker_exit_permit = if matches!(&event, WorkerEvent::WorkerExited { .. }) {
+        let worker_exit_permit = if matches!(
+            &event,
+            WorkerEvent::WorkerExited { .. } | WorkerEvent::DeliveryRepairExited { .. }
+        ) {
             let Some(permit) = self.quiescing.begin_dispatch() else {
                 return;
             };
@@ -4782,8 +4791,17 @@ impl Orchestrator {
                 step_name,
                 ..
             } => issue_id == &identity.issue_id && step_name == &identity.step_name,
+            WorkerEvent::DeliveryRepairExited { issue_id, .. } => {
+                issue_id == &identity.issue_id && identity.step_name == "delivery_repair"
+            }
         };
-        if !event_matches_identity || !self.worker_identity_is_current(&identity).await {
+        let identity_is_current = match &event {
+            WorkerEvent::DeliveryRepairExited { .. } => {
+                self.delivery_repair_identity_is_current(&identity).await
+            }
+            _ => self.worker_identity_is_current(&identity).await,
+        };
+        if !event_matches_identity || !identity_is_current {
             if let Some(permit) = worker_exit_permit.as_ref() {
                 self.dispatch_ready_active_pipelines(permit).await;
             }
@@ -4815,6 +4833,9 @@ impl Orchestrator {
                         .expect("worker exit has a dispatch permit"),
                 )
                 .await;
+            }
+            WorkerEvent::DeliveryRepairExited { result, .. } => {
+                self.handle_delivery_repair_exit(identity, result).await;
             }
         }
         drop(workspace_capture);
@@ -4895,6 +4916,9 @@ impl Orchestrator {
             } => {
                 self.handle_worker_exit(&issue_id, &step_name, result).await;
             }
+            WorkerEvent::DeliveryRepairExited { .. } => {
+                // Unit helpers have no durable delivery owner to reconcile.
+            }
         }
     }
 
@@ -4913,6 +4937,21 @@ impl Orchestrator {
                 run.step_states.get(&identity.step_name),
                 Some(StepState::Running { .. })
             )
+    }
+
+    async fn delivery_repair_identity_is_current(&self, identity: &WorkerIdentity) -> bool {
+        let state = self.state.read().await;
+        state
+            .delivery
+            .get(&identity.issue_id)
+            .is_some_and(|delivery| {
+                delivery.run_id == identity.run_id
+                    && identity.step_name == "delivery_repair"
+                    && delivery
+                        .repair
+                        .as_ref()
+                        .is_some_and(|repair| repair.phase == DeliveryRepairPhase::DispatchInFlight)
+            })
     }
 
     async fn cancel_and_drain_for_reconciliation(&self, issue_id: &str) -> Option<DrainedWorkers> {
@@ -9186,7 +9225,8 @@ impl Orchestrator {
             interactions.retain(|interaction| {
                 !state.is_running(&interaction.issue_id)
                     && !state.is_waiting_on_human(&interaction.issue_id)
-                    && !state.delivery.contains_key(&interaction.issue_id)
+                    && (interaction.step_name == "delivery_repair"
+                        || !state.delivery.contains_key(&interaction.issue_id))
                     && !state
                         .pending_terminal_transitions
                         .contains_key(&interaction.issue_id)
@@ -9216,7 +9256,8 @@ impl Orchestrator {
         for interaction in interactions {
             if state.is_running(&interaction.issue_id)
                 || state.is_waiting_on_human(&interaction.issue_id)
-                || state.delivery.contains_key(&interaction.issue_id)
+                || (state.delivery.contains_key(&interaction.issue_id)
+                    && interaction.step_name != "delivery_repair")
                 || state
                     .pending_terminal_transitions
                     .contains_key(&interaction.issue_id)
@@ -11400,6 +11441,12 @@ impl Orchestrator {
             .into());
         }
 
+        if interaction.step_name == "delivery_repair" {
+            return self
+                .resume_delivery_repair_interaction(issue, &interaction)
+                .await;
+        }
+
         let current_dag = build_dag(&current_config.steps)?;
         let current_step = current_dag
             .steps
@@ -12718,9 +12765,13 @@ async fn bridge_worker_events(
     completion_tx: watch::Sender<bool>,
 ) {
     while let Some(event) = local_event_rx.recv().await {
-        let workspace_capture = if matches!(&event, WorkerEvent::WorkerExited { .. })
-            && worker_uses_exclusive_issue_workspace(&cancellation_registry, &identity)
-        {
+        let workspace_capture = if matches!(
+            &event,
+            WorkerEvent::WorkerExited { .. } | WorkerEvent::DeliveryRepairExited { .. }
+        ) && worker_uses_exclusive_issue_workspace(
+            &cancellation_registry,
+            &identity,
+        ) {
             Some(acquire_issue_workspace_capture(&cancellation_registry, &identity.issue_id).await)
         } else {
             None
@@ -12788,6 +12839,7 @@ fn spawn_agent_worker(
                 event_tx: local_event_tx.clone(),
                 cancel_token,
                 step_outputs,
+                delivery_repair: None,
             }),
             &issue.id,
             &step_name,
@@ -12797,6 +12849,55 @@ fn spawn_agent_worker(
             .send(WorkerEvent::WorkerExited {
                 issue_id: issue.id,
                 step_name,
+                result: worker_result,
+                timestamp: Utc::now(),
+            })
+            .await;
+    });
+    local_event_rx
+}
+
+/// Runs a repair under the delivery owner. Its exit has a distinct event so it
+/// cannot enter pipeline-step completion or retry accounting.
+#[allow(clippy::too_many_arguments)]
+fn spawn_delivery_repair_worker(
+    runner: Arc<dyn AgentRunner>,
+    config: Arc<EnsembleConfig>,
+    issue: Issue,
+    agent_name: String,
+    repair: crate::config::template::DeliveryRepairPromptContext,
+    attempt: u32,
+    timeout_ms: u64,
+    workspace_path: std::path::PathBuf,
+    cancel_token: tokio_util::sync::CancellationToken,
+) -> mpsc::Receiver<WorkerEvent> {
+    let (local_event_tx, local_event_rx) = mpsc::channel(100);
+    tokio::spawn(async move {
+        let step_name = "delivery_repair";
+        let worker_result = catch_worker_panic(
+            runner.run(AgentRunRequest {
+                config,
+                issue: &issue,
+                agent_name: &agent_name,
+                step_name,
+                step_kind: StepKind::Agent,
+                artifact_access: ArtifactAccess::Mutable,
+                attempt: Some(attempt),
+                timeout_ms,
+                interaction_response: None,
+                workspace_path: &workspace_path,
+                event_tx: local_event_tx.clone(),
+                cancel_token,
+                step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: Some(repair),
+            }),
+            &issue.id,
+            step_name,
+        )
+        .await;
+        let _ = local_event_tx
+            .send(WorkerEvent::DeliveryRepairExited {
+                issue_id: issue.id,
                 result: worker_result,
                 timestamp: Utc::now(),
             })
@@ -15207,6 +15308,21 @@ mod tests {
             Ok(())
         }
 
+        async fn guarded_repair_push(
+            &self,
+            _repository_path: &Path,
+            _remote: &str,
+            _head_branch: &str,
+            _observed_head: &str,
+            _local_head: &str,
+        ) -> crate::orchestrator::delivery::GuardedRepairPushOutcome {
+            self.mutation_phases
+                .lock()
+                .unwrap()
+                .push(crate::orchestrator::delivery::DeliveryPhase::PushInFlight);
+            crate::orchestrator::delivery::GuardedRepairPushOutcome::Confirmed
+        }
+
         async fn list_pull_requests(
             &self,
             _repository_path: &Path,
@@ -15768,6 +15884,137 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GuardedRepairPushCall {
+        observed_head: String,
+        local_head: String,
+        journaled_phase: crate::orchestrator::delivery::DeliveryRepairPhase,
+    }
+
+    /// A delivery remote whose guarded-push boundary is observable by recovery tests.
+    /// It deliberately separates a guarded call from a real push mutation: rejected
+    /// calls prove the orchestrator retained ownership without publishing anything.
+    struct GuardedRepairRemote {
+        journal: PipelineRunJournal,
+        issue_id: String,
+        local_sha: std::sync::Mutex<String>,
+        outcomes: std::sync::Mutex<Vec<crate::orchestrator::delivery::GuardedRepairPushOutcome>>,
+        observations: std::sync::Mutex<
+            Vec<crate::orchestrator::delivery_observation::DeliveryObservationRead>,
+        >,
+        guarded_calls: std::sync::Mutex<Vec<GuardedRepairPushCall>>,
+        pushes: AtomicUsize,
+        creates: AtomicUsize,
+        lists: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::orchestrator::delivery::DeliveryRemote for GuardedRepairRemote {
+        fn supports_delivery_observation(&self) -> bool {
+            true
+        }
+
+        async fn local_identity(
+            &self,
+            _repository_path: &Path,
+        ) -> Result<crate::orchestrator::delivery::LocalRepositoryIdentity, String> {
+            Ok(crate::orchestrator::delivery::LocalRepositoryIdentity {
+                head_branch: "ensemble/repo-1".to_string(),
+                local_sha: self.local_sha.lock().unwrap().clone(),
+            })
+        }
+
+        async fn remote_head(
+            &self,
+            _repository_path: &Path,
+            _remote: &str,
+            _head_branch: &str,
+        ) -> Result<Option<String>, String> {
+            Ok(Some("0123456789abcdef".to_string()))
+        }
+
+        async fn push(
+            &self,
+            _repository_path: &Path,
+            _remote: &str,
+            _head_branch: &str,
+            _local_sha: &str,
+        ) -> Result<(), String> {
+            self.pushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn guarded_repair_push(
+            &self,
+            _repository_path: &Path,
+            _remote: &str,
+            _head_branch: &str,
+            observed_head: &str,
+            local_head: &str,
+        ) -> crate::orchestrator::delivery::GuardedRepairPushOutcome {
+            let journaled_phase = self
+                .journal
+                .latest_live_record_for_issue(&self.issue_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .delivery
+                .unwrap()
+                .repair
+                .unwrap()
+                .phase;
+            self.guarded_calls
+                .lock()
+                .unwrap()
+                .push(GuardedRepairPushCall {
+                    observed_head: observed_head.to_string(),
+                    local_head: local_head.to_string(),
+                    journaled_phase,
+                });
+            self.outcomes.lock().unwrap().remove(0)
+        }
+
+        async fn list_pull_requests(
+            &self,
+            _repository_path: &Path,
+            _repository_key: &str,
+            _adoption_policy: Option<&crate::orchestrator::delivery::PullRequestAdoptionPolicy>,
+        ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn create_pull_request(
+            &self,
+            _repository_path: &Path,
+            _base_branch: &str,
+            _head_branch: &str,
+            _marker: &str,
+        ) -> Result<(), String> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn observe_pull_request(
+            &self,
+            _repository_path: &Path,
+            _pull_request_number: u64,
+            _pull_request_url: &str,
+            _base_branch: &str,
+            _head_branch: &str,
+            _remote: &str,
+        ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
+            self.observations.lock().unwrap().pop().unwrap_or_else(|| {
+                crate::orchestrator::delivery_observation::DeliveryObservationRead::Retryable(
+                    crate::orchestrator::delivery_observation::DeliveryObservationFailure::new(
+                        crate::orchestrator::delivery_observation::DeliveryObservationFailureKind::Transport,
+                        "no test observation configured",
+                    ),
+                )
+            })
+        }
+    }
+
     #[async_trait]
     impl crate::orchestrator::delivery::DeliveryRemote for SequencedObservationRemote {
         fn supports_delivery_observation(&self) -> bool {
@@ -15954,6 +16201,11 @@ mod tests {
             terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -15964,6 +16216,2111 @@ mod tests {
             .await
             .unwrap();
         (orchestrator, workspace_temp, repo_temp, delivery)
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_exit_is_journaled_without_pipeline_step_completion() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 1,
+        });
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::State {
+                state: "Todo".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            WorkerEvent::DeliveryRepairExited { .. }
+        ));
+        orchestrator.handle_worker_event(event).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state
+            .delivery
+            .get("1")
+            .is_some_and(|record| record.repair.as_ref().is_some_and(|repair| {
+                repair.phase == crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+            })));
+        assert!(state
+            .get_pipeline_run("1")
+            .is_none_or(|run| !run.step_states.contains_key("delivery_repair")));
+        assert!(state.is_waiting_on_human("1"));
+        drop(state);
+
+        let interaction = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(interaction.body.contains("source-repo"));
+        assert!(interaction.body.contains("0123456789abcdef"));
+        orchestrator
+            .interaction_store
+            .resolve(
+                &interaction.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "handle manually".to_string(),
+                    selected_option: Some("Handle manually".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .unwrap();
+        let state = orchestrator.state.read().await;
+        assert!(state
+            .delivery
+            .get("1")
+            .is_some_and(|record| record.repair.is_none()));
+        assert!(!state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_removed_retained_worktree_converts_its_durable_launch_intent_to_one_handoff(
+    ) {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let prepared = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let retained_worktree = prepared.worktrees["source-repo"].path.clone();
+        assert!(retained_worktree.is_dir());
+        std::fs::remove_dir_all(&retained_worktree).unwrap();
+        assert!(orchestrator
+            .workspace_mgr
+            .owned_worktree_paths(&delivery.issue_id)
+            .unwrap()
+            .contains_key("source-repo"));
+        assert!(!retained_worktree.is_dir());
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 2,
+        });
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::State {
+                state: "Todo".to_string(),
+            },
+        );
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+        drop(state);
+        assert!(!orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .contains(&delivery.issue_id));
+        let interaction = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            interaction.body.contains("worktree is unavailable"),
+            "{}",
+            interaction.body
+        );
+    }
+
+    #[tokio::test]
+    async fn nonmergeable_actionable_delivery_feedback_becomes_one_capacity_free_operator_handoff()
+    {
+        let (orchestrator, workspace, _repo, mut delivery, remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        delivery.repair = None;
+        delivery.delivery_repair_attempts_used = 0;
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::State {
+                state: "Todo".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        remote.observations.lock().unwrap().push(
+            crate::orchestrator::delivery_observation::DeliveryObservationRead::Observed(
+                DeliveryObservationFacts {
+                    pull_request_number: 7,
+                    pull_request_url: "https://example.test/pr/7".to_string(),
+                    head_sha: "0123456789abcdef".to_string(),
+                    matches_delivery: false,
+                    head_diverged: false,
+                    terminal_state: PullRequestTerminalState::Open,
+                    mergeability: Mergeability::Conflicting,
+                    base_freshness: BaseFreshness::UpToDate,
+                    checks: vec![crate::orchestrator::delivery_observation::DeliveryCheck {
+                        name: "test".to_string(),
+                        status: crate::orchestrator::delivery_observation::CheckStatus::Completed,
+                        conclusion: Some(
+                            crate::orchestrator::delivery_observation::CheckConclusion::Failure,
+                        ),
+                    }],
+                    check_summary: CheckSummary::Failing,
+                    review_decision: ReviewDecision::ReviewRequired,
+                    feedback: Default::default(),
+                },
+            ),
+        );
+
+        let observed = orchestrator
+            .reconcile_delivery_observations(delivery, None)
+            .await;
+        orchestrator
+            .ensure_delivery_repair_interaction(&observed)
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let repair = state.delivery["1"].repair.as_ref().unwrap();
+        assert_eq!(
+            repair.phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+        );
+        assert!(repair
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("mergeability is conflicting")));
+        assert_eq!(state.delivery["1"].delivery_repair_attempts_used, 0);
+        assert!(state.is_waiting_on_human("1"));
+        drop(state);
+        assert!(workspace.path().exists());
+        assert!(!orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .contains("1"));
+        let interaction = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(interaction.body.contains("mergeability is conflicting"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_dispatch_respects_its_frozen_selected_lane_capacity() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let mut config = orchestrator.config.write().await;
+        config.scheduler.lanes.insert(
+            "delivery".to_string(),
+            crate::config::ensemble::SchedulerLaneConfig {
+                precedence: 1,
+                idle_only: false,
+                capacity: Some(1),
+            },
+        );
+        let max_global_workers = config.concurrency.max_concurrent_agents;
+        let max_issue_workers = config.concurrency.max_step_parallelism;
+        drop(config);
+
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 2,
+        });
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::Lane {
+                lane: "delivery".to_string(),
+            },
+        );
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec![],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+
+        let holder = WorkerIdentity {
+            issue_id: "lane-holder".to_string(),
+            run_id: "holder".to_string(),
+            cycle: 0,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_holder_done, holder_completion) = watch::channel(false);
+        try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &orchestrator.cancellation_registry,
+            holder.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            holder_completion,
+            max_global_workers,
+            max_issue_workers,
+            WorkerCapacity::lane("delivery", Some(1)),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .unwrap();
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(25),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .is_err());
+        assert!(orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .contains(&delivery.issue_id));
+
+        assert!(rollback_worker_reservation(
+            &orchestrator.cancellation_registry,
+            &holder
+        ));
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            WorkerEvent::DeliveryRepairExited { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_dispatch_respects_legacy_state_capacity_and_fails_closed_without_it() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let mut config = orchestrator.config.write().await;
+        config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("in progress".to_string(), 1);
+        let max_global_workers = config.concurrency.max_concurrent_agents;
+        let max_issue_workers = config.concurrency.max_step_parallelism;
+        drop(config);
+
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 2,
+        });
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::State {
+                state: "In Progress".to_string(),
+            },
+        );
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec![],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+
+        let holder = WorkerIdentity {
+            issue_id: "state-holder".to_string(),
+            run_id: "holder".to_string(),
+            cycle: 0,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_holder_done, holder_completion) = watch::channel(false);
+        try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &orchestrator.cancellation_registry,
+            holder.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            holder_completion,
+            max_global_workers,
+            max_issue_workers,
+            WorkerCapacity::new(
+                "In Progress",
+                &BTreeMap::from([("in progress".to_string(), 1)]),
+            ),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .unwrap();
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(25),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .is_err());
+        assert!(rollback_worker_reservation(
+            &orchestrator.cancellation_registry,
+            &holder
+        ));
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            WorkerEvent::DeliveryRepairExited { .. }
+        ));
+
+        let mut legacy = delivery.clone();
+        legacy.delivery_repair_capacity = None;
+        legacy.repair.as_mut().unwrap().phase = DeliveryRepairPhase::DispatchInFlight;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&legacy)
+            .await;
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_missing_frozen_lane_becomes_one_operator_handoff() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 2,
+        });
+        delivery.delivery_repair_capacity = Some(
+            crate::orchestrator::delivery::DeliveryRepairCapacity::Lane {
+                lane: "removed-after-freeze".to_string(),
+            },
+        );
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec![],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        let mut frozen_config = orchestrator.config.read().await.clone();
+        frozen_config.scheduler.lanes.insert(
+            "removed-after-freeze".to_string(),
+            crate::config::ensemble::SchedulerLaneConfig {
+                precedence: 1,
+                idle_only: false,
+                capacity: Some(1),
+            },
+        );
+        orchestrator
+            .state
+            .write()
+            .await
+            .pipeline_configs
+            .insert(delivery.issue_id.clone(), Arc::new(frozen_config));
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap()
+            .insert(delivery.issue_id.clone());
+
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+        orchestrator
+            .dispatch_delivery_repair_if_authorized(&delivery)
+            .await;
+
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert_eq!(
+            orchestrator
+                .interaction_store
+                .latest_blocking_for_issue("1")
+                .await
+                .unwrap()
+                .into_iter()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_handoff_retains_failed_and_blocked_worker_context() {
+        let (orchestrator, _workspace, _repo, delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        orchestrator
+            .handle_delivery_repair_exit(
+                WorkerIdentity {
+                    issue_id: delivery.issue_id.clone(),
+                    run_id: delivery.run_id.clone(),
+                    cycle: 0,
+                    step_name: "delivery_repair".to_string(),
+                    started_at: Utc::now(),
+                },
+                WorkerResult::Failed {
+                    error: "repair runtime failed".to_string(),
+                    kind: WorkerFailureKind::Runtime,
+                },
+            )
+            .await;
+        let failed = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failed.body.contains("repair runtime failed"));
+        orchestrator
+            .interaction_store
+            .clear_waiting_state(&failed.id)
+            .await
+            .unwrap();
+
+        let mut blocked = orchestrator.state.read().await.delivery["1"].clone();
+        let repair = blocked.repair.as_mut().unwrap();
+        repair.phase = DeliveryRepairPhase::DispatchInFlight;
+        repair.last_error = None;
+        repair.interaction_id = Some("delivery-repair-blocked-context".to_string());
+        orchestrator
+            .persist_delivery_record(&blocked, None)
+            .await
+            .unwrap();
+        orchestrator
+            .handle_delivery_repair_exit(
+                WorkerIdentity {
+                    issue_id: blocked.issue_id.clone(),
+                    run_id: blocked.run_id.clone(),
+                    cycle: 0,
+                    step_name: "delivery_repair".to_string(),
+                    started_at: Utc::now(),
+                },
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::Question,
+                        blocking: true,
+                        title: "Need a repair decision".to_string(),
+                        body: "choose the release branch".to_string(),
+                        options: vec!["main".to_string()],
+                        artifacts: vec![],
+                    },
+                },
+            )
+            .await;
+        let blocked = orchestrator
+            .interaction_store
+            .get("delivery-repair-blocked-context")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(blocked.body.contains("choose the release branch"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_operator_choices_preserve_or_suppress_the_retained_attempt() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        delivery.delivery_repair.as_mut().unwrap().max_attempts = 2;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = DeliveryRepairPhase::AwaitingHuman;
+        repair.last_error = Some("first repair failed".to_string());
+        repair.interaction_id = Some("delivery-repair-retry-choice".to_string());
+        let expected_attempt = repair.attempt.clone();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .ensure_delivery_repair_interaction(&delivery)
+            .await;
+        let retry = orchestrator
+            .interaction_store
+            .get("delivery-repair-retry-choice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retry.options,
+            vec![
+                "Retry delivery repair".to_string(),
+                "Handle manually".to_string(),
+            ]
+        );
+        orchestrator
+            .interaction_store
+            .resolve(
+                &retry.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "retry".to_string(),
+                    selected_option: Some("Retry delivery repair".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .unwrap();
+        let retried = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(retried.delivery_repair_attempts_used, 1);
+        assert_eq!(retried.repair.as_ref().unwrap().attempt, expected_attempt);
+        assert_eq!(
+            retried.repair.as_ref().unwrap().phase,
+            DeliveryRepairPhase::PendingDispatch
+        );
+
+        let mut manual = retried.clone();
+        let repair = manual.repair.as_mut().unwrap();
+        repair.phase = DeliveryRepairPhase::AwaitingHuman;
+        repair.interaction_id = Some("delivery-repair-manual-choice".to_string());
+        orchestrator
+            .persist_delivery_record(&manual, None)
+            .await
+            .unwrap();
+        orchestrator
+            .ensure_delivery_repair_interaction(&manual)
+            .await;
+        let manual_interaction = orchestrator
+            .interaction_store
+            .get("delivery-repair-manual-choice")
+            .await
+            .unwrap()
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .resolve(
+                &manual_interaction.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "manual".to_string(),
+                    selected_option: Some("Handle manually".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .unwrap();
+        let handled = orchestrator.state.read().await.delivery["1"].clone();
+        assert!(handled.repair.is_none());
+        assert!(handled.delivery_repair_suppressions.contains(
+            &crate::orchestrator::delivery::DeliveryRepairIdentity {
+                repository_key: expected_attempt.repository_key.clone(),
+                pull_request_number: expected_attempt.pull_request_number,
+                head_sha: expected_attempt.starting_sha.clone(),
+            }
+        ));
+        assert_eq!(handled.repositories, delivery.repositories);
+        assert!(orchestrator.state.read().await.is_claimed("1"));
+
+        let mut invalid = handled.clone();
+        invalid.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: invalid.delivery_repair_attempts_used,
+            phase: DeliveryRepairPhase::AwaitingHuman,
+            attempt: expected_attempt,
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: Some("delivery-repair-invalid-choice".to_string()),
+        });
+        orchestrator
+            .persist_delivery_record(&invalid, None)
+            .await
+            .unwrap();
+        orchestrator
+            .ensure_delivery_repair_interaction(&invalid)
+            .await;
+        let invalid_interaction = orchestrator
+            .interaction_store
+            .get("delivery-repair-invalid-choice")
+            .await
+            .unwrap()
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .resolve(
+                &invalid_interaction.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "unexpected".to_string(),
+                    selected_option: Some("Unexpected choice".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .is_err());
+        let state = orchestrator.state.read().await;
+        assert!(state.is_claimed("1"));
+        assert!(state.is_waiting_on_human("1"));
+        assert_eq!(
+            state.delivery["1"].repair.as_ref().unwrap().phase,
+            DeliveryRepairPhase::AwaitingHuman
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_retry_failure_creates_one_new_interaction_cycle() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        delivery.delivery_repair.as_mut().unwrap().max_attempts = 2;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = DeliveryRepairPhase::AwaitingHuman;
+        repair.last_error = Some("first repair failed".to_string());
+        repair.interaction_id = Some("delivery-repair-first-cycle".to_string());
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator
+            .ensure_delivery_repair_interaction(&delivery)
+            .await;
+        let first = orchestrator
+            .interaction_store
+            .get("delivery-repair-first-cycle")
+            .await
+            .unwrap()
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .resolve(
+                &first.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "retry".to_string(),
+                    selected_option: Some("Retry delivery repair".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .unwrap();
+
+        let mut second = orchestrator.state.read().await.delivery["1"].clone();
+        second.delivery_repair_attempts_used = 2;
+        let repair = second.repair.as_mut().unwrap();
+        repair.attempts_used = 2;
+        repair.phase = DeliveryRepairPhase::DispatchInFlight;
+        let second_id = second
+            .repair
+            .as_ref()
+            .and_then(|repair| repair.interaction_id.clone())
+            .unwrap();
+        assert_ne!(second_id, first.id);
+        orchestrator
+            .persist_delivery_record(&second, None)
+            .await
+            .unwrap();
+        orchestrator
+            .handle_delivery_repair_exit(
+                WorkerIdentity {
+                    issue_id: second.issue_id.clone(),
+                    run_id: second.run_id.clone(),
+                    cycle: 0,
+                    step_name: "delivery_repair".to_string(),
+                    started_at: Utc::now(),
+                },
+                WorkerResult::Failed {
+                    error: "second repair failed".to_string(),
+                    kind: WorkerFailureKind::Runtime,
+                },
+            )
+            .await;
+
+        let failed = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(
+            failed.repair.as_ref().map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(orchestrator.state.read().await.is_waiting_on_human("1"));
+        let open = orchestrator.interaction_store.list_open().await.unwrap();
+        assert_eq!(
+            open.iter()
+                .filter(|interaction| interaction.issue_id == "1")
+                .count(),
+            1
+        );
+        assert_eq!(open[0].id, second_id);
+
+        // Replaying recovery for the same durable cycle must retain the one
+        // already-open interaction rather than creating another request.
+        orchestrator
+            .ensure_delivery_repair_interaction(&failed)
+            .await;
+        orchestrator
+            .ensure_delivery_repair_interaction(&failed)
+            .await;
+        let open = orchestrator.interaction_store.list_open().await.unwrap();
+        assert_eq!(
+            open.iter()
+                .filter(|interaction| interaction.issue_id == "1")
+                .count(),
+            1
+        );
+        assert_eq!(open[0].id, second_id);
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_retry_cycle_interaction_is_not_duplicated_after_restart() {
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = false;
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let agent_runs = Arc::new(AtomicUsize::new(0));
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let first = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config.clone(),
+            remote.clone(),
+            Arc::clone(&agent_runs),
+        );
+        let mut delivery = creation_crash_delivery();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(7);
+        repository.pr_url = Some("https://example.test/pr/7".to_string());
+        repository.last_error = None;
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 2,
+        });
+        delivery.delivery_repair_attempts_used = 2;
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 2,
+            phase: DeliveryRepairPhase::AwaitingHuman,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: Some("second repair failed".to_string()),
+            post_worker_local_head: None,
+            interaction_id: Some("delivery-repair-1-source-repo-7-0123456789abcdef-2".to_string()),
+        });
+        first
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        first
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        first.ensure_delivery_repair_interaction(&delivery).await;
+        let interaction_id = delivery
+            .repair
+            .as_ref()
+            .and_then(|repair| repair.interaction_id.clone())
+            .unwrap();
+        drop(first);
+
+        let restart = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config,
+            remote,
+            Arc::clone(&agent_runs),
+        );
+        restart.handle_tick().await;
+
+        let open = restart.interaction_store.list_open().await.unwrap();
+        assert_eq!(
+            open.iter()
+                .filter(|interaction| interaction.issue_id == "1")
+                .count(),
+            1
+        );
+        assert_eq!(open[0].id, interaction_id);
+        assert!(restart.state.read().await.is_waiting_on_human("1"));
+        assert_eq!(agent_runs.load(Ordering::SeqCst), 0);
+        drop(repo_temp);
+    }
+
+    fn repair_observation(
+        pull_request_number: u64,
+        pull_request_url: &str,
+        head_sha: &str,
+        terminal_state: PullRequestTerminalState,
+    ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
+        crate::orchestrator::delivery_observation::DeliveryObservationRead::Observed(
+            DeliveryObservationFacts {
+                pull_request_number,
+                pull_request_url: pull_request_url.to_string(),
+                head_sha: head_sha.to_string(),
+                matches_delivery: false,
+                head_diverged: false,
+                terminal_state,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::ReviewRequired,
+                feedback: Default::default(),
+            },
+        )
+    }
+
+    fn actionable_repair_observation(
+        pull_request_number: u64,
+        pull_request_url: &str,
+        head_sha: &str,
+    ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
+        crate::orchestrator::delivery_observation::DeliveryObservationRead::Observed(
+            DeliveryObservationFacts {
+                pull_request_number,
+                pull_request_url: pull_request_url.to_string(),
+                head_sha: head_sha.to_string(),
+                matches_delivery: false,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::Open,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![crate::orchestrator::delivery_observation::DeliveryCheck {
+                    name: "test".to_string(),
+                    status: crate::orchestrator::delivery_observation::CheckStatus::Completed,
+                    conclusion: Some(
+                        crate::orchestrator::delivery_observation::CheckConclusion::Failure,
+                    ),
+                }],
+                check_summary: CheckSummary::Failing,
+                review_decision: ReviewDecision::ReviewRequired,
+                feedback: Default::default(),
+            },
+        )
+    }
+
+    async fn guarded_repair_test_orchestrator(
+        outcomes: Vec<crate::orchestrator::delivery::GuardedRepairPushOutcome>,
+        observations: Vec<crate::orchestrator::delivery_observation::DeliveryObservationRead>,
+    ) -> (
+        Orchestrator,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DeliveryRecord,
+        Arc<GuardedRepairRemote>,
+    ) {
+        let bootstrap = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, workspace, repo, mut delivery) =
+            recovery_test_orchestrator(bootstrap).await;
+        let remote = Arc::new(GuardedRepairRemote {
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: delivery.issue_id.clone(),
+            local_sha: std::sync::Mutex::new("fedcba9876543210".to_string()),
+            outcomes: std::sync::Mutex::new(outcomes),
+            observations: std::sync::Mutex::new(observations),
+            guarded_calls: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        orchestrator.delivery_remote = remote.clone();
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(7);
+        repository.pr_url = Some("https://example.test/pr/7".to_string());
+        repository.last_error = None;
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 1,
+        });
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        (orchestrator, workspace, repo, delivery, remote)
+    }
+
+    async fn complete_guarded_repair_worker(
+        orchestrator: &Orchestrator,
+        delivery: &DeliveryRecord,
+    ) {
+        orchestrator
+            .handle_delivery_repair_exit(
+                WorkerIdentity {
+                    issue_id: delivery.issue_id.clone(),
+                    run_id: delivery.run_id.clone(),
+                    cycle: 0,
+                    step_name: "delivery_repair".to_string(),
+                    started_at: Utc::now(),
+                },
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_guarded_push_confirms_the_retained_pull_request_without_republication()
+    {
+        let (orchestrator, workspace, _repo, delivery, remote) = guarded_repair_test_orchestrator(
+            vec![crate::orchestrator::delivery::GuardedRepairPushOutcome::Confirmed],
+            vec![repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::Open,
+            )],
+        )
+        .await;
+        complete_guarded_repair_worker(&orchestrator, &delivery).await;
+        let pending = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(
+            pending.repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::PushPending
+        );
+
+        orchestrator.advance_delivery_repair_push(&pending).await;
+        let reconciling = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(
+            reconciling.repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::ReconcilingPush
+        );
+        assert_eq!(
+            *remote.guarded_calls.lock().unwrap(),
+            vec![GuardedRepairPushCall {
+                observed_head: "0123456789abcdef".to_string(),
+                local_head: "fedcba9876543210".to_string(),
+                journaled_phase: crate::orchestrator::delivery::DeliveryRepairPhase::PushInFlight,
+            }]
+        );
+
+        let observed = orchestrator
+            .reconcile_delivery_observations(reconciling, None)
+            .await;
+        orchestrator.reconcile_delivery_repair_push(&observed).await;
+        let state = orchestrator.state.read().await;
+        let retained = &state.delivery["1"];
+        assert!(retained.repair.is_none());
+        assert_eq!(
+            retained.repositories["source-repo"].local_sha,
+            "fedcba9876543210"
+        );
+        assert_eq!(retained.repositories["source-repo"].pr_number, Some(7));
+        assert_eq!(
+            retained.repositories["source-repo"].pr_url.as_deref(),
+            Some("https://example.test/pr/7")
+        );
+        assert!(state.is_claimed("1"));
+        drop(state);
+        assert!(workspace.path().exists());
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_delivery_observations_keeps_a_manually_suppressed_same_head_unrepaired() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(
+                vec![],
+                vec![actionable_repair_observation(
+                    7,
+                    "https://example.test/pr/7",
+                    "0123456789abcdef",
+                )],
+            )
+            .await;
+        delivery.repair = None;
+        delivery.delivery_repair_attempts_used = 0;
+        delivery.delivery_repair_suppressions.insert(
+            crate::orchestrator::delivery::DeliveryRepairIdentity {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                head_sha: "0123456789abcdef".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let reconciled = orchestrator
+            .reconcile_delivery_observations(delivery, None)
+            .await;
+
+        assert!(reconciled.repair.is_none());
+        assert_eq!(
+            reconciled.repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_delivery_observations_freezes_a_distinct_head_after_manual_suppression() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(
+                vec![],
+                vec![actionable_repair_observation(
+                    7,
+                    "https://example.test/pr/7",
+                    "fedcba9876543210",
+                )],
+            )
+            .await;
+        delivery.repair = None;
+        delivery.delivery_repair_attempts_used = 0;
+        delivery.delivery_repair_suppressions.insert(
+            crate::orchestrator::delivery::DeliveryRepairIdentity {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                head_sha: "0123456789abcdef".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let reconciled = orchestrator
+            .reconcile_delivery_observations(delivery, None)
+            .await;
+
+        assert_eq!(
+            reconciled
+                .repair
+                .as_ref()
+                .map(|repair| &repair.attempt.starting_sha),
+            Some(&"fedcba9876543210".to_string())
+        );
+        assert_eq!(
+            reconciled.repair.as_ref().map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::PendingDispatch)
+        );
+        assert_eq!(
+            reconciled.repositories["source-repo"].local_sha,
+            "0123456789abcdef"
+        );
+        assert_eq!(
+            reconciled.repositories["source-repo"]
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.facts.as_ref())
+                .map(|facts| facts.head_diverged),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_delivery_observations_hands_off_a_distinct_suppressed_successor_when_budget_is_exhausted(
+    ) {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(
+                vec![],
+                vec![actionable_repair_observation(
+                    7,
+                    "https://example.test/pr/7",
+                    "fedcba9876543210",
+                )],
+            )
+            .await;
+        delivery.repair = None;
+        delivery.delivery_repair_attempts_used = 1;
+        delivery.delivery_repair_suppressions.insert(
+            crate::orchestrator::delivery::DeliveryRepairIdentity {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                head_sha: "0123456789abcdef".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let reconciled = orchestrator
+            .reconcile_delivery_observations(delivery, None)
+            .await;
+
+        assert_eq!(reconciled.delivery_repair_attempts_used, 1);
+        assert_eq!(
+            reconciled.repair.as_ref().map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert_eq!(
+            reconciled
+                .repair
+                .as_ref()
+                .map(|repair| &repair.attempt.starting_sha),
+            Some(&"fedcba9876543210".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_delivery_observations_blocks_an_arbitrary_divergent_head() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(
+                vec![],
+                vec![actionable_repair_observation(
+                    7,
+                    "https://example.test/pr/7",
+                    "fedcba9876543210",
+                )],
+            )
+            .await;
+        delivery.repair = None;
+        delivery.delivery_repair_attempts_used = 0;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let reconciled = orchestrator
+            .reconcile_delivery_observations(delivery, None)
+            .await;
+
+        assert!(reconciled.repair.is_none());
+        assert_eq!(
+            reconciled.repositories["source-repo"].phase,
+            DeliveryPhase::Blocked
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_ambiguous_push_reconciles_once_without_a_second_push() {
+        let (orchestrator, _workspace, _repo, delivery, remote) = guarded_repair_test_orchestrator(
+            vec![crate::orchestrator::delivery::GuardedRepairPushOutcome::Ambiguous],
+            vec![repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::Open,
+            )],
+        )
+        .await;
+        complete_guarded_repair_worker(&orchestrator, &delivery).await;
+        let pending = orchestrator.state.read().await.delivery["1"].clone();
+        orchestrator.advance_delivery_repair_push(&pending).await;
+        let reconciling = orchestrator.state.read().await.delivery["1"].clone();
+
+        let observed = orchestrator
+            .reconcile_delivery_observations(reconciling, None)
+            .await;
+        orchestrator.reconcile_delivery_repair_push(&observed).await;
+        let duplicate_recovery = orchestrator.state.read().await.delivery["1"].clone();
+        orchestrator
+            .reconcile_delivery_repair_push(&duplicate_recovery)
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery["1"].repair.is_none());
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_push_pending_with_missing_metadata_becomes_one_operator_handoff() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = crate::orchestrator::delivery::DeliveryRepairPhase::PushPending;
+        repair.post_worker_local_head = Some("fedcba9876543210".to_string());
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        std::fs::remove_file(orchestrator.workspace_mgr.metadata_path_for_test("1")).unwrap();
+
+        orchestrator.advance_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+        drop(state);
+        let interaction = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(interaction.body.contains("worktree"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_push_pending_without_post_worker_head_becomes_one_operator_handoff() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        delivery.repair.as_mut().unwrap().phase = DeliveryRepairPhase::PushPending;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.advance_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_push_pending_with_missing_repository_becomes_one_operator_handoff() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = crate::orchestrator::delivery::DeliveryRepairPhase::PushPending;
+        repair.post_worker_local_head = Some("fedcba9876543210".to_string());
+        delivery.repositories.clear();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.advance_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_push_pending_with_deleted_worktree_becomes_one_operator_handoff() {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = crate::orchestrator::delivery::DeliveryRepairPhase::PushPending;
+        repair.post_worker_local_head = Some("fedcba9876543210".to_string());
+        let worktree = orchestrator
+            .workspace_mgr
+            .owned_worktree_paths(&delivery.issue_id)
+            .unwrap()
+            .remove("source-repo")
+            .unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.advance_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_reconciling_push_without_post_worker_head_becomes_one_operator_handoff(
+    ) {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        delivery.repair.as_mut().unwrap().phase = DeliveryRepairPhase::ReconcilingPush;
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.reconcile_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_reconciling_push_with_missing_repository_becomes_one_operator_handoff()
+    {
+        let (orchestrator, _workspace, _repo, mut delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = DeliveryRepairPhase::ReconcilingPush;
+        repair.post_worker_local_head = Some("fedcba9876543210".to_string());
+        delivery.repositories.clear();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.reconcile_delivery_repair_push(&delivery).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"]
+                .repair
+                .as_ref()
+                .map(|repair| repair.phase),
+            Some(DeliveryRepairPhase::AwaitingHuman)
+        );
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_restart_reconciles_an_ambiguous_push_without_replaying_publication() {
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = false;
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let agent_runs = Arc::new(AtomicUsize::new(0));
+        let bootstrap = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let mut first = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config.clone(),
+            bootstrap,
+            Arc::clone(&agent_runs),
+        );
+        let remote = Arc::new(GuardedRepairRemote {
+            journal: first.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            local_sha: std::sync::Mutex::new("fedcba9876543210".to_string()),
+            outcomes: std::sync::Mutex::new(vec![
+                crate::orchestrator::delivery::GuardedRepairPushOutcome::Ambiguous,
+            ]),
+            observations: std::sync::Mutex::new(vec![repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::Open,
+            )]),
+            guarded_calls: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        first.delivery_remote = remote.clone();
+        let mut delivery = creation_crash_delivery();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(7);
+        repository.pr_url = Some("https://example.test/pr/7".to_string());
+        repository.last_error = None;
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 1,
+        });
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::PushPending,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: Some("fedcba9876543210".to_string()),
+            interaction_id: None,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        first
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        first
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        first.advance_delivery_repair_push(&delivery).await;
+        assert_eq!(
+            first.state.read().await.delivery["1"]
+                .repair
+                .as_ref()
+                .unwrap()
+                .phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::ReconcilingPush
+        );
+        drop(first);
+
+        let restart = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config,
+            remote.clone(),
+            Arc::clone(&agent_runs),
+        );
+        restart.handle_tick().await;
+
+        let state = restart.state.read().await;
+        assert!(state.delivery["1"].repair.is_none());
+        assert!(state.is_claimed("1"));
+        assert_eq!(
+            state.delivery["1"].repositories["source-repo"].pr_number,
+            Some(7)
+        );
+        drop(state);
+        assert_eq!(agent_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_rejected_push_and_bad_reconciliation_retain_one_human_handoff() {
+        let invalid_observations = vec![
+            repair_observation(
+                8,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::Open,
+            ),
+            repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::ClosedWithoutMerge,
+            ),
+            repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "different-head",
+                PullRequestTerminalState::Open,
+            ),
+            crate::orchestrator::delivery_observation::DeliveryObservationRead::Retryable(
+                crate::orchestrator::delivery_observation::DeliveryObservationFailure::new(
+                    crate::orchestrator::delivery_observation::DeliveryObservationFailureKind::Transport,
+                    "incomplete observation",
+                ),
+            ),
+        ];
+
+        for observation in invalid_observations {
+            let (orchestrator, workspace, _repo, delivery, remote) =
+                guarded_repair_test_orchestrator(
+                    vec![crate::orchestrator::delivery::GuardedRepairPushOutcome::Ambiguous],
+                    vec![observation],
+                )
+                .await;
+            complete_guarded_repair_worker(&orchestrator, &delivery).await;
+            let pending = orchestrator.state.read().await.delivery["1"].clone();
+            orchestrator.advance_delivery_repair_push(&pending).await;
+            let reconciling = orchestrator.state.read().await.delivery["1"].clone();
+            let observed = orchestrator
+                .reconcile_delivery_observations(reconciling, None)
+                .await;
+            orchestrator.reconcile_delivery_repair_push(&observed).await;
+            let duplicate = orchestrator.state.read().await.delivery["1"].clone();
+            orchestrator
+                .reconcile_delivery_repair_push(&duplicate)
+                .await;
+
+            let state = orchestrator.state.read().await;
+            assert_eq!(
+                state.delivery["1"].repair.as_ref().unwrap().phase,
+                crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+            );
+            assert!(state.is_claimed("1"));
+            assert!(workspace.path().exists());
+            drop(state);
+            assert_eq!(
+                orchestrator
+                    .interaction_store
+                    .latest_blocking_for_issue("1")
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .count(),
+                1
+            );
+            assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+            assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+            assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+            assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        }
+
+        let (orchestrator, workspace, _repo, delivery, remote) = guarded_repair_test_orchestrator(
+            vec![crate::orchestrator::delivery::GuardedRepairPushOutcome::Rejected],
+            vec![],
+        )
+        .await;
+        complete_guarded_repair_worker(&orchestrator, &delivery).await;
+        let pending = orchestrator.state.read().await.delivery["1"].clone();
+        orchestrator.advance_delivery_repair_push(&pending).await;
+        let duplicate = orchestrator.state.read().await.delivery["1"].clone();
+        orchestrator.advance_delivery_repair_push(&duplicate).await;
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"]
+                .repair
+                .as_ref()
+                .unwrap()
+                .phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+        );
+        assert!(workspace.path().exists());
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert!(orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_budget_survives_success_interaction_resume_and_new_feedback() {
+        let (orchestrator, _workspace, _repo, delivery, remote) = guarded_repair_test_orchestrator(
+            vec![crate::orchestrator::delivery::GuardedRepairPushOutcome::Confirmed],
+            vec![repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+                PullRequestTerminalState::Open,
+            )],
+        )
+        .await;
+        complete_guarded_repair_worker(&orchestrator, &delivery).await;
+        let pending = orchestrator.state.read().await.delivery["1"].clone();
+        orchestrator.advance_delivery_repair_push(&pending).await;
+        let reconciling = orchestrator.state.read().await.delivery["1"].clone();
+        let observed = orchestrator
+            .reconcile_delivery_observations(reconciling, None)
+            .await;
+        orchestrator.reconcile_delivery_repair_push(&observed).await;
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"].delivery_repair_attempts_used,
+            1
+        );
+
+        remote
+            .observations
+            .lock()
+            .unwrap()
+            .push(actionable_repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+            ));
+        let later = orchestrator.state.read().await.delivery["1"].clone();
+        let exhausted = orchestrator
+            .reconcile_delivery_observations(later, None)
+            .await;
+        orchestrator
+            .ensure_delivery_repair_interaction(&exhausted)
+            .await;
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery["1"].delivery_repair_attempts_used, 1);
+        assert_eq!(
+            state.delivery["1"].repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+        );
+        drop(state);
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+        let interaction = orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .resolve(
+                &interaction.id,
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "handled manually".to_string(),
+                    selected_option: Some("Handle manually".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .unwrap();
+        assert!(orchestrator.state.read().await.delivery["1"]
+            .repair
+            .is_none());
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"].delivery_repair_attempts_used,
+            1
+        );
+
+        remote
+            .observations
+            .lock()
+            .unwrap()
+            .push(actionable_repair_observation(
+                7,
+                "https://example.test/pr/7",
+                "fedcba9876543210",
+            ));
+        let later = orchestrator.state.read().await.delivery["1"].clone();
+        let exhausted_again = orchestrator
+            .reconcile_delivery_observations(later, None)
+            .await;
+        orchestrator
+            .ensure_delivery_repair_interaction(&exhausted_again)
+            .await;
+        assert_eq!(
+            orchestrator.state.read().await.delivery["1"].delivery_repair_attempts_used,
+            1
+        );
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 1);
+        assert!(orchestrator
+            .interaction_store
+            .latest_blocking_for_issue("1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_restored_dispatch_intent_becomes_one_durable_handoff() {
+        let (orchestrator, workspace, _repo, delivery, remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        orchestrator
+            .reconcile_delivery_repair_dispatch(&delivery)
+            .await;
+        orchestrator
+            .reconcile_delivery_repair_dispatch(&delivery)
+            .await;
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"].repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+        );
+        assert_eq!(state.delivery["1"].delivery_repair_attempts_used, 1);
+        assert!(state.is_claimed("1"));
+        drop(state);
+        assert!(workspace.path().exists());
+        assert_eq!(remote.guarded_calls.lock().unwrap().len(), 0);
+        assert_eq!(
+            orchestrator
+                .interaction_store
+                .latest_blocking_for_issue("1")
+                .await
+                .unwrap()
+                .into_iter()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_restart_between_dispatch_intent_and_launch_retains_one_handoff() {
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = false;
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let agent_runs = Arc::new(AtomicUsize::new(0));
+        let bootstrap = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let mut first = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config.clone(),
+            bootstrap,
+            Arc::clone(&agent_runs),
+        );
+        let remote = Arc::new(GuardedRepairRemote {
+            journal: first.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            local_sha: std::sync::Mutex::new("fedcba9876543210".to_string()),
+            outcomes: std::sync::Mutex::new(vec![]),
+            observations: std::sync::Mutex::new(vec![]),
+            guarded_calls: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        first.delivery_remote = remote.clone();
+        let mut delivery = creation_crash_delivery();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(7);
+        repository.pr_url = Some("https://example.test/pr/7".to_string());
+        repository.last_error = None;
+        delivery.delivery_repair = Some(crate::config::ensemble::DeliveryRepairConfig {
+            agent: "builder".to_string(),
+            max_attempts: 1,
+        });
+        delivery.delivery_repair_attempts_used = 1;
+        delivery.repair = Some(crate::orchestrator::delivery::DeliveryRepairState {
+            attempts_used: 1,
+            phase: crate::orchestrator::delivery::DeliveryRepairPhase::DispatchInFlight,
+            attempt: crate::orchestrator::delivery::DeliveryRepairAttempt {
+                repository_key: "source-repo".to_string(),
+                pull_request_number: 7,
+                pull_request_url: "https://example.test/pr/7".to_string(),
+                starting_sha: "0123456789abcdef".to_string(),
+                feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback {
+                    terminal_failed_checks: vec!["test".to_string()],
+                    change_request_bodies: vec![],
+                    unresolved_threads: vec![],
+                },
+            },
+            last_error: None,
+            post_worker_local_head: None,
+            interaction_id: None,
+        });
+        first
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        first
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        drop(first);
+
+        let restart = delivery_restart_orchestrator(
+            config_dir.path(),
+            repo_config,
+            remote.clone(),
+            Arc::clone(&agent_runs),
+        );
+        restart.handle_tick().await;
+        restart.handle_tick().await;
+        let state = restart.state.read().await;
+        assert_eq!(
+            state.delivery["1"].repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::AwaitingHuman
+        );
+        assert_eq!(state.delivery["1"].delivery_repair_attempts_used, 1);
+        assert!(state.is_claimed("1"));
+        drop(state);
+        assert_eq!(agent_runs.load(Ordering::SeqCst), 0);
+        assert!(remote.guarded_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            restart
+                .interaction_store
+                .latest_blocking_for_issue("1")
+                .await
+                .unwrap()
+                .into_iter()
+                .count(),
+            1
+        );
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_restored_push_in_flight_only_enters_reconciliation() {
+        let (orchestrator, _workspace, _repo, mut delivery, remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        let repair = delivery.repair.as_mut().unwrap();
+        repair.phase = crate::orchestrator::delivery::DeliveryRepairPhase::PushInFlight;
+        repair.post_worker_local_head = Some("fedcba9876543210".to_string());
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        orchestrator.advance_delivery_repair_push(&delivery).await;
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery["1"].repair.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::DeliveryRepairPhase::ReconcilingPush
+        );
+        assert_eq!(state.delivery["1"].delivery_repair_attempts_used, 1);
+        drop(state);
+        assert!(remote.guarded_calls.lock().unwrap().is_empty());
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }
 
     async fn two_delivery_recovery_test_orchestrator(
@@ -16180,6 +18537,7 @@ mod tests {
                 checks: vec![],
                 check_summary: CheckSummary::Passing,
                 review_decision: ReviewDecision::Approved,
+                feedback: Default::default(),
             },
             Utc::now(),
         ));
@@ -16401,6 +18759,7 @@ mod tests {
                 checks: vec![],
                 check_summary: CheckSummary::Passing,
                 review_decision: ReviewDecision::Approved,
+                feedback: Default::default(),
             },
             Utc::now(),
         ));
@@ -16454,6 +18813,7 @@ mod tests {
                 checks: vec![],
                 check_summary: CheckSummary::Passing,
                 review_decision: ReviewDecision::ReviewRequired,
+                feedback: Default::default(),
             },
             Utc::now(),
         ));
@@ -16490,6 +18850,7 @@ mod tests {
                 checks: vec![],
                 check_summary: CheckSummary::Passing,
                 review_decision: ReviewDecision::Approved,
+                feedback: Default::default(),
             },
             Utc::now(),
         ));
@@ -16514,6 +18875,7 @@ mod tests {
                 checks: vec![],
                 check_summary: CheckSummary::Passing,
                 review_decision: ReviewDecision::ReviewRequired,
+                feedback: Default::default(),
             },
         );
         orchestrator.delivery_remote = Arc::new(SequencedObservationRemote {
@@ -17815,12 +20177,15 @@ mod tests {
         );
     }
 
-    fn delivery_restart_orchestrator(
+    fn delivery_restart_orchestrator<R>(
         config_dir: &Path,
         repo_config: crate::config::ensemble::RepoConfig,
-        remote: Arc<RecoveryDeliveryRemote>,
+        remote: Arc<R>,
         agent_runs: Arc<AtomicUsize>,
-    ) -> Orchestrator {
+    ) -> Orchestrator
+    where
+        R: crate::orchestrator::delivery::DeliveryRemote + 'static,
+    {
         let config = Arc::new(RwLock::new(make_config()));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
@@ -17871,6 +20236,11 @@ mod tests {
             terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -28870,6 +31240,7 @@ agent:
                 on_success: config.on_success.clone(),
                 on_failure: config.on_failure.clone(),
                 delivery_states: Default::default(),
+                delivery_repair: None,
             },
         );
         config.scheduler = SchedulerConfig {

@@ -431,6 +431,37 @@ Pipeline run recovery:
   it returns to reconciliation; it does not infer success from the mutation command alone. Once the
   successful final step hands back after delivery reaches a durable waiting, published, or blocked
   state, its agent capacity is released.
+- Optional delivery repair is part of this retained-delivery lifecycle, not a pipeline retry. Fresh
+  actionable feedback may freeze one repair snapshot for the exact retained pull-request head.
+  Automatic repair requires `mergeable` pull-request evidence: otherwise actionable feedback with
+  `conflicting` or `unknown` mergeability becomes an operator interaction without reserving repair
+  capacity. If a journaled repair launch cannot find a retained worktree directory, it likewise
+  becomes an operator interaction and its in-memory launch grant is discarded.
+  Ensemble consumes the configured cumulative repair budget when it journals the repair launch
+  intent, before ACP launch; that budget persists after repair completion, interaction resume, and
+  restart. Exhausted or ambiguous repair work remains claimed and becomes one durable operator
+  interaction rather than a new automatic agent run.
+- Repair scheduler ownership retains its frozen identity as either the selected workflow lane or
+  original issue-state capacity bucket. Lane admission resolves a frozen lane against current live
+  configuration and its current capacity. A legacy record without that identity, or a removed frozen
+  lane, fails closed to an operator question rather than launching in a synthetic delivery bucket.
+  The question accepts explicit `Retry delivery repair` only while budget remains; each retry has a
+  distinct durable interaction identity for its repair cycle. `Handle
+  manually`, which retains ownership and suppresses only that repository, pull request, and
+  observed head; invalid choices retain the waiting owner. A different head for that retained pull
+  request may form a new repair snapshot only when it follows that manually suppressed exact prior
+  head for the same repository and pull request. The durable delivery SHA is not adopted or
+  overwritten; the observed successor head belongs only to the repair snapshot and exact push
+  lease. Other divergent heads remain blocked, all other manual suppressions remain durable, and
+  the cumulative repair budget still applies.
+- A repair worker may publish only through one guarded exact-head push. The journal records
+  `push_in_flight` before that effect, and the Git push uses an exact ref lease for the observed
+  remote head so a branch advance cannot be overwritten between observation and publication.
+  Normal and ambiguous outcomes reconcile the same durable PR against the post-worker head.
+  Restart never replays a journaled repair dispatch or push: ambiguous dispatch is handed to an
+  operator, while an in-flight push first becomes read-only PR reconciliation. Missing retained
+  worktree or repository identity, mismatched identity, incomplete evidence, closure, divergence,
+  or an unexpected head retain the delivery workspace, claim, and PR identity for operator recovery.
 - Push reconciliation advances only when the configured remote head equals the stored local SHA.
   A different remote SHA blocks delivery. Pull request reconciliation adopts exactly one request
   matching the configured repository, head and base branches, stored marker, and intended head
@@ -1159,6 +1190,14 @@ Template input variables:
 - `dependency_outputs` (list of objects, optional)
   - Ordered list of outputs from the step's direct dependencies. Each entry has the same shape as
     `steps` entries: `{ step, result, summary, output }`.
+- `delivery_repair` (object, delivery-repair dispatches only)
+  - Absent from ordinary pipeline steps.
+  - Contains the frozen retained pull-request feedback snapshot:
+    `pull_request_number`, `pull_request_url`, `starting_sha`, `terminal_failed_checks`,
+    `change_request_bodies`, and `unresolved_threads`.
+  - `terminal_failed_checks` and `change_request_bodies` are lists of strings.
+  - Each `unresolved_threads` entry contains `path` (string or null), `line` (integer or null),
+    and `body` (string).
 
 Synthesis steps receive the same `steps` and `dependency_outputs` variables as normal steps. The
 runtime appends synthesis-specific guidance to the first turn prompt, instructing the agent to
@@ -2469,6 +2508,9 @@ Inputs to prompt rendering:
 - `agent.prompt` or contents of `agent.prompt_template` (per the active pipeline step's agent)
 - normalized `issue` object
 - optional `attempt` integer (retry/continuation metadata)
+- optional `delivery_repair` object, present only for delivery-repair dispatches and containing
+  `pull_request_number`, `pull_request_url`, `starting_sha`, `terminal_failed_checks`,
+  `change_request_bodies`, and `unresolved_threads` entries with `path`, `line`, and `body`
 
 ### 12.2 Rendering Rules
 

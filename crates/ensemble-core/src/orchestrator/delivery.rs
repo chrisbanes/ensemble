@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,17 +16,26 @@ use super::{
     FinalizeApprovalError, FinalizeRetryError, Orchestrator, HISTORY_OUTCOME_FAILED,
     HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
 };
-use crate::config::ensemble::DeliveryStates;
+use crate::agent::cancellation::{
+    try_reserve_scheduler_worker_with_workspace_exclusivity, WorkerCapacity, WorkerReservationError,
+};
+use crate::agent::events::{WorkerIdentity, WorkerResult};
+use crate::config::ensemble::{DeliveryRepairConfig, DeliveryStates};
+use crate::config::template::{DeliveryRepairPromptContext, DeliveryRepairThread};
 use crate::history::model::HistoryRecord;
+use crate::interaction::{
+    InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
+    InteractionStatus,
+};
 use crate::observability::events::PipelineEvent;
 use crate::orchestrator::delivery_observation::{
     BaseFreshness, CheckConclusion, CheckStatus, CheckSummary, DeliveryCheck, DeliveryObservation,
     DeliveryObservationFacts, DeliveryObservationFailure, DeliveryObservationFailureKind,
-    DeliveryObservationRead, DeliveryObservationRetry, Mergeability, ObservationFreshness,
-    PullRequestTerminalState, ReviewDecision,
+    DeliveryObservationRead, DeliveryObservationRetry, DeliveryRepairFeedback, Mergeability,
+    ObservationFreshness, PullRequestTerminalState, ReviewDecision,
 };
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
-use crate::tracker::OwnershipConflict;
+use crate::tracker::{model::Issue, OwnershipConflict};
 use crate::workspace::finalize::FinalizeMode;
 use crate::workspace::key::issue_workspace_key;
 
@@ -88,6 +98,23 @@ pub(crate) struct DeliveryRecord {
     /// Policy copied from the selected pipeline before any delivery I/O.
     #[serde(default)]
     pub delivery_states: DeliveryStates,
+    /// Repair policy copied with the selected delivery policy before any delivery I/O.
+    #[serde(default)]
+    pub delivery_repair: Option<DeliveryRepairConfig>,
+    /// Durable, immutable repair intent for one retained delivery owner.
+    #[serde(default)]
+    pub repair: Option<DeliveryRepairState>,
+    /// Cumulative repair launches admitted for this delivery owner. This survives a completed
+    /// repair so later feedback cannot reset the configured delivery repair budget.
+    #[serde(default)]
+    pub delivery_repair_attempts_used: u32,
+    /// Scheduler ownership frozen when delivery starts; old records without it must not launch a
+    /// repair worker under an unrelated capacity bucket after restart.
+    #[serde(default)]
+    pub delivery_repair_capacity: Option<DeliveryRepairCapacity>,
+    /// Delivery identities explicitly handed to a human are not automatically frozen again.
+    #[serde(default)]
+    pub delivery_repair_suppressions: BTreeSet<DeliveryRepairIdentity>,
     /// Success target copied from the selected pipeline with the delivery policy.
     #[serde(default)]
     pub success_state: Option<String>,
@@ -100,6 +127,86 @@ pub(crate) struct DeliveryRecord {
     /// The exact fact and target selected from the frozen delivery policy before tracker I/O.
     #[serde(default)]
     pub selected_delivery_state: Option<DeliveryStateProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum DeliveryRepairCapacity {
+    State { state: String },
+    Lane { lane: String },
+}
+
+/// Repair state owned by a delivery record rather than a new issue pipeline run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveryRepairState {
+    pub attempts_used: u32,
+    pub phase: DeliveryRepairPhase,
+    pub attempt: DeliveryRepairAttempt,
+    /// A terminal runtime error retained with an operator-owned repair handoff.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub post_worker_local_head: Option<String>,
+    /// Stable durable identity for the interaction raised by this frozen feedback snapshot.
+    #[serde(default)]
+    pub interaction_id: Option<String>,
+}
+
+/// The durable boundary before a repair agent may cause an external effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeliveryRepairPhase {
+    PendingDispatch,
+    DispatchInFlight,
+    AwaitingHuman,
+    PushPending,
+    PushInFlight,
+    ReconcilingPush,
+}
+
+/// The next journal-owned action for a frozen repair attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepairDispatch {
+    Dispatch,
+    AlreadyInFlight,
+    Exhausted,
+    NotPending,
+}
+
+/// The exact head and feedback frozen before a repair agent may be dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveryRepairAttempt {
+    pub repository_key: String,
+    pub pull_request_number: u64,
+    pub pull_request_url: String,
+    pub starting_sha: String,
+    pub feedback: crate::orchestrator::delivery_observation::ActionableDeliveryFeedback,
+}
+
+/// Exact retained delivery identity that a human has chosen to handle manually.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct DeliveryRepairIdentity {
+    pub repository_key: String,
+    pub pull_request_number: u64,
+    pub head_sha: String,
+}
+
+impl DeliveryRepairIdentity {
+    fn observed(repository_key: &str, facts: &DeliveryObservationFacts) -> Self {
+        Self {
+            repository_key: repository_key.to_string(),
+            pull_request_number: facts.pull_request_number,
+            head_sha: facts.head_sha.clone(),
+        }
+    }
+
+    fn attempted(attempt: &DeliveryRepairAttempt) -> Self {
+        Self {
+            repository_key: attempt.repository_key.clone(),
+            pull_request_number: attempt.pull_request_number,
+            head_sha: attempt.starting_sha.clone(),
+        }
+    }
 }
 
 /// A versioned durable selection made from delivery evidence.
@@ -171,6 +278,166 @@ impl DeliveryStates {
 }
 
 impl DeliveryRecord {
+    /// A manually handled head may be followed only by actionable feedback on a distinct head for
+    /// the same retained pull request. The repository's durable delivery SHA remains unchanged;
+    /// the replacement head is scoped to the next repair attempt and its guarded push lease.
+    fn allows_suppressed_head_successor(
+        has_repair_policy: bool,
+        suppressions: &BTreeSet<DeliveryRepairIdentity>,
+        repository_key: &str,
+        retained_head: &str,
+        facts: &DeliveryObservationFacts,
+    ) -> bool {
+        has_repair_policy
+            && facts.terminal_state == PullRequestTerminalState::Open
+            && facts.head_sha != retained_head
+            && suppressions.contains(&DeliveryRepairIdentity {
+                repository_key: repository_key.to_string(),
+                pull_request_number: facts.pull_request_number,
+                head_sha: retained_head.to_string(),
+            })
+            && facts
+                .clone()
+                .for_delivery(&facts.head_sha)
+                .repair_feedback()
+                .is_some()
+    }
+
+    fn repair_interaction_id(
+        &self,
+        repository_key: &str,
+        pull_request_number: u64,
+        head_sha: &str,
+        cycle: u32,
+    ) -> String {
+        format!(
+            "delivery-repair-{}-{}-{}-{}-{}",
+            self.issue_id,
+            repository_key.replace(|character: char| !character.is_ascii_alphanumeric(), "-"),
+            pull_request_number,
+            head_sha.replace(|character: char| !character.is_ascii_alphanumeric(), "-"),
+            cycle,
+        )
+    }
+
+    fn freeze_actionable_repair(&mut self, repository_key: &str, facts: &DeliveryObservationFacts) {
+        let Some(policy) = self.delivery_repair.as_ref() else {
+            return;
+        };
+        if self.repair.is_some() {
+            return;
+        }
+        let identity = DeliveryRepairIdentity::observed(repository_key, facts);
+        if self.delivery_repair_suppressions.contains(&identity) {
+            return;
+        }
+        let classification = match facts.actionable_feedback() {
+            Some(feedback) => DeliveryRepairFeedback::Actionable(feedback),
+            None => match facts.repair_feedback() {
+                Some(classification) => classification,
+                None => return,
+            },
+        };
+        if policy.max_attempts == 0 {
+            return;
+        }
+        let (feedback, last_error) = match classification {
+            DeliveryRepairFeedback::Actionable(feedback) => (feedback, None),
+            DeliveryRepairFeedback::RequiresOperator {
+                feedback,
+                mergeability,
+            } => (
+                feedback,
+                Some(format!(
+                    "pull request mergeability is {}; resolve it before retrying delivery repair",
+                    match mergeability {
+                        Mergeability::Conflicting => "conflicting",
+                        Mergeability::Unknown => "unknown",
+                        Mergeability::Mergeable => "mergeable",
+                    }
+                )),
+            ),
+        };
+        self.repair = Some(DeliveryRepairState {
+            attempts_used: self.delivery_repair_attempts_used,
+            phase: if last_error.is_some()
+                || self.delivery_repair_attempts_used >= policy.max_attempts
+            {
+                DeliveryRepairPhase::AwaitingHuman
+            } else {
+                DeliveryRepairPhase::PendingDispatch
+            },
+            attempt: DeliveryRepairAttempt {
+                repository_key: repository_key.to_string(),
+                pull_request_number: facts.pull_request_number,
+                pull_request_url: facts.pull_request_url.clone(),
+                starting_sha: facts.head_sha.clone(),
+                feedback,
+            },
+            last_error,
+            post_worker_local_head: None,
+            interaction_id: Some(self.repair_interaction_id(
+                repository_key,
+                facts.pull_request_number,
+                &facts.head_sha,
+                self.delivery_repair_attempts_used.saturating_add(1),
+            )),
+        });
+    }
+
+    /// Transitions only a frozen, budgeted repair to its durable launch intent. The caller must
+    /// persist this record before reserving capacity or starting the agent.
+    fn begin_repair_dispatch(&mut self) -> RepairDispatch {
+        let Some(policy) = self.delivery_repair.as_ref() else {
+            return RepairDispatch::NotPending;
+        };
+        let Some(repair) = self.repair.as_ref() else {
+            return RepairDispatch::NotPending;
+        };
+        match repair.phase {
+            DeliveryRepairPhase::DispatchInFlight => RepairDispatch::AlreadyInFlight,
+            DeliveryRepairPhase::AwaitingHuman => RepairDispatch::NotPending,
+            DeliveryRepairPhase::PushPending
+            | DeliveryRepairPhase::PushInFlight
+            | DeliveryRepairPhase::ReconcilingPush => RepairDispatch::NotPending,
+            DeliveryRepairPhase::PendingDispatch
+                if self.delivery_repair_attempts_used >= policy.max_attempts =>
+            {
+                self.repair.as_mut().expect("checked").phase = DeliveryRepairPhase::AwaitingHuman;
+                RepairDispatch::Exhausted
+            }
+            DeliveryRepairPhase::PendingDispatch => {
+                self.delivery_repair_attempts_used =
+                    self.delivery_repair_attempts_used.saturating_add(1);
+                let repair = self.repair.as_mut().expect("checked");
+                repair.attempts_used = self.delivery_repair_attempts_used;
+                repair.phase = DeliveryRepairPhase::DispatchInFlight;
+                RepairDispatch::Dispatch
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn complete_repair_dispatch_without_commit(&mut self) {
+        let Some(repair) = self.repair.as_mut() else {
+            return;
+        };
+        self.delivery_repair_attempts_used = self.delivery_repair_attempts_used.saturating_add(1);
+        repair.attempts_used = self.delivery_repair_attempts_used;
+        repair.phase = DeliveryRepairPhase::PendingDispatch;
+    }
+
+    fn complete_repair_dispatch(&mut self, result: &WorkerResult) {
+        let Some(repair) = self.repair.as_mut() else {
+            return;
+        };
+        repair.phase = DeliveryRepairPhase::AwaitingHuman;
+        repair.last_error = match result {
+            WorkerResult::Success { .. } => None,
+            WorkerResult::BlockedOnHuman { request } => Some(request.body.clone()),
+            WorkerResult::Failed { error, .. } => Some(error.clone()),
+        };
+    }
     fn is_frozen_delivery_state(&self, observed_state: &str) -> bool {
         [
             self.delivery_states.waiting.as_deref(),
@@ -426,6 +693,15 @@ pub(crate) struct LocalRepositoryIdentity {
     pub local_sha: String,
 }
 
+/// Result of the single repair-specific publication attempt. `Ambiguous` is
+/// intentionally reconciled through the retained PR and is never retried blind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardedRepairPushOutcome {
+    Confirmed,
+    Ambiguous,
+    Rejected,
+}
+
 #[async_trait]
 pub(crate) trait DeliveryRemote: Send + Sync {
     fn supports_delivery_observation(&self) -> bool {
@@ -459,6 +735,24 @@ pub(crate) trait DeliveryRemote: Send + Sync {
         head_branch: &str,
         local_sha: &str,
     ) -> Result<(), String>;
+
+    async fn guarded_repair_push(
+        &self,
+        repository_path: &Path,
+        remote: &str,
+        head_branch: &str,
+        observed_head: &str,
+        local_head: &str,
+    ) -> GuardedRepairPushOutcome {
+        let _ = (
+            repository_path,
+            remote,
+            head_branch,
+            observed_head,
+            local_head,
+        );
+        GuardedRepairPushOutcome::Rejected
+    }
 
     async fn list_pull_requests(
         &self,
@@ -609,6 +903,46 @@ impl DeliveryRemote for CliDeliveryRemote {
             .map(|_| ())
     }
 
+    async fn guarded_repair_push(
+        &self,
+        repository_path: &Path,
+        remote: &str,
+        head_branch: &str,
+        observed_head: &str,
+        local_head: &str,
+    ) -> GuardedRepairPushOutcome {
+        let Ok(identity) = self.local_identity(repository_path).await else {
+            return GuardedRepairPushOutcome::Rejected;
+        };
+        if identity.head_branch != head_branch || identity.local_sha != local_head {
+            return GuardedRepairPushOutcome::Rejected;
+        }
+        let Ok(Some(remote_head)) = self.remote_head(repository_path, remote, head_branch).await
+        else {
+            return GuardedRepairPushOutcome::Rejected;
+        };
+        if remote_head != observed_head {
+            return GuardedRepairPushOutcome::Rejected;
+        }
+        if command_stdout(
+            repository_path,
+            "git",
+            &["merge-base", "--is-ancestor", observed_head, local_head],
+        )
+        .await
+        .is_err()
+        {
+            return GuardedRepairPushOutcome::Rejected;
+        }
+        let arguments =
+            guarded_repair_push_arguments(remote, head_branch, observed_head, local_head);
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        match command_stdout(repository_path, "git", &arguments).await {
+            Ok(_) => GuardedRepairPushOutcome::Confirmed,
+            Err(_) => GuardedRepairPushOutcome::Ambiguous,
+        }
+    }
+
     async fn list_pull_requests(
         &self,
         repository_path: &Path,
@@ -726,7 +1060,7 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(repository) => repository,
             Err(read) => return read,
         };
-        let query = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!, $head: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } comparison(base: $base, head: $head) { behindBy } } }";
+        let query = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!, $head: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } reviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } comparison(base: $base, head: $head) { behindBy } } }";
         let number = pull_request_number.to_string();
         let variables = [
             format!("query={query}"),
@@ -844,6 +1178,10 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(checks) => checks,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
+        let feedback = match complete_feedback(value) {
+            Ok(feedback) => feedback,
+            Err(failure) => return DeliveryObservationRead::Terminal(failure),
+        };
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
             pull_request_number: number,
             pull_request_url: url.to_string(),
@@ -863,6 +1201,7 @@ impl DeliveryRemote for CliDeliveryRemote {
             checks,
             check_summary: crate::orchestrator::delivery_observation::CheckSummary::Pending,
             review_decision,
+            feedback,
         })
     }
 }
@@ -953,6 +1292,145 @@ fn complete_checks(
                 "GitHub returned an unsupported check context",
             )
         })
+}
+
+fn complete_feedback(
+    value: &serde_json::Value,
+) -> Result<crate::orchestrator::delivery_observation::DeliveryFeedback, DeliveryObservationFailure>
+{
+    use crate::orchestrator::delivery_observation::{DeliveryFeedback, DeliveryFeedbackThread};
+
+    let reviews = value.get("reviews").ok_or_else(|| {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::MalformedResponse,
+            "GitHub returned an incomplete pull request review observation",
+        )
+    })?;
+    let change_request_bodies = complete_connection_nodes(reviews, "pull request reviews")?
+        .iter()
+        .filter(|review| {
+            review.get("state").and_then(serde_json::Value::as_str) == Some("CHANGES_REQUESTED")
+        })
+        .map(|review| {
+            review
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    DeliveryObservationFailure::new(
+                        DeliveryObservationFailureKind::MalformedResponse,
+                        "GitHub returned a change request without a body",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let threads = value.get("reviewThreads").ok_or_else(|| {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::MalformedResponse,
+            "GitHub returned an incomplete pull request thread observation",
+        )
+    })?;
+    let mut unresolved_threads = Vec::new();
+    for thread in complete_connection_nodes(threads, "pull request review threads")? {
+        let resolved = thread
+            .get("isResolved")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned a review thread without resolution state",
+                )
+            })?;
+        let outdated = thread
+            .get("isOutdated")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned a review thread without outdated state",
+                )
+            })?;
+        let comments = thread.get("comments").ok_or_else(|| {
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned a review thread without comments",
+            )
+        })?;
+        let comments = complete_connection_nodes(comments, "review thread comments")?;
+        if resolved || outdated {
+            continue;
+        }
+        let Some(comment) = comments.last() else {
+            return Err(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an unresolved review thread without a comment",
+            ));
+        };
+        let body = comment
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .ok_or_else(|| {
+                DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned an unresolved review comment without a body",
+                )
+            })?;
+        let path = match comment.get("path") {
+            Some(path) => Some(path.as_str().map(str::to_string).ok_or_else(|| {
+                DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned an invalid review comment path",
+                )
+            })?),
+            None => None,
+        };
+        let line = comment.get("line").and_then(serde_json::Value::as_u64);
+        unresolved_threads.push(DeliveryFeedbackThread {
+            path,
+            line,
+            body: body.to_string(),
+        });
+    }
+    Ok(DeliveryFeedback {
+        change_request_bodies,
+        unresolved_threads,
+    })
+}
+
+fn complete_connection_nodes<'a>(
+    connection: &'a serde_json::Value,
+    label: &str,
+) -> Result<&'a Vec<serde_json::Value>, DeliveryObservationFailure> {
+    let total = connection
+        .get("totalCount")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                &format!("GitHub returned {label} without a total count"),
+            )
+        })?;
+    let nodes = connection
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                &format!("GitHub returned {label} without nodes"),
+            )
+        })?;
+    if total != nodes.len() as u64 {
+        return Err(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::UnsupportedResponse,
+            &format!("GitHub {label} exceed the complete observation limit"),
+        ));
+    }
+    Ok(nodes)
 }
 
 async fn github_repository_identity(
@@ -1083,6 +1561,21 @@ async fn command_stdout(
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn guarded_repair_push_arguments(
+    remote: &str,
+    head_branch: &str,
+    observed_head: &str,
+    local_head: &str,
+) -> [String; 4] {
+    let reference = format!("refs/heads/{head_branch}");
+    [
+        "push".to_string(),
+        format!("--force-with-lease={reference}:{observed_head}"),
+        remote.to_string(),
+        format!("{local_head}:{reference}"),
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1777,6 +2270,14 @@ impl Orchestrator {
             let delivery = self
                 .reconcile_delivery_observations(delivery, snapshot.as_ref())
                 .await;
+            let delivery = self
+                .persist_repair_dispatch_intent(delivery, snapshot.as_ref())
+                .await;
+            self.reconcile_delivery_repair_dispatch(&delivery).await;
+            self.dispatch_delivery_repair_if_authorized(&delivery).await;
+            self.ensure_delivery_repair_interaction(&delivery).await;
+            self.reconcile_delivery_repair_push(&delivery).await;
+            self.advance_delivery_repair_push(&delivery).await;
             let fact = delivery.delivery_state_fact();
             let delivery = if fact != Some(DeliveryStateFact::ClosedWithoutMerge)
                 && delivery.has_fresh_nonclosed_delivery_evidence()
@@ -1902,7 +2403,7 @@ impl Orchestrator {
         }
     }
 
-    async fn reconcile_delivery_observations(
+    pub(super) async fn reconcile_delivery_observations(
         &self,
         delivery: DeliveryRecord,
         snapshot: Option<&PipelineRunSnapshot>,
@@ -1968,34 +2469,65 @@ impl Orchestrator {
                     &repository.remote,
                 )
                 .await;
+            // A guarded repair push is reconciling one newer, already-durable local
+            // head. Validate that exact head rather than marking the expected repair
+            // publication as divergence from the pre-repair delivery SHA.
+            let expected_delivery_sha = current
+                .repair
+                .as_ref()
+                .filter(|repair| {
+                    repair.phase == DeliveryRepairPhase::ReconcilingPush
+                        && repair.attempt.repository_key == repository_key
+                })
+                .and_then(|repair| repair.post_worker_local_head.as_deref())
+                .unwrap_or(&repository.local_sha);
+            let has_repair_policy = current.delivery_repair.is_some();
+            // The mutable repository update below must not borrow `current` through the repair
+            // policy at the same time. Suppressions are a durable, small identity set.
+            let repair_suppressions = current.delivery_repair_suppressions.clone();
+            let mut repair_facts = None;
+            let mut permits_suppressed_head_successor = false;
             let updated = current
                 .repositories
                 .get_mut(&repository_key)
                 .expect("repository was cloned from the delivery record");
             match read {
                 DeliveryObservationRead::Observed(facts) => {
-                    let observation =
-                        match facts.validate_identity(pull_request_number, pull_request_url) {
-                            Ok(()) => DeliveryObservation::successful(
-                                facts.for_delivery(&repository.local_sha),
+                    let observation = match facts
+                        .validate_identity(pull_request_number, pull_request_url)
+                    {
+                        Ok(()) => {
+                            permits_suppressed_head_successor =
+                                DeliveryRecord::allows_suppressed_head_successor(
+                                    has_repair_policy,
+                                    &repair_suppressions,
+                                    &repository_key,
+                                    &repository.local_sha,
+                                    &facts,
+                                );
+                            let successor_repair_facts = permits_suppressed_head_successor
+                                .then(|| facts.clone().for_delivery(&facts.head_sha));
+                            let facts = facts.for_delivery(expected_delivery_sha);
+                            repair_facts = successor_repair_facts.or_else(|| Some(facts.clone()));
+                            DeliveryObservation::successful(facts, now)
+                        }
+                        Err(failure) => {
+                            updated.phase = DeliveryPhase::Blocked;
+                            updated.retry_from = Some(DeliveryPhase::Waiting);
+                            updated.last_error = Some(failure.message.clone());
+                            DeliveryObservation::failed(
+                                updated.observation.as_ref(),
+                                failure,
+                                None,
                                 now,
-                            ),
-                            Err(failure) => {
-                                updated.phase = DeliveryPhase::Blocked;
-                                updated.retry_from = Some(DeliveryPhase::Waiting);
-                                updated.last_error = Some(failure.message.clone());
-                                DeliveryObservation::failed(
-                                    updated.observation.as_ref(),
-                                    failure,
-                                    None,
-                                    now,
-                                )
-                            }
-                        };
+                            )
+                        }
+                    };
                     if observation
                         .facts
                         .as_ref()
                         .is_some_and(|facts| facts.head_diverged)
+                        && !permits_suppressed_head_successor
                     {
                         updated.phase = DeliveryPhase::Blocked;
                         updated.retry_from = Some(DeliveryPhase::Waiting);
@@ -2038,6 +2570,9 @@ impl Orchestrator {
                     ));
                 }
             }
+            if let Some(facts) = repair_facts {
+                current.freeze_actionable_repair(&repository_key, &facts);
+            }
             updated_at = Some(now);
         }
         if current == original {
@@ -2077,6 +2612,710 @@ impl Orchestrator {
         )
         .await;
         current
+    }
+
+    /// Makes a repair launch durable before the recovery loop is allowed to reserve a worker or
+    /// invoke an agent. On restart, `dispatch_in_flight` is retained and therefore cannot create a
+    /// second launch merely because the process stopped between those effects.
+    async fn persist_repair_dispatch_intent(
+        &self,
+        delivery: DeliveryRecord,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) -> DeliveryRecord {
+        let mut candidate = delivery.clone();
+        match candidate.begin_repair_dispatch() {
+            RepairDispatch::Dispatch => match self
+                .persist_delivery_candidate(&delivery, candidate, snapshot)
+                .await
+            {
+                Ok(persisted) => {
+                    self.pending_delivery_repair_dispatches
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(persisted.issue_id.clone());
+                    persisted
+                }
+                Err(_) => delivery,
+            },
+            RepairDispatch::Exhausted => self
+                .persist_delivery_candidate(&delivery, candidate, snapshot)
+                .await
+                .unwrap_or(delivery),
+            RepairDispatch::AlreadyInFlight | RepairDispatch::NotPending => delivery,
+        }
+    }
+
+    /// A launch grant exists only in this process after its dispatch intent is journaled. A
+    /// restored intent is deliberately converted into operator-owned recovery instead of being
+    /// able to launch a second ambiguous ACP session.
+    pub(super) async fn reconcile_delivery_repair_dispatch(&self, delivery: &DeliveryRecord) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        if repair.phase != DeliveryRepairPhase::DispatchInFlight
+            || self
+                .pending_delivery_repair_dispatches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&delivery.issue_id)
+        {
+            return;
+        }
+        let mut awaiting_human = delivery.clone();
+        awaiting_human.repair.as_mut().expect("checked").phase = DeliveryRepairPhase::AwaitingHuman;
+        if let Ok(persisted) = self
+            .persist_delivery_candidate(delivery, awaiting_human, None)
+            .await
+        {
+            self.ensure_delivery_repair_interaction(&persisted).await;
+        }
+    }
+
+    /// Dispatches only an intent made durable by this runtime. A restored
+    /// `dispatch_in_flight` record has no proof whether an earlier process got
+    /// as far as starting the session, so it is deliberately not relaunched.
+    pub(super) async fn dispatch_delivery_repair_if_authorized(&self, delivery: &DeliveryRecord) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        if repair.phase != DeliveryRepairPhase::DispatchInFlight
+            || !self
+                .pending_delivery_repair_dispatches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&delivery.issue_id)
+        {
+            return;
+        }
+        let Some(workspace_path) = self
+            .workspace_mgr
+            .owned_worktree_paths(&delivery.issue_id)
+            .ok()
+            .and_then(|paths| {
+                paths
+                    .get(&repair.attempt.repository_key)
+                    .filter(|path| path.is_dir())
+                    .cloned()
+            })
+        else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the retained delivery worktree is unavailable; inspect or restore it before retrying delivery repair".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let frozen_config = {
+            let state = self.state.read().await;
+            state.get_pipeline_config(&delivery.issue_id).cloned()
+        };
+        let config = match frozen_config {
+            Some(config) => config,
+            None => Arc::new(self.config.read().await.clone()),
+        };
+        let live_config = self.config.read().await.clone();
+        let capacity = match delivery.delivery_repair_capacity.as_ref() {
+            Some(DeliveryRepairCapacity::Lane { lane }) => {
+                let Some(capacity) = live_config
+                    .scheduler
+                    .lanes
+                    .get(lane.as_str())
+                    .map(|lane| lane.capacity)
+                else {
+                    self.await_delivery_repair_operator(delivery).await;
+                    return;
+                };
+                WorkerCapacity::lane(lane.as_str(), capacity)
+            }
+            Some(DeliveryRepairCapacity::State { state }) => {
+                WorkerCapacity::new(state.as_str(), &config.agent.max_concurrent_agents_by_state)
+            }
+            None => {
+                self.await_delivery_repair_operator(delivery).await;
+                return;
+            }
+        };
+        let issue = Issue {
+            id: delivery.issue_id.clone(),
+            identifier: delivery.identifier.clone(),
+            title: format!("Delivery repair for {}", delivery.identifier),
+            description: None,
+            priority: None,
+            tracker_position: None,
+            state: "Delivery".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let identity = WorkerIdentity {
+            issue_id: delivery.issue_id.clone(),
+            run_id: delivery.run_id.clone(),
+            cycle: 0,
+            step_name: "delivery_repair".to_string(),
+            started_at: Utc::now(),
+        };
+        let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
+        let resource_capacities = config
+            .scheduler
+            .resources
+            .iter()
+            .map(|(name, resource)| (name.clone(), resource.capacity))
+            .collect();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        match try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &self.cancellation_registry,
+            identity.clone(),
+            cancel_token.clone(),
+            completion_rx,
+            config.concurrency.max_concurrent_agents,
+            config.concurrency.max_step_parallelism,
+            capacity,
+            &resource_capacities,
+            Default::default(),
+            true,
+        ) {
+            Ok(()) => {}
+            Err(
+                WorkerReservationError::GlobalCapacityExhausted
+                | WorkerReservationError::IssueCapacityExhausted
+                | WorkerReservationError::CapacityBucketExhausted
+                | WorkerReservationError::ResourceExhausted
+                | WorkerReservationError::PathConflict
+                | WorkerReservationError::IssueWorkspaceExclusive,
+            ) => return,
+            Err(WorkerReservationError::DuplicateIdentity) => return,
+        }
+        if !self
+            .pending_delivery_repair_dispatches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&delivery.issue_id)
+        {
+            crate::agent::cancellation::rollback_worker_reservation(
+                &self.cancellation_registry,
+                &identity,
+            );
+            return;
+        }
+        let completion_tx = match crate::agent::cancellation::mark_worker_launched(
+            &self.cancellation_registry,
+            &identity,
+        ) {
+            true => completion_tx,
+            false => {
+                crate::agent::cancellation::rollback_worker_reservation(
+                    &self.cancellation_registry,
+                    &identity,
+                );
+                return;
+            }
+        };
+        let prompt = DeliveryRepairPromptContext {
+            pull_request_number: repair.attempt.pull_request_number,
+            pull_request_url: repair.attempt.pull_request_url.clone(),
+            starting_sha: repair.attempt.starting_sha.clone(),
+            terminal_failed_checks: repair.attempt.feedback.terminal_failed_checks.clone(),
+            change_request_bodies: repair.attempt.feedback.change_request_bodies.clone(),
+            unresolved_threads: repair
+                .attempt
+                .feedback
+                .unresolved_threads
+                .iter()
+                .map(|thread| DeliveryRepairThread {
+                    path: thread.path.clone(),
+                    line: thread.line,
+                    body: thread.body.clone(),
+                })
+                .collect(),
+        };
+        let timeout_ms = config.agent.turn_timeout_ms;
+        let local = super::spawn_delivery_repair_worker(
+            Arc::clone(&self.agent_runner),
+            config,
+            issue,
+            delivery
+                .delivery_repair
+                .as_ref()
+                .expect("repair state requires a frozen policy")
+                .agent
+                .clone(),
+            prompt,
+            repair.attempts_used,
+            timeout_ms,
+            workspace_path,
+            cancel_token,
+        );
+        tokio::spawn(super::bridge_worker_events(
+            local,
+            self.worker_tx.clone(),
+            self.cancellation_registry.clone(),
+            identity,
+            completion_tx,
+        ));
+    }
+
+    pub(super) async fn handle_delivery_repair_exit(
+        &self,
+        identity: WorkerIdentity,
+        result: WorkerResult,
+    ) {
+        let current = {
+            let state = self.state.read().await;
+            state.delivery.get(&identity.issue_id).cloned()
+        };
+        let Some(current) = current else {
+            return;
+        };
+        if current
+            .repair
+            .as_ref()
+            .is_none_or(|repair| repair.phase != DeliveryRepairPhase::DispatchInFlight)
+        {
+            return;
+        }
+        let mut completed = current.clone();
+        completed.complete_repair_dispatch(&result);
+        if matches!(result, WorkerResult::Success { .. }) {
+            if let Some(repair) = completed.repair.as_mut() {
+                if let Ok(paths) = self.workspace_mgr.owned_worktree_paths(&completed.issue_id) {
+                    if let Some(path) = paths.get(&repair.attempt.repository_key) {
+                        if let Ok(identity) = self.delivery_remote.local_identity(path).await {
+                            if identity.local_sha != repair.attempt.starting_sha {
+                                repair.post_worker_local_head = Some(identity.local_sha);
+                                repair.phase = DeliveryRepairPhase::PushPending;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The journal write is the completion boundary. Only the durable record
+        // allows any later observation, interaction, or publication work.
+        let Ok(completed) = self
+            .persist_delivery_candidate(&current, completed, None)
+            .await
+        else {
+            return;
+        };
+        self.ensure_delivery_repair_interaction(&completed).await;
+    }
+
+    async fn await_delivery_repair_operator(&self, delivery: &DeliveryRecord) {
+        self.await_delivery_repair_operator_with_diagnostic(delivery, None)
+            .await;
+    }
+
+    async fn await_delivery_repair_operator_with_diagnostic(
+        &self,
+        delivery: &DeliveryRecord,
+        diagnostic: impl Into<Option<String>>,
+    ) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        self.pending_delivery_repair_dispatches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&delivery.issue_id);
+        let diagnostic = diagnostic.into();
+        if repair.phase == DeliveryRepairPhase::AwaitingHuman
+            && diagnostic.as_deref() == repair.last_error.as_deref()
+        {
+            self.ensure_delivery_repair_interaction(delivery).await;
+            return;
+        }
+        let mut awaiting_human = delivery.clone();
+        let repair = awaiting_human.repair.as_mut().expect("checked");
+        repair.phase = DeliveryRepairPhase::AwaitingHuman;
+        if let Some(diagnostic) = diagnostic {
+            repair.last_error = Some(diagnostic);
+        }
+        if let Ok(persisted) = self
+            .persist_delivery_candidate(delivery, awaiting_human, None)
+            .await
+        {
+            self.ensure_delivery_repair_interaction(&persisted).await;
+        }
+    }
+
+    pub(super) async fn advance_delivery_repair_push(&self, delivery: &DeliveryRecord) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        match repair.phase {
+            DeliveryRepairPhase::PushPending => {}
+            DeliveryRepairPhase::PushInFlight => {
+                let mut reconciling = delivery.clone();
+                reconciling.repair.as_mut().expect("checked").phase =
+                    DeliveryRepairPhase::ReconcilingPush;
+                let _ = self
+                    .persist_delivery_candidate(delivery, reconciling, None)
+                    .await;
+                return;
+            }
+            _ => return,
+        }
+        let Some(local_head) = repair.post_worker_local_head.as_deref() else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the delivery repair has no retained post-worker local head; inspect it before retrying publication".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let Some(path) = self
+            .workspace_mgr
+            .owned_worktree_paths(&delivery.issue_id)
+            .ok()
+            .and_then(|paths| {
+                paths
+                    .get(&repair.attempt.repository_key)
+                    .filter(|path| path.is_dir())
+                    .cloned()
+            })
+        else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the retained delivery worktree is unavailable; inspect or restore it before retrying delivery repair publication".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let Some(repository) = delivery.repositories.get(&repair.attempt.repository_key) else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the retained delivery repository is unavailable; inspect or restore it before retrying delivery repair publication".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let mut in_flight = delivery.clone();
+        in_flight.repair.as_mut().expect("checked").phase = DeliveryRepairPhase::PushInFlight;
+        let Ok(in_flight) = self
+            .persist_delivery_candidate(delivery, in_flight, None)
+            .await
+        else {
+            return;
+        };
+        let outcome = self
+            .delivery_remote
+            .guarded_repair_push(
+                &path,
+                &repository.remote,
+                &repository.head_branch,
+                &repair.attempt.starting_sha,
+                local_head,
+            )
+            .await;
+        let mut next = in_flight.clone();
+        let phase = match outcome {
+            GuardedRepairPushOutcome::Confirmed | GuardedRepairPushOutcome::Ambiguous => {
+                DeliveryRepairPhase::ReconcilingPush
+            }
+            GuardedRepairPushOutcome::Rejected => DeliveryRepairPhase::AwaitingHuman,
+        };
+        next.repair.as_mut().expect("checked").phase = phase;
+        if self
+            .persist_delivery_candidate(&in_flight, next.clone(), None)
+            .await
+            .is_ok()
+            && phase == DeliveryRepairPhase::AwaitingHuman
+        {
+            self.ensure_delivery_repair_interaction(&next).await;
+        }
+    }
+
+    pub(super) async fn reconcile_delivery_repair_push(&self, delivery: &DeliveryRecord) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        if repair.phase != DeliveryRepairPhase::ReconcilingPush {
+            return;
+        }
+        let Some(local_head) = repair.post_worker_local_head.as_deref() else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the delivery repair has no retained post-worker local head; inspect it before reconciling publication".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let Some(repository) = delivery.repositories.get(&repair.attempt.repository_key) else {
+            self.await_delivery_repair_operator_with_diagnostic(
+                delivery,
+                Some(
+                    "the retained delivery repository is unavailable; inspect or restore it before reconciling publication".to_string(),
+                ),
+            )
+            .await;
+            return;
+        };
+        let observed = repository
+            .observation
+            .as_ref()
+            .filter(|observation| observation.freshness == ObservationFreshness::Fresh)
+            .and_then(|observation| observation.facts.as_ref())
+            .filter(|facts| {
+                facts.pull_request_number == repair.attempt.pull_request_number
+                    && facts.pull_request_url == repair.attempt.pull_request_url
+                    && facts.terminal_state == PullRequestTerminalState::Open
+                    && facts.matches_delivery
+                    && !facts.head_diverged
+            });
+        let mut next = delivery.clone();
+        match observed {
+            Some(facts) if facts.head_sha == local_head => {
+                let entry = next
+                    .repositories
+                    .get_mut(&repair.attempt.repository_key)
+                    .expect("checked");
+                entry.local_sha = facts.head_sha.clone();
+                entry.observed_remote_sha = Some(facts.head_sha.clone());
+                next.repair = None;
+                let _ = self
+                    .persist_delivery_candidate(delivery, next.clone(), None)
+                    .await;
+                if let Ok(Some(interaction)) = self
+                    .interaction_store
+                    .latest_blocking_for_issue(&delivery.issue_id)
+                    .await
+                {
+                    let _ = self.interaction_store.mark_resumed(&interaction.id).await;
+                }
+                self.state
+                    .write()
+                    .await
+                    .remove_waiting_on_human(&delivery.issue_id);
+            }
+            _ => {
+                next.repair.as_mut().expect("checked").phase = DeliveryRepairPhase::AwaitingHuman;
+                if self
+                    .persist_delivery_candidate(delivery, next.clone(), None)
+                    .await
+                    .is_ok()
+                {
+                    self.ensure_delivery_repair_interaction(&next).await;
+                }
+            }
+        }
+    }
+
+    pub(super) async fn ensure_delivery_repair_interaction(&self, delivery: &DeliveryRecord) {
+        let Some(repair) = delivery.repair.as_ref() else {
+            return;
+        };
+        if repair.phase != DeliveryRepairPhase::AwaitingHuman {
+            return;
+        }
+        let attempt = &repair.attempt;
+        let id = repair.interaction_id.clone().unwrap_or_else(|| {
+            format!(
+                "delivery-repair-{}-{}-{}-{}-{}",
+                delivery.issue_id,
+                attempt
+                    .repository_key
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+                attempt.pull_request_number,
+                repair.attempts_used,
+                attempt
+                    .starting_sha
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+            )
+        });
+        if self
+            .interaction_store
+            .get(&id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        let feedback = &attempt.feedback;
+        let outcome = repair
+            .last_error
+            .as_deref()
+            .unwrap_or("No repair-worker failure was recorded.");
+        let body = format!(
+            "Delivery repair needs an operator decision.\n\nRepository: {}\nPull request: {} ({})\nObserved head: {}\nRepair attempts used: {}\nRepair outcome: {}\nFailed checks: {}\nChange requests: {}\nUnresolved threads: {}",
+            attempt.repository_key,
+            attempt.pull_request_number,
+            attempt.pull_request_url,
+            attempt.starting_sha,
+            repair.attempts_used,
+            outcome,
+            feedback.terminal_failed_checks.join(", "),
+            feedback.change_request_bodies.join("\n"),
+            feedback.unresolved_threads.iter().map(|thread| format!("{}:{} {}", thread.path.as_deref().unwrap_or("<unknown>"), thread.line.map_or_else(|| "?".to_string(), |line| line.to_string()), thread.body)).collect::<Vec<_>>().join("\n"),
+        );
+        let interaction =
+            InteractionRequest {
+                id,
+                schema_version: 1,
+                issue_id: delivery.issue_id.clone(),
+                issue_identifier: delivery.identifier.clone(),
+                pipeline_cycle: 0,
+                completed_steps: vec![],
+                step_name: "delivery_repair".to_string(),
+                agent_name: delivery
+                    .delivery_repair
+                    .as_ref()
+                    .map(|policy| policy.agent.clone())
+                    .unwrap_or_default(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: format!("Resolve delivery repair for {}", delivery.identifier),
+                body,
+                options: if delivery.delivery_repair.as_ref().is_some_and(|policy| {
+                    delivery.delivery_repair_attempts_used < policy.max_attempts
+                }) {
+                    vec![
+                        "Retry delivery repair".to_string(),
+                        "Handle manually".to_string(),
+                    ]
+                } else {
+                    vec!["Handle manually".to_string()]
+                },
+                artifacts: vec![attempt.pull_request_url.clone()],
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+        if self
+            .interaction_store
+            .create(interaction.clone())
+            .await
+            .is_ok()
+        {
+            let mut state = self.state.write().await;
+            state.add_waiting_on_human(super::state::WaitingOnHumanEntry {
+                issue_id: interaction.issue_id.clone(),
+                identifier: interaction.issue_identifier.clone(),
+                interaction_request_id: interaction.id.clone(),
+                step_name: interaction.step_name.clone(),
+                kind: interaction.kind.clone(),
+                prompt: interaction.title.clone(),
+                agent_name: interaction.agent_name.clone(),
+                retry_attempt: Some(repair.attempts_used),
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: interaction.requested_at,
+                run_id: Some(delivery.run_id.clone()),
+                issue: None,
+            });
+        }
+    }
+
+    pub(super) async fn resume_delivery_repair_interaction(
+        &self,
+        issue: &Issue,
+        interaction: &InteractionRequest,
+    ) -> Result<(), crate::error::EnsembleError> {
+        let current = self
+            .state
+            .read()
+            .await
+            .delivery
+            .get(&issue.id)
+            .cloned()
+            .ok_or_else(|| crate::error::AgentError::PromptError {
+                reason: format!("issue '{}' has no delivery repair", issue.identifier),
+            })?;
+        let selected_option = match interaction.response.as_ref() {
+            Some(InteractionResponse::Question {
+                selected_option: Some(option),
+                ..
+            }) => option.as_str(),
+            _ => {
+                return Err(crate::error::AgentError::PromptError {
+                    reason: "delivery repair requires an explicit valid option".to_string(),
+                }
+                .into())
+            }
+        };
+        let Some(repair) = current.repair.as_ref() else {
+            return Err(crate::error::AgentError::PromptError {
+                reason: "delivery repair interaction has no retained repair".to_string(),
+            }
+            .into());
+        };
+        let mut retry = current.clone();
+        match selected_option {
+            "Retry delivery repair"
+                if current.delivery_repair.as_ref().is_some_and(|policy| {
+                    current.delivery_repair_attempts_used < policy.max_attempts
+                }) =>
+            {
+                let next_cycle = retry.delivery_repair_attempts_used.saturating_add(1);
+                let next_interaction_id = retry.repair_interaction_id(
+                    &repair.attempt.repository_key,
+                    repair.attempt.pull_request_number,
+                    &repair.attempt.starting_sha,
+                    next_cycle,
+                );
+                let repair = retry.repair.as_mut().expect("checked");
+                repair.phase = DeliveryRepairPhase::PendingDispatch;
+                repair.last_error = None;
+                repair.post_worker_local_head = None;
+                repair.interaction_id = Some(next_interaction_id);
+            }
+            "Handle manually" => {
+                retry
+                    .delivery_repair_suppressions
+                    .insert(DeliveryRepairIdentity::attempted(&repair.attempt));
+                retry.repair = None;
+            }
+            _ => {
+                return Err(crate::error::AgentError::PromptError {
+                    reason: "delivery repair option is unavailable for this retained delivery"
+                        .to_string(),
+                }
+                .into())
+            }
+        }
+        for repository in retry.repositories.values_mut() {
+            if let Some(observation) = repository.observation.as_mut() {
+                observation.retry = None;
+            }
+        }
+        self.persist_delivery_candidate(&current, retry, None)
+            .await
+            .map_err(|_| crate::error::AgentError::PromptError {
+                reason: "could not persist delivery repair retry".to_string(),
+            })?;
+        self.interaction_store.mark_resumed(&interaction.id).await?;
+        self.state.write().await.remove_waiting_on_human(&issue.id);
+        Ok(())
     }
 
     pub(super) async fn advance_review_projection(
@@ -3174,7 +4413,7 @@ impl Orchestrator {
         workspace: &crate::workspace::manager::WorkspaceResult,
         repository_keys: &[String],
     ) -> Result<(DeliveryRecord, Option<PipelineRunSnapshot>), String> {
-        let (run_id, snapshot, terminal_history) = {
+        let (run_id, snapshot, terminal_history, delivery_repair_capacity) = {
             let state = self.state.read().await;
             let run_id = state
                 .running
@@ -3194,7 +4433,21 @@ impl Orchestrator {
                     Utc::now(),
                 )
                 .or_else(|| state.finalize_terminal_history.get(issue_id).cloned());
-            (run_id, snapshot, terminal_history)
+            let delivery_repair_capacity = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.selected_workflow.as_ref())
+                .map(|selected| DeliveryRepairCapacity::Lane {
+                    lane: selected.lane.clone(),
+                })
+                .or_else(|| {
+                    state
+                        .running
+                        .get(issue_id)
+                        .map(|running| DeliveryRepairCapacity::State {
+                            state: running.issue.state.clone(),
+                        })
+                });
+            (run_id, snapshot, terminal_history, delivery_repair_capacity)
         };
         let configured_repositories = self.workspace_mgr.repos();
         let mut repositories = std::collections::BTreeMap::new();
@@ -3236,13 +4489,14 @@ impl Orchestrator {
                 },
             );
         }
-        let (delivery_states, success_state, failure_state) = {
+        let (delivery_states, delivery_repair, success_state, failure_state) = {
             let state = self.state.read().await;
             state
                 .get_pipeline_config(issue_id)
                 .map(|config| {
                     (
                         config.delivery_states.clone(),
+                        config.delivery_repair.clone(),
                         config.on_success.clone(),
                         config.on_failure.clone(),
                     )
@@ -3258,6 +4512,11 @@ impl Orchestrator {
                 terminal_history: terminal_history.map(Box::new),
                 review_projection: None,
                 delivery_states,
+                delivery_repair,
+                repair: None,
+                delivery_repair_attempts_used: 0,
+                delivery_repair_capacity,
+                delivery_repair_suppressions: Default::default(),
                 success_state: Some(success_state),
                 failure_state: Some(failure_state),
                 closed_without_merge_parked: false,
@@ -3310,6 +4569,20 @@ fn closed_without_merge_attention_close(
 mod tests {
     use super::*;
 
+    fn git_stdout(repository_path: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(repository_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     fn repository(phase: DeliveryPhase) -> DeliveryRepository {
         DeliveryRepository {
             mode: DeliveryMode::PushAndPr,
@@ -3328,6 +4601,70 @@ mod tests {
             last_error: None,
             retry_from: None,
         }
+    }
+
+    #[test]
+    fn guarded_repair_push_uses_an_exact_ref_lease() {
+        assert_eq!(
+            guarded_repair_push_arguments("origin", "ensemble/issue-420", "observed", "local"),
+            [
+                "push".to_string(),
+                "--force-with-lease=refs/heads/ensemble/issue-420:observed".to_string(),
+                "origin".to_string(),
+                "local:refs/heads/ensemble/issue-420".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_repair_push_rejects_a_branch_advanced_after_observation_without_overwriting_it(
+    ) {
+        let root = tempfile::TempDir::new().unwrap();
+        let remote = root.path().join("remote.git");
+        let repair = root.path().join("repair");
+        let racer = root.path().join("racer");
+        std::fs::create_dir_all(&repair).unwrap();
+        git_stdout(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git_stdout(&repair, &["init", "--initial-branch=main"]);
+        git_stdout(&repair, &["config", "user.email", "test@example.com"]);
+        git_stdout(&repair, &["config", "user.name", "Test"]);
+        std::fs::write(repair.join("README.md"), "base\n").unwrap();
+        git_stdout(&repair, &["add", "README.md"]);
+        git_stdout(&repair, &["commit", "-m", "base"]);
+        git_stdout(
+            &repair,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_stdout(&repair, &["push", "-u", "origin", "main"]);
+        let observed_head = git_stdout(&repair, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repair.join("README.md"), "repair\n").unwrap();
+        git_stdout(&repair, &["commit", "-am", "repair"]);
+        let repair_head = git_stdout(&repair, &["rev-parse", "HEAD"]);
+
+        git_stdout(
+            root.path(),
+            &["clone", remote.to_str().unwrap(), racer.to_str().unwrap()],
+        );
+        git_stdout(&racer, &["config", "user.email", "racer@example.com"]);
+        git_stdout(&racer, &["config", "user.name", "Racer"]);
+        std::fs::write(racer.join("README.md"), "racer\n").unwrap();
+        git_stdout(&racer, &["commit", "-am", "racer"]);
+        let racer_head = git_stdout(&racer, &["rev-parse", "HEAD"]);
+        git_stdout(&racer, &["push", "origin", "main"]);
+
+        let arguments =
+            guarded_repair_push_arguments("origin", "main", &observed_head, &repair_head);
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+
+        assert!(command_stdout(&repair, "git", &arguments).await.is_err());
+        assert_eq!(
+            git_stdout(
+                root.path(),
+                &["--git-dir", remote.to_str().unwrap(), "rev-parse", "main",],
+            ),
+            racer_head
+        );
     }
 
     fn pull_request(marker: &str, head_sha: &str) -> RemotePullRequest {
@@ -3368,6 +4705,7 @@ mod tests {
             checks: vec![],
             check_summary: CheckSummary::Passing,
             review_decision: ReviewDecision::ReviewRequired,
+            feedback: Default::default(),
         }
     }
 
@@ -3385,6 +4723,11 @@ mod tests {
             terminal_history: None,
             review_projection: None,
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -3446,6 +4789,207 @@ mod tests {
             delivery_with_observations(vec![observation_facts()]).delivery_state_fact(),
             Some(DeliveryStateFact::Waiting)
         );
+    }
+
+    #[test]
+    fn delivery_repair_freezes_the_first_matching_head_feedback() {
+        let mut facts = observation_facts();
+        facts.checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Failure),
+        }];
+        facts = facts.for_delivery("0123456789abcdef");
+        let mut delivery = delivery_with_observations(vec![]);
+        delivery.delivery_repair = Some(DeliveryRepairConfig {
+            agent: "repair".to_string(),
+            max_attempts: 2,
+        });
+
+        delivery.freeze_actionable_repair("source-repo", &facts);
+        let first = delivery.repair.clone().unwrap();
+
+        let mut later = facts.clone();
+        later.feedback.change_request_bodies = vec!["later feedback".to_string()];
+        delivery.freeze_actionable_repair("source-repo", &later);
+
+        assert_eq!(delivery.repair, Some(first));
+    }
+
+    #[test]
+    fn delivery_repair_interaction_identity_is_stable_for_one_feedback_head() {
+        let mut facts = observation_facts();
+        facts.checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Failure),
+        }];
+        let facts = facts.for_delivery("0123456789abcdef");
+        let mut delivery = delivery_with_observations(vec![]);
+        delivery.delivery_repair = Some(DeliveryRepairConfig {
+            agent: "repair".to_string(),
+            max_attempts: 2,
+        });
+
+        delivery.freeze_actionable_repair("source/repo", &facts);
+        let first_id = delivery
+            .repair
+            .as_ref()
+            .and_then(|repair| repair.interaction_id.as_deref());
+
+        let mut restored = delivery_with_observations(vec![]);
+        restored.delivery_repair = delivery.delivery_repair.clone();
+        restored.freeze_actionable_repair("source/repo", &facts);
+        let restored_id = restored
+            .repair
+            .as_ref()
+            .and_then(|repair| repair.interaction_id.as_deref());
+
+        assert_eq!(
+            first_id,
+            Some("delivery-repair-issue-420-source-repo-420-0123456789abcdef-1")
+        );
+        assert_eq!(first_id, restored_id);
+    }
+
+    #[test]
+    fn manual_repair_suppression_is_scoped_to_one_delivery_identity() {
+        let mut first_repository = observation_facts();
+        first_repository.pull_request_number = 1;
+        first_repository.pull_request_url = "https://github.com/example/project/pull/1".to_string();
+        first_repository.head_sha = "shared-head".to_string();
+        first_repository.checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Failure),
+        }];
+        let first_head = first_repository.clone().for_delivery("shared-head");
+        let mut second_repository = first_repository.clone();
+        second_repository.pull_request_number = 2;
+        second_repository.pull_request_url =
+            "https://github.com/example/project/pull/2".to_string();
+        second_repository.head_sha = "second-head".to_string();
+        let second_head = second_repository.for_delivery("second-head");
+        let mut delivery = delivery_with_observations(vec![]);
+        delivery.delivery_repair = Some(DeliveryRepairConfig {
+            agent: "repair".to_string(),
+            max_attempts: 2,
+        });
+        delivery
+            .delivery_repair_suppressions
+            .insert(DeliveryRepairIdentity::observed(
+                "repository-a",
+                &first_head,
+            ));
+
+        delivery.freeze_actionable_repair("repository-b", &second_head);
+        assert_eq!(
+            delivery
+                .repair
+                .as_ref()
+                .map(|repair| repair.attempt.repository_key.as_str()),
+            Some("repository-b")
+        );
+        delivery.repair = None;
+
+        delivery.freeze_actionable_repair("repository-a", &first_head);
+        assert!(delivery.repair.is_none());
+
+        first_repository.head_sha = "changed-head".to_string();
+        let changed_first_head = first_repository.for_delivery("changed-head");
+        delivery.freeze_actionable_repair("repository-a", &changed_first_head);
+
+        assert_eq!(
+            delivery
+                .repair
+                .as_ref()
+                .map(|repair| repair.attempt.starting_sha.as_str()),
+            Some("changed-head")
+        );
+    }
+
+    #[test]
+    fn legacy_delivery_record_without_capacity_identity_deserializes_as_unavailable() {
+        let mut record = delivery_with_observations(vec![]);
+        record.delivery_repair_capacity = Some(DeliveryRepairCapacity::State {
+            state: "In Progress".to_string(),
+        });
+        let mut json = serde_json::to_value(record).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("delivery_repair_capacity");
+
+        let restored = serde_json::from_value::<DeliveryRecord>(json).unwrap();
+
+        assert_eq!(restored.delivery_repair_capacity, None);
+    }
+
+    #[test]
+    fn manual_repair_suppression_serializes_its_exact_delivery_identity() {
+        let mut record = delivery_with_observations(vec![]);
+        let suppression = DeliveryRepairIdentity {
+            repository_key: "repository-a".to_string(),
+            pull_request_number: 42,
+            head_sha: "abc123".to_string(),
+        };
+        record
+            .delivery_repair_suppressions
+            .insert(suppression.clone());
+
+        let restored =
+            serde_json::from_value::<DeliveryRecord>(serde_json::to_value(record).unwrap())
+                .unwrap();
+
+        assert!(restored.delivery_repair_suppressions.contains(&suppression));
+    }
+
+    #[test]
+    fn repair_dispatch_intent_is_idempotent_and_respects_its_cumulative_budget() {
+        let mut delivery = delivery_with_observations(vec![]);
+        delivery.delivery_repair = Some(DeliveryRepairConfig {
+            agent: "repair".to_string(),
+            max_attempts: 1,
+        });
+        let mut facts = observation_facts();
+        facts.checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Failure),
+        }];
+        let facts = facts.for_delivery("0123456789abcdef");
+        delivery.freeze_actionable_repair("source-repo", &facts);
+
+        assert_eq!(delivery.begin_repair_dispatch(), RepairDispatch::Dispatch);
+        assert_eq!(
+            delivery.begin_repair_dispatch(),
+            RepairDispatch::AlreadyInFlight
+        );
+
+        delivery.complete_repair_dispatch_without_commit();
+        assert_eq!(delivery.begin_repair_dispatch(), RepairDispatch::Exhausted);
+    }
+
+    #[test]
+    fn complete_feedback_rejects_incomplete_review_pages_and_excludes_resolved_threads() {
+        let incomplete = serde_json::json!({
+            "reviews": { "totalCount": 101, "nodes": [] },
+            "reviewThreads": { "totalCount": 0, "nodes": [] },
+        });
+        assert!(complete_feedback(&incomplete).is_err());
+
+        let complete = serde_json::json!({
+            "reviews": { "totalCount": 1, "nodes": [{ "state": "CHANGES_REQUESTED", "body": "Please fix" }] },
+            "reviewThreads": { "totalCount": 2, "nodes": [
+                { "isResolved": true, "isOutdated": false, "comments": { "totalCount": 1, "nodes": [{ "body": "done", "path": "src/lib.rs", "line": 1 }] } },
+                { "isResolved": false, "isOutdated": false, "comments": { "totalCount": 1, "nodes": [{ "body": "rename", "path": "src/lib.rs", "line": 7 }] } }
+            ] },
+        });
+
+        let feedback = complete_feedback(&complete).unwrap();
+
+        assert_eq!(feedback.change_request_bodies, vec!["Please fix"]);
+        assert_eq!(feedback.unresolved_threads.len(), 1);
+        assert_eq!(feedback.unresolved_threads[0].body, "rename");
     }
 
     #[test]
@@ -3588,6 +5132,11 @@ mod tests {
             terminal_history: None,
             review_projection: None,
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -3622,6 +5171,11 @@ mod tests {
                 history_persisted: false,
             }),
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -3653,6 +5207,11 @@ mod tests {
                 history_persisted: false,
             }),
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
@@ -3692,6 +5251,11 @@ mod tests {
                 history_persisted: false,
             }),
             delivery_states: Default::default(),
+            delivery_repair: None,
+            repair: None,
+            delivery_repair_attempts_used: 0,
+            delivery_repair_capacity: None,
+            delivery_repair_suppressions: Default::default(),
             success_state: None,
             failure_state: None,
             closed_without_merge_parked: false,
