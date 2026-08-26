@@ -713,6 +713,27 @@ fn automatic_merge_candidate(repository: &DeliveryRepository) -> bool {
             .is_some_and(|facts| facts.terminal_state == PullRequestTerminalState::Merged)
 }
 
+fn automatic_merge_candidate_has_eligible_evidence(repository: &DeliveryRepository) -> bool {
+    let Some(observation) = repository.observation.as_ref() else {
+        return false;
+    };
+    if observation.freshness != ObservationFreshness::Fresh {
+        return false;
+    }
+    let Some(evidence) = observation
+        .facts
+        .as_ref()
+        .and_then(DeliveryObservationFacts::automatic_merge_evidence)
+    else {
+        return false;
+    };
+    match repository.merge {
+        DeliveryMergeConfig::Manual => false,
+        DeliveryMergeConfig::Auto { .. } => evidence.is_eligible_for_direct_merge(),
+        DeliveryMergeConfig::MergeQueue => evidence.is_eligible_for_queue(),
+    }
+}
+
 fn automatic_merge_candidate_key(
     repositories: &BTreeMap<String, DeliveryRepository>,
 ) -> Option<String> {
@@ -727,6 +748,14 @@ fn automatic_merge_candidate_key(
                     )
                 }))
             .then(|| key.clone())
+        })
+        .or_else(|| {
+            repositories.iter().find_map(|(key, repository)| {
+                (automatic_merge_candidate(repository)
+                    && repository.merge_mutation.is_none()
+                    && automatic_merge_candidate_has_eligible_evidence(repository))
+                .then(|| key.clone())
+            })
         })
         .or_else(|| {
             repositories.iter().find_map(|(key, repository)| {
@@ -7143,6 +7172,38 @@ mod tests {
         assert_eq!(
             automatic_merge_candidate_key(&repositories).as_deref(),
             Some("b-waiting")
+        );
+
+        let automatic_evidence = |required_checks_passing| AutomaticMergeEvidence {
+            required_checks_passing,
+            required_reviews_satisfied: true,
+            required_review_threads_resolved: true,
+            strict_base_satisfied: true,
+            direct_merge_supported: true,
+            no_requested_changes: true,
+            queue_supported: false,
+            queued: false,
+        };
+        let mut ineligible = waiting.clone();
+        let mut ineligible_facts = observation_facts().for_delivery(&ineligible.local_sha);
+        ineligible_facts.automatic_merge = Some(automatic_evidence(false));
+        ineligible.observation = Some(DeliveryObservation::successful(
+            ineligible_facts,
+            Utc::now(),
+        ));
+        let mut eligible = waiting.clone();
+        eligible.pr_number = Some(3);
+        eligible.pr_url = Some("https://example.test/pr/3".to_string());
+        let mut eligible_facts = observation_facts().for_delivery(&eligible.local_sha);
+        eligible_facts.automatic_merge = Some(automatic_evidence(true));
+        eligible.observation = Some(DeliveryObservation::successful(eligible_facts, Utc::now()));
+        let repositories = BTreeMap::from([
+            ("a-ineligible".to_string(), ineligible),
+            ("b-eligible".to_string(), eligible),
+        ]);
+        assert_eq!(
+            automatic_merge_candidate_key(&repositories).as_deref(),
+            Some("b-eligible")
         );
 
         for phase in [DeliveryMergePhase::Queued, DeliveryMergePhase::Blocked] {

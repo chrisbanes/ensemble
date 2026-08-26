@@ -501,6 +501,8 @@ Pipeline run recovery:
   not needed for observation-only reconciliation. An applicable merge-queue rule authorizes only
   queue admission; it prevents direct automatic merge from bypassing the queue.
 - One orchestrator-wide permit serializes the short merge/queue mutation section across issues.
+  Within a multi-repository delivery, a waiting repository with fresh eligible evidence is selected
+  ahead of ineligible peers, while already-journaled mutations retain reconciliation priority.
   After acquiring it, Ensemble re-observes the exact PR, journals the PR node, expected head SHA,
   operation, and configured method as in flight, performs at most one mutation, and returns to
   reconciliation. Restart and ambiguous responses observe first rather than replaying the write;
