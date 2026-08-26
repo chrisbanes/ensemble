@@ -7052,14 +7052,23 @@ mod tests {
     #[test]
     fn automatic_merge_policy_routes_merge_queue_rules_to_queue_admission() {
         let evidence = automatic_merge_evidence_from_policy(
-            &serde_json::json!([[{"type": "merge_queue", "parameters": {}}]]),
+            &serde_json::json!([[
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": true,
+                        "required_status_checks": []
+                    }
+                },
+                {"type": "merge_queue", "parameters": {}}
+            ]]),
             None,
             AutomaticMergeStatus {
                 checks: &[],
                 review_decision: ReviewDecision::Approved,
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
-                base_freshness: BaseFreshness::UpToDate,
+                base_freshness: BaseFreshness::Behind,
                 direct_merge_method: None,
                 repository_merge_method_supported: Some(true),
                 queue_supported: true,

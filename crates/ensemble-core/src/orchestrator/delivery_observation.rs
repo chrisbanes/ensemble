@@ -177,20 +177,21 @@ pub struct AutomaticMergeEvidence {
 }
 
 impl AutomaticMergeEvidence {
-    fn policy_requirements_satisfied(&self) -> bool {
+    fn shared_policy_requirements_satisfied(&self) -> bool {
         self.required_checks_passing
             && self.required_reviews_satisfied
             && self.required_review_threads_resolved
-            && self.strict_base_satisfied
             && self.no_requested_changes
     }
 
     pub(crate) fn is_eligible_for_direct_merge(&self) -> bool {
-        self.policy_requirements_satisfied() && self.direct_merge_supported
+        self.shared_policy_requirements_satisfied()
+            && self.strict_base_satisfied
+            && self.direct_merge_supported
     }
 
     pub(crate) fn is_eligible_for_queue(&self) -> bool {
-        self.policy_requirements_satisfied() && self.queue_supported && !self.queued
+        self.shared_policy_requirements_satisfied() && self.queue_supported && !self.queued
     }
 }
 

@@ -537,8 +537,9 @@ requires `push_and_pr` and admits an eligible pull request to GitHub's queue wit
 admission as merge completion. The selected policy is frozen into the retained repository entry.
 Automatic modes require a fresh exact-head version-2 observation, a mergeable pull request,
 terminal-green effective required checks, satisfied required reviews, required review threads
-resolved, strict-check base freshness, and no requested changes; queue mode also requires confirmed
-queue support. Ensemble combines every applicable ruleset page with classic branch protection.
+resolved, and no requested changes. Direct merge also requires strict-check base freshness; queue
+mode instead requires confirmed queue support and lets GitHub validate a current merge-group
+commit. Ensemble combines every applicable ruleset page with classic branch protection.
 Successful required-check conclusions include GitHub's success, neutral, and skipped outcomes; a
 legacy expected status remains pending until it reports a terminal state. A review decision is
 needed when the effective policy requires an approval count, code-owner

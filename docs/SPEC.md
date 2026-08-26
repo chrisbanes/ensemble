@@ -486,7 +486,8 @@ Pipeline run recovery:
   method, or `merge_queue`. Automatic modes use only a fresh version-2 exact-head observation with
   complete effective required-check and review evidence from every applicable ruleset page and
   classic branch protection, no requested changes, any required review-thread resolution,
-  strict-check base freshness, mergeability, and confirmed queue support when applicable.
+  mergeability, and confirmed queue support when applicable. Direct merge also requires
+  strict-check base freshness; queue admission lets GitHub validate a current merge-group commit.
   Required checks accept GitHub's successful terminal conclusions, including neutral and skipped;
   an expected legacy status remains pending until it reports a terminal state. A review decision
   is needed when the effective policy requires an approval count, code-owner
