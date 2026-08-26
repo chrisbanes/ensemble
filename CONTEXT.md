@@ -69,7 +69,7 @@ A structured judgment about whether an artifact snapshot satisfies declared crit
 _Avoid_: Step result, execution result
 
 **Interaction request**:
-A durable question, approval, or handoff that blocks a run until a human resolves it.
+A durable question, approval, or handoff that blocks a run or retained delivery until a human resolves it.
 _Avoid_: Prompt, comment
 
 **Action capability**:
@@ -89,6 +89,18 @@ _Avoid_: Completion, cleanup
 **Delivery**:
 The durable owner of configured repository publication after pipeline work and approval are complete. It preserves exact local and remote identity until publication is confirmed, waiting on a pull request, or blocked for operator recovery.
 _Avoid_: Worker, tracker state
+
+**Actionable delivery feedback**:
+A fresh delivery observation for the retained pull-request head that contains a terminal check failure, a change-request review body, or an unresolved non-outdated inline review thread and forms the input boundary for one repair attempt.
+_Avoid_: PR feedback, first failure signal, fix trigger
+
+**Delivery repair budget**:
+The configured cumulative number of feedback repair attempts available to one retained issue delivery until terminal completion or an explicit human reset.
+_Avoid_: Retry count, per-head attempts
+
+**Delivery repair attempt**:
+One agent execution against a frozen actionable-delivery-feedback snapshot and retained pull-request head. It consumes one delivery repair budget unit and may publish only while the remote head still matches its starting identity.
+_Avoid_: Pipeline retry, fix pass, feedback loop iteration
 
 **Delivery-state projection**:
 An optional configuration mapping from a durable delivery fact to an external tracker state. It reflects delivery without transferring runtime authority to the tracker.
