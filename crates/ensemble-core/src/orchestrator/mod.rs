@@ -4796,6 +4796,9 @@ impl Orchestrator {
             }
         };
         let identity_is_current = match &event {
+            WorkerEvent::AgentUpdate { step_name, .. } if step_name == "delivery_repair" => {
+                self.delivery_repair_identity_is_current(&identity).await
+            }
             WorkerEvent::DeliveryRepairExited { .. } => {
                 self.delivery_repair_identity_is_current(&identity).await
             }
@@ -17415,6 +17418,125 @@ mod tests {
                 },
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_unsuccessful_verdicts_and_approval_requests_never_publish() {
+        let cases = [
+            (
+                WorkerResult::Success {
+                    output: StepOutput {
+                        result: StepResult::Failed {
+                            summary: "repair failed".to_string(),
+                        },
+                        summary: Some("repair failed".to_string()),
+                        output: None,
+                    },
+                    approval_request: None,
+                },
+                "repair failed",
+            ),
+            (
+                WorkerResult::Success {
+                    output: StepOutput {
+                        result: StepResult::Concern {
+                            summary: "repair concern".to_string(),
+                        },
+                        summary: Some("repair concern".to_string()),
+                        output: None,
+                    },
+                    approval_request: None,
+                },
+                "repair concern",
+            ),
+            (
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: Some(StepApprovalRequestDraft {
+                        schema_version: 1,
+                        title: "Approve repair".to_string(),
+                        body: "review the repair before publication".to_string(),
+                        state: None,
+                    }),
+                },
+                "review the repair before publication",
+            ),
+        ];
+
+        for (result, expected_diagnostic) in cases {
+            let (orchestrator, _workspace, _repo, delivery, remote) =
+                guarded_repair_test_orchestrator(vec![], vec![]).await;
+
+            orchestrator
+                .handle_delivery_repair_exit(
+                    WorkerIdentity {
+                        issue_id: delivery.issue_id.clone(),
+                        run_id: delivery.run_id.clone(),
+                        cycle: 0,
+                        step_name: "delivery_repair".to_string(),
+                        started_at: Utc::now(),
+                    },
+                    result,
+                )
+                .await;
+
+            let state = orchestrator.state.read().await;
+            let repair = state.delivery["1"].repair.as_ref().unwrap();
+            assert_eq!(repair.phase, DeliveryRepairPhase::AwaitingHuman);
+            assert!(repair.post_worker_local_head.is_none());
+            assert!(repair
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected_diagnostic)));
+            drop(state);
+            assert!(remote.guarded_calls.lock().unwrap().is_empty());
+            let interaction = orchestrator
+                .interaction_store
+                .latest_blocking_for_issue("1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(interaction.body.contains(expected_diagnostic));
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_repair_agent_updates_use_the_delivery_owner_identity() {
+        let (orchestrator, _workspace, _repo, delivery, _remote) =
+            guarded_repair_test_orchestrator(vec![], vec![]).await;
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.running.get_mut("1").unwrap().run_id = Some(delivery.run_id.clone());
+        }
+        let identity = WorkerIdentity {
+            issue_id: delivery.issue_id.clone(),
+            run_id: delivery.run_id.clone(),
+            cycle: 0,
+            step_name: "delivery_repair".to_string(),
+            started_at: Utc::now(),
+        };
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity,
+                workspace_capture: None,
+                event: WorkerEvent::AgentUpdate {
+                    issue_id: delivery.issue_id.clone(),
+                    step_name: "delivery_repair".to_string(),
+                    event: AgentEvent::OutputChunk {
+                        stream: crate::agent::events::RuntimeStream::Stdout,
+                        content: "repair output".to_string(),
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let running = state.running.get("1").unwrap();
+        assert_eq!(running.last_agent_event.as_deref(), Some("output_chunk"));
+        assert_eq!(running.last_agent_message.as_deref(), Some("repair output"));
     }
 
     #[tokio::test]

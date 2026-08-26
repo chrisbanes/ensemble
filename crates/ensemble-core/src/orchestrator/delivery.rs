@@ -434,7 +434,18 @@ impl DeliveryRecord {
         };
         repair.phase = DeliveryRepairPhase::AwaitingHuman;
         repair.last_error = match result {
-            WorkerResult::Success { .. } => None,
+            WorkerResult::Success {
+                output,
+                approval_request,
+            } => match &output.result {
+                crate::pipeline::verdict::StepResult::Succeeded => approval_request
+                    .as_ref()
+                    .map(|request| request.body.clone()),
+                crate::pipeline::verdict::StepResult::Failed { summary }
+                | crate::pipeline::verdict::StepResult::Concern { summary } => {
+                    Some(summary.clone())
+                }
+            },
             WorkerResult::BlockedOnHuman { request } => Some(request.body.clone()),
             WorkerResult::Failed { error, .. } => Some(error.clone()),
         };
@@ -2910,7 +2921,7 @@ impl Orchestrator {
         }
         let mut completed = current.clone();
         completed.complete_repair_dispatch(&result);
-        if matches!(result, WorkerResult::Success { .. }) {
+        if delivery_repair_result_is_publishable(&result) {
             if let Some(repair) = completed.repair.as_mut() {
                 if let Ok(paths) = self.workspace_mgr.owned_worktree_paths(&completed.issue_id) {
                     if let Some(path) = paths.get(&repair.attempt.repository_key) {
@@ -4555,6 +4566,19 @@ impl Orchestrator {
             snapshot,
         ))
     }
+}
+
+fn delivery_repair_result_is_publishable(result: &WorkerResult) -> bool {
+    matches!(
+        result,
+        WorkerResult::Success {
+            output,
+            approval_request: None,
+        } if matches!(
+            &output.result,
+            crate::pipeline::verdict::StepResult::Succeeded
+        )
+    )
 }
 
 fn closed_without_merge_attention(
