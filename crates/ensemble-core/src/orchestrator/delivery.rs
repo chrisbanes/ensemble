@@ -4624,7 +4624,15 @@ mod tests {
         let repair = root.path().join("repair");
         let racer = root.path().join("racer");
         std::fs::create_dir_all(&repair).unwrap();
-        git_stdout(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git_stdout(
+            root.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
         git_stdout(&repair, &["init", "--initial-branch=main"]);
         git_stdout(&repair, &["config", "user.email", "test@example.com"]);
         git_stdout(&repair, &["config", "user.name", "Test"]);
