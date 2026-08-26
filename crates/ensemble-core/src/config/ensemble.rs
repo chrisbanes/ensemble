@@ -1,7 +1,7 @@
 use crate::agent::runtime::RuntimeKind;
 use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
-use crate::workspace::finalize::RepoFinalizeConfig;
+use crate::workspace::finalize::{FinalizeMode, RepoFinalizeConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -2072,6 +2072,20 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                     name: repair.agent.clone(),
                 });
             }
+        }
+    }
+
+    for repository in &config.repos {
+        if repository.finalize.merge.is_automatic()
+            && (!repository.finalize.enabled || repository.finalize.mode != FinalizeMode::PushAndPr)
+        {
+            return Err(PipelineError::InvalidNamedPipeline {
+                pipeline: "<repositories>".to_string(),
+                reason: format!(
+                    "repository '{}' automatic finalize.merge requires enabled finalize.mode: push_and_pr",
+                    repository.path
+                ),
+            });
         }
     }
 
@@ -4806,6 +4820,57 @@ pipelines:
 
         let error = validate_config(&parse_config(yaml).unwrap()).unwrap_err();
         assert!(matches!(error, PipelineError::UnknownAgent { name } if name == "absent"));
+    }
+
+    #[test]
+    fn delivery_merge_config_defaults_to_manual_and_rejects_invalid_automatic_combinations() {
+        let manual = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build it
+repos:
+  - path: repo
+    branch: main
+    finalize:
+      mode: push_and_pr
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(manual).unwrap();
+        assert_eq!(
+            config.repos[0].finalize.merge,
+            crate::workspace::finalize::DeliveryMergeConfig::Manual
+        );
+        validate_config(&config).unwrap();
+
+        for method in ["merge", "squash", "rebase"] {
+            let yaml = manual.replace(
+                "mode: push_and_pr",
+                &format!(
+                    "mode: push_and_pr\n      merge:\n        mode: auto\n        method: {method}"
+                ),
+            );
+            validate_config(&parse_config(&yaml).unwrap()).unwrap();
+        }
+
+        let queue = manual.replace(
+            "mode: push_and_pr",
+            "mode: push_and_pr\n      merge:\n        mode: merge_queue",
+        );
+        validate_config(&parse_config(&queue).unwrap()).unwrap();
+
+        let invalid = manual.replace(
+            "mode: push_and_pr",
+            "mode: none\n      merge:\n        mode: auto\n        method: squash",
+        );
+        assert!(validate_config(&parse_config(&invalid).unwrap()).is_err());
     }
 
     #[test]

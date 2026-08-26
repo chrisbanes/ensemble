@@ -239,6 +239,9 @@ repos:
     finalize:
       mode: push_and_pr
       approval_required: true
+      merge:
+        mode: auto
+        method: squash
 
 delivery_states:
   waiting: In review
@@ -512,6 +515,8 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 | `finalize.enabled` | bool | `true` | Whether post-pipeline finalization is enabled for this repo |
 | `finalize.mode` | string | `none` | Finalization action: `none`, `push`, or `push_and_pr` |
 | `finalize.approval_required` | bool | `false` | Requires explicit approval from web/desktop UI before finalize runs |
+| `finalize.merge.mode` | string | `manual` | Retained pull-request completion: `manual`, `auto`, or `merge_queue` |
+| `finalize.merge.method` | string | — | Required by `auto`: `merge`, `squash`, or `rebase`; forbidden for other modes |
 
 `finalize.mode` defaults to `none`, so Ensemble does not push branches or open pull requests unless
 you opt in per repo. Ensemble still records durable run artifacts for each completed issue,
@@ -525,6 +530,19 @@ publication. A `push_and_pr` repository remains claimed in a non-capacity-consum
 after its uniquely matching pull request is found. A merge projects the issue through the durable
 terminal-success transition only when frozen `delivery_states.merged` is `on_success`; a pull
 request closed without merge remains retained for operator recovery.
+
+`finalize.merge` is optional and defaults to `manual`, preserving observation-only delivery. `auto`
+requires `finalize.mode: push_and_pr` and an explicit repository merge method. `merge_queue` also
+requires `push_and_pr` and admits an eligible pull request to GitHub's queue without treating
+admission as merge completion. The selected policy is frozen into the retained repository entry.
+Automatic modes require a fresh exact-head version-2 observation, a mergeable pull request,
+terminal-green effective required checks, satisfied required reviews, no requested changes, and—
+for queue mode—confirmed queue support. Effective policy data that is missing, incomplete, or
+unauthorized fails closed. Ensemble journals the exact PR node, head SHA, operation, and method
+before one serialized mutation, then observes GitHub again; a command response alone never proves
+merge or queue admission. Once submitted, queue membership is reconciled independently of a later
+effective-policy read, so a transient rules failure does not turn confirmed admission into a
+rejection. Active delivery repair excludes automatic merge activity.
 
 `delivery_states` belongs beside a legacy pipeline's `on_success` and `on_failure`, or inside a
 named pipeline. Its optional non-terminal targets are `waiting`, `checks_failed`,

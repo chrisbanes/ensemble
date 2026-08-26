@@ -446,6 +446,16 @@ only after an exact tracker read. Omitted mappings leave the tracker unchanged; 
 unexpected reconciliation retains delivery without another branch, pull request, terminal
 transition, or agent dispatch.
 
+Per-repository `finalize.merge` optionally advances that same retained owner after observation.
+`manual` is the default. Direct `auto` freezes an explicit merge method; `merge_queue` freezes queue
+admission. Both require a fresh version-2 observation for the exact durable head with complete
+effective GitHub required-check and review evidence, no requested changes, mergeability, and no
+active repair; queue mode also requires confirmed queue support. The orchestrator re-observes under
+one global mutation permit, persists an exact in-flight intent before remote I/O, and reconciles
+again after every response or restart. Queue admission is not merge completion. Only a later
+observed merge enters the existing durable terminal transition, so rejection or ambiguity never
+releases the claim or workspace and never causes a blind retry.
+
 An optional pipeline `delivery_repair` policy may freeze actionable feedback for the retained
 pull-request head. The observation must be fresh, match the durable SHA, and contain a terminal
 failed check, a non-empty change-request body, or an unresolved non-outdated inline thread.

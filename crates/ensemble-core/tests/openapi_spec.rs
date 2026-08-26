@@ -204,6 +204,7 @@ fn openapi_documents_versioned_delivery_observations() {
         "BaseFreshness",
         "ReviewDecision",
         "CheckSummary",
+        "AutomaticMergeEvidence",
     ] {
         assert!(spec["components"]["schemas"].get(schema).is_some());
     }
