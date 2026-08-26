@@ -539,6 +539,8 @@ Automatic modes require a fresh exact-head version-2 observation, a mergeable pu
 terminal-green effective required checks, satisfied required reviews, required review threads
 resolved, strict-check base freshness, and no requested changes; queue mode also requires confirmed
 queue support. Ensemble combines every applicable ruleset page with classic branch protection.
+Successful required-check conclusions include GitHub's success, neutral, and skipped outcomes; a
+review decision is needed only when the effective policy requires approving reviews.
 Effective policy data that is missing, incomplete, or unauthorized fails closed. Manual mode skips
 ruleset and classic-protection reads because it performs observation-only reconciliation. An
 applicable merge-queue rule permits queue admission but prevents direct automatic merge from
@@ -546,7 +548,8 @@ bypassing the queue. Ensemble journals the exact PR node, head SHA, operation, a
 one serialized mutation, then observes GitHub again; a command response alone never proves merge
 or queue admission. Once submitted, queue
 membership is reconciled independently of a later effective-policy read, so a transient rules
-failure does not turn confirmed admission into a rejection. Active delivery repair excludes
+failure does not turn confirmed admission into a rejection. Policy reads stop once a merge or queue
+mutation is journaled for reconciliation. Active delivery repair excludes
 automatic merge activity.
 
 `delivery_states` belongs beside a legacy pipeline's `on_success` and `on_failure`, or inside a

@@ -1745,14 +1745,20 @@ fn automatic_merge_evidence_from_policy(
                         && integration_id
                             .is_none_or(|required| check.integration_id == Some(required))
                         && check.status == CheckStatus::Completed
-                        && check.conclusion == Some(CheckConclusion::Success)
+                        && matches!(
+                            check.conclusion,
+                            Some(
+                                CheckConclusion::Success
+                                    | CheckConclusion::Neutral
+                                    | CheckConclusion::Skipped
+                            )
+                        )
                 })
             });
     Some(AutomaticMergeEvidence {
         required_checks_passing,
-        required_reviews_satisfied: status.review_decision != ReviewDecision::Unknown
-            && (requirements.required_approvals == 0
-                || status.review_decision == ReviewDecision::Approved),
+        required_reviews_satisfied: requirements.required_approvals == 0
+            || status.review_decision == ReviewDecision::Approved,
         required_review_threads_resolved: !requirements.requires_resolved_review_threads
             || !status.has_unresolved_review_threads,
         strict_base_satisfied: !requirements.requires_current_base
@@ -3048,7 +3054,8 @@ impl Orchestrator {
                     base_branch: &repository.base_branch,
                     head_branch: &repository.head_branch,
                     remote: &repository.remote,
-                    collect_automatic_merge_policy: repository.merge.is_automatic(),
+                    collect_automatic_merge_policy: repository.merge.is_automatic()
+                        && repository.merge_mutation.is_none(),
                 })
                 .await;
             // A guarded repair push is reconciling one newer, already-durable local
@@ -3248,7 +3255,7 @@ impl Orchestrator {
                 base_branch: &repository.base_branch,
                 head_branch: &repository.head_branch,
                 remote: &repository.remote,
-                collect_automatic_merge_policy: true,
+                collect_automatic_merge_policy: repository.merge_mutation.is_none(),
             })
             .await;
         let DeliveryObservationRead::Observed(facts) = read else {
@@ -6400,6 +6407,62 @@ mod tests {
             },
         )
         .is_none());
+    }
+
+    #[test]
+    fn automatic_merge_policy_needs_a_review_decision_only_when_reviews_are_required() {
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_accepts_successful_required_check_conclusions() {
+        let rules = serde_json::json!([{
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": false,
+                "required_status_checks": [{"context": "test"}]
+            }
+        }]);
+
+        for conclusion in [CheckConclusion::Neutral, CheckConclusion::Skipped] {
+            let checks = [DeliveryCheck {
+                name: "test".to_string(),
+                integration_id: None,
+                status: CheckStatus::Completed,
+                conclusion: Some(conclusion),
+            }];
+            let evidence = automatic_merge_evidence_from_policy(
+                &rules,
+                None,
+                AutomaticMergeStatus {
+                    checks: &checks,
+                    review_decision: ReviewDecision::Unknown,
+                    has_requested_changes: false,
+                    has_unresolved_review_threads: false,
+                    base_freshness: BaseFreshness::UpToDate,
+                    queue_supported: false,
+                    queued: false,
+                },
+            )
+            .unwrap();
+
+            assert!(evidence.is_eligible_for_direct_merge(), "{conclusion:?}");
+        }
     }
 
     #[test]

@@ -487,6 +487,8 @@ Pipeline run recovery:
   complete effective required-check and review evidence from every applicable ruleset page and
   classic branch protection, no requested changes, any required review-thread resolution,
   strict-check base freshness, mergeability, and confirmed queue support when applicable.
+  Required checks accept GitHub's successful terminal conclusions, including neutral and skipped;
+  a review decision is needed only when the effective policy requires approving reviews.
   Version-1 retained observations remain readable but cannot authorize mutation. Labels,
   assignees, aggregate non-required checks, and stale evidence are not merge authority.
   Manual delivery does not read rulesets or classic branch protection because those policies are
@@ -498,7 +500,8 @@ Pipeline run recovery:
   reconciliation. Restart and ambiguous responses observe first rather than replaying the write;
   queue admission remains waiting until an observation confirms the merge. Queue membership is
   reconciled independently of a later effective-policy read, so a transient policy-read failure
-  cannot reinterpret confirmed admission as rejection. Rejection, conflict, unsupported queue,
+  cannot reinterpret confirmed admission as rejection. Policy is read only while authorizing a
+  new mutation, not while reconciling one already journaled. Rejection, conflict, unsupported queue,
   changed head, and unconfirmed outcomes retain the PR, claim, and workspace.
   A retained repair attempt or repair push excludes automatic merge activity.
 - Observing `merged` or `closed_without_merge` is evidence only. It does not create, update,

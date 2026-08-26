@@ -16443,6 +16443,7 @@ mod tests {
                     ),
                 ),
                 observation(true, None),
+                observation(true, None),
             ]),
             automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
@@ -16461,8 +16462,17 @@ mod tests {
             .is_some_and(|mutation| {
                 mutation.phase == crate::orchestrator::delivery::DeliveryMergePhase::Reconciling
             }));
+        assert_eq!(*remote.automatic_policy_reads.lock().unwrap(), vec![true]);
 
-        let queued = orchestrator.advance_delivery_merge(reconciling, None).await;
+        let observed = orchestrator
+            .reconcile_delivery_observations(reconciling, None)
+            .await;
+        assert_eq!(
+            *remote.automatic_policy_reads.lock().unwrap(),
+            vec![true, false]
+        );
+
+        let queued = orchestrator.advance_delivery_merge(observed, None).await;
         assert_eq!(remote.merge_calls.load(Ordering::SeqCst), 1);
         assert!(queued.repositories["source-repo"]
             .merge_mutation
@@ -16476,6 +16486,10 @@ mod tests {
             .as_ref()
             .and_then(|observation| observation.facts.as_ref())
             .is_some_and(|facts| facts.in_merge_queue && facts.automatic_merge.is_none()));
+        assert_eq!(
+            *remote.automatic_policy_reads.lock().unwrap(),
+            vec![true, false, false]
+        );
     }
 
     #[tokio::test]
