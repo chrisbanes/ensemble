@@ -488,9 +488,11 @@ Pipeline run recovery:
   classic branch protection, no requested changes, any required review-thread resolution,
   strict-check base freshness, mergeability, and confirmed queue support when applicable.
   Required checks accept GitHub's successful terminal conclusions, including neutral and skipped;
-  a review decision is needed when the effective policy requires an approval count, code-owner
-  approval, or approval of the last push. A configured direct merge method must appear in every
-  applicable pull-request rule's allowed methods; missing or malformed method policy fails closed.
+  an expected legacy status remains pending until it reports a terminal state. A review decision
+  is needed when the effective policy requires an approval count, code-owner
+  approval, or approval of the last push. A configured direct merge method must be enabled in the
+  repository and appear in every applicable pull-request rule's allowed methods; missing or
+  malformed method-capability or ruleset policy fails closed.
   Version-1 retained observations remain readable but cannot authorize mutation. Labels,
   assignees, aggregate non-required checks, and stale evidence are not merge authority.
   Manual delivery does not read rulesets or classic branch protection because those policies are
