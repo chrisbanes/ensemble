@@ -534,6 +534,18 @@ so reloading configuration cannot reinterpret work already owned by the journal.
 leave tracker state unchanged. `repos[].finalize.review_state` has been removed; migrate it to
 `delivery_states.waiting`.
 
+`delivery_repair` is an optional policy in the same legacy or named pipeline location. It names
+one configured agent and a positive cumulative `max_attempts`. When a matching pull request has
+terminal failed checks, non-empty requested-change bodies, or unresolved non-outdated inline
+threads, Ensemble freezes that head-associated evidence in the delivery record for the retained
+pull request.
+
+```yaml
+delivery_repair:
+  agent: repair
+  max_attempts: 2
+```
+
 **Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
 
 **Migration note:** top-level `push_strategy` has been removed. Configure `repos[].finalize` instead.
@@ -881,6 +893,22 @@ Prompt templates use [Liquid](https://shopify.github.io/liquid/) syntax. Availab
 | `issue.branch_name` | string or nil | Associated branch |
 | `issue.url` | string or nil | Issue URL |
 | `attempt` | integer or nil | Retry attempt number (nil on first run) |
+| `delivery_repair` | object, delivery repair only | Frozen pull-request feedback for a delivery-repair dispatch; absent from ordinary pipeline steps |
+
+`delivery_repair` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pull_request_number` | integer | Retained pull-request number |
+| `pull_request_url` | string | Retained pull-request URL |
+| `starting_sha` | string | Exact observed pull-request head the repair attempt is based on |
+| `terminal_failed_checks` | array of strings | Names of terminal failed checks on `starting_sha` |
+| `change_request_bodies` | array of strings | Review bodies that requested changes on `starting_sha` |
+| `unresolved_threads` | array of objects | Unresolved, non-outdated inline review threads on `starting_sha` |
+
+Each `unresolved_threads` entry contains `path` (string or nil), `line` (integer or nil), and
+`body` (string). The object is a frozen snapshot: later pull-request activity does not mutate a
+running repair prompt.
 
 **Example template** (`templates/implement.liquid`):
 

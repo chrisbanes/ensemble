@@ -3,6 +3,26 @@ use crate::interaction::InteractionResponse;
 use crate::pipeline::engine::StepOutputTemplateContext;
 use crate::tracker::model::Issue;
 use liquid::ParserBuilder;
+use serde::Serialize;
+
+/// Frozen, head-associated delivery feedback supplied only to a repair agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeliveryRepairPromptContext {
+    pub pull_request_number: u64,
+    pub pull_request_url: String,
+    pub starting_sha: String,
+    pub terminal_failed_checks: Vec<String>,
+    pub change_request_bodies: Vec<String>,
+    pub unresolved_threads: Vec<DeliveryRepairThread>,
+}
+
+/// One unresolved, non-outdated inline review thread in a repair prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeliveryRepairThread {
+    pub path: Option<String>,
+    pub line: Option<u64>,
+    pub body: String,
+}
 
 /// Render a Liquid prompt template with the given issue and attempt.
 ///
@@ -37,6 +57,28 @@ pub fn render_prompt_with_context(
     attempt: Option<u32>,
     interaction_response: Option<&InteractionResponse>,
     step_outputs: Option<&StepOutputTemplateContext>,
+) -> Result<String, ConfigError> {
+    render_prompt_with_delivery_repair_context(
+        template_str,
+        issue,
+        attempt,
+        interaction_response,
+        step_outputs,
+        None,
+    )
+}
+
+/// Render a prompt with the optional delivery-owned repair snapshot.
+///
+/// Ordinary pipeline dispatches use [`render_prompt_with_context`], so a template can only
+/// observe `delivery_repair` when the delivery repair state machine supplies a frozen snapshot.
+pub fn render_prompt_with_delivery_repair_context(
+    template_str: &str,
+    issue: &Issue,
+    attempt: Option<u32>,
+    interaction_response: Option<&InteractionResponse>,
+    step_outputs: Option<&StepOutputTemplateContext>,
+    delivery_repair: Option<&DeliveryRepairPromptContext>,
 ) -> Result<String, ConfigError> {
     let parser =
         ParserBuilder::with_stdlib()
@@ -120,6 +162,17 @@ pub fn render_prompt_with_context(
                 reason: "step_outputs did not serialize to a Liquid object".to_string(),
             });
         }
+    }
+
+    if let Some(delivery_repair) = delivery_repair {
+        globals.insert(
+            "delivery_repair".into(),
+            liquid::model::to_value(delivery_repair).map_err(|e| {
+                ConfigError::TemplateRenderError {
+                    reason: e.to_string(),
+                }
+            })?,
+        );
     }
 
     template
@@ -268,5 +321,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "looks good / low");
+    }
+
+    #[test]
+    fn render_delivery_repair_exposes_only_the_frozen_structured_feedback() {
+        let repair = DeliveryRepairPromptContext {
+            pull_request_number: 42,
+            pull_request_url: "https://github.com/acme/repo/pull/42".to_string(),
+            starting_sha: "abc123".to_string(),
+            terminal_failed_checks: vec!["test".to_string()],
+            change_request_bodies: vec!["please fix this".to_string()],
+            unresolved_threads: vec![DeliveryRepairThread {
+                path: Some("src/lib.rs".to_string()),
+                line: Some(7),
+                body: "rename this".to_string(),
+            }],
+        };
+
+        let rendered = render_prompt_with_delivery_repair_context(
+            "{{ delivery_repair.pull_request_number }} {{ delivery_repair.starting_sha }} {{ delivery_repair.terminal_failed_checks[0] }} {{ delivery_repair.unresolved_threads[0].path }}",
+            &test_issue(),
+            None,
+            None,
+            None,
+            Some(&repair),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "42 abc123 test src/lib.rs");
+    }
+
+    #[test]
+    fn ordinary_prompts_do_not_receive_delivery_repair_context() {
+        let rendered = render_prompt_with_context(
+            "{% if delivery_repair %}unexpected{% else %}ordinary{% endif %}",
+            &test_issue(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "ordinary");
     }
 }

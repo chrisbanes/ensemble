@@ -27,6 +27,9 @@ pub struct EnsembleConfig {
     /// Optional tracker-state projections for durable delivery facts in the legacy pipeline.
     #[serde(default)]
     pub delivery_states: DeliveryStates,
+    /// Optional repair policy for actionable feedback on retained pull-request delivery.
+    #[serde(default)]
+    pub delivery_repair: Option<DeliveryRepairConfig>,
     /// Neutral named pipelines used only when `workflow_selection` is non-empty.
     #[serde(default)]
     pub pipelines: BTreeMap<String, PipelineConfig>,
@@ -63,6 +66,18 @@ pub struct PipelineConfig {
     pub on_failure: String,
     #[serde(default)]
     pub delivery_states: DeliveryStates,
+    #[serde(default)]
+    pub delivery_repair: Option<DeliveryRepairConfig>,
+}
+
+/// Opt-in policy for repairing actionable pull-request feedback in the retained delivery.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryRepairConfig {
+    /// The configured agent that receives the frozen delivery feedback.
+    pub agent: String,
+    /// Cumulative repair attempts allowed for one delivery owner.
+    pub max_attempts: u32,
 }
 
 /// Optional non-terminal tracker-state targets for durable delivery facts.
@@ -1281,6 +1296,9 @@ impl EnsembleConfig {
         effective
             .delivery_states
             .clone_from(&pipeline.delivery_states);
+        effective
+            .delivery_repair
+            .clone_from(&pipeline.delivery_repair);
         Ok(effective)
     }
 
@@ -1953,32 +1971,42 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         }
     }
 
-    let effective_pipelines: Vec<(&str, &[StepConfig], &str, &str, &DeliveryStates)> =
-        if selected_mode {
-            config
-                .pipelines
-                .iter()
-                .map(|(name, pipeline)| {
-                    (
-                        name.as_str(),
-                        pipeline.steps.as_slice(),
-                        pipeline.on_success.as_str(),
-                        pipeline.on_failure.as_str(),
-                        &pipeline.delivery_states,
-                    )
-                })
-                .collect()
-        } else {
-            vec![(
-                "<legacy>",
-                config.steps.as_slice(),
-                config.on_success.as_str(),
-                config.on_failure.as_str(),
-                &config.delivery_states,
-            )]
-        };
+    type EffectivePipeline<'a> = (
+        &'a str,
+        &'a [StepConfig],
+        &'a str,
+        &'a str,
+        &'a DeliveryStates,
+        Option<&'a DeliveryRepairConfig>,
+    );
+    let effective_pipelines: Vec<EffectivePipeline<'_>> = if selected_mode {
+        config
+            .pipelines
+            .iter()
+            .map(|(name, pipeline)| {
+                (
+                    name.as_str(),
+                    pipeline.steps.as_slice(),
+                    pipeline.on_success.as_str(),
+                    pipeline.on_failure.as_str(),
+                    &pipeline.delivery_states,
+                    pipeline.delivery_repair.as_ref(),
+                )
+            })
+            .collect()
+    } else {
+        vec![(
+            "<legacy>",
+            config.steps.as_slice(),
+            config.on_success.as_str(),
+            config.on_failure.as_str(),
+            &config.delivery_states,
+            config.delivery_repair.as_ref(),
+        )]
+    };
 
-    for (name, _, on_success, on_failure, delivery_states) in &effective_pipelines {
+    for (name, _, on_success, on_failure, delivery_states, delivery_repair) in &effective_pipelines
+    {
         if name.trim().is_empty() || on_success.trim().is_empty() || on_failure.trim().is_empty() {
             return Err(PipelineError::InvalidNamedPipeline {
                 pipeline: (*name).to_string(),
@@ -2023,6 +2051,25 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 return Err(PipelineError::InvalidNamedPipeline {
                     pipeline: (*name).to_string(),
                     reason: "delivery_states.merged must equal on_success".to_string(),
+                });
+            }
+        }
+        if let Some(repair) = delivery_repair {
+            if repair.agent.trim().is_empty() {
+                return Err(PipelineError::InvalidNamedPipeline {
+                    pipeline: (*name).to_string(),
+                    reason: "delivery_repair.agent must not be blank".to_string(),
+                });
+            }
+            if repair.max_attempts == 0 {
+                return Err(PipelineError::InvalidNamedPipeline {
+                    pipeline: (*name).to_string(),
+                    reason: "delivery_repair.max_attempts must be greater than 0".to_string(),
+                });
+            }
+            if !config.agents.contains_key(&repair.agent) {
+                return Err(PipelineError::UnknownAgent {
+                    name: repair.agent.clone(),
                 });
             }
         }
@@ -2128,7 +2175,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         validate_name(&mut acceptance_names, "handoff", &rule.name)?;
         if effective_pipelines
             .iter()
-            .any(|(_, steps, _, _, _)| !steps.iter().any(|step| step.name == rule.step))
+            .any(|(_, steps, _, _, _, _)| !steps.iter().any(|step| step.name == rule.step))
         {
             return Err(PipelineError::InvalidAcceptanceRequirement {
                 kind: "handoff".to_string(),
@@ -2293,7 +2340,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         });
     }
 
-    for (pipeline_name, steps, _, _, _) in effective_pipelines {
+    for (pipeline_name, steps, _, _, _, _) in effective_pipelines {
         let mut seen_names = std::collections::HashSet::new();
         for step in steps {
             if !seen_names.insert(&step.name) {
@@ -4706,6 +4753,59 @@ on_failure: Failed
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn delivery_repair_rejects_blank_agent_and_zero_budget_in_legacy_pipeline() {
+        let cases = [
+            ("agent: '  '\n  max_attempts: 1", "agent must not be blank"),
+            (
+                "agent: build\n  max_attempts: 0",
+                "max_attempts must be greater than 0",
+            ),
+        ];
+
+        for (repair, expected) in cases {
+            let yaml = format!("{}\ndelivery_repair:\n  {repair}\n", minimal_yaml());
+            let error = validate_config(&parse_config(&yaml).unwrap()).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn delivery_repair_rejects_unknown_agent_in_named_pipeline() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing."
+workflow_selection:
+  - name: ready
+    precedence: 1
+    pipeline: delivery
+    lane: default
+    order_by: [identifier]
+scheduler:
+  lanes:
+    default: {}
+pipelines:
+  delivery:
+    steps:
+      - name: build
+        agent: build
+    on_success: Done
+    on_failure: Failed
+    delivery_repair:
+      agent: absent
+      max_attempts: 1
+"#;
+
+        let error = validate_config(&parse_config(yaml).unwrap()).unwrap_err();
+        assert!(matches!(error, PipelineError::UnknownAgent { name } if name == "absent"));
     }
 
     #[test]

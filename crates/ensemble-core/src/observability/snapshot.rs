@@ -1070,6 +1070,7 @@ mod tests {
         std::sync::Arc::new(EnsembleConfig {
             pipelines: Default::default(),
             delivery_states: Default::default(),
+            delivery_repair: None,
             scheduler: Default::default(),
             workflow_selection: Default::default(),
             tracker: TrackerConfig {

@@ -20,7 +20,9 @@ use crate::config::ensemble::{
     ArtifactAccess, DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode,
     PermissionMode, StepKind,
 };
-use crate::config::template::render_prompt_with_context;
+use crate::config::template::{
+    render_prompt_with_delivery_repair_context, DeliveryRepairPromptContext,
+};
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
@@ -109,6 +111,8 @@ pub struct AgentRunRequest<'a> {
     /// direct path, so cancellation is handled by dropping the `AcpAgent`.
     pub cancel_token: CancellationToken,
     pub step_outputs: crate::pipeline::engine::StepOutputTemplateContext,
+    /// Frozen delivery feedback. This is absent for ordinary pipeline steps.
+    pub delivery_repair: Option<DeliveryRepairPromptContext>,
 }
 
 /// Trait for running an agent session against an issue.
@@ -134,6 +138,7 @@ struct BuildPromptRequest<'a> {
     workspace_path: &'a Path,
     turn_number: u32,
     step_outputs: &'a crate::pipeline::engine::StepOutputTemplateContext,
+    delivery_repair: Option<&'a DeliveryRepairPromptContext>,
 }
 
 fn update_agent_capabilities(
@@ -240,6 +245,7 @@ impl AcpAgentRunner {
             workspace_path,
             turn_number,
             step_outputs,
+            delivery_repair,
         } = request;
         if turn_number == 1 {
             let agent_config =
@@ -272,7 +278,7 @@ impl AcpAgentRunner {
 
             let interaction_response = load_interaction_response(workspace_path).await?;
 
-            let rendered = render_prompt_with_context(
+            let rendered = render_prompt_with_delivery_repair_context(
                 &template_str,
                 issue,
                 attempt,
@@ -280,6 +286,7 @@ impl AcpAgentRunner {
                     .as_ref()
                     .map(|response| &response.response),
                 Some(step_outputs),
+                delivery_repair,
             )
             .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
@@ -725,6 +732,7 @@ impl AgentRunner for AcpAgentRunner {
                             workspace_path,
                             turn_number: 1,
                             step_outputs: &request.step_outputs,
+                            delivery_repair: request.delivery_repair.as_ref(),
                         },
                     )
                     .await?;
@@ -794,6 +802,7 @@ impl AcpAgentRunner {
                     workspace_path: request.workspace_path,
                     turn_number: 1,
                     step_outputs: &request.step_outputs,
+                    delivery_repair: request.delivery_repair.as_ref(),
                 },
             )
             .await?;
@@ -1056,6 +1065,7 @@ on_failure: Todo
             cancel_token: CancellationToken::new(),
             timeout_ms: 3210,
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         assert_eq!(effective_request_timeout_ms(&request), 3210);
@@ -1216,6 +1226,7 @@ on_failure: Todo
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
                 step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: None,
             })
             .await;
 
@@ -1265,6 +1276,7 @@ on_failure: Todo
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
                 step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: None,
             })
             .await;
 
@@ -1330,6 +1342,7 @@ exit 1
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
                 step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: None,
             })
             .await
             .unwrap();
@@ -1403,6 +1416,7 @@ exit 0
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
                 step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: None,
             })
             .await
             .unwrap();
@@ -1715,6 +1729,7 @@ agent:
                     workspace_path: workspace.path(),
                     turn_number: 1,
                     step_outputs: &StepOutputTemplateContext::default(),
+                    delivery_repair: None,
                 },
             )
             .await
@@ -1901,6 +1916,7 @@ on_failure: Todo
                     workspace_path: workspace.path(),
                     turn_number: 1,
                     step_outputs: &StepOutputTemplateContext::default(),
+                    delivery_repair: None,
                 },
             )
             .await
@@ -1966,6 +1982,7 @@ on_failure: Todo
                     workspace_path: workspace.path(),
                     turn_number: 1,
                     step_outputs: &StepOutputTemplateContext::default(),
+                    delivery_repair: None,
                 },
             )
             .await
@@ -2402,6 +2419,7 @@ on_failure: Todo
                     workspace_path: workspace.path(),
                     turn_number: 1,
                     step_outputs: &context,
+                    delivery_repair: None,
                 },
             )
             .await
@@ -2471,6 +2489,7 @@ on_failure: Todo
                     workspace_path: tmp.path(),
                     turn_number: 1,
                     step_outputs: &context,
+                    delivery_repair: None,
                 },
             )
             .await

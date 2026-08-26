@@ -446,6 +446,50 @@ only after an exact tracker read. Omitted mappings leave the tracker unchanged; 
 unexpected reconciliation retains delivery without another branch, pull request, terminal
 transition, or agent dispatch.
 
+An optional pipeline `delivery_repair` policy may freeze actionable feedback for the retained
+pull-request head. The observation must be fresh, match the durable SHA, and contain a terminal
+failed check, a non-empty change-request body, or an unresolved non-outdated inline thread.
+Pending checks and general pull-request conversation do not form repair instructions. A frozen
+snapshot is immutable: later observations cannot replace it while the delivery retains repair
+state. Ensemble journals the repair launch intent, including the consumed cumulative repair budget,
+before reserving capacity or launching the repair agent. The budget belongs to the retained delivery
+owner rather than one feedback snapshot, so it remains consumed after a successful repair, an
+interaction resume, and restart. Once exhausted, later actionable feedback creates a durable
+operator handoff instead of another automatic repair launch.
+
+Automatic repair additionally requires `mergeable` pull-request evidence. Actionable feedback on a
+`conflicting` or `unknown` pull request creates the same durable operator handoff without reserving
+repair capacity. If a journaled launch cannot locate a retained worktree directory, Ensemble
+records that diagnostic, removes the in-memory launch grant, and hands the retained delivery to an
+operator rather than retrying indefinitely.
+
+The repair worker retains the scheduler capacity identity frozen with delivery: the selected workflow
+lane when one was selected, otherwise the original issue state. Lane admission still resolves that
+frozen lane against the live configuration and its current capacity. A missing frozen identity or a
+lane removed by reload fails closed to the same operator question; repairs never borrow a synthetic
+delivery-state bucket. The question offers `Retry delivery repair` only while budget remains, which
+retains the frozen feedback, journals a new launch intent, and creates a distinct durable interaction
+identity for that retry cycle, or `Handle manually`, which suppresses
+automatic refreezing only for that repository, pull request, and exact head while retaining the
+delivery owner and continuing read-only observation. A different actionable head for that same pull
+request is eligible only when it follows a manually suppressed exact prior head for the same
+repository and pull request. Ensemble retains the durable delivery SHA and records the observed
+divergence; the new observed head belongs only to the next frozen repair attempt and guarded-push
+lease. Other divergent heads remain blocked. The successor is evaluated against the same cumulative
+budget without clearing other repositories' manual suppressions. Invalid or missing choices leave
+the owner waiting for an explicit decision.
+
+After a successful repair worker changes its local head, Ensemble journals `push_in_flight` before
+one guarded push that requires the retained remote head and the current local head to match the
+frozen identities. The Git mutation applies an exact ref lease for that observed remote head, so a
+concurrent branch advance is rejected rather than overwritten. A normal response and an ambiguous
+response both enter same-pull-request reconciliation; a restart with a journaled dispatch or push
+in flight never replays the uncertain effect. It either hands dispatch ambiguity to an operator or
+reads the exact retained pull request and accepts only the expected post-worker head. Missing
+post-worker head, retained worktree or repository identity, identity mismatch, closed or divergent pull requests,
+incomplete observations, and guarded-push rejection retain the workspace, claim, and pull-request
+identity with one durable operator interaction.
+
 ## Retries and cycles
 
 When a step fails or an agent errors out, Ensemble can retry. The `max_cycles` setting controls how many times:

@@ -672,6 +672,7 @@ exit 1
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
                 step_outputs: StepOutputTemplateContext::default(),
+                delivery_repair: None,
             };
 
             runner.run_step(&request, "finish the task").await.unwrap();
@@ -725,6 +726,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let error = runner
@@ -785,6 +787,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
@@ -882,6 +885,7 @@ exit 1
             event_tx: tx_a,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let request_b = AgentRunRequest {
             config: Arc::clone(&config),
@@ -897,6 +901,7 @@ exit 1
             event_tx: tx_b,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let request_c = AgentRunRequest {
             config,
@@ -912,6 +917,7 @@ exit 1
             event_tx: tx_c,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let sessions = [
             "issue-a-build-a-attempt-1",
@@ -1039,6 +1045,7 @@ exit 1
             event_tx: cancel_tx,
             cancel_token: cancel_token.clone(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let failed = AgentRunRequest {
             config: Arc::clone(&config),
@@ -1054,6 +1061,7 @@ exit 1
             event_tx: failure_tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let successful = AgentRunRequest {
             config,
@@ -1069,6 +1077,7 @@ exit 1
             event_tx: success_tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
         let sessions = [
             "issue-cancel-build-attempt-1",
@@ -1181,6 +1190,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
@@ -1250,6 +1260,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let error = runner
@@ -1330,6 +1341,7 @@ exit 1
             event_tx: tx,
             cancel_token: cancel_token.clone(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let canceller = tokio::spawn({
@@ -1426,6 +1438,7 @@ exit 1
             event_tx: tx,
             cancel_token: cancel_token.clone(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let canceller = tokio::spawn({
@@ -1522,6 +1535,7 @@ on_failure: Failed
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         runner.run_step(&request, "finish the task").await.unwrap();
@@ -1582,6 +1596,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
@@ -1640,6 +1655,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let error = runner
@@ -1700,6 +1716,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -1760,6 +1777,7 @@ exit 1
             event_tx: tx,
             cancel_token: cancel_token.clone(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let canceller = tokio::spawn({
@@ -1843,6 +1861,7 @@ exit 1
             cancel_token: CancellationToken::new(),
             timeout_ms: 100,
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let result = runner.run_step(&request, "finish the task").await;
@@ -1931,6 +1950,7 @@ exit 1
             cancel_token: CancellationToken::new(),
             timeout_ms: 100,
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let result = runner.run_step(&request, "finish the task").await;
@@ -2041,6 +2061,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -2114,6 +2135,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -2178,6 +2200,7 @@ exit 1
             event_tx: tx,
             cancel_token: CancellationToken::new(),
             step_outputs: StepOutputTemplateContext::default(),
+            delivery_repair: None,
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
