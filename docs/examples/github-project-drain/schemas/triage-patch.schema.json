@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "comment", "expected_snapshot", "operations"],
+  "properties": {
+    "version": { "const": 1 },
+    "comment": { "type": "string", "minLength": 1 },
+    "expected_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue_number", "project_id", "status", "labels"],
+      "properties": {
+        "issue_number": { "type": "integer", "minimum": 1 },
+        "project_id": { "type": "string", "minLength": 1 },
+        "status": { "const": "Triage approved" },
+        "labels": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "value"],
+        "properties": {
+          "type": { "enum": ["set_status", "add_label", "remove_label"] },
+          "value": { "type": "string", "minLength": 1 }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "type": { "const": "set_status" },
+              "value": { "const": "Ready to implement" }
+            }
+          },
+          {
+            "properties": {
+              "type": { "enum": ["add_label", "remove_label"] },
+              "value": { "enum": ["needs-triage", "ready-for-agent", "ready-for-human"] }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

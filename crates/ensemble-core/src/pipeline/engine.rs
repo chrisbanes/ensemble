@@ -203,6 +203,8 @@ pub struct StepOutputTemplateEntry {
     pub result: String,
     pub summary: Option<String>,
     pub output: Option<serde_json::Value>,
+    /// Compact JSON for templates that must preserve the exact structured output.
+    pub output_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_snapshot: Option<ArtifactSnapshot>,
 }
@@ -406,6 +408,25 @@ impl PipelineRun {
             selected_workflow: self.selected_workflow.clone(),
             active_scheduler_reservations: self.active_scheduler_reservations.clone(),
         }
+    }
+
+    /// Returns the opaque terminal state selected by the persisted route evidence.
+    ///
+    /// Configuration validation permits at most one terminal-bearing route, so a
+    /// selected case is unambiguous. This deliberately reads the frozen DAG and
+    /// decision evidence rather than re-evaluating producer output.
+    pub fn selected_route_terminal(&self) -> Option<&str> {
+        self.dag.steps.iter().find_map(|step| {
+            let route = step.route.as_ref()?;
+            if route.terminals.is_empty() {
+                return None;
+            }
+            let decision = self.route_decisions.get(&step.name)?;
+            route
+                .terminals
+                .get(&decision.selected_case)
+                .map(|terminal| terminal.state.as_str())
+        })
     }
 
     pub(crate) fn scheduler_requirements_for(
@@ -1943,6 +1964,7 @@ fn template_entry(
         },
         summary: output.summary.clone(),
         output: output.output.clone(),
+        output_json: output.output.as_ref().map(serde_json::Value::to_string),
         artifact_snapshot,
     }
 }
@@ -3194,6 +3216,10 @@ mod tests {
         assert_eq!(context.dependency_outputs[0].step, "review-a");
         assert_eq!(context.dependency_outputs[1].step, "review-b");
         assert_eq!(context.steps["review-a"].summary.as_deref(), Some("a ok"));
+        assert_eq!(
+            context.steps["review-a"].output_json.as_deref(),
+            Some(r#"{"risk":"low"}"#)
+        );
     }
 
     #[test]
@@ -3992,6 +4018,7 @@ mod tests {
                 ),
                 ("disagreement".to_string(), vec!["escalate".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         let accept = make_step(
             "accept_agreement",
@@ -4057,6 +4084,50 @@ mod tests {
     }
 
     #[test]
+    fn selected_route_terminal_survives_snapshot_recovery() {
+        let producer = make_step("produce", "builder", &[]);
+        let mut route = make_step("choose", "", &["produce"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "produce".to_string(),
+                pointer: "/outcome".to_string(),
+            },
+            cases: BTreeMap::from([
+                ("continue".to_string(), vec!["continue".to_string()]),
+                ("hold".to_string(), vec!["hold".to_string()]),
+            ]),
+            terminals: BTreeMap::from([(
+                "hold".to_string(),
+                crate::config::ensemble::RouteTerminalConfig {
+                    state: "Needs human".to_string(),
+                },
+            )]),
+        });
+        let continue_step = make_step("continue", "builder", &["choose"]);
+        let hold_step = make_step("hold", "builder", &["choose"]);
+        let mut run = make_run(&[producer, route, continue_step, hold_step]);
+        run.route_decisions.insert(
+            "choose".to_string(),
+            RouteDecisionEvidence {
+                source_step: "produce".to_string(),
+                pointer: "/outcome".to_string(),
+                selected_case: "hold".to_string(),
+                source_output_digest: "digest".to_string(),
+            },
+        );
+
+        assert_eq!(run.selected_route_terminal(), Some("Needs human"));
+        assert_eq!(
+            PipelineRun::from_snapshot(run.to_snapshot())
+                .unwrap()
+                .selected_route_terminal(),
+            Some("Needs human")
+        );
+    }
+
+    #[test]
     fn route_shared_gate_join_evaluates_after_selected_dependencies_settle() {
         let compare = make_step("compare", "comparator", &[]);
         let mut route = make_step("choose", "", &["compare"]);
@@ -4071,6 +4142,7 @@ mod tests {
                 ("review".to_string(), vec!["review".to_string()]),
                 ("skip".to_string(), vec!["skipped_branch".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         let review = make_step("review", "reviewer", &["choose"]);
         let mut adjudicate = make_step("adjudicate", "synthesizer", &["review"]);
@@ -4119,6 +4191,7 @@ mod tests {
                 pointer: "/decision".to_string(),
             },
             cases: BTreeMap::from([("agreement".to_string(), vec!["accept".to_string()])]),
+            terminals: BTreeMap::new(),
         });
         let mut accept = make_step("accept", "handler", &["choose"]);
         accept.actions = vec![StepActionConfig::TrackerComment {
@@ -4167,6 +4240,7 @@ mod tests {
                     vec!["review_escalation".to_string()],
                 ),
             ]),
+            terminals: BTreeMap::new(),
         });
         let review_agreement = make_step("review_agreement", "reviewer", &["choose_primary"]);
         let review_escalation = make_step("review_escalation", "reviewer", &["choose_primary"]);
@@ -4182,6 +4256,7 @@ mod tests {
                 ("accept".to_string(), vec!["accept".to_string()]),
                 ("escalate".to_string(), vec!["escalate".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         let accept = make_step("accept", "handler", &["choose_agreement"]);
         let escalate = make_step("escalate", "handler", &["choose_agreement"]);
@@ -4254,6 +4329,7 @@ mod tests {
                 ("agreement".to_string(), vec!["accept".to_string()]),
                 ("disagreement".to_string(), vec!["escalate".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         let accept = make_step("accept", "handler", &["choose"]);
         let escalate = make_step("escalate", "handler", &["choose"]);
@@ -4308,6 +4384,7 @@ mod tests {
                 pointer: "/decision".to_string(),
             },
             cases: BTreeMap::from([("agreement".to_string(), vec!["accept".to_string()])]),
+            terminals: BTreeMap::new(),
         });
         let accept = make_step("accept", "handler", &["choose"]);
         let mut run = make_run(&[compare, route, accept]);
@@ -4634,6 +4711,7 @@ mod tests {
                 ("continue".to_string(), vec!["continue".to_string()]),
                 ("stop".to_string(), vec!["stop".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         let mut continue_step = make_step("continue", "handler", &["choose"]);
         continue_step.actions = vec![StepActionConfig::TrackerComment {

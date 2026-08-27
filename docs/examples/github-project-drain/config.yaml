@@ -1,0 +1,269 @@
+# Copy this directory before adapting it. These names are reference policy data,
+# not an Ensemble runtime mode.
+tracker:
+  kind: github
+  repository: example/ensemble
+  project_number: 6
+  api_key: $GITHUB_TOKEN
+  active_states: [Backlog, Planning, Triage approved, Ready to implement, In progress, Awaiting review, Awaiting merge, Needs human, Human hold]
+  terminal_states: [Done, Cancelled]
+  github:
+    status_field: Status
+    priority:
+      field: Priority
+      options: [P0, P1, P2, P3]
+    ownership:
+      claim:
+        claimed_state: In progress
+        resume_states: [In progress]
+      delivery_adoption:
+        repository: example/ensemble
+        base_branch: main
+        branch_template: ensemble/{issue_workspace_key}
+        require_authenticated_author: true
+
+repos:
+  - path: target
+    branch: main
+    finalize:
+      mode: push_and_pr
+      merge:
+        mode: merge_queue
+
+scheduler:
+  lanes:
+    planning: { precedence: 1, capacity: 1 }
+    delivery: { precedence: 2, capacity: 2 }
+    triage: { precedence: 3, idle_only: true, capacity: 1 }
+    epic-closure: { precedence: 4, capacity: 1 }
+    human-attention: { precedence: 5, idle_only: true, capacity: 1 }
+  resources:
+    repository: { capacity: 1 }
+  recovery: { max_attempts: 2, max_backoff_ms: 30000 }
+  one_shot: { deadline_ms: 1800000 }
+
+agents:
+  planner: { executor: example-agent, model: example-model, prompt_template: prompts/planning.md }
+  implementer: { executor: example-agent, model: example-model, prompt_template: prompts/delivery.md }
+  reviewer: { executor: example-agent, model: example-model, prompt_template: prompts/review.md }
+  verifier: { executor: example-agent, model: example-model, prompt_template: prompts/verification.md }
+  synthesizer: { executor: example-agent, model: example-model, prompt_template: prompts/synthesis.md }
+  triager: { executor: example-agent, model: example-model, prompt_template: prompts/triage-draft.md }
+  triage-applier: { executor: example-agent, model: example-model, prompt_template: prompts/triage-apply.md }
+  epic-owner: { executor: example-agent, model: example-model, prompt_template: prompts/epic.md }
+  attention-owner: { executor: example-agent, model: example-model, prompt_template: prompts/attention.md }
+
+pipelines:
+  planning:
+    steps:
+      - name: draft-plan
+        agent: planner
+        depends: []
+        resource_requests: { repository: 1 }
+        output_schema: { path: schemas/plan.schema.json }
+        artifact_snapshot: { repositories: [target] }
+        actions:
+          - type: tracker_comment
+            body: /comment
+      - name: route-plan-outcome
+        kind: route
+        depends: [draft-plan]
+        on_failure: halt
+        route:
+          source: { step: draft-plan, pointer: /outcome }
+          cases:
+            revision: [acknowledge-plan-revision]
+            operator_required: [record-plan-attention]
+          terminals:
+            revision: { state: Ready to implement }
+            operator_required: { state: Needs human }
+      - name: acknowledge-plan-revision
+        agent: planner
+        depends: [route-plan-outcome, draft-plan]
+        artifact_inputs: [draft-plan]
+        artifact_access: immutable
+        output_schema: { path: schemas/plan.schema.json }
+        authorization:
+          artifact_step: draft-plan
+          event:
+            # Copy the opaque Project status-field node ID; a display name is not evidence.
+            field: PVTSSF_example_status
+            value: Ready to implement
+            actors: [example-maintainer]
+          after_artifact: true
+          handoff: wait_for_event
+      - name: record-plan-attention
+        agent: attention-owner
+        depends: [route-plan-outcome]
+        output_schema: { path: schemas/attention.schema.json }
+        actions:
+          - type: tracker_comment
+            body: /comment
+          - type: operator_attention
+            kind: ensemble.github_project_drain
+            summary: /summary
+            remedy: /remedy
+            references: /references
+    on_success: Ready to implement
+    on_failure: Planning
+  delivery:
+    steps:
+      - name: implement
+        agent: implementer
+        depends: []
+        resource_requests: { repository: 1 }
+        output_schema: { path: schemas/plan.schema.json }
+        artifact_snapshot: { repositories: [target] }
+      - name: review
+        agent: reviewer
+        depends: [implement]
+        artifact_inputs: [implement]
+        artifact_access: immutable
+        output_schema: { path: schemas/assessment.schema.json }
+      - name: verify
+        agent: verifier
+        depends: [implement]
+        artifact_inputs: [implement]
+        artifact_access: immutable
+        output_schema: { path: schemas/assessment.schema.json }
+      - name: adjudicate
+        kind: synthesis
+        agent: synthesizer
+        depends: [review, verify]
+        output_schema: { path: schemas/adjudication.schema.json }
+      - name: delivery-gate
+        kind: gate
+        depends: [adjudicate]
+        gate:
+          assessment_steps: [review, verify]
+          adjudication_step: adjudicate
+    on_success: Done
+    on_failure: In progress
+    delivery_repair: { agent: implementer, max_attempts: 2 }
+    delivery_states:
+      waiting: Awaiting review
+      checks_failed: In progress
+      changes_requested: In progress
+      approved: Awaiting merge
+      closed_without_merge: In progress
+      merged: on_success
+  triage:
+    steps:
+      - name: draft-triage-patch
+        agent: triager
+        depends: []
+        output_schema: { path: schemas/triage-patch.schema.json }
+        artifact_snapshot: { repositories: [target] }
+        actions:
+          - type: tracker_comment
+            body: /comment
+      - name: apply-triage-patch
+        agent: triage-applier
+        depends: [draft-triage-patch]
+        artifact_inputs: [draft-triage-patch]
+        artifact_access: immutable
+        output_schema: { path: schemas/triage-apply.schema.json }
+        authorization:
+          artifact_step: draft-triage-patch
+          event:
+            field: PVTSSF_example_status
+            value: Triage approved
+            actors: [example-maintainer]
+          after_artifact: true
+          handoff: wait_for_event
+    on_success: Ready to implement
+    on_failure: Backlog
+  epic-closure:
+    steps:
+      - name: choose-epic-outcome
+        agent: epic-owner
+        depends: []
+        output_schema: { path: schemas/closure.schema.json }
+      - name: route-epic-outcome
+        kind: route
+        depends: [choose-epic-outcome]
+        on_failure: halt
+        route:
+          source: { step: choose-epic-outcome, pointer: /outcome }
+          cases:
+            close: [acknowledge-closure]
+            attention: [record-epic-attention]
+          terminals:
+            close: { state: Done }
+            attention: { state: Needs human }
+      - name: acknowledge-closure
+        agent: epic-owner
+        depends: [route-epic-outcome]
+        approval: { mode: always }
+        output_schema: { path: schemas/closure.schema.json }
+      - name: record-epic-attention
+        agent: attention-owner
+        depends: [route-epic-outcome]
+        output_schema: { path: schemas/attention.schema.json }
+        actions:
+          - type: tracker_comment
+            body: /comment
+          - type: operator_attention
+            kind: ensemble.github_project_drain
+            summary: /summary
+            remedy: /remedy
+            references: /references
+    on_success: Done
+    on_failure: Needs human
+  human-attention:
+    steps:
+      - name: record-attention
+        agent: attention-owner
+        depends: []
+        output_schema: { path: schemas/attention.schema.json }
+        actions:
+          - type: tracker_comment
+            body: /comment
+          - type: operator_attention
+            kind: ensemble.github_project_drain
+            summary: /summary
+            remedy: /remedy
+            references: /references
+    on_success: Human hold
+    on_failure: Needs human
+
+workflow_selection:
+  - name: planning
+    precedence: 1
+    pipeline: planning
+    lane: planning
+    states: [Planning]
+    require_unblocked: true
+    order_by: [priority, tracker_position, identifier]
+  - name: delivery
+    precedence: 2
+    pipeline: delivery
+    lane: delivery
+    states: [Ready to implement]
+    labels_all: [ready-for-agent]
+    labels_none: [epic]
+    require_unblocked: true
+    order_by: [priority, tracker_position, identifier]
+  - name: triage
+    precedence: 3
+    pipeline: triage
+    lane: triage
+    states: [Backlog]
+    labels_all: [needs-triage]
+    require_unblocked: true
+    order_by: [priority, tracker_position, identifier]
+  - name: epic-closure
+    precedence: 4
+    pipeline: epic-closure
+    lane: epic-closure
+    states: [Ready to implement]
+    labels_all: [epic]
+    require_unblocked: true
+    order_by: [priority, tracker_position, identifier]
+  - name: human-attention
+    precedence: 5
+    pipeline: human-attention
+    lane: human-attention
+    states: [Needs human]
+    labels_all: [ready-for-human]
+    order_by: [priority, tracker_position, identifier]

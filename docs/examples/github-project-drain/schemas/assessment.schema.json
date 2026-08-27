@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assessment"],
+  "properties": {
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findings"],
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "severity", "summary", "evidence"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "severity": { "enum": ["blocking", "non_blocking"] },
+              "summary": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "object", "minProperties": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

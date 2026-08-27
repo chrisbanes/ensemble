@@ -147,6 +147,20 @@ fn artifact_snapshot_capture_failure(error: impl std::fmt::Display) -> StepOutpu
     }
 }
 
+fn terminal_target_for_outcome(
+    config: &EnsembleConfig,
+    outcome: TerminalOutcome,
+    run: Option<&PipelineRun>,
+) -> String {
+    match outcome {
+        TerminalOutcome::Succeeded => run
+            .and_then(PipelineRun::selected_route_terminal)
+            .unwrap_or(&config.on_success)
+            .to_string(),
+        TerminalOutcome::Failed => config.on_failure.clone(),
+    }
+}
+
 fn worker_failure_output(error: String) -> StepOutput {
     StepOutput {
         result: StepResult::Failed {
@@ -2157,7 +2171,11 @@ impl Orchestrator {
                                 (
                                     Some(terminal_issue),
                                     Some(TerminalOutcome::Succeeded),
-                                    Some(config_snapshot.on_success.clone()),
+                                    Some(terminal_target_for_outcome(
+                                        &config_snapshot,
+                                        TerminalOutcome::Succeeded,
+                                        state.get_pipeline_run(&issue.id),
+                                    )),
                                     history_record,
                                 )
                             } else {
@@ -6243,7 +6261,11 @@ impl Orchestrator {
                                     FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
                                 ) {
                                     (
-                                        Some(config_snapshot.on_success.clone()),
+                                        Some(terminal_target_for_outcome(
+                                            &config_snapshot,
+                                            TerminalOutcome::Succeeded,
+                                            state.get_pipeline_run(issue_id),
+                                        )),
                                         Some(TerminalOutcome::Succeeded),
                                         terminal_issue,
                                         history_record,
@@ -10600,8 +10622,21 @@ impl Orchestrator {
             | FinalizeStatus::Failed => return,
         };
         let target_state = match outcome {
-            TerminalOutcome::Succeeded => config.on_success.clone(),
-            TerminalOutcome::Failed => config.on_failure.clone(),
+            TerminalOutcome::Succeeded => {
+                let state = self.state.read().await;
+                state
+                    .delivery
+                    .get(issue_id)
+                    .and_then(|delivery| delivery.success_state.clone())
+                    .unwrap_or_else(|| {
+                        terminal_target_for_outcome(
+                            config,
+                            outcome,
+                            state.get_pipeline_run(issue_id),
+                        )
+                    })
+            }
+            TerminalOutcome::Failed => terminal_target_for_outcome(config, outcome, None),
         };
         let last_error = finalize_state
             .repos
@@ -11088,7 +11123,20 @@ impl Orchestrator {
                     return;
                 }
             };
-            let target_state = config_snapshot.on_success.clone();
+            let target_state = {
+                let state = self.state.read().await;
+                state
+                    .delivery
+                    .get(issue_id)
+                    .and_then(|delivery| delivery.success_state.clone())
+                    .unwrap_or_else(|| {
+                        terminal_target_for_outcome(
+                            config_snapshot.as_ref(),
+                            outcome,
+                            state.get_pipeline_run(issue_id),
+                        )
+                    })
+            };
             if let Some(finalize_state) = self
                 .state
                 .read()
@@ -12254,7 +12302,11 @@ impl Orchestrator {
                             ) {
                                 (
                                     Some(TerminalOutcome::Succeeded),
-                                    Some(pipeline_config.on_success.clone()),
+                                    Some(terminal_target_for_outcome(
+                                        &pipeline_config,
+                                        TerminalOutcome::Succeeded,
+                                        state.get_pipeline_run(&issue.id),
+                                    )),
                                     history_record,
                                 )
                             } else {
@@ -16298,6 +16350,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_finalization_uses_the_delivery_route_target_after_pipeline_removal() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let config_snapshot = orchestrator.config.read().await.clone();
+        let run = PipelineRun::new(
+            delivery.issue_id.clone(),
+            1,
+            build_dag(&config_snapshot.steps).unwrap(),
+        );
+        let snapshot = run.to_snapshot();
+        delivery.success_state = Some("Route terminal".to_string());
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .state
+            .write()
+            .await
+            .remove_pipeline_run(&delivery.issue_id);
+        orchestrator.config.write().await.on_success = "Drifted default".to_string();
+        orchestrator.tracker = Arc::new(FailingWriteTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+
+        let finalize = IssueFinalizeState {
+            issue_identifier: delivery.identifier.clone(),
+            status: FinalizeStatus::NotRequired,
+            repos: Vec::new(),
+        };
+        let config_after_drift = orchestrator.config.read().await.clone();
+        orchestrator
+            .stage_finalization_terminal_transition(
+                &delivery.issue_id,
+                &delivery.identifier,
+                &config_after_drift,
+                &finalize,
+            )
+            .await;
+
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&delivery.issue_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.terminal_transition.unwrap().target_state,
+            "Route terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_delivery_uses_its_frozen_route_target_after_config_drift() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let config_snapshot = orchestrator.config.read().await.clone();
+        let run = PipelineRun::new(
+            delivery.issue_id.clone(),
+            1,
+            build_dag(&config_snapshot.steps).unwrap(),
+        );
+        let snapshot = run.to_snapshot();
+        delivery.success_state = Some("Route terminal".to_string());
+        delivery.repositories.get_mut("source-repo").unwrap().phase = DeliveryPhase::Published;
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .state
+            .write()
+            .await
+            .remove_pipeline_run(&delivery.issue_id);
+        orchestrator.config.write().await.on_success = "Drifted default".to_string();
+        orchestrator.tracker = Arc::new(FailingWriteTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+
+        orchestrator
+            .complete_published_delivery(&delivery, Some(&snapshot))
+            .await;
+
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&delivery.issue_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.terminal_transition.unwrap().target_state,
+            "Route terminal"
+        );
+    }
+
+    #[tokio::test]
     async fn delivery_merge_mutation_persists_exact_intent_before_remote_io_and_reconciles() {
         let bootstrap = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
@@ -19557,6 +19717,149 @@ mod tests {
             Ok(true)
         );
         assert_eq!(remote.inner.pushes.load(Ordering::SeqCst), 0);
+
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn finalize_retry_reconstructs_the_route_terminal_before_delivery_persistence() {
+        let remote = Arc::new(FailOnceIdentityRemote {
+            inner: RecoveryDeliveryRemote {
+                pull_requests: std::sync::Mutex::new(Vec::new()),
+                pushes: AtomicUsize::new(0),
+                creates: AtomicUsize::new(0),
+                lists: AtomicUsize::new(0),
+            },
+            identity_failures: AtomicUsize::new(1),
+        });
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let mut initial_config = make_always_approval_route_config();
+        initial_config.steps[1]
+            .route
+            .as_mut()
+            .unwrap()
+            .terminals
+            .insert(
+                "accept".to_string(),
+                crate::config::ensemble::RouteTerminalConfig {
+                    state: "Route terminal".to_string(),
+                },
+            );
+        let config = Arc::new(RwLock::new(initial_config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        orchestrator.delivery_remote = remote.clone();
+        let (route_snapshot, route_run_id) = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            run.step_completed("build", succeeded_step_output(), false);
+            run.route_decisions.insert(
+                "choose".to_string(),
+                RouteDecisionEvidence {
+                    source_step: "build".to_string(),
+                    pointer: "/decision".to_string(),
+                    selected_case: "accept".to_string(),
+                    source_output_digest: "frozen-route-output".to_string(),
+                },
+            );
+            let route_snapshot = run.to_snapshot();
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            let route_run_id = state.running["1"].run_id.clone().unwrap();
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            (route_snapshot, route_run_id)
+        };
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepCompleted,
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some(route_run_id),
+                cycle: route_snapshot.cycle,
+                step: Some("choose".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(route_snapshot),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+        let config_snapshot = config.read().await.clone();
+        let finalize = orchestrator
+            .run_finalize_phase("1", "repo#1", &config_snapshot)
+            .await;
+        assert_eq!(finalize.status, FinalizeStatus::Failed);
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .finalize_terminal_history
+            .contains_key("1"));
+        {
+            let mut state = orchestrator.state.write().await;
+            state.remove_running("1");
+            state.remove_pipeline_run("1");
+            state.set_finalize_state("1", finalize);
+        }
+        config.write().await.on_success = "Drifted default".to_string();
+
+        orchestrator
+            .retry_finalize_delivery("1", "repo#1")
+            .await
+            .unwrap();
+        orchestrator.process_finalize_retries().await;
+
+        let delivery = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(delivery.success_state.as_deref(), Some("Route terminal"));
+        assert_eq!(delivery.failure_state.as_deref(), Some("Failed"));
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        drop(delivery);
+
+        let finalize = IssueFinalizeState {
+            issue_identifier: "repo#1".to_string(),
+            status: FinalizeStatus::NotRequired,
+            repos: Vec::new(),
+        };
+        let config_after_drift = config.read().await.clone();
+        orchestrator
+            .stage_finalization_terminal_transition("1", "repo#1", &config_after_drift, &finalize)
+            .await;
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.terminal_transition.unwrap().target_state,
+            "Route terminal"
+        );
 
         drop(repo_temp);
     }
@@ -25684,6 +25987,7 @@ agent:
                 ("accept".to_string(), vec!["accept".to_string()]),
                 ("reject".to_string(), vec!["reject".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         for name in ["accept", "reject"] {
             let mut branch = config.steps[0].clone();

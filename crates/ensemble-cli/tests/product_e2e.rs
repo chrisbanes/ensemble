@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -21,8 +21,371 @@ const ISSUE_TITLE: &str = "Exercise product workflow";
 // growth cannot silently reintroduce platform-dependent stack overflows.
 const ACCEPTANCE_FAILURE_WORKER_STACK_BYTES: usize = 15 * 128 * 1024;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_triage_waits_for_authorized_event() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference()
+        .await
+        .expect("copied reference fixture");
+    let port = reserve_local_port().expect("reserve port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url)
+        .await
+        .expect("server starts");
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Draft a schema-valid triage patch",
+    )
+    .await
+    .expect("triage draft dispatches");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let before = fs::read_to_string(&fixture.fixture.acpx_log_path).unwrap();
+    assert!(
+        !before.contains("This step receives the immutable triage-draft Artifact"),
+        "triage applier started before its authorized status event: {before}"
+    );
+    assert!(
+        fs::read_to_string(reference_helper_log_path(&fixture.fixture))
+            .unwrap_or_default()
+            .is_empty(),
+        "triage helper ran before its authorized status event"
+    );
+    assert_eq!(fixture.mutations.load(Ordering::SeqCst), 1, "claim only");
+
+    fixture.event_visible.store(true, Ordering::SeqCst);
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "This step receives the immutable triage-draft Artifact",
+    )
+    .await
+    .expect("triage applier dispatches after authorization");
+    wait_for_acpx_text(
+        &reference_helper_log_path(&fixture.fixture),
+        "ReferenceTriageSetStatus",
+    )
+    .await;
+    let records = read_pipeline_journal_records(fixture.fixture.config_dir.path()).unwrap();
+    assert_journal_evidence_precedes_step(&records, "apply-triage-patch");
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_planning_revision_waits_for_authorized_event() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_state("Planning")
+        .await
+        .expect("copied reference fixture");
+    let port = reserve_local_port().expect("reserve port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url)
+        .await
+        .expect("server starts");
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Produce a versioned implementation plan",
+    )
+    .await
+    .expect("plan draft dispatches");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        acpx_occurrences(
+            &fixture.fixture.acpx_log_path,
+            "Produce a versioned implementation plan"
+        ),
+        2,
+        "the planner acknowledgement must wait for the authorized status event"
+    );
+
+    fixture.event_visible.store(true, Ordering::SeqCst);
+    wait_for_reference_acpx_occurrences(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Produce a versioned implementation plan",
+        3,
+    )
+    .await
+    .expect("planner acknowledgement dispatches after authorization");
+    let records = read_pipeline_journal_records(fixture.fixture.config_dir.path()).unwrap();
+    assert_journal_evidence_precedes_step(&records, "acknowledge-plan-revision");
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_planning_operator_required_records_only_attention() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_state("Planning")
+        .await
+        .expect("copied reference fixture");
+    replace_mock_acpx_output(
+        &fixture.fixture,
+        "\"outcome\":\"revision\"",
+        "\"outcome\":\"operator_required\"",
+    );
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Describe the operator action needed",
+    )
+    .await
+    .expect("operator-required route dispatches attention");
+    wait_for_counter(&fixture.comments, 1, "attention comment").await;
+    assert_eq!(
+        acpx_occurrences(
+            &fixture.fixture.acpx_log_path,
+            "Produce a versioned implementation plan"
+        ),
+        2,
+        "revision acknowledgement must not dispatch on operator_required"
+    );
+    wait_for_reference_journal_action(&fixture.fixture, "record-plan-attention").await;
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_epic_close_pauses_after_acknowledgement_producer() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Ready to implement",
+        vec!["epic"],
+        "In progress",
+        false,
+    )
+    .await
+    .unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_acpx_occurrences(
+        &fixture.fixture.acpx_log_path,
+        "Return the configured closure outcome",
+        4,
+    )
+    .await;
+    wait_for_reference_interaction(&client, &base_url, "acknowledge-closure").await;
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_epic_attention_records_only_attention_actions() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Ready to implement",
+        vec!["epic"],
+        "In progress",
+        false,
+    )
+    .await
+    .unwrap();
+    replace_mock_acpx_output(
+        &fixture.fixture,
+        "\"outcome\":\"close\"",
+        "\"outcome\":\"attention\"",
+    );
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Describe the operator action needed",
+    )
+    .await
+    .unwrap();
+    wait_for_counter(&fixture.comments, 1, "epic attention comment").await;
+    assert_eq!(
+        acpx_occurrences(
+            &fixture.fixture.acpx_log_path,
+            "Return the configured closure outcome"
+        ),
+        2,
+        "closure acknowledgement must be skipped for attention"
+    );
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_blocked_epic_is_not_claimed_or_dispatched() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Ready to implement",
+        vec!["epic"],
+        "In progress",
+        true,
+    )
+    .await
+    .unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(fs::read_to_string(&fixture.fixture.acpx_log_path)
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(fixture.mutations.load(Ordering::SeqCst), 0);
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_delivery_requires_label_then_dispatches() {
+    let excluded = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Ready to implement",
+        vec![],
+        "In progress",
+        false,
+    )
+    .await
+    .unwrap();
+    let excluded_port = reserve_local_port().unwrap();
+    let excluded_url = format!("http://127.0.0.1:{excluded_port}");
+    let excluded_guard = spawn_web(&excluded.fixture, excluded_port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &excluded_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(fs::read_to_string(&excluded.fixture.acpx_log_path)
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(excluded.mutations.load(Ordering::SeqCst), 0);
+    drop(excluded_guard);
+
+    let admitted = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Ready to implement",
+        vec!["ready-for-agent"],
+        "In progress",
+        false,
+    )
+    .await
+    .unwrap();
+    let admitted_port = reserve_local_port().unwrap();
+    let admitted_url = format!("http://127.0.0.1:{admitted_port}");
+    let admitted_guard = spawn_web(&admitted.fixture, admitted_port);
+    wait_for_server(&client, &admitted_url).await.unwrap();
+    wait_for_reference_acpx_text(
+        &admitted.fixture,
+        &client,
+        &admitted_url,
+        "Implement the selected issue",
+    )
+    .await
+    .unwrap();
+    let records = read_pipeline_journal_records(admitted.fixture.config_dir.path()).unwrap();
+    assert!(records.iter().any(|record| {
+        record["kind"] == "run_started"
+            && record["snapshot"]["selected_workflow"]["pipeline"] == "delivery"
+            && record["snapshot"]["selected_workflow"]["lane"] == "delivery"
+    }));
+    drop(admitted_guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_human_attention_records_effects() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_scenario(
+        "Needs human",
+        vec!["ready-for-human"],
+        "In progress",
+        false,
+    )
+    .await
+    .unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Describe the operator action needed",
+    )
+    .await
+    .unwrap();
+    wait_for_counter(&fixture.comments, 1, "human attention comment").await;
+    wait_for_reference_journal_action(&fixture.fixture, "record-attention").await;
+    drop(guard);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_project_drain_reference_idle_triage_waits_for_and_follows_non_idle_planning() {
+    let fixture = GithubAuthorizationFixture::new_with_copied_reference_planning_and_triage()
+        .await
+        .unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let planning_release =
+        PlanningReleaseGuard::new(fixture.fixture.config_dir.path().join("release-planning"));
+    let guard = spawn_web_with_planning_gate(&fixture.fixture, port, planning_release.path());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Produce a versioned implementation plan",
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert!(
+        !fs::read_to_string(&fixture.fixture.acpx_log_path)
+            .unwrap()
+            .contains("Draft a schema-valid triage patch"),
+        "idle-only triage must not run while planning is live"
+    );
+
+    fixture.event_visible.store(true, Ordering::SeqCst);
+    planning_release.release().unwrap();
+    wait_for_acpx_occurrences(
+        &fixture.fixture.acpx_log_path,
+        "Produce a versioned implementation plan",
+        3,
+    )
+    .await;
+    wait_for_reference_acpx_text(
+        &fixture.fixture,
+        &client,
+        &base_url,
+        "Draft a schema-valid triage patch",
+    )
+    .await
+    .expect("triage becomes eligible after planning releases its lane");
+    drop(guard);
+}
+
+fn copy_reference_assets(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_reference_assets(&entry.path(), &destination_path)?;
+        } else {
+            fs::copy(entry.path(), destination_path)?;
+        }
+    }
+    Ok(())
+}
+
 struct GithubTimelineResponder {
     visible: Arc<AtomicBool>,
+    status: String,
 }
 
 impl Respond for GithubTimelineResponder {
@@ -34,7 +397,7 @@ impl Respond for GithubTimelineResponder {
                 // reject it until the fixture exposes it as tracker history.
                 "createdAt": "2099-01-01T00:00:00Z",
                 "previousStatus": "Todo",
-                "status": "In Progress",
+                "status": self.status,
                 "project": { "id": "P_configured" },
                 "actor": { "id": "U_operator", "login": "operator" }
             })
@@ -54,6 +417,228 @@ struct GithubMutationResponder {
 
 struct GithubCommentResponder {
     calls: Arc<AtomicUsize>,
+}
+
+struct GithubReferenceAssigneeResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+impl Respond for GithubReferenceAssigneeResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let secondary =
+            self.state.secondary_triage && String::from_utf8_lossy(&request.body).contains("E2E-2");
+        let owned = if secondary {
+            self.state.secondary_assigned.load(Ordering::SeqCst)
+        } else {
+            self.state.assigned.load(Ordering::SeqCst)
+        };
+        let nodes = owned.then(|| serde_json::json!({ "id": "U_operator", "login": "operator" }));
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "id": ISSUE_ID, "assignees": {
+                "totalCount": usize::from(owned), "nodes": nodes.into_iter().collect::<Vec<_>>()
+            }}}
+        }))
+    }
+}
+
+struct GithubReferenceFreshIssueResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+impl Respond for GithubReferenceFreshIssueResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        if self.state.secondary_triage && String::from_utf8_lossy(&request.body).contains("E2E-2") {
+            let status = self
+                .state
+                .secondary_status
+                .lock()
+                .expect("reference state")
+                .clone();
+            return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "nodes": [{
+                    "id": "E2E-2", "number": 2, "title": "Deferred triage", "state": "OPEN",
+                    "url": "https://github.example/acme/repo/issues/2",
+                    "labels": { "nodes": [{"name":"Todo"}, {"name":status}] }
+                }] }
+            }));
+        }
+        let state = self.state.status.lock().expect("reference state").clone();
+        let labels = self.state.labels_with_status(&state);
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "nodes": [{
+                "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "state": "OPEN",
+                "url": "https://github.example/acme/repo/issues/1",
+                "labels": { "nodes": labels }
+            }] }
+        }))
+    }
+}
+
+struct GithubReferenceState {
+    assigned: AtomicBool,
+    status: Mutex<String>,
+    labels: Vec<String>,
+    blocked: bool,
+    secondary_triage: bool,
+    secondary_assigned: AtomicBool,
+    secondary_status: Mutex<String>,
+}
+
+impl GithubReferenceState {
+    fn labels_with_status(&self, status: &str) -> Vec<Value> {
+        self.labels
+            .iter()
+            .chain(std::iter::once(&status.to_string()))
+            .map(|label| serde_json::json!({ "name": label }))
+            .collect()
+    }
+}
+
+struct GithubReferenceProjectItemsResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+struct GithubReferenceBlockerResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+struct GithubReferenceProjectItemLookupResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+impl Respond for GithubReferenceProjectItemLookupResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let secondary =
+            self.state.secondary_triage && String::from_utf8_lossy(&request.body).contains("E2E-2");
+        let item_id = if secondary { "PVT_item_2" } else { "PVT_item" };
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "projectItems": {
+                "nodes": [{ "id": item_id, "project": { "id": "P_configured" } }]
+            }}}
+        }))
+    }
+}
+
+impl Respond for GithubReferenceBlockerResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let nodes = self.state.blocked.then(|| {
+            serde_json::json!({
+                "id": "blocked-item", "number": 2, "state": "OPEN",
+                "repository": { "nameWithOwner": "acme/repo" }
+            })
+        });
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "blockedBy": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": nodes.into_iter().collect::<Vec<_>>()
+            }}}
+        }))
+    }
+}
+
+impl Respond for GithubReferenceProjectItemsResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let status = self.state.status.lock().expect("reference state").clone();
+        let option_id = if status == "In progress" {
+            "O_progress"
+        } else {
+            "O_todo"
+        };
+        let assigned = self.state.assigned.load(Ordering::SeqCst);
+        let labels = self.state.labels_with_status(&status);
+        let assignees =
+            assigned.then(|| serde_json::json!({ "id": "U_operator", "login": "operator" }));
+        if self.state.secondary_triage {
+            let secondary_status = self
+                .state
+                .secondary_status
+                .lock()
+                .expect("reference state")
+                .clone();
+            let secondary_assigned = self.state.secondary_assigned.load(Ordering::SeqCst);
+            return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "node": { "items": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "edges": [
+                        { "cursor": "item-1", "node": {
+                            "fieldValues": { "nodes": [{"name":status,"optionId":option_id,"field":{"id":"F_status","name":"Status"}}]},
+                            "content": {"id":ISSUE_ID,"number":1,"title":ISSUE_TITLE,"body":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"https://github.example/acme/repo/issues/1","labels":{"nodes":labels},"assignees":{"totalCount":usize::from(assigned),"nodes":assignees.into_iter().collect::<Vec<_>>()}}
+                        }},
+                        { "cursor": "item-2", "node": {
+                            "fieldValues": { "nodes": [{"name":secondary_status,"optionId":if secondary_status == "In progress" { "O_progress" } else { "O_todo" },"field":{"id":"F_status","name":"Status"}}]},
+                            "content": {"id":"E2E-2","number":2,"title":"Deferred triage","body":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"https://github.example/acme/repo/issues/2","labels":{"nodes":[{"name":"Todo"},{"name":secondary_status}]},"assignees":{"totalCount":usize::from(secondary_assigned),"nodes":[]}}
+                        }}
+                    ]
+                }}}
+            }));
+        }
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "items": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "edges": [{ "cursor": "item-1", "node": {
+                    "fieldValues": { "nodes": [{
+                        "name": status, "optionId": option_id,
+                        "field": { "id": "F_status", "name": "Status" }
+                    }]},
+                    "content": {
+                        "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "body": "",
+                        "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                        "url": "https://github.example/acme/repo/issues/1",
+                        "labels": { "nodes": labels },
+                        "assignees": { "totalCount": usize::from(assigned), "nodes": assignees.into_iter().collect::<Vec<_>>() }
+                    }
+                }}]
+            }}}
+        }))
+    }
+}
+
+struct GithubReferenceAssignResponder {
+    state: Arc<GithubReferenceState>,
+}
+
+impl Respond for GithubReferenceAssignResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        if self.state.secondary_triage && String::from_utf8_lossy(&request.body).contains("E2E-2") {
+            self.state.secondary_assigned.store(true, Ordering::SeqCst);
+        } else {
+            self.state.assigned.store(true, Ordering::SeqCst);
+        }
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "addAssigneesToAssignable": { "assignable": { "id": ISSUE_ID } } }
+        }))
+    }
+}
+
+struct GithubReferenceStatusMutationResponder {
+    calls: Arc<AtomicUsize>,
+    state: Arc<GithubReferenceState>,
+}
+
+impl Respond for GithubReferenceStatusMutationResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let body = String::from_utf8_lossy(&request.body);
+        let status = if body.contains("O_progress") {
+            "In progress"
+        } else if body.contains("O_ready") {
+            "Ready to implement"
+        } else if body.contains("O_todo") {
+            "Todo"
+        } else {
+            panic!("unexpected reference status mutation: {body}");
+        };
+        if self.state.secondary_triage && body.contains("PVT_item_2") {
+            *self.state.secondary_status.lock().expect("reference state") = status.to_string();
+        } else {
+            *self.state.status.lock().expect("reference state") = status.to_string();
+        }
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "updateProjectV2ItemFieldValue": {
+                "projectV2Item": { "id": "PVT_item" }
+            }}
+        }))
+    }
 }
 
 impl Respond for GithubCommentResponder {
@@ -80,6 +665,30 @@ impl Respond for GithubMutationResponder {
 
 struct ChildGuard {
     child: Child,
+}
+
+struct PlanningReleaseGuard {
+    path: PathBuf,
+}
+
+impl PlanningReleaseGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release(&self) -> io::Result<()> {
+        fs::write(&self.path, "release\n")
+    }
+}
+
+impl Drop for PlanningReleaseGuard {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
 }
 
 impl ChildGuard {
@@ -817,6 +1426,8 @@ struct TestFixture {
     todo_path: PathBuf,
     workspace_root: PathBuf,
     acpx_log_path: PathBuf,
+    web_stdout_path: PathBuf,
+    web_stderr_path: PathBuf,
     mock_bin_dir: PathBuf,
 }
 
@@ -839,6 +1450,8 @@ impl GithubAuthorizationFixture {
             event_visible.clone(),
             mutations.clone(),
             comments.clone(),
+            None,
+            "In Progress",
         )
         .await;
         let fixture =
@@ -851,9 +1464,195 @@ impl GithubAuthorizationFixture {
             comments,
         })
     }
+
+    async fn new_with_copied_reference() -> io::Result<Self> {
+        Self::new_with_copied_reference_scenario("Todo", vec!["Todo"], "In progress", false).await
+    }
+
+    async fn new_with_copied_reference_state(initial_status: &str) -> io::Result<Self> {
+        let event_status = if initial_status == "Planning" {
+            "Ready to implement"
+        } else {
+            "In progress"
+        };
+        Self::new_with_copied_reference_scenario(
+            initial_status,
+            vec![initial_status],
+            event_status,
+            false,
+        )
+        .await
+    }
+
+    async fn new_with_copied_reference_scenario(
+        initial_status: &str,
+        labels: Vec<&str>,
+        event_status: &str,
+        blocked: bool,
+    ) -> io::Result<Self> {
+        let server = MockServer::start().await;
+        let event_visible = Arc::new(AtomicBool::new(false));
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let comments = Arc::new(AtomicUsize::new(0));
+        let reference_state = Arc::new(GithubReferenceState {
+            assigned: AtomicBool::new(false),
+            status: Mutex::new(initial_status.to_string()),
+            labels: labels.into_iter().map(ToString::to_string).collect(),
+            blocked,
+            secondary_triage: false,
+            secondary_assigned: AtomicBool::new(false),
+            secondary_status: Mutex::new("Todo".to_string()),
+        });
+        mount_github_authorization_api(
+            &server,
+            event_visible.clone(),
+            mutations.clone(),
+            comments.clone(),
+            Some(reference_state),
+            event_status,
+        )
+        .await;
+        let fixture = TestFixture::new_with_copied_github_reference(&server.uri())?;
+        Ok(Self {
+            fixture,
+            _server: server,
+            event_visible,
+            mutations,
+            comments,
+        })
+    }
+
+    async fn new_with_copied_reference_planning_and_triage() -> io::Result<Self> {
+        let server = MockServer::start().await;
+        let event_visible = Arc::new(AtomicBool::new(false));
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let comments = Arc::new(AtomicUsize::new(0));
+        let reference_state = Arc::new(GithubReferenceState {
+            assigned: AtomicBool::new(false),
+            status: Mutex::new("Planning".to_string()),
+            labels: vec!["Planning".to_string()],
+            blocked: false,
+            secondary_triage: true,
+            secondary_assigned: AtomicBool::new(false),
+            secondary_status: Mutex::new("Todo".to_string()),
+        });
+        mount_github_authorization_api(
+            &server,
+            event_visible.clone(),
+            mutations.clone(),
+            comments.clone(),
+            Some(reference_state),
+            "Ready to implement",
+        )
+        .await;
+        let fixture = TestFixture::new_with_copied_github_reference(&server.uri())?;
+        Ok(Self {
+            fixture,
+            _server: server,
+            event_visible,
+            mutations,
+            comments,
+        })
+    }
 }
 
 impl TestFixture {
+    fn new_with_copied_github_reference(endpoint: &str) -> io::Result<Self> {
+        let config_dir = TempDir::new()?;
+        let root = config_dir.path();
+        let workspace_root = root.join("workspaces");
+        let repo_path = root.join("source");
+        let mock_bin_dir = root.join("bin");
+        let acpx_log_path = root.join("mock-acpx.log");
+        let web_stdout_path = root.join("ensemble-web.stdout.log");
+        let web_stderr_path = root.join("ensemble-web.stderr.log");
+        fs::create_dir_all(&workspace_root)?;
+        fs::create_dir_all(&mock_bin_dir)?;
+        init_git_repo(&repo_path)?;
+        let reference =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/github-project-drain");
+        copy_reference_assets(&reference, root)?;
+        let config_path = root.join("config.yaml");
+        let config = fs::read_to_string(&config_path)?
+            .replace("repository: example/ensemble", "repository: acme/repo")
+            .replace("project_number: 6", "project_number: 1")
+            .replace(
+                "api_key: $GITHUB_TOKEN",
+                "endpoint: 'REPLACE_ENDPOINT'\n  api_key: fixture-token",
+            )
+            .replace("REPLACE_ENDPOINT", endpoint)
+            .replace("PVTSSF_example_status", "F_status")
+            .replace("example-maintainer", "U_operator")
+            .replace("Backlog", "Todo")
+            .replace("Triage approved", "In progress")
+            .replace("needs-triage", "Todo")
+            .replace(
+                "\nrepos:\n",
+                &format!(
+                    "\nworkspace:\n  root: {}\nrepos:\n",
+                    yaml_quote(&workspace_root.display().to_string())
+                ),
+            )
+            .replace("\nagents:\n", "\npolling: { interval_ms: 100 }\nagents:\n")
+            .replace(
+                "- path: target",
+                &format!("- path: {}", yaml_quote(&repo_path.display().to_string())),
+            )
+            .replace("repositories: [target]", "repositories: [source]")
+            .replace(
+                "executor: example-agent, model: example-model, ",
+                "acpx_agent: builder, ",
+            );
+        fs::write(&config_path, config)?;
+        let triage_schema_path = root.join("schemas/triage-patch.schema.json");
+        fs::write(
+            &triage_schema_path,
+            fs::read_to_string(&triage_schema_path)?
+                .replace("\"Triage approved\"", "\"In progress\""),
+        )?;
+        let triage_draft_path = root.join("prompts/triage-draft.md");
+        fs::write(
+            &triage_draft_path,
+            fs::read_to_string(&triage_draft_path)?.replace("Triage approved", "In progress"),
+        )?;
+        let triage_helper_path = root.join("tools/apply-triage-patch.sh");
+        fs::write(
+            &triage_helper_path,
+            fs::read_to_string(&triage_helper_path)?.replace(
+                "approval_status='Triage approved'",
+                "approval_status='In progress'",
+            ),
+        )?;
+        let triage_apply_path = root.join("prompts/triage-apply.md");
+        fs::write(
+            &triage_apply_path,
+            fs::read_to_string(&triage_apply_path)?
+                .replace("Triage approved", "In progress")
+                .replace(
+                    "/absolute/path/to/github-project-drain/tools/apply-triage-patch.sh",
+                    &triage_helper_path.display().to_string(),
+                ),
+        )?;
+        fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
+        fs::write(mock_bin_dir.join("gh"), mock_reference_gh_script())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(mock_bin_dir.join("acpx"), fs::Permissions::from_mode(0o755))?;
+            fs::set_permissions(mock_bin_dir.join("gh"), fs::Permissions::from_mode(0o755))?;
+            fs::set_permissions(&triage_helper_path, fs::Permissions::from_mode(0o755))?;
+        }
+        let todo_path = root.join("unused-TODO.md");
+        Ok(Self {
+            config_dir,
+            todo_path,
+            workspace_root,
+            acpx_log_path,
+            web_stdout_path,
+            web_stderr_path,
+            mock_bin_dir,
+        })
+    }
     fn new() -> io::Result<Self> {
         Self::new_with_acceptance("yes x | head -c 40000")
     }
@@ -866,6 +1665,8 @@ impl TestFixture {
         let repo_path = root.join("source");
         let mock_bin_dir = root.join("bin");
         let acpx_log_path = root.join("mock-acpx.log");
+        let web_stdout_path = root.join("ensemble-web.stdout.log");
+        let web_stderr_path = root.join("ensemble-web.stderr.log");
 
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&mock_bin_dir)?;
@@ -888,6 +1689,8 @@ impl TestFixture {
             todo_path,
             workspace_root,
             acpx_log_path,
+            web_stdout_path,
+            web_stderr_path,
             mock_bin_dir,
         })
     }
@@ -900,6 +1703,8 @@ impl TestFixture {
         let repo_path = root.join("source");
         let mock_bin_dir = root.join("bin");
         let acpx_log_path = root.join("mock-acpx.log");
+        let web_stdout_path = root.join("ensemble-web.stdout.log");
+        let web_stderr_path = root.join("ensemble-web.stderr.log");
 
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&mock_bin_dir)?;
@@ -922,6 +1727,8 @@ impl TestFixture {
             todo_path,
             workspace_root,
             acpx_log_path,
+            web_stdout_path,
+            web_stderr_path,
             mock_bin_dir,
         })
     }
@@ -934,6 +1741,8 @@ impl TestFixture {
         let repo_path = root.join("source");
         let mock_bin_dir = root.join("bin");
         let acpx_log_path = root.join("mock-acpx.log");
+        let web_stdout_path = root.join("ensemble-web.stdout.log");
+        let web_stderr_path = root.join("ensemble-web.stderr.log");
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&mock_bin_dir)?;
         init_git_repo(&repo_path)?;
@@ -953,6 +1762,8 @@ impl TestFixture {
             todo_path,
             workspace_root,
             acpx_log_path,
+            web_stdout_path,
+            web_stderr_path,
             mock_bin_dir,
         })
     }
@@ -968,6 +1779,8 @@ impl TestFixture {
         let repo_path = root.join("source");
         let mock_bin_dir = root.join("bin");
         let acpx_log_path = root.join("mock-acpx.log");
+        let web_stdout_path = root.join("ensemble-web.stdout.log");
+        let web_stderr_path = root.join("ensemble-web.stderr.log");
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&mock_bin_dir)?;
         init_git_repo(&repo_path)?;
@@ -1004,6 +1817,8 @@ impl TestFixture {
             todo_path,
             workspace_root,
             acpx_log_path,
+            web_stdout_path,
+            web_stderr_path,
             mock_bin_dir,
         })
     }
@@ -1315,14 +2130,35 @@ async fn mount_github_authorization_api(
     event_visible: Arc<AtomicBool>,
     mutations: Arc<AtomicUsize>,
     comments: Arc<AtomicUsize>,
+    reference_state: Option<Arc<GithubReferenceState>>,
+    authorization_status: &str,
 ) {
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("viewer { id login }"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "viewer": { "id": "U_operator", "login": "operator" } }
+        })))
+        .mount(server)
+        .await;
+    let progress_status = if reference_state.is_some() {
+        "In progress"
+    } else {
+        "In Progress"
+    };
     let discovery = serde_json::json!({ "data": { "repository": { "projectV2": {
         "id": "P_configured",
         "fields": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [{
             "id": "F_status", "name": "Status", "options": [
                 { "id": "O_todo", "name": "Todo" },
-                { "id": "O_progress", "name": "In Progress" },
+                { "id": "O_progress", "name": progress_status },
+                { "id": "O_ready", "name": "Ready to implement" },
                 { "id": "O_done", "name": "Done" }
+            ]
+        }, {
+            "id": "F_priority", "name": "Priority", "options": [
+                { "id": "P0", "name": "P0" }, { "id": "P1", "name": "P1" },
+                { "id": "P2", "name": "P2" }, { "id": "P3", "name": "P3" }
             ]
         }] }
     }}}});
@@ -1362,55 +2198,146 @@ async fn mount_github_authorization_api(
                 "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "body": "",
                 "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
                 "url": "https://github.example/acme/repo/issues/1",
-                "labels": { "nodes": [] }, "assignees": { "totalCount": 0, "nodes": [] }
+                "labels": { "nodes": [{ "name": "Todo" }] }, "assignees": { "totalCount": 0, "nodes": [] }
             }
         }}]
     }}}});
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_string_contains("orderBy: {field: POSITION"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(project_items))
-        .mount(server)
-        .await;
+    if let Some(state) = reference_state.as_ref() {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("orderBy: {field: POSITION"))
+            .respond_with(GithubReferenceProjectItemsResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+    } else {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("orderBy: {field: POSITION"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_items))
+            .mount(server)
+            .await;
+    }
 
     Mock::given(method("POST"))
         .and(path("/"))
         .and(body_string_contains("timelineItems(first:"))
         .respond_with(GithubTimelineResponder {
             visible: event_visible,
+            status: authorization_status.to_string(),
         })
+        .mount(server)
+        .await;
+
+    if let Some(state) = reference_state.as_ref() {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("blockedBy(first:"))
+            .respond_with(GithubReferenceBlockerResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+    } else {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("blockedBy(first:"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "node": { "blockedBy": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": []
+                }}}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("subIssues(first:"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "subIssues": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": []
+            }}}
+        })))
         .mount(server)
         .await;
 
     let project_item = serde_json::json!({ "data": { "node": { "projectItems": {
         "nodes": [{ "id": "PVT_item", "project": { "id": "P_configured" } }]
     }}}});
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_string_contains("projectItems(first: 100)"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(project_item))
-        .mount(server)
-        .await;
+    if let Some(state) = reference_state.as_ref() {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("projectItems(first: 100)"))
+            .respond_with(GithubReferenceProjectItemLookupResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+    } else {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("projectItems(first: 100)"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_item))
+            .mount(server)
+            .await;
+    }
 
-    let states = serde_json::json!({ "data": { "nodes": [{
-        "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "state": "OPEN",
-        "url": "https://github.example/acme/repo/issues/1",
-        "labels": { "nodes": [{ "name": "Todo" }] },
-        "assignees": { "totalCount": 0, "nodes": [] }
-    }]}});
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_string_contains("nodes(ids:"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(states))
-        .mount(server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_string_contains("updateProjectV2ItemFieldValue"))
-        .respond_with(GithubMutationResponder { calls: mutations })
-        .mount(server)
-        .await;
+    if let Some(state) = reference_state {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("nodes(ids:"))
+            .respond_with(GithubReferenceFreshIssueResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(GithubReferenceAssigneeResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("addAssigneesToAssignable"))
+            .respond_with(GithubReferenceAssignResponder {
+                state: state.clone(),
+            })
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("updateProjectV2ItemFieldValue"))
+            .respond_with(GithubReferenceStatusMutationResponder {
+                calls: mutations,
+                state,
+            })
+            .mount(server)
+            .await;
+    } else {
+        let states = serde_json::json!({ "data": { "nodes": [{
+            "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "state": "OPEN",
+            "url": "https://github.example/acme/repo/issues/1",
+            "labels": { "nodes": [{ "name": "Todo" }] },
+            "assignees": { "totalCount": 0, "nodes": [] }
+        }]}});
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("nodes(ids:"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(states))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("updateProjectV2ItemFieldValue"))
+            .respond_with(GithubMutationResponder { calls: mutations })
+            .mount(server)
+            .await;
+    }
 }
 
 fn init_git_repo(repo_path: &Path) -> io::Result<()> {
@@ -1583,6 +2510,30 @@ if [[ " $* " == *" prompt "* ]]; then
     verdict='{"result":"concern","summary":"operator should approve","output":{"artifact":"mock"}}'
   elif [[ "$prompt" == *"GitHub producer"* ]]; then
     verdict='{"result":"succeeded","summary":"GitHub producer completed","output":{"artifact":"mock","comment":"Artifact ready","summary":"Artifact ready","remedy":"Review it","references":["artifact:mock"]}}'
+  elif [[ "$prompt" == *"Produce a versioned implementation plan"* ]]; then
+    if [[ -n "${ENSEMBLE_E2E_PLANNING_RELEASE:-}" ]]; then
+      while [[ ! -f "${ENSEMBLE_E2E_PLANNING_RELEASE}" ]]; do
+        sleep 0.01
+      done
+    fi
+    verdict='{"result":"succeeded","summary":"plan revision","output":{"outcome":"revision","summary":"Plan is ready","comment":"Review the proposed plan."}}'
+  elif [[ "$prompt" == *"Return the configured closure outcome"* ]]; then
+    verdict='{"result":"succeeded","summary":"epic close","output":{"outcome":"close","summary":"All descendants are complete."}}'
+  elif [[ "$prompt" == *"Describe the operator action needed"* ]]; then
+    verdict='{"result":"succeeded","summary":"attention recorded","output":{"comment":"Operator action required.","summary":"Review the issue.","remedy":"Decide the next action.","references":["issue:1"]}}'
+  elif [[ "$prompt" == *"Implement the selected issue"* ]]; then
+    verdict='{"result":"succeeded","summary":"delivery implemented","output":{"outcome":"revision","summary":"Implementation is ready","comment":"Implementation complete."}}'
+  elif [[ "$prompt" == *"Draft a schema-valid triage patch"* ]]; then
+    verdict='{"result":"succeeded","summary":"triage draft","output":{"version":1,"comment":"Triage draft","expected_snapshot":{"issue_number":1,"project_id":"P_configured","status":"In progress","labels":["Todo"]},"operations":[{"type":"set_status","value":"Ready to implement"}]}}'
+  elif [[ "$prompt" == *"This step receives the immutable triage-draft Artifact"* ]]; then
+    patch="$cwd/.ensemble/reference-triage-patch.json"
+    printf '%s\n' "$prompt" | awk '
+      $0 == "BEGIN APPROVED TRIAGE PATCH" { capture = 1; next }
+      $0 == "END APPROVED TRIAGE PATCH" { capture = 0 }
+      capture { print }
+    ' > "$patch"
+    "${ENSEMBLE_E2E_TRIAGE_HELPER:?missing triage helper}" --repo acme/repo --project-number 1 --status-field Status --issue 1 --patch "$patch"
+    verdict='{"result":"succeeded","summary":"triage applied","output":{"summary":"applied"}}'
   elif [[ "$prompt" == *"Evaluation reviewer"* ]]; then
     severity="${ENSEMBLE_E2E_FINDING_SEVERITY:-non_blocking}"
     verdict="{\"result\":\"succeeded\",\"summary\":\"assessment\",\"output\":{\"assessment\":{\"findings\":[{\"id\":\"finding-1\",\"severity\":\"$severity\",\"summary\":\"Minor concern\",\"evidence\":{\"path\":\"README.md\"}}]}}}"
@@ -1613,8 +2564,40 @@ exit 2
 "#
 }
 
+fn mock_reference_gh_script() -> &'static str {
+    r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${ENSEMBLE_E2E_HELPER_LOG:?missing helper log}"
+case "$*" in
+  *ReferenceTriageSnapshot*)
+    cat <<'JSON'
+{"data":{"repository":{"projectV2":{"id":"P_configured","fields":{"nodes":[{"id":"F_status","name":"Status","options":[{"id":"O_todo","name":"Todo"},{"id":"O_progress","name":"In progress"},{"id":"O_ready","name":"Ready to implement"}]}]}},"labels":{"nodes":[{"id":"L_todo","name":"Todo"},{"id":"L_ready","name":"ready-for-agent"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"issue":{"id":"E2E-1","number":1,"labels":{"nodes":[{"id":"L_todo","name":"Todo"}]},"projectItems":{"nodes":[{"id":"PVT_item","project":{"id":"P_configured"},"fieldValues":{"nodes":[{"name":"In progress","field":{"id":"F_status","name":"Status"}}]}}]}}}}}
+JSON
+    ;;
+esac
+"#
+}
+
 fn spawn_web(fixture: &TestFixture, port: u16) -> ChildGuard {
+    spawn_web_with_optional_planning_gate(fixture, port, None)
+}
+
+fn spawn_web_with_planning_gate(
+    fixture: &TestFixture,
+    port: u16,
+    planning_release: &Path,
+) -> ChildGuard {
+    spawn_web_with_optional_planning_gate(fixture, port, Some(planning_release))
+}
+
+fn spawn_web_with_optional_planning_gate(
+    fixture: &TestFixture,
+    port: u16,
+    planning_release: Option<&Path>,
+) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    let stdout = fs::File::create(&fixture.web_stdout_path).expect("create web stdout log");
+    let stderr = fs::File::create(&fixture.web_stderr_path).expect("create web stderr log");
     command
         .arg("web")
         .arg("--config-dir")
@@ -1625,9 +2608,27 @@ fn spawn_web(fixture: &TestFixture, port: u16) -> ChildGuard {
         .arg(port.to_string())
         .env("PATH", fixture.path_with_mock_bin())
         .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .env(
+            "ENSEMBLE_E2E_TRIAGE_HELPER",
+            fixture
+                .config_dir
+                .path()
+                .join("tools/apply-triage-patch.sh"),
+        )
+        .env(
+            "ENSEMBLE_E2E_HELPER_LOG",
+            reference_helper_log_path(fixture),
+        )
+        .stdout(stdout)
+        .stderr(stderr);
+    if let Some(planning_release) = planning_release {
+        command.env("ENSEMBLE_E2E_PLANNING_RELEASE", planning_release);
+    }
     ChildGuard::new(command.spawn().expect("spawn ensemble web"))
+}
+
+fn reference_helper_log_path(fixture: &TestFixture) -> PathBuf {
+    fixture.config_dir.path().join("reference-helper.log")
 }
 
 async fn wait_for_acpx_text(path: &Path, text: &str) {
@@ -1643,6 +2644,176 @@ async fn wait_for_acpx_text(path: &Path, text: &str) {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn acpx_occurrences(path: &Path, text: &str) -> usize {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .match_indices(text)
+        .count()
+}
+
+async fn wait_for_acpx_occurrences(path: &Path, text: &str, minimum: usize) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if acpx_occurrences(path, text) >= minimum {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {minimum} occurrences of {text:?} in {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn replace_mock_acpx_output(fixture: &TestFixture, from: &str, to: &str) {
+    let path = fixture.mock_bin_dir.join("acpx");
+    let script = fs::read_to_string(&path).expect("read copied mock acpx");
+    assert!(
+        script.contains(from),
+        "mock output token was absent: {from}"
+    );
+    fs::write(path, script.replacen(from, to, 1)).expect("rewrite copied mock acpx");
+}
+
+async fn wait_for_counter(counter: &AtomicUsize, minimum: usize, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if counter.load(Ordering::SeqCst) >= minimum {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {name}; observed {}",
+            counter.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_reference_journal_action(fixture: &TestFixture, step: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if read_pipeline_journal_records(fixture.config_dir.path())
+            .unwrap_or_default()
+            .iter()
+            .any(|record| record["kind"] == "action_applied" && record["step"] == step)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "action receipt for {step} was not journaled"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_reference_interaction(client: &reqwest::Client, base_url: &str, step: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let state = client
+            .get(format!("{base_url}/api/v1/state"))
+            .send()
+            .await
+            .expect("read reference state")
+            .json::<Value>()
+            .await
+            .expect("decode reference state");
+        if state["waiting_on_human"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["step_name"] == step))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "interaction for {step} missing: {state:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_reference_acpx_text(
+    fixture: &TestFixture,
+    client: &reqwest::Client,
+    base_url: &str,
+    text: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if fs::read_to_string(&fixture.acpx_log_path)
+            .unwrap_or_default()
+            .contains(text)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for {text:?}: {}",
+                reference_runtime_diagnostics(fixture, client, base_url).await
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_reference_acpx_occurrences(
+    fixture: &TestFixture,
+    client: &reqwest::Client,
+    base_url: &str,
+    text: &str,
+    minimum: usize,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if acpx_occurrences(&fixture.acpx_log_path, text) >= minimum {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "expected {minimum} occurrences of {text:?}: {}",
+                reference_runtime_diagnostics(fixture, client, base_url).await
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn reference_runtime_diagnostics(
+    fixture: &TestFixture,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> String {
+    let api_state = match client.get(format!("{base_url}/api/v1/state")).send().await {
+        Ok(response) => response
+            .text()
+            .await
+            .unwrap_or_else(|error| error.to_string()),
+        Err(error) => error.to_string(),
+    };
+    let attention = match client
+        .get(format!("{base_url}/api/v1/{ISSUE_ID}"))
+        .send()
+        .await
+    {
+        Ok(response) => response
+            .text()
+            .await
+            .unwrap_or_else(|error| error.to_string()),
+        Err(error) => error.to_string(),
+    };
+    format!(
+        "acpx log:\n{}\nAPI state:\n{api_state}\nissue attention:\n{attention}\npipeline journal:\n{}\nweb stdout:\n{}\nweb stderr:\n{}",
+        fs::read_to_string(&fixture.acpx_log_path).unwrap_or_default(),
+        read_pipeline_journal_records(fixture.config_dir.path())
+            .map(|records| format!("{records:#?}"))
+            .unwrap_or_else(|error| error),
+        fs::read_to_string(&fixture.web_stdout_path).unwrap_or_default(),
+        fs::read_to_string(&fixture.web_stderr_path).unwrap_or_default(),
+    )
 }
 
 fn find_workspace_file(root: &Path, name: &str) -> io::Result<PathBuf> {

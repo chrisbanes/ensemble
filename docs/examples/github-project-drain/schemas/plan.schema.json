@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "summary", "comment"],
+  "properties": {
+    "outcome": { "type": "string", "enum": ["revision", "operator_required"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "comment": { "type": "string", "minLength": 1 }
+  }
+}

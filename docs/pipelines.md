@@ -12,6 +12,8 @@ A configuration can replace the legacy top-level pipeline with named `pipelines`
 `scheduler.lanes`, and `workflow_selection` rules. The selector matches normalized issue state,
 labels, and blockers without assigning built-in meanings such as planning or delivery to them.
 The matching rule chooses both the executable pipeline and the live-worker capacity lane.
+For a checked-in copy/adapt composition of this mechanism with GitHub Project normalization,
+authorization, and attention policy, see [GitHub Project reference configuration](github-project-drain.md).
 
 For fresh work, Ensemble evaluates and orders the candidate snapshot, then refreshes the selected
 issue by stable ID immediately before the existing claim operation. The refreshed issue must still
@@ -181,6 +183,8 @@ partition every direct successor exactly once.
     cases:
       agreement: [accept_agreement]
       disagreement: [escalate]
+    terminals:
+      disagreement: { state: Needs human }
 - name: accept_agreement
   agent: agreement_handler
   depends: [choose_review_path]
@@ -195,10 +199,14 @@ output, attempt, transcript, artifact, or dependency-output entry. A shared join
 dependency to settle and runs when at least one passed. A run containing only `Passed` and `Skipped`
 terminal steps succeeds.
 
-The selected case and a source-output digest are stored in the run snapshot, so restart and a
-downstream retry retain the choice. Resetting the source resets its descendants and removes affected
-route decisions. Missing or unmatched route evidence fails the route closed and halts; routes do
-not support automatic retry, fixup, defaults, coercion, predicates, dynamic nodes, or loops.
+An optional `terminals` mapping gives selected cases an opaque successful terminal state. Mapping
+keys must name declared cases, states must be non-blank, and a pipeline may have at most one
+terminal-bearing route. The selected case and a source-output digest are stored in the run snapshot,
+so restart, finalization, and a downstream retry retain the choice; unmapped cases use the
+pipeline's `on_success`, while failures always use `on_failure`. Resetting the source resets its
+descendants and removes affected route decisions. Missing or unmatched route evidence fails the
+route closed and halts; routes do not support automatic retry, fixup, defaults, coercion,
+predicates, dynamic nodes, or loops.
 
 ## Durable post-output actions
 

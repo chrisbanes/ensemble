@@ -32,6 +32,8 @@ existing bounded, evidence-sensitive upsert store. Pending actions retain the Ru
 claim without rerunning their producer or consuming an agent slot.
 
 For a complete static-route composition, see [Outcome routing](outcome-routing.md).
+For a copyable GitHub Project composition built from the same generic contracts, see [GitHub
+Project reference configuration](github-project-drain.md).
 
 Configuration serves one trusted local operator. ACPX-backed agents and sequential pipelines are
 the supported first-release path. `agent.max_turns` is not a supported field and is rejected.
@@ -735,7 +737,7 @@ Pipeline step definitions. Agent and synthesis steps invoke configured agents; g
 | `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
 | `authorization` | object | — | Optional immutable tracker-event evidence required before this step starts |
 | `gate` | object | — | Required only for `kind: gate`: ordered unique `assessment_steps` and one `adjudication_step`; a gate has no `agent` |
-| `route` | object | — | Required only for `kind: route`: a direct `source` (`step`, non-empty JSON Pointer) and exhaustive enum `cases`; a route has no `agent` and must use `on_failure: halt` |
+| `route` | object | — | Required only for `kind: route`: a direct `source` (`step`, non-empty JSON Pointer), exhaustive enum `cases`, and optional `terminals` case-to-opaque-state mapping. At most one route per pipeline may have terminal mappings; a route has no `agent` and must use `on_failure: halt` |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution. For a complete
 fixture-backed composition of Artifact snapshots, immutable Assessment consumers, synthesis, and
