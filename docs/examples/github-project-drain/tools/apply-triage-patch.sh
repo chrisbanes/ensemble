@@ -78,7 +78,7 @@ snapshot_query='query ReferenceTriageSnapshot($owner: String!, $name: String!, $
       id
       fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } }
     }
-    labels(first: 100) { nodes { id name } }
+    labels(first: 100) { nodes { id name } pageInfo { hasNextPage endCursor } }
     issue(number: $issue) {
       id number labels(first: 100) { nodes { id name } }
       projectItems(first: 100) {
@@ -91,6 +91,55 @@ snapshot_query='query ReferenceTriageSnapshot($owner: String!, $name: String!, $
   }
 }'
 snapshot=$(gh api graphql -f query="$snapshot_query" -F owner="$owner" -F name="$name" -F project="$project_number" -F issue="$issue_number")
+
+# The first snapshot carries the issue's authoritative current labels and the
+# first repository-label page. Resolve every repository label page before any
+# preflight target lookup so an allowlisted label beyond page one is not treated
+# as unavailable (or accidentally resolved against a partial catalogue).
+repository_labels=$(printf '%s' "$snapshot" | jq -ce '.data.repository.labels.nodes')
+labels_page_info=$(printf '%s' "$snapshot" | jq -ce '
+  .data.repository.labels.pageInfo
+  | if type == "object"
+      and (.hasNextPage | type == "boolean")
+      and has("endCursor")
+    then .
+    else error("repository label pageInfo is malformed")
+    end
+')
+labels_has_next=$(printf '%s' "$labels_page_info" | jq -r '.hasNextPage')
+labels_cursor=$(printf '%s' "$labels_page_info" | jq -r '
+  if .hasNextPage then
+    .endCursor | if type == "string" and length > 0 then . else error("repository label page is missing a cursor") end
+  else ""
+  end
+')
+labels_page_query='query ReferenceTriageRepositoryLabels($owner: String!, $name: String!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    labels(first: 100, after: $cursor) { nodes { id name } pageInfo { hasNextPage endCursor } }
+  }
+}'
+while [ "$labels_has_next" = true ]; do
+  [ -n "$labels_cursor" ] || { echo "repository label pagination omitted its cursor" >&2; exit 65; }
+  labels_page=$(gh api graphql -f query="$labels_page_query" -F owner="$owner" -F name="$name" -F cursor="$labels_cursor")
+  next_labels=$(printf '%s' "$labels_page" | jq -ce '.data.repository.labels.nodes')
+  repository_labels=$(printf '%s\n%s\n' "$repository_labels" "$next_labels" | jq -sce 'add')
+  labels_page_info=$(printf '%s' "$labels_page" | jq -ce '
+    .data.repository.labels.pageInfo
+    | if type == "object"
+        and (.hasNextPage | type == "boolean")
+        and has("endCursor")
+      then .
+      else error("repository label pageInfo is malformed")
+      end
+  ')
+  labels_has_next=$(printf '%s' "$labels_page_info" | jq -r '.hasNextPage')
+  labels_cursor=$(printf '%s' "$labels_page_info" | jq -r '
+    if .hasNextPage then
+      .endCursor | if type == "string" and length > 0 then . else error("repository label page is missing a cursor") end
+    else ""
+    end
+  ')
+done
 
 project_id=$(printf '%s' "$snapshot" | jq -er '.data.repository.projectV2.id')
 status_field_id=$(printf '%s' "$snapshot" | jq -er --arg name "$status_field" '[.data.repository.projectV2.fields.nodes[] | select(.name == $name) | .id] | if length == 1 then .[0] else error("status field must resolve exactly once") end')
@@ -120,11 +169,11 @@ while IFS= read -r operation; do
       operation_plan="${operation_plan}${type}|${option_id}\n"
       ;;
     add_label)
-      label_id=$(printf '%s' "$snapshot" | jq -er --arg value "$value" '[.data.repository.labels.nodes[] | select(.name == $value) | .id] | if length == 1 then .[0] else error("label must resolve exactly once") end')
+      label_id=$(printf '%s' "$repository_labels" | jq -er --arg value "$value" '[.[] | select(.name == $value) | .id] | if length == 1 then .[0] else error("label must resolve exactly once") end')
       operation_plan="${operation_plan}${type}|${label_id}\n"
       ;;
     remove_label)
-      label_id=$(printf '%s' "$snapshot" | jq -er --arg value "$value" '[.data.repository.labels.nodes[] | select(.name == $value) | .id] | if length == 1 then .[0] else error("label must resolve exactly once") end')
+      label_id=$(printf '%s' "$repository_labels" | jq -er --arg value "$value" '[.[] | select(.name == $value) | .id] | if length == 1 then .[0] else error("label must resolve exactly once") end')
       operation_plan="${operation_plan}${type}|${label_id}\n"
       ;;
   esac

@@ -150,6 +150,7 @@ fn github_project_drain_reference_is_a_complete_public_configuration_bundle() {
     let helper =
         fs::read_to_string(root.join("tools/apply-triage-patch.sh")).expect("triage helper exists");
     assert!(helper.contains("-F labels[]"));
+    assert!(helper.contains("ReferenceTriageRepositoryLabels"));
     let triage_apply_prompt = fs::read_to_string(root.join("prompts/triage-apply.md"))
         .expect("triage applier prompt exists");
     assert!(triage_apply_prompt.contains("{{ dependency_outputs[0].output_json }}"));
@@ -442,6 +443,94 @@ esac
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn triage_helper_resolves_an_allowlisted_label_beyond_the_first_repository_page() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("temporary fixture");
+    let patch_path = root.path().join("patch.json");
+    let log_path = root.path().join("gh.log");
+    let snapshot_path = root.path().join("snapshot.json");
+    let labels_page_path = root.path().join("labels-page.json");
+    let bin_dir = root.path().join("bin");
+    fs::create_dir(&bin_dir).expect("mock bin directory");
+    let gh_path = bin_dir.join("gh");
+    fs::write(
+        &gh_path,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *ReferenceTriageSnapshot*) cat "$GH_SNAPSHOT" ;;
+  *ReferenceTriageRepositoryLabels*) cat "$GH_LABELS_PAGE" ;;
+  *) exit 0 ;;
+esac
+"#,
+    )
+    .expect("mock gh");
+    fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("executable gh");
+
+    let mut snapshot: serde_json::Value = serde_json::from_str(fixture_snapshot()).unwrap();
+    let first_page = (0..100)
+        .map(|index| serde_json::json!({ "id": format!("LABEL_{index}"), "name": format!("label-{index}") }))
+        .collect::<Vec<_>>();
+    snapshot["data"]["repository"]["labels"]["nodes"] = serde_json::Value::Array(first_page);
+    snapshot["data"]["repository"]["labels"]["pageInfo"] = serde_json::json!({
+        "hasNextPage": true,
+        "endCursor": "LABEL_CURSOR_1"
+    });
+    fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).expect("snapshot");
+    fs::write(
+        &labels_page_path,
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "labels": {
+                        "nodes": [{ "id": "LABEL_agent", "name": "ready-for-agent" }],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("second labels page");
+    fs::write(
+        &patch_path,
+        patch_document("Triage approved", "add_label", "ready-for-agent"),
+    )
+    .expect("approved patch");
+
+    let status = Command::new(example_root().join("tools/apply-triage-patch.sh"))
+        .args([
+            "--repo",
+            "example/ensemble",
+            "--project-number",
+            "6",
+            "--status-field",
+            "Status",
+            "--issue",
+            "42",
+            "--patch",
+            patch_path.to_str().expect("utf-8 patch path"),
+        ])
+        .env("GH_LOG", &log_path)
+        .env("GH_SNAPSHOT", &snapshot_path)
+        .env("GH_LABELS_PAGE", &labels_page_path)
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap()),
+        )
+        .status()
+        .expect("helper starts");
+
+    assert!(status.success());
+    let log = fs::read_to_string(log_path).expect("gh calls are logged");
+    assert!(log.contains("ReferenceTriageRepositoryLabels"));
+    assert!(log.contains("LABEL_CURSOR_1"));
+    assert!(log.contains("ReferenceTriageAddLabels"));
+}
+
 fn patch_document(status: &str, operation: &str, value: &str) -> String {
     format!(
         r#"{{
@@ -478,7 +567,7 @@ fn fixture_snapshot() -> &'static str {
         { "id": "LABEL_triage", "name": "needs-triage" },
         { "id": "LABEL_agent", "name": "ready-for-agent" },
         { "id": "LABEL_human", "name": "ready-for-human" }
-      ] },
+      ], "pageInfo": { "hasNextPage": false, "endCursor": null } },
       "issue": {
         "id": "ISSUE_42",
         "number": 42,
