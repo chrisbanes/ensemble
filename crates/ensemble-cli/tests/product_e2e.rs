@@ -2571,7 +2571,7 @@ printf '%s\n' "$*" >> "${ENSEMBLE_E2E_HELPER_LOG:?missing helper log}"
 case "$*" in
   *ReferenceTriageSnapshot*)
     cat <<'JSON'
-{"data":{"repository":{"projectV2":{"id":"P_configured","fields":{"nodes":[{"id":"F_status","name":"Status","options":[{"id":"O_todo","name":"Todo"},{"id":"O_progress","name":"In progress"},{"id":"O_ready","name":"Ready to implement"}]}]}},"labels":{"nodes":[{"id":"L_todo","name":"Todo"},{"id":"L_ready","name":"ready-for-agent"}]},"issue":{"id":"E2E-1","number":1,"labels":{"nodes":[{"id":"L_todo","name":"Todo"}]},"projectItems":{"nodes":[{"id":"PVT_item","project":{"id":"P_configured"},"fieldValues":{"nodes":[{"name":"In progress","field":{"id":"F_status","name":"Status"}}]}}]}}}}}
+{"data":{"repository":{"projectV2":{"id":"P_configured","fields":{"nodes":[{"id":"F_status","name":"Status","options":[{"id":"O_todo","name":"Todo"},{"id":"O_progress","name":"In progress"},{"id":"O_ready","name":"Ready to implement"}]}]}},"labels":{"nodes":[{"id":"L_todo","name":"Todo"},{"id":"L_ready","name":"ready-for-agent"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"issue":{"id":"E2E-1","number":1,"labels":{"nodes":[{"id":"L_todo","name":"Todo"}]},"projectItems":{"nodes":[{"id":"PVT_item","project":{"id":"P_configured"},"fieldValues":{"nodes":[{"name":"In progress","field":{"id":"F_status","name":"Status"}}]}}]}}}}}
 JSON
     ;;
 esac
