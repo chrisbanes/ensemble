@@ -302,6 +302,7 @@ mod tests {
                 result: "succeeded".to_string(),
                 summary: Some("looks good".to_string()),
                 output: Some(json!({"risk":"low"})),
+                output_json: Some(r#"{"risk":"low"}"#.to_string()),
                 artifact_snapshot: None,
             },
         );
@@ -312,7 +313,7 @@ mod tests {
         };
 
         let rendered = render_prompt_with_context(
-            "{{ steps[\"review-a\"].summary }} / {{ dependency_outputs[0].output.risk }}",
+            "{{ steps[\"review-a\"].summary }} / {{ dependency_outputs[0].output.risk }} / {{ dependency_outputs[0].output_json }}",
             &test_issue(),
             None,
             None,
@@ -320,7 +321,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered, "looks good / low");
+        assert_eq!(rendered, r#"looks good / low / {"risk":"low"}"#);
     }
 
     #[test]

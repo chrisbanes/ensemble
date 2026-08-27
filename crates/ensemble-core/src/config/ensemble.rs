@@ -752,6 +752,17 @@ pub struct RouteSource {
 pub struct RouteConfig {
     pub source: RouteSource,
     pub cases: BTreeMap<String, Vec<String>>,
+    /// Optional terminal-state override for a successfully selected case.
+    /// Values are opaque tracker state identifiers resolved by the adapter.
+    #[serde(default)]
+    pub terminals: BTreeMap<String, RouteTerminalConfig>,
+}
+
+/// Opaque terminal state selected by one route case.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteTerminalConfig {
+    pub state: String,
 }
 
 /// Immutable upstream Artifact and tracker-event evidence required before one
@@ -2831,6 +2842,23 @@ fn validate_route_configs(
     steps: &[StepConfig],
     dag: &crate::pipeline::dag::StepDag,
 ) -> Result<(), PipelineError> {
+    let terminal_bearing_routes = steps
+        .iter()
+        .filter(|step| {
+            step.kind == StepKind::Route
+                && step
+                    .route
+                    .as_ref()
+                    .is_some_and(|route| !route.terminals.is_empty())
+        })
+        .count();
+    if terminal_bearing_routes > 1 {
+        return Err(PipelineError::InvalidStepConfig {
+            step: "routes".to_string(),
+            reason: "a pipeline may declare terminal mappings on at most one route step"
+                .to_string(),
+        });
+    }
     for route in steps.iter().filter(|step| step.kind == StepKind::Route) {
         let invalid = |reason: String| PipelineError::InvalidStepConfig {
             step: route.name.clone(),
@@ -2909,6 +2937,18 @@ fn validate_route_configs(
             return Err(invalid(
                 "route cases must exactly exhaust the source string enum".to_string(),
             ));
+        }
+        for (case, terminal) in &config.terminals {
+            if !config.cases.contains_key(case) {
+                return Err(invalid(format!(
+                    "route terminal mapping references unknown case '{case}'"
+                )));
+            }
+            if terminal.state.trim().is_empty() {
+                return Err(invalid(format!(
+                    "route terminal mapping for case '{case}' requires a non-blank state"
+                )));
+            }
         }
         let direct_successors = dag
             .steps
@@ -3271,6 +3311,7 @@ on_failure: Failed
                     ),
                     ("disagreement".to_string(), vec!["escalate".to_string()]),
                 ]),
+                terminals: BTreeMap::new(),
             }),
             actions: Vec::new(),
         };
@@ -3320,6 +3361,87 @@ on_failure: Failed
         assert!(
             matches!(validate_config(&config), Err(PipelineError::InvalidStepConfig { step, reason }) if step == "choose_review_path" && reason.contains("exactly exhaust"))
         );
+    }
+
+    #[test]
+    fn route_terminal_mapping_must_name_a_case_and_non_blank_state() {
+        let mut config = parse_config(minimal_yaml()).unwrap();
+        let mut compare = config.steps[0].clone();
+        compare.name = "compare".to_string();
+        compare.output_schema = Some(OutputSchemaConfig {
+            path: "decision.json".into(),
+            schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["decision"],
+                "properties": {"decision": {"type": "string", "enum": ["accept"]}}
+            })),
+        });
+        let mut route = compare.clone();
+        route.name = "choose".to_string();
+        route.kind = StepKind::Route;
+        route.agent.clear();
+        route.depends = Some(vec!["compare".to_string()]);
+        route.output_schema = None;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([("accept".to_string(), vec!["finish".to_string()])]),
+            terminals: BTreeMap::from([(
+                "unknown".to_string(),
+                RouteTerminalConfig {
+                    state: " ".to_string(),
+                },
+            )]),
+        });
+        let mut finish = compare.clone();
+        finish.name = "finish".to_string();
+        finish.depends = Some(vec!["choose".to_string()]);
+        finish.output_schema = None;
+        config.steps = vec![compare, route, finish];
+
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("route terminal")
+        ));
+
+        config.steps[1].route.as_mut().unwrap().terminals = BTreeMap::from([(
+            "accept".to_string(),
+            RouteTerminalConfig {
+                state: " ".to_string(),
+            },
+        )]);
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("non-blank")
+        ));
+
+        config.steps[1].route.as_mut().unwrap().terminals = BTreeMap::from([(
+            "accept".to_string(),
+            RouteTerminalConfig {
+                state: "Ready".to_string(),
+            },
+        )]);
+        assert!(validate_config(&config).is_ok());
+
+        let mut second_route = config.steps[1].clone();
+        second_route.name = "choose-again".to_string();
+        let mut second_finish = config.steps[2].clone();
+        second_finish.name = "finish-again".to_string();
+        second_finish.depends = Some(vec!["choose-again".to_string()]);
+        second_route
+            .route
+            .as_mut()
+            .unwrap()
+            .cases
+            .insert("accept".to_string(), vec!["finish-again".to_string()]);
+        config.steps.extend([second_route, second_finish]);
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("at most one route step")
+        ));
     }
 
     #[test]
@@ -3403,6 +3525,7 @@ on_failure: Failed
                         ("agreement".to_string(), vec!["accept".to_string()]),
                         ("escalation".to_string(), vec!["escalate".to_string()]),
                     ]),
+                    terminals: BTreeMap::new(),
                 }),
                 actions: Vec::new(),
             },

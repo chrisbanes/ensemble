@@ -147,6 +147,20 @@ fn artifact_snapshot_capture_failure(error: impl std::fmt::Display) -> StepOutpu
     }
 }
 
+fn terminal_target_for_outcome(
+    config: &EnsembleConfig,
+    outcome: TerminalOutcome,
+    run: Option<&PipelineRun>,
+) -> String {
+    match outcome {
+        TerminalOutcome::Succeeded => run
+            .and_then(PipelineRun::selected_route_terminal)
+            .unwrap_or(&config.on_success)
+            .to_string(),
+        TerminalOutcome::Failed => config.on_failure.clone(),
+    }
+}
+
 fn worker_failure_output(error: String) -> StepOutput {
     StepOutput {
         result: StepResult::Failed {
@@ -2157,7 +2171,11 @@ impl Orchestrator {
                                 (
                                     Some(terminal_issue),
                                     Some(TerminalOutcome::Succeeded),
-                                    Some(config_snapshot.on_success.clone()),
+                                    Some(terminal_target_for_outcome(
+                                        &config_snapshot,
+                                        TerminalOutcome::Succeeded,
+                                        state.get_pipeline_run(&issue.id),
+                                    )),
                                     history_record,
                                 )
                             } else {
@@ -6243,7 +6261,11 @@ impl Orchestrator {
                                     FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
                                 ) {
                                     (
-                                        Some(config_snapshot.on_success.clone()),
+                                        Some(terminal_target_for_outcome(
+                                            &config_snapshot,
+                                            TerminalOutcome::Succeeded,
+                                            state.get_pipeline_run(issue_id),
+                                        )),
                                         Some(TerminalOutcome::Succeeded),
                                         terminal_issue,
                                         history_record,
@@ -10600,8 +10622,11 @@ impl Orchestrator {
             | FinalizeStatus::Failed => return,
         };
         let target_state = match outcome {
-            TerminalOutcome::Succeeded => config.on_success.clone(),
-            TerminalOutcome::Failed => config.on_failure.clone(),
+            TerminalOutcome::Succeeded => {
+                let state = self.state.read().await;
+                terminal_target_for_outcome(config, outcome, state.get_pipeline_run(issue_id))
+            }
+            TerminalOutcome::Failed => terminal_target_for_outcome(config, outcome, None),
         };
         let last_error = finalize_state
             .repos
@@ -11088,7 +11113,14 @@ impl Orchestrator {
                     return;
                 }
             };
-            let target_state = config_snapshot.on_success.clone();
+            let target_state = {
+                let state = self.state.read().await;
+                terminal_target_for_outcome(
+                    config_snapshot.as_ref(),
+                    outcome,
+                    state.get_pipeline_run(issue_id),
+                )
+            };
             if let Some(finalize_state) = self
                 .state
                 .read()
@@ -12254,7 +12286,11 @@ impl Orchestrator {
                             ) {
                                 (
                                     Some(TerminalOutcome::Succeeded),
-                                    Some(pipeline_config.on_success.clone()),
+                                    Some(terminal_target_for_outcome(
+                                        &pipeline_config,
+                                        TerminalOutcome::Succeeded,
+                                        state.get_pipeline_run(&issue.id),
+                                    )),
                                     history_record,
                                 )
                             } else {
@@ -25684,6 +25720,7 @@ agent:
                 ("accept".to_string(), vec!["accept".to_string()]),
                 ("reject".to_string(), vec!["reject".to_string()]),
             ]),
+            terminals: BTreeMap::new(),
         });
         for name in ["accept", "reject"] {
             let mut branch = config.steps[0].clone();

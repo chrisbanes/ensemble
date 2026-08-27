@@ -2397,6 +2397,7 @@ on_failure: Todo
                 result: "succeeded".to_string(),
                 summary: None,
                 output: Some(json!({"risk":"low"})),
+                output_json: Some(r#"{"risk":"low"}"#.to_string()),
                 artifact_snapshot: None,
             },
         );
@@ -2464,6 +2465,7 @@ on_failure: Todo
                     result: "succeeded".to_string(),
                     summary: Some("risk is low".to_string()),
                     output: Some(serde_json::json!({"risk": "low"})),
+                    output_json: Some(r#"{"risk":"low"}"#.to_string()),
                     artifact_snapshot: None,
                 },
             )]),
@@ -2472,6 +2474,7 @@ on_failure: Todo
                 result: "succeeded".to_string(),
                 summary: Some("risk is low".to_string()),
                 output: Some(serde_json::json!({"risk": "low"})),
+                output_json: Some(r#"{"risk":"low"}"#.to_string()),
                 artifact_snapshot: None,
             }],
             output_schema: None,

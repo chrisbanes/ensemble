@@ -975,6 +975,7 @@ mod tests {
                     pointer: "/decision".to_string(),
                 },
                 cases: std::collections::BTreeMap::new(),
+                terminals: std::collections::BTreeMap::new(),
             }),
             actions: Vec::new(),
         }])

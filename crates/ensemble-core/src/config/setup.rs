@@ -1637,6 +1637,7 @@ mod tests {
                             "agreement".to_string(),
                             vec!["publish".to_string()],
                         )]),
+                        terminals: BTreeMap::new(),
                     }),
                 },
             ],

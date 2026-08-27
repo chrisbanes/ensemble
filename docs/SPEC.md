@@ -645,8 +645,10 @@ There is no default-success result. A step must produce valid `StepOutput` throu
 
 Prompt templates for downstream steps receive:
 
-- `steps` — map of completed step name to `{ step, result, summary, output }`.
+- `steps` — map of completed step name to `{ step, result, summary, output, output_json }`.
 - `dependency_outputs` — ordered list of direct dependency outputs for the step being dispatched.
+  `output_json` is the exact compact JSON serialization of `output` for templates that must
+  materialize an immutable structured result without reconstructing it.
 
 #### 4.1.8 Run Attempt
 
@@ -1220,10 +1222,11 @@ Template input variables:
   - Integer on retry or continuation run.
 - `steps` (map of string to object, optional)
   - Present when upstream steps have completed. Each entry contains `step`, `result`, `summary`,
-    and `output` fields.
+    `output`, and `output_json` fields. `output_json` is the exact compact JSON serialization of
+    `output` when structured output exists.
 - `dependency_outputs` (list of objects, optional)
   - Ordered list of outputs from the step's direct dependencies. Each entry has the same shape as
-    `steps` entries: `{ step, result, summary, output }`.
+    `steps` entries: `{ step, result, summary, output, output_json }`.
 - `delivery_repair` (object, delivery-repair dispatches only)
   - Absent from ordinary pipeline steps.
   - Contains the frozen retained pull-request feedback snapshot:
