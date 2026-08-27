@@ -19721,6 +19721,149 @@ mod tests {
         drop(repo_temp);
     }
 
+    #[tokio::test]
+    async fn finalize_retry_reconstructs_the_route_terminal_before_delivery_persistence() {
+        let remote = Arc::new(FailOnceIdentityRemote {
+            inner: RecoveryDeliveryRemote {
+                pull_requests: std::sync::Mutex::new(Vec::new()),
+                pushes: AtomicUsize::new(0),
+                creates: AtomicUsize::new(0),
+                lists: AtomicUsize::new(0),
+            },
+            identity_failures: AtomicUsize::new(1),
+        });
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let mut initial_config = make_always_approval_route_config();
+        initial_config.steps[1]
+            .route
+            .as_mut()
+            .unwrap()
+            .terminals
+            .insert(
+                "accept".to_string(),
+                crate::config::ensemble::RouteTerminalConfig {
+                    state: "Route terminal".to_string(),
+                },
+            );
+        let config = Arc::new(RwLock::new(initial_config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        orchestrator.delivery_remote = remote.clone();
+        let (route_snapshot, route_run_id) = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            run.step_completed("build", succeeded_step_output(), false);
+            run.route_decisions.insert(
+                "choose".to_string(),
+                RouteDecisionEvidence {
+                    source_step: "build".to_string(),
+                    pointer: "/decision".to_string(),
+                    selected_case: "accept".to_string(),
+                    source_output_digest: "frozen-route-output".to_string(),
+                },
+            );
+            let route_snapshot = run.to_snapshot();
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            let route_run_id = state.running["1"].run_id.clone().unwrap();
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            (route_snapshot, route_run_id)
+        };
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepCompleted,
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some(route_run_id),
+                cycle: route_snapshot.cycle,
+                step: Some("choose".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(route_snapshot),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+        let config_snapshot = config.read().await.clone();
+        let finalize = orchestrator
+            .run_finalize_phase("1", "repo#1", &config_snapshot)
+            .await;
+        assert_eq!(finalize.status, FinalizeStatus::Failed);
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .finalize_terminal_history
+            .contains_key("1"));
+        {
+            let mut state = orchestrator.state.write().await;
+            state.remove_running("1");
+            state.remove_pipeline_run("1");
+            state.set_finalize_state("1", finalize);
+        }
+        config.write().await.on_success = "Drifted default".to_string();
+
+        orchestrator
+            .retry_finalize_delivery("1", "repo#1")
+            .await
+            .unwrap();
+        orchestrator.process_finalize_retries().await;
+
+        let delivery = orchestrator.state.read().await.delivery["1"].clone();
+        assert_eq!(delivery.success_state.as_deref(), Some("Route terminal"));
+        assert_eq!(delivery.failure_state.as_deref(), Some("Failed"));
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        drop(delivery);
+
+        let finalize = IssueFinalizeState {
+            issue_identifier: "repo#1".to_string(),
+            status: FinalizeStatus::NotRequired,
+            repos: Vec::new(),
+        };
+        let config_after_drift = config.read().await.clone();
+        orchestrator
+            .stage_finalization_terminal_transition("1", "repo#1", &config_after_drift, &finalize)
+            .await;
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.terminal_transition.unwrap().target_state,
+            "Route terminal"
+        );
+
+        drop(repo_temp);
+    }
+
     fn post_finalize_acceptance_snapshot(
         rule_names: &[&str],
         results: Vec<crate::acceptance::AcceptanceResult>,

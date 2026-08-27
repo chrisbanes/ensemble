@@ -5347,21 +5347,22 @@ impl Orchestrator {
         workspace: &crate::workspace::manager::WorkspaceResult,
         repository_keys: &[String],
     ) -> Result<(DeliveryRecord, Option<PipelineRunSnapshot>), String> {
-        let (run_id, snapshot, terminal_history, delivery_repair_capacity, route_success_state) = {
+        let (
+            live_run_id,
+            live_snapshot,
+            terminal_history,
+            live_pipeline_config,
+            live_delivery_repair_capacity,
+        ) = {
             let state = self.state.read().await;
             let run_id = state
                 .running
                 .get(issue_id)
                 .and_then(|entry| entry.run_id.clone())
-                .or_else(|| state.issue_run_ids.get(issue_id).cloned())
-                .ok_or_else(|| "delivery requires a stable run ID".to_string())?;
+                .or_else(|| state.issue_run_ids.get(issue_id).cloned());
             let snapshot = state
                 .get_pipeline_run(issue_id)
                 .map(PipelineRun::to_snapshot);
-            let route_success_state = state
-                .get_pipeline_run(issue_id)
-                .and_then(PipelineRun::selected_route_terminal)
-                .map(str::to_string);
             let terminal_history = self
                 .build_owned_history_record(
                     &state,
@@ -5371,28 +5372,63 @@ impl Orchestrator {
                     Utc::now(),
                 )
                 .or_else(|| state.finalize_terminal_history.get(issue_id).cloned());
-            let delivery_repair_capacity = snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.selected_workflow.as_ref())
-                .map(|selected| DeliveryRepairCapacity::Lane {
-                    lane: selected.lane.clone(),
-                })
-                .or_else(|| {
-                    state
-                        .running
-                        .get(issue_id)
-                        .map(|running| DeliveryRepairCapacity::State {
-                            state: running.issue.state.clone(),
-                        })
-                });
+            let delivery_repair_capacity =
+                state
+                    .running
+                    .get(issue_id)
+                    .map(|running| DeliveryRepairCapacity::State {
+                        state: running.issue.state.clone(),
+                    });
             (
                 run_id,
                 snapshot,
                 terminal_history,
+                state.get_pipeline_config(issue_id).cloned(),
                 delivery_repair_capacity,
-                route_success_state,
             )
         };
+        // A pre-persistence delivery failure can remove the in-memory run before an explicit
+        // retry. Recover the last durable owner snapshot instead of falling back to changed
+        // runtime config or losing the route terminal selected by that snapshot.
+        let durable_record = if live_snapshot.is_none() {
+            self.pipeline_journal
+                .latest_live_record_for_issue(issue_id)
+                .await
+                .map_err(|error| format!("failed to recover delivery snapshot: {error}"))?
+        } else {
+            None
+        };
+        let run_id = live_run_id
+            .or_else(|| {
+                durable_record
+                    .as_ref()
+                    .and_then(|record| record.run_id.clone())
+            })
+            .ok_or_else(|| "delivery requires a stable run ID".to_string())?;
+        if durable_record
+            .as_ref()
+            .and_then(|record| record.run_id.as_deref())
+            .is_some_and(|durable_run_id| durable_run_id != run_id)
+        {
+            return Err("durable delivery snapshot belongs to a different run".to_string());
+        }
+        let snapshot = live_snapshot.or_else(|| durable_record.and_then(|record| record.snapshot));
+        let route_success_state = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                PipelineRun::from_snapshot(snapshot.clone())
+                    .map(|run| run.selected_route_terminal().map(str::to_string))
+            })
+            .transpose()
+            .map_err(|error| format!("failed to recover delivery route terminal: {error}"))?
+            .flatten();
+        let delivery_repair_capacity = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.selected_workflow.as_ref())
+            .map(|selected| DeliveryRepairCapacity::Lane {
+                lane: selected.lane.clone(),
+            })
+            .or(live_delivery_repair_capacity);
         let configured_repositories = self.workspace_mgr.repos();
         let mut repositories = std::collections::BTreeMap::new();
         for repository_key in repository_keys {
@@ -5435,20 +5471,19 @@ impl Orchestrator {
                 },
             );
         }
-        let (delivery_states, delivery_repair, success_state, failure_state) = {
-            let state = self.state.read().await;
-            state
-                .get_pipeline_config(issue_id)
-                .map(|config| {
-                    (
-                        config.delivery_states.clone(),
-                        config.delivery_repair.clone(),
-                        config.on_success.clone(),
-                        config.on_failure.clone(),
-                    )
-                })
-                .unwrap_or_default()
+        let pipeline_config = match live_pipeline_config {
+            Some(config) => config,
+            None => self
+                .current_config_for_snapshot(snapshot.as_ref())
+                .await
+                .map_err(|error| format!("failed to recover selected delivery config: {error}"))?,
         };
+        let (delivery_states, delivery_repair, success_state, failure_state) = (
+            pipeline_config.delivery_states.clone(),
+            pipeline_config.delivery_repair.clone(),
+            pipeline_config.on_success.clone(),
+            pipeline_config.on_failure.clone(),
+        );
         Ok((
             DeliveryRecord {
                 issue_id: issue_id.to_string(),
