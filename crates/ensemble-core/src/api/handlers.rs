@@ -160,7 +160,7 @@ pub async fn get_issue_detail(
             }
         }
         if let Err(response) = enrich_issue_attention(&state, exposure, &mut detail).await {
-            return response;
+            return *response;
         }
         return (StatusCode::OK, Json(detail)).into_response();
     }
@@ -186,7 +186,7 @@ pub async fn get_issue_detail(
     match detail {
         Some(mut detail) => {
             if let Err(response) = enrich_issue_attention(&state, exposure, &mut detail).await {
-                return response;
+                return *response;
             }
             (StatusCode::OK, Json(detail)).into_response()
         }
@@ -207,20 +207,22 @@ async fn enrich_issue_attention(
     state: &AppState,
     exposure: ApiExposure,
     detail: &mut IssueDetailSnapshot,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     if exposure == ApiExposure::UnsafeRemote {
         return Ok(());
     }
     let Some(store) = state.history_store.as_ref() else {
-        return Err(attention_history_unavailable(
+        return Err(Box::new(attention_history_unavailable(
             "attention history store is unavailable",
-        ));
+        )));
     };
     detail.attention_items = store
         .read_open_attention_for_subject(&detail.issue_identifier)
         .await
         .map_err(|error| {
-            attention_history_unavailable(format!("failed to read attention history: {error}"))
+            Box::new(attention_history_unavailable(format!(
+                "failed to read attention history: {error}"
+            )))
         })?;
     Ok(())
 }
