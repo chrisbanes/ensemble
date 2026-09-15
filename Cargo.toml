@@ -47,7 +47,7 @@ shellexpand = "3.1.2"
 mime_guess = "2.0.5"
 opener = "0.8.5"
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
-agent-client-protocol = "2.0.0"
+agent-client-protocol = "2.1.0"
 notify = "8.2.0"
 pulldown-cmark = "0.13.4"
 shell-words = "1.1.1"
