@@ -37,7 +37,7 @@ futures-util = "0.3.34"
 async-stream = "0.3.6"
 tower-http = { version = "0.7.1", features = ["cors", "fs"] }
 tower = "0.5.3"
-clap = { version = "4.6.6", features = ["derive", "env"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 inquire = "0.9.4"
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 rust-embed = { version = "8.12.0", features = ["axum"] }
