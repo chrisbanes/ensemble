@@ -92,7 +92,7 @@ CI will run these checks on your PR; failures block merge.
 ## CI
 
 GitHub Actions runs on push to `main` and all PRs. A dedicated MSRV job uses Rust 1.95.0 to
-check all workspace targets. Main, normal, frontend, and desktop jobs use the pinned Rust 1.97.0
+check all workspace targets. Main, normal, frontend, and desktop jobs use the pinned Rust 1.98.1
 toolchain from `rust-toolchain.toml`. The main CI job runs format, clippy, default non-desktop
 Rust tests, the feature-enabled product E2E test, and a CLI `web-ui` feature check. Frontend and
 desktop jobs run separately. All must pass. Primary jobs use `RUSTFLAGS=-Dwarnings` — treat
@@ -122,7 +122,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 
 - **Compatibility policy**: Do not preserve backwards compatibility unless it is explicitly requested for the change. When choosing between compatibility and a better long-term design, prefer the option that is cleaner, more scalable, and easier to maintain, even if it requires more work upfront.
 - **Rust 2021 edition**, minimum rust-version 1.95; normal development and primary CI use the exact
-  Rust 1.97.0 toolchain pinned in `rust-toolchain.toml`; the dedicated MSRV compatibility job uses
+  Rust 1.98.1 toolchain pinned in `rust-toolchain.toml`; the dedicated MSRV compatibility job uses
   Rust 1.95.0.
 - **Async traits**: The codebase currently uses the `async-trait` crate/macro. Follow the existing pattern in the surrounding module; prefer native `async fn` in traits only where it fits the existing interface and compatibility requirements.
 - **Error handling**: `thiserror` enums (`EnsembleError`, `ConfigError`, `WorkspaceError`, `TrackerError`). Use `?` propagation, not `.unwrap()` in library code. Tests may unwrap. Return `anyhow::Result<()>` from executable `main` functions to avoid manual `process::exit` boilerplate.

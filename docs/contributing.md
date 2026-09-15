@@ -3,7 +3,7 @@
 ## Build and test
 
 Ensemble is a Rust workspace. The minimum supported Rust version (MSRV) is Rust 1.95.
-Normal development and primary CI use the exact Rust 1.97.0 toolchain pinned in
+Normal development and primary CI use the exact Rust 1.98.1 toolchain pinned in
 [`rust-toolchain.toml`](../rust-toolchain.toml); Rustup selects it automatically. The dedicated
 MSRV compatibility job uses Rust 1.95.0.
 
@@ -215,7 +215,7 @@ ensemble/
 ## CI
 
 GitHub Actions runs on push to `main` and all PRs. A dedicated MSRV job uses Rust 1.95.0 to
-check all workspace targets. Main, normal, frontend, and desktop jobs use the pinned Rust 1.97.0
+check all workspace targets. Main, normal, frontend, and desktop jobs use the pinned Rust 1.98.1
 toolchain from `rust-toolchain.toml`. The main CI job runs format, clippy, default non-desktop
 Rust tests, the feature-enabled product E2E test, and a CLI `web-ui` feature check. Frontend and
 desktop jobs run separately. All must pass. Primary jobs use `RUSTFLAGS=-Dwarnings`; the MSRV job

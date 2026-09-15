@@ -1219,14 +1219,14 @@ impl DeliveryRemote for CliDeliveryRemote {
         } = request;
         let (owner, name) = match github_repository_identity(repository_path, remote).await {
             Ok(repository) => repository,
-            Err(read) => return read,
+            Err(read) => return *read,
         };
         let arguments =
             delivery_observation_arguments(&owner, &name, pull_request_number, base_branch);
         let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         let stdout = match observation_command_stdout(repository_path, &argument_refs).await {
             Ok(stdout) => stdout,
-            Err(read) => return read,
+            Err(read) => return *read,
         };
         let response: serde_json::Value = match serde_json::from_str(&stdout) {
             Ok(value) => value,
@@ -1377,7 +1377,7 @@ impl DeliveryRemote for CliDeliveryRemote {
         let comparison_stdout =
             match observation_command_stdout(repository_path, &comparison_arguments).await {
                 Ok(stdout) => stdout,
-                Err(read) => return read,
+                Err(read) => return *read,
             };
         let comparison: serde_json::Value = match serde_json::from_str(&comparison_stdout) {
             Ok(value) => value,
@@ -1412,7 +1412,7 @@ impl DeliveryRemote for CliDeliveryRemote {
                 let rules_stdout =
                     match observation_command_stdout(repository_path, &rules_arguments).await {
                         Ok(stdout) => stdout,
-                        Err(read) => return read,
+                        Err(read) => return *read,
                     };
                 let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
                     Ok(value) => value,
@@ -1433,7 +1433,7 @@ impl DeliveryRemote for CliDeliveryRemote {
                 .await
                 {
                     Ok(stdout) => stdout,
-                    Err(read) => return read,
+                    Err(read) => return *read,
                 };
                 let protection = match protection_stdout {
                     Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
@@ -2070,13 +2070,15 @@ fn complete_connection_nodes<'a>(
 async fn github_repository_identity(
     repository_path: &Path,
     remote: &str,
-) -> Result<(String, String), DeliveryObservationRead> {
+) -> Result<(String, String), Box<DeliveryObservationRead>> {
     let url = command_stdout(repository_path, "git", &["remote", "get-url", remote])
         .await
         .map_err(|_| {
-            DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
-                DeliveryObservationFailureKind::InvalidIdentity,
-                "delivery remote cannot identify its GitHub repository",
+            Box::new(DeliveryObservationRead::Terminal(
+                DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::InvalidIdentity,
+                    "delivery remote cannot identify its GitHub repository",
+                ),
             ))
         })?;
     let repository_path = url
@@ -2091,22 +2093,22 @@ async fn github_repository_identity(
         Some((owner, name)) if !owner.is_empty() && !name.is_empty() => {
             Ok((owner.to_string(), name.to_string()))
         }
-        _ => Err(DeliveryObservationRead::Terminal(
+        _ => Err(Box::new(DeliveryObservationRead::Terminal(
             DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::InvalidIdentity,
                 "delivery remote has no GitHub owner and repository name",
             ),
-        )),
+        ))),
     }
 }
 
 async fn observation_command_stdout(
     repository_path: &Path,
     arguments: &[&str],
-) -> Result<String, DeliveryObservationRead> {
+) -> Result<String, Box<DeliveryObservationRead>> {
     let output = run_delivery_command(repository_path, "gh", arguments)
         .await
-        .map_err(observation_command_error)?;
+        .map_err(|error| Box::new(observation_command_error(error)))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
@@ -2125,23 +2127,23 @@ async fn observation_command_stdout(
             "GitHub authorization failed while observing delivery",
         )
     } else {
-        return Err(DeliveryObservationRead::Retryable(
+        return Err(Box::new(DeliveryObservationRead::Retryable(
             DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::Transport,
                 "GitHub observation request failed",
             ),
-        ));
+        )));
     };
-    Err(DeliveryObservationRead::Terminal(failure))
+    Err(Box::new(DeliveryObservationRead::Terminal(failure)))
 }
 
 async fn optional_observation_command_stdout(
     repository_path: &Path,
     arguments: &[&str],
-) -> Result<Option<String>, DeliveryObservationRead> {
+) -> Result<Option<String>, Box<DeliveryObservationRead>> {
     let output = run_delivery_command(repository_path, "gh", arguments)
         .await
-        .map_err(observation_command_error)?;
+        .map_err(|error| Box::new(observation_command_error(error)))?;
     if output.status.success() {
         return Ok(Some(
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -2167,14 +2169,14 @@ async fn optional_observation_command_stdout(
             "GitHub authorization failed while observing delivery",
         )
     } else {
-        return Err(DeliveryObservationRead::Retryable(
+        return Err(Box::new(DeliveryObservationRead::Retryable(
             DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::Transport,
                 "GitHub observation request failed",
             ),
-        ));
+        )));
     };
-    Err(DeliveryObservationRead::Terminal(failure))
+    Err(Box::new(DeliveryObservationRead::Terminal(failure)))
 }
 
 fn is_unprotected_branch_response(stdout: &str) -> bool {
@@ -4978,7 +4980,7 @@ impl Orchestrator {
         }
         self.persist_delivery_candidate(&current, candidate, Some(snapshot))
             .await
-            .unwrap_or_else(|authoritative| authoritative)
+            .unwrap_or_else(|authoritative| *authoritative)
     }
     async fn advance_delivery_pull_request(
         &self,
@@ -4999,7 +5001,7 @@ impl Orchestrator {
                 .await
             {
                 Ok(persisted) => persisted,
-                Err(authoritative) => return (authoritative, false),
+                Err(authoritative) => return (*authoritative, false),
             };
         }
         let repository = delivery.repositories[repository_key].clone();
@@ -5050,7 +5052,7 @@ impl Orchestrator {
                 (
                     self.persist_delivery_candidate(&delivery, waiting, snapshot)
                         .await
-                        .unwrap_or_else(|authoritative| authoritative),
+                        .unwrap_or_else(|authoritative| *authoritative),
                     false,
                 )
             }
@@ -5066,7 +5068,7 @@ impl Orchestrator {
                     .await
                 {
                     Ok(persisted) => persisted,
-                    Err(authoritative) => return (authoritative, false),
+                    Err(authoritative) => return (*authoritative, false),
                 };
                 let result = self
                     .delivery_remote
@@ -5090,7 +5092,7 @@ impl Orchestrator {
                 let persisted = self
                     .persist_delivery_candidate(&delivery, after_create, snapshot)
                     .await
-                    .unwrap_or_else(|authoritative| authoritative);
+                    .unwrap_or_else(|authoritative| *authoritative);
                 let created =
                     persisted.repositories[repository_key].phase == DeliveryPhase::ReconcilingPr;
                 (persisted, created)
@@ -5142,7 +5144,7 @@ impl Orchestrator {
                 .await
             {
                 Ok(persisted) => persisted,
-                Err(authoritative) => return authoritative,
+                Err(authoritative) => return *authoritative,
             };
         }
         let repository = delivery.repositories[repository_key].clone();
@@ -5180,7 +5182,7 @@ impl Orchestrator {
                     .await
                 {
                     Ok(persisted) => persisted,
-                    Err(authoritative) => return authoritative,
+                    Err(authoritative) => return *authoritative,
                 };
                 let result = self
                     .delivery_remote
@@ -5203,7 +5205,7 @@ impl Orchestrator {
                 }
                 self.persist_delivery_candidate(&delivery, after_push, snapshot)
                     .await
-                    .unwrap_or_else(|authoritative| authoritative)
+                    .unwrap_or_else(|authoritative| *authoritative)
             }
             PushReconciliation::Advance => {
                 let mut advanced = delivery.clone();
@@ -5218,7 +5220,7 @@ impl Orchestrator {
                 };
                 self.persist_delivery_candidate(&delivery, advanced, snapshot)
                     .await
-                    .unwrap_or_else(|authoritative| authoritative)
+                    .unwrap_or_else(|authoritative| *authoritative)
             }
             PushReconciliation::Blocked { error } => {
                 self.block_delivery_repository(
@@ -5251,14 +5253,14 @@ impl Orchestrator {
         }
         self.persist_delivery_candidate(current, blocked, snapshot)
             .await
-            .unwrap_or_else(|authoritative| authoritative)
+            .unwrap_or_else(|authoritative| *authoritative)
     }
     async fn persist_delivery_candidate(
         &self,
         current: &DeliveryRecord,
         candidate: DeliveryRecord,
         snapshot: Option<&PipelineRunSnapshot>,
-    ) -> Result<DeliveryRecord, DeliveryRecord> {
+    ) -> Result<DeliveryRecord, Box<DeliveryRecord>> {
         match self.persist_delivery_record(&candidate, snapshot).await {
             Ok(()) => Ok(candidate),
             Err(error) => {
@@ -5267,7 +5269,7 @@ impl Orchestrator {
                     error = %error,
                     "failed to persist delivery transition; retaining the prior durable owner"
                 );
-                Err(current.clone())
+                Err(Box::new(current.clone()))
             }
         }
     }
