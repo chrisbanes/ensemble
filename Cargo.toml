@@ -41,7 +41,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 inquire = "0.9.4"
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 rust-embed = { version = "8.12.0", features = ["axum"] }
-dirs = "6"
+dirs = "7.0.0"
 dotenvy = "0.15.7"
 shellexpand = "3.1.2"
 mime_guess = "2.0.5"
