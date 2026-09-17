@@ -36,8 +36,8 @@ importers:
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.0(@types/node@25.9.7)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
       '@tanstack/react-query':
-        specifier: ^5.102.8
-        version: 5.102.8(react@19.3.0)
+        specifier: ^5.103.1
+        version: 5.103.1(react@19.3.0)
       '@uiw/react-codemirror':
         specifier: ^4.25.11
         version: 4.25.11(@babel/runtime@7.29.7)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/lint@6.9.7)(@codemirror/search@6.7.2)(@codemirror/state@6.7.5)(@codemirror/theme-one-dark@6.1.3)(@codemirror/view@6.43.12)(codemirror@6.0.2)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -107,7 +107,7 @@ importers:
         version: 30.0.1
       orval:
         specifier: ^8.33.0
-        version: 8.33.0(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(@tanstack/react-query@5.102.8(react@19.3.0))(typescript@7.0.2)(zod@3.25.76)
+        version: 8.33.0(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(@tanstack/react-query@5.103.1(react@19.3.0))(typescript@7.0.2)(zod@3.25.76)
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -1272,11 +1272,11 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@tanstack/query-core@5.102.8':
-    resolution: {integrity: sha512-ZNjkJ33CqvPNec/6lZBnHqLc3EVGPZ9ySLhYahU9TcuRFdmwXewuj0c4hwSWcGHqEUwcSrKeZ+oGcvPBqXcQcg==}
+  '@tanstack/query-core@5.103.1':
+    resolution: {integrity: sha512-rms8HqTGp6zA00dM+cUQ2eBcgzNJefuu5CAMB37i/6MiGT1zulPOytCFu2a0qjLqVR2n1jENPj9woqFQNuCzWA==}
 
-  '@tanstack/react-query@5.102.8':
-    resolution: {integrity: sha512-TYBea4OuXWD7MhaSHq069TWbFe7rcwWN6kzT7JF0OKi1K6c1gTv2IzD6A6ExJsCMozdkqBWeuIUZmu4KQg0O5A==}
+  '@tanstack/react-query@5.103.1':
+    resolution: {integrity: sha512-rmAPPApNEK17VXRJhtE1rja53n23VV5w30C0saCgJhhX+EpdUnVqMGV/s5nnzV43X75KTHKzuoiuxSzGTBIkag==}
     peerDependencies:
       react: ^18 || ^19
 
@@ -4250,13 +4250,13 @@ snapshots:
       - supports-color
       - typescript
 
-  '@orval/query@8.33.0(@tanstack/react-query@5.102.8(react@19.3.0))(typescript@7.0.2)':
+  '@orval/query@8.33.0(@tanstack/react-query@5.103.1(react@19.3.0))(typescript@7.0.2)':
     dependencies:
       '@orval/core': 8.33.0(typescript@7.0.2)
       '@orval/fetch': 8.33.0(typescript@7.0.2)
       remeda: 2.50.0
     optionalDependencies:
-      '@tanstack/react-query': 5.102.8(react@19.3.0)
+      '@tanstack/react-query': 5.103.1(react@19.3.0)
     transitivePeerDependencies:
       - '@faker-js/faker'
       - supports-color
@@ -4772,11 +4772,11 @@ snapshots:
       tailwindcss: 4.3.3
       vite: 8.3.0(@types/node@25.9.7)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)
 
-  '@tanstack/query-core@5.102.8': {}
+  '@tanstack/query-core@5.103.1': {}
 
-  '@tanstack/react-query@5.102.8(react@19.3.0)':
+  '@tanstack/react-query@5.103.1(react@19.3.0)':
     dependencies:
-      '@tanstack/query-core': 5.102.8
+      '@tanstack/query-core': 5.103.1
       react: 19.3.0
 
   '@testing-library/dom@10.4.2':
@@ -6353,7 +6353,7 @@ snapshots:
       string-width: 7.2.0
       strip-ansi: 7.2.0
 
-  orval@8.33.0(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(@tanstack/react-query@5.102.8(react@19.3.0))(typescript@7.0.2)(zod@3.25.76):
+  orval@8.33.0(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(@tanstack/react-query@5.103.1(react@19.3.0))(typescript@7.0.2)(zod@3.25.76):
     dependencies:
       '@commander-js/extra-typings': 15.0.0(commander@15.0.0)
       '@orval/angular': 8.33.0(typescript@7.0.2)
@@ -6365,7 +6365,7 @@ snapshots:
       '@orval/mcp': 8.33.0(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(typescript@7.0.2)(zod@3.25.76)
       '@orval/mock': 8.33.0(typescript@7.0.2)
       '@orval/pinia-colada': 8.33.0(typescript@7.0.2)
-      '@orval/query': 8.33.0(@tanstack/react-query@5.102.8(react@19.3.0))(typescript@7.0.2)
+      '@orval/query': 8.33.0(@tanstack/react-query@5.103.1(react@19.3.0))(typescript@7.0.2)
       '@orval/solid-start': 8.33.0(typescript@7.0.2)
       '@orval/swr': 8.33.0(typescript@7.0.2)
       '@orval/zod': 8.33.0(typescript@7.0.2)(zod@3.25.76)
