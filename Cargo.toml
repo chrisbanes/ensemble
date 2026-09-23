@@ -39,7 +39,7 @@ tower-http = { version = "0.7.1", features = ["cors", "fs"] }
 tower = "0.5.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 inquire = "0.9.4"
-utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
+utoipa = { version = "6.0.0", features = ["axum_extras", "chrono"] }
 rust-embed = { version = "8.12.0", features = ["axum"] }
 dirs = "6"
 dotenvy = "0.15.7"
