@@ -1,42 +1,19 @@
 name: CI
-
 on:
   push:
-    branches: [main, cb/agent-coordination]
+    branches: [main]
   pull_request:
-    branches: [main, cb/agent-coordination]
-
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
-
 jobs:
-  ci:
-    name: Check, Test, Clippy, Format
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Build
-        run: cargo build --locked
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test --locked
-
-  msrv:
-    name: MSRV (Rust 1.95.0)
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Check minimum supported Rust version
-        run: cargo +1.95.0 check --all-targets --locked
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm install --global npm@11.19.1
+      - run: npm ci
+      - run: npm run check

@@ -1,52 +1,74 @@
 # Ensemble
 
-Ensemble is being rebuilt as a persistent service that coordinates agents across
-issue tracker boards. Agent instructions determine how work proceeds; Ensemble
-will own durable coordination, execution, permissions, and recovery.
+Ensemble is being built as a BB plugin for agents working on project-scoped tasks.
+Agent instructions determine the process. Ensemble owns tasks, assignments, and
+durable coordination; BB supplies conversations, agent execution, and workspaces.
+Taskboard informs the UI design; Ensemble is an independent implementation.
+
+## Planning checkpoint
+
+The prototype has established feasibility. Further product implementation is paused
+for review of the specification, technical design, automated acceptance plan, and
+dependency-ordered ticket drafts. The next handback is a complete tested flow, not
+a series of user-operated integration tests.
 
 ## Current status
 
-This branch contains the accepted design and a dependency-free Rust library
-scaffold. It does not yet run agents, connect trackers, or provide a dashboard.
+This branch contains a bounded TypeScript prototype using BB plugin SDK 0.5.9:
 
-The previous implementation is preserved on `cb/pipeline-implementation` at
-`272adb7`. The fresh implementation lives on `cb/agent-coordination`, retaining
-Git history. Existing pipeline configuration and persisted runs are not supported
-by the redesign. Finish or explicitly retire existing runs before an operational
-cutover.
+- Local task creation in one configured BB project.
+- One worker assignment per task, launched through the BB SDK.
+- Persisted launch intent, worker identity, and reported results in SQLite.
+- Reconciliation of uncertain launches without automatic duplicate dispatch.
+- Agent tools for creation, delegation, reporting, and reading assignments.
 
-## Design
+This is not an operational autonomous coordinator. There is no task panel,
+GitHub integration, automatic result delivery, project scheduler, or enforced
+project sandbox. Local-path installation and tool registration were verified on
+BB 0.43.4 with plugin SDK 0.5.9. The user reported successful live delegation
+after configuring Haze. Automated live-provider and restart evidence is still
+outstanding. Tests use real SQLite files with a fake execution host.
 
-- A board is a configured queue from one tracker, with its own lead, instructions,
-  and permissions. Multiple tracker kinds remain supported by the target design.
-- Board leads delegate to concurrent issue owners using operator-defined agent
-  profiles. Instructions determine planning, implementation, and review.
-- Ensemble records assignments, handoffs, pending work, and human interactions.
-  Each issue has one owning board across the service.
-- Events wake agents, with periodic reconciliation for missed changes. Work can
-  recover across conversations and service restarts.
-- Plugins connect trackers, agent runtimes, and tools. Permission enforcement
-  covers agents' actual access, including direct tool and shell use.
-- A shared dashboard supervises all boards. The initial deployment will place the
-  service and agents on one dedicated always-on host.
-
-See [the glossary](CONTEXT.md), [the architecture decision](docs/adr/0020-let-agent-instructions-direct-the-work-process.md),
-and [the fresh implementation decision](docs/adr/0021-start-a-fresh-implementation.md).
+The accepted target adds local tasks plus multiple external sources per project,
+project leads, task owners, concurrent delegation, durable handoffs, and a BB task
+panel. GitHub repository issues and GitHub Projects are the first external sources;
+Jira and Linear remain deferred.
 
 ## Development
 
-The existing Rust 1.98.1 toolchain pin and Rust 1.95 minimum are retained.
+Use Node **24.21.0** (`.node-version`) and npm **11.19.1**:
 
 ```sh
-cargo build --locked
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
-cargo fmt --all -- --check
+npm ci
+npm run check
 ```
 
-The scaffold has no behavioural tests yet. There are no release or deployment
-workflows on this branch.
+`check` runs strict type checking, lint, formatting checks, compilation, and tests.
+`npm run format` applies formatting. `npm run build` emits JavaScript into `dist/`;
+it does not package or install the plugin into BB. The BB manifest points to the
+TypeScript server entry for BB's plugin tooling.
+
+See [the prototype guide](docs/bb-prototype.md) for configuration, tools, failure
+handling, and the live experiment still required.
+
+## Design documents
+
+- [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): accepted architecture.
+- [Behavioural specification](docs/SPEC.md): target behaviour and open choices.
+- [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
+- [Acceptance plan](docs/acceptance.md): automated journeys and release gates.
+- [Delivery tickets](docs/delivery.md): review drafts with dependencies and acceptance IDs.
+- [Glossary](CONTEXT.md): canonical language.
+- [Agent workflows](docs/agents/): contribution conventions.
+
+## Previous implementation
+
+The Rust pipeline implementation is preserved on `cb/pipeline-implementation` at
+`272adb7`. This branch is `cb/agent-coordination`. Old configuration and persisted
+runs have no compatibility requirement; finish or explicitly retire existing runs
+before operational cutover.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). No Taskboard or BB implementation source has
+been copied into this repository; dependencies retain their own licenses.

@@ -1,9 +1,0 @@
-[package]
-name = "ensemble"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.95"
-license = "Apache-2.0"
-repository = "https://github.com/chrisbanes/ensemble"
-description = "Agent coordination across issue tracker boards"
-publish = false

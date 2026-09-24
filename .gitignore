@@ -1,8 +1,17 @@
-/target
 .DS_Store
 .worktrees/
 .superpowers/
+
+# Node.js and TypeScript
 node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Local environment configuration
 .env
 .env.*
 !.env.example
