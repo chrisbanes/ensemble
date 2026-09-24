@@ -1,16 +1,21 @@
 # Ensemble
 
-Ensemble orchestrates issue-driven, multi-agent software delivery while keeping runtime authority separate from trackers and agent sessions.
+Ensemble coordinates agents working across issue tracker boards. Agents decide
+how work proceeds; Ensemble owns durable coordination and execution.
 
 ## Language
 
-### Proposed agent coordination model
+**Tracker**:
+An external system that holds issues and their shared work records.
+_Avoid_: Board when referring to the source system
 
-These terms describe the direction under discussion in ADR-0020.
+**Issue**:
+A unit of work identified within a tracker, which may appear in multiple boards.
+_Avoid_: Assignment when referring to the tracker work item
 
 **Board**:
 A configured work queue from one tracker, with its own lead, instructions, and permissions.
-_Avoid_: Tracker when referring to a selected queue within a tracker
+_Avoid_: Tracker when referring to a selected queue
 
 **Board lead**:
 The agent responsible for selecting and delegating work across a board.
@@ -26,122 +31,4 @@ _Avoid_: Assignment when referring to a reusable agent configuration
 
 **Assignment**:
 A durable unit of delegated work within a board that can continue across agent conversations.
-_Avoid_: Step when referring to delegated work in the proposed coordination model
-
-### Current execution model
-
-**Issue**:
-A tracker-sourced unit of work normalized into Ensemble's tracker-independent model.
-_Avoid_: Ticket or task when referring to the normalized runtime model
-
-**Tracker**:
-An external source and projection surface for issues; it does not own Ensemble's runtime state.
-_Avoid_: Board, runtime
-
-**Pipeline**:
-The configured directed graph that defines which steps run and how their results control delivery.
-_Avoid_: Workflow when referring to the executable graph
-
-**Scheduler lane**:
-A named, configuration-defined live-worker capacity bucket shared by runs selected into that lane.
-_Avoid_: Tracker state, workflow role
-
-**Scheduler resource lease**:
-The exact live-agent reservation of declared resource units and normalized repository-relative paths.
-It is journaled with dispatch and released when the agent is no longer live.
-
-**Parked run**:
-A claimed run retained after configured automatic recovery is exhausted; it has no live-agent lease
-and is reported through durable operator attention until fresh evidence permits resumption.
-
-**Drain outcome**:
-The structured terminal result of bounded scheduler execution: success, waiting for human, or partial drain.
-
-**Step**:
-A named unit of agent or synthesis work within a pipeline.
-_Avoid_: Stage, phase
-
-**Route**:
-An agentless Step that selects one statically declared successor partition from a required string-enum Step output.
-_Avoid_: Dynamic graph, condition
-
-**Skipped**:
-A successful terminal Step state for work excluded by a Route. It has no agent attempt, Step output, transcript, or artifact.
-_Avoid_: Passed, failed
-
-**Run**:
-One issue's execution through a resolved pipeline.
-_Avoid_: Session when referring to issue-level execution
-
-**Attempt**:
-One execution of a step within a run; retrying creates another attempt without creating another issue.
-_Avoid_: Run, session
-
-**Step output**:
-The structured result by which a step reports success, failure, concern, summary, and downstream data.
-_Avoid_: Verdict
-
-**Post-output action**:
-A bounded configured effect resolved from one producer's schema-validated Step output and durably
-acknowledged before that producer can satisfy downstream dependencies.
-_Avoid_: Replan, workflow mode, command
-
-**Artifact snapshot**:
-An immutable identity for material exposed by one step to downstream evaluation, ensuring sibling evaluators assess the same subject.
-_Avoid_: Current workspace, live files
-
-**Assessment**:
-A structured judgment about whether an artifact snapshot satisfies declared criteria, distinct from whether the evaluating step completed successfully.
-_Avoid_: Step result, execution result
-
-**Interaction request**:
-A durable question, approval, or handoff that blocks a run or retained delivery until a human resolves it.
-_Avoid_: Prompt, comment
-
-**Action capability**:
-A server-derived snapshot-time statement of whether one named Mission Control operation is currently
-available. Disabled capabilities include an operator-facing reason; enabled capability does not
-reserve the operation, whose endpoint remains authoritative at execution time.
-_Avoid_: Client-side lifecycle inference, permission, reservation
-
-**Operator-attention item**:
-A durable, non-authoritative report from a producer that fresh evidence says a subject needs an operator.
-_Avoid_: Interaction request, action, command
-
-**Finalization**:
-The recoverable post-pipeline phase that performs configured repository publication, if any, before an issue is considered complete.
-_Avoid_: Completion, cleanup
-
-**Delivery**:
-The durable owner of configured repository publication after pipeline work and approval are complete. It preserves exact local and remote identity until publication is confirmed, waiting on a pull request, or blocked for operator recovery.
-_Avoid_: Worker, tracker state
-
-**Actionable delivery feedback**:
-A fresh delivery observation for the retained pull-request head that contains a terminal check failure, a change-request review body, or an unresolved non-outdated inline review thread and forms the input boundary for one repair attempt.
-_Avoid_: PR feedback, first failure signal, fix trigger
-
-**Delivery repair budget**:
-The configured cumulative number of feedback repair attempts available to one retained issue delivery until terminal completion or an explicit human reset.
-_Avoid_: Retry count, per-head attempts
-
-**Delivery repair attempt**:
-One agent execution against a frozen actionable-delivery-feedback snapshot and retained pull-request head. It consumes one delivery repair budget unit and may publish only while the remote head still matches its starting identity.
-_Avoid_: Pipeline retry, fix pass, feedback loop iteration
-
-**Delivery-state projection**:
-An optional configuration mapping from a durable delivery fact to an external tracker state. It reflects delivery without transferring runtime authority to the tracker.
-_Avoid_: Workflow state, delivery outcome
-
-**Claim**:
-Adapter-issued remote ownership evidence for one issue. It may supply an opaque workspace branch
-identity, but the orchestrator records it durably and remains the lifecycle authority.
-_Avoid_: Assignment, scheduler policy
-
-**Ownership conflict**:
-Bounded adapter evidence that an owner is foreign or ambiguous. It blocks admission or recovery
-without creating a competing run, workspace, or pull request.
-_Avoid_: Workflow branch, implicit adoption
-
-**Workspace**:
-The issue-owned filesystem area in which repository worktrees and run artifacts persist across steps and retries.
-_Avoid_: Checkout, repository
+_Avoid_: Step when referring to delegated work

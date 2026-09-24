@@ -1,8 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "required": ["outcome"],
-  "properties": {
-    "outcome": { "type": "string", "enum": ["revised_artifact", "operator_required"] }
-  }
-}

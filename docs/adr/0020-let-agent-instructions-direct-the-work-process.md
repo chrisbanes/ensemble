@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Let agent instructions direct the work process
@@ -13,8 +13,7 @@ tracker-independent direction of ADR-0003.
 
 Each board is a configured work queue from one tracker and has a lead that selects
 work and delegates to issue owners. Each issue owner coordinates its
-implementation and review, allowing multiple issues to
-progress concurrently. Persistent board permissions define which actions agents
+implementation and review, allowing multiple issues to progress concurrently. Persistent board permissions define which actions agents
 may take autonomously; Ensemble enforces those limits, and actions outside the
 granted permissions require explicit approval.
 
@@ -45,7 +44,7 @@ autonomously.
 
 ## Consequences for existing decisions
 
-This direction would supersede ADR-0005's configured DAG and strict step-output
+This direction supersedes ADR-0005's configured DAG and strict step-output
 model, and the pipeline composition mechanisms in ADR-0017, ADR-0018, and ADR-0019.
 It preserves ADR-0003's tracker independence and ADR-0008's durable human
 interactions, while replacing their dependence on pipeline execution where present.
@@ -59,5 +58,6 @@ and migration of existing runs require a subsequent implementation design. These
 details must support the selected coordination model without reintroducing a
 configured process graph. A dedicated host alone does not enforce agent permissions.
 
-This ADR records the proposed target architecture, not current implementation
-behaviour. Acceptance awaits confirmation of the completed design interview.
+This ADR records the accepted target architecture. The implementation is being
+rebuilt from a minimal scaffold; these capabilities are not yet implemented.
+The earlier ADRs referenced above remain on `cb/pipeline-implementation`.
