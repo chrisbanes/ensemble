@@ -80,20 +80,23 @@ runs in the isolated BB harness from T01 and adds its scenarios as it lands.
 
 ## T01 — Establish BB compatibility and automated integration harness
 
-**Unresolved dispatch boundary:** [isolated startup probe](bb-capabilities.md)
-shows that BB 0.43.4 releases queued work when its guard plugin fails to initialize.
-The hook-only approach fails; investigate Ensemble-owned pending work and its
-handoff to BB before concluding that an upstream change is required. Prove the
-startup contract before dependent execution work; other harness and design work
-can continue. The diagnostic probe is not the full T01 harness.
+**Unresolved dispatch boundary:** the [full isolated T01 harness](bb-capabilities.md)
+shows that BB 0.43.4 releases an accepted queued send when its wait-owning guard
+plugin fails to initialize. The Ensemble-owned SQLite alternative was exercised:
+an unsent intent survives restart, but it does not govern a message BB has already
+accepted into its queue. The tested public `threads.send({ mode: "start" })` can
+still return queued under a plugin wait. T01's startup/queued-dispatch gate remains
+failed; do not mark T01 or dependent execution work ready until this contract has
+a proved solution. Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
-Build an isolated, pinned BB installation with actual plugin loading, SQLite,
-temporary repositories, and a scripted provider. Prove public API support for
-spawn, rich execution configuration, lifecycle events, restart, message identity,
-plugin tools, human interactions, and environment retention. Record supported
-behaviour for SDK 0.5.9/BB 0.43.4 or select a tested replacement together.
+Build an isolated, version-checked BB installation with actual plugin loading,
+SQLite, temporary repositories, and a scripted provider. Prove public API support
+for spawn, rich execution configuration, lifecycle events, restart, message
+identity, plugin tools, human interactions, and environment retention. Record
+supported behaviour for the tested plugin SDK 0.5.24 package on BB 0.43.4's
+declared SDK 0.5.9 host compatibility, or select a tested replacement together.
 
 Done when one command starts the instance, loads a fixture plugin, exercises a
 scripted tool/result round trip, restarts BB, asserts persisted state, and cleans
