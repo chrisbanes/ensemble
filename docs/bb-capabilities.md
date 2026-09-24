@@ -2,12 +2,13 @@
 
 Date: 2026-09-24. Live harness runtime: installed **BB 0.43.4** with host SDK
 **0.5.9**, plugin SDK package **0.5.24**, Node **24.21.0**, macOS arm64. The
-plugin SDK package version is pinned independently of BB's declared host SDK
-compatibility version. The loaded plugin exercised SDK 0.5.24 successfully on
-this host. The installed BB package exposes version 0.43.4 but no source commit;
-the separate pinned source checkout below supplies the scripted provider only,
-and is not claimed as the build source for the installed app. These isolated
-observations do not prove the Ensemble product is ready.
+harness verifies SHA-256 digests of the installed BB runtime tree and plugin SDK
+package before launch, and requires the scripted-provider source checkout to be
+clean at its pinned commit. The loaded plugin exercised SDK 0.5.24 successfully
+on this host. The installed BB package exposes no source commit; the separate
+source checkout supplies the scripted provider only and is not claimed as the
+build source for the installed app. These isolated observations do not prove the
+Ensemble product is ready.
 
 ## Failed approach: startup guard releases queued work
 
@@ -127,16 +128,25 @@ node scripts/check-bb-integration.mjs "$BB_APP_PACKAGE" "$BB_SOURCE_CHECKOUT"
 ```
 
 The script checks installed BB package **0.43.4**, plugin SDK package **0.5.24**,
-and Node **24.21.0**. The actual host declares plugin SDK **0.5.9** compatibility;
+Node **24.21.0**, and macOS arm64. It hashes sorted relative file paths and bytes
+for the installed unpacked BB `node_modules` runtime tree (SHA-256
+`950d603f24546984352d533a54946c2d900abcaef01b9516105d602494d3df34`)
+and the plugin SDK package tree (SHA-256
+`03c336f1fa462e1288f4aaebfbd413512dc65782a402eff590aa84a280288bdf`).
+This pins the exact files used by this run; it does not establish their upstream
+build provenance. The actual host declares plugin SDK **0.5.9** compatibility;
 this fixture has been loaded and exercised with SDK package 0.5.24 on that host.
 The second path is a BB source checkout at
 `fdd3de3b19b97e6cd1ef7300cbb54711431249d3`; that revision pins only the source
-of BB's MIT-licensed scripted provider bridge, which the harness copies into a
-temporary fixture with its license. The installed app does not expose a source
-commit, so the harness does not infer that the app binary was built from this
-checkout. It imports no BB private SDK path, integration harness or server
-internals. A test-only recorder added to the copied provider captures the tool
-result delivered back to it.
+of BB's MIT-licensed scripted provider bridge. The harness rejects a dirty checkout
+before it copies the provider into a temporary fixture with its license. The
+installed app does not expose a source commit, so the harness does not infer
+that the app binary was built from this checkout. It imports no BB private SDK
+path, integration harness or server
+internals. Test-only instrumentation added to the copied provider captures the
+tool result delivered back to it and holds one busy turn until the fixture writes
+an explicit release file. The busy-queue probe therefore does not depend on a
+fixed delay or machine speed.
 
 The harness starts a fresh `BB_DATA_DIR`, temporary Git repository and managed
 worktree, separate loopback ports and an offline scripted provider. It uses BB's
@@ -172,7 +182,7 @@ Run `2026-09-24` on the runtime pair above, command exit **2**:
 | Restart and environment retention | **Passed** | BB restart preserved the thread environment id, tool count and an unsubmitted local SQLite intent. |
 | Ensemble-owned pending intent and healthy handoff | **Passed, bounded** | The local intent survived restart and public `threads.send({ mode: "auto" })` returned `sent` after healthy plugin load; exactly one tool effect followed. This proves the direct healthy handoff only, not a crash-safe transfer if BB accepts the send but its response is lost, or if the send becomes queued behind another plugin wait. |
 | Human interaction | **Passed** | Provider raised a public native user question; the fixture resolved it through public interaction APIs and the thread returned idle. |
-| Dispatch hook and core queue composition | **Passed, bounded** | A later Ensemble `reject` overrode an earlier plugin `wait` without persisting a new row. A paused/stopped gate rejected `queue-if-active` before core busy-queueing. A previously accepted plugin-waited or `thread-busy` row stayed queued with a failure reason while the gate was paused, then dispatched once after recheck on resume. |
+| Dispatch hook and core queue composition | **Passed, bounded** | A later Ensemble `reject` overrode an earlier plugin `wait` without persisting a new row. A paused/stopped gate rejected `queue-if-active` before core busy-queueing. A fixture-controlled release barrier held the source turn active until a `thread-busy` row was accepted and the gate paused. That row then stayed queued with a failure reason and dispatched once after recheck on resume. |
 | Public queue creation as a hold | **Not supported** | `threads.queuedMessages.create` on an idle conversation created a `thread-busy` row and immediately scheduled its dispatch. It does not provide a durable operator-controlled hold. |
 | Lost send response | **Partial** | The harness dropped a successful `threads.send` response for both an immediately sent message and a BB-accepted, plugin-waited queue row. After restart, a unique marker found exactly one public timeline row or queue row; queue recovery preserved its public queue id. The harness did not resend and observed exactly one tool effect after release. Zero or multiple matches stay `uncertain`; the SDK exposes no caller-supplied operation id or in-flight lookup, so this is safe bounded recovery, not general idempotency or stale-generation invalidation. |
 | Startup with BB-accepted queued work | **Failed capability; harness passed** | When the external wait owner failed but the Ensemble gate loaded paused, its `reject` kept the orphaned accepted row queued with a failure reason and no tool effect; resume dispatched once. When both Ensemble and the wait owner failed, BB cleared the plugin wait, emptied its public queue, and delivered the accepted prompt to the separately loaded provider. Public thread status read `idle`; the provider observed `turn/start`, but this run did not establish a completed turn/tool effect. A guard-unavailable dispatch attempt still crosses the policy boundary. |

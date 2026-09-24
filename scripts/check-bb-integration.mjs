@@ -1,13 +1,14 @@
 // Run the public plugin SDK against a disposable, pinned BB installation.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   copyFile,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -33,36 +34,91 @@ const EXPECTED_SCRIPTED_PROVIDER_REVISION =
 const EXPECTED_PLUGIN_SDK_PACKAGE_VERSION = "0.5.24";
 const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.9";
 const EXPECTED_NODE_VERSION = "24.21.0";
+const EXPECTED_BB_RUNTIME_SHA256 =
+  "950d603f24546984352d533a54946c2d900abcaef01b9516105d602494d3df34";
+const EXPECTED_PLUGIN_SDK_SHA256 =
+  "03c336f1fa462e1288f4aaebfbd413512dc65782a402eff590aa84a280288bdf";
 const PLUGIN_ID = "ensemble-t01-integration";
 const GUARD_ID = "ensemble-t01-startup-guard";
 const RUNTIME_ID = "ensemble-t01-scripted-runtime";
 const PROVIDER_ID = "ensemble-scripted";
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
+async function hashTree(directory) {
+  const hash = createHash("sha256");
+  async function visit(current, prefix) {
+    const entries = (await readdir(current, { withFileTypes: true })).sort(
+      (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    );
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await visit(fullPath, relative);
+      } else if (entry.isFile()) {
+        hash.update(relative);
+        hash.update("\0");
+        hash.update(await readFile(fullPath));
+        hash.update("\0");
+      } else {
+        throw new Error(`Unexpected entry in pinned artifact: ${relative}`);
+      }
+    }
+  }
+  await visit(directory, "");
+  return hash.digest("hex");
+}
+
 assert.equal(
   process.versions.node,
   EXPECTED_NODE_VERSION,
   "Run this harness with Node 24.21.0",
 );
+assert.equal(`${process.platform}-${process.arch}`, "darwin-arm64");
+assert.equal(path.basename(bbPackage), "bb-app");
 const installedBbVersion = JSON.parse(
   await readFile(path.join(bbPackage, "package.json"), "utf8"),
 ).version;
 assert.equal(installedBbVersion, EXPECTED_BB_VERSION);
+const bbRuntimeSha256 = await hashTree(path.dirname(bbPackage));
+assert.equal(
+  bbRuntimeSha256,
+  EXPECTED_BB_RUNTIME_SHA256,
+  "Installed BB runtime files differ from the tested artifact",
+);
+const pluginSdkPath = path.join(
+  repositoryRoot,
+  "node_modules/@get-bb/plugin-sdk",
+);
 const installedSdkVersion = JSON.parse(
-  await readFile(
-    path.join(repositoryRoot, "node_modules/@get-bb/plugin-sdk/package.json"),
-    "utf8",
-  ),
+  await readFile(path.join(pluginSdkPath, "package.json"), "utf8"),
 ).version;
 assert.equal(installedSdkVersion, EXPECTED_PLUGIN_SDK_PACKAGE_VERSION);
+const pluginSdkSha256 = await hashTree(pluginSdkPath);
+assert.equal(
+  pluginSdkSha256,
+  EXPECTED_PLUGIN_SDK_SHA256,
+  "Plugin SDK files differ from the tested package",
+);
 const scriptedProviderRevision = (
   await exec("git", ["-C", bbSource, "rev-parse", "HEAD"])
 ).stdout.trim();
 assert.equal(scriptedProviderRevision, EXPECTED_SCRIPTED_PROVIDER_REVISION);
+const sourceStatus = (
+  await exec("git", [
+    "-C",
+    bbSource,
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+  ])
+).stdout.trim();
+assert.equal(sourceStatus, "", "Pinned scripted provider source must be clean");
 
 const root = await mkdtemp(path.join(tmpdir(), "ensemble-bb-t01-"));
 const data = path.join(root, "data");
 const providerRecord = path.join(root, "provider-record.jsonl");
+const busyRelease = path.join(root, "release-busy-turn");
 const ensembleFailure = path.join(root, "fail-ensemble-startup");
 const waiterEnabled = path.join(root, "enable-startup-waiter");
 const launcher = path.join(bbPackage, "dist/bb-app.js");
@@ -73,6 +129,7 @@ const env = {
   BB_SERVER_BIND_HOST: "127.0.0.1",
   BB_TELEMETRY: "false",
   SCRIPTED_ECHO_RECORD_PATH: providerRecord,
+  T01_BUSY_RELEASE_PATH: busyRelease,
   T01_FAIL_ENSEMBLE_STARTUP: ensembleFailure,
 };
 
@@ -100,9 +157,11 @@ const evidence = {
   runtime: {
     node: process.versions.node,
     bb: installedBbVersion,
+    bbRuntimeSha256,
     hostPluginSdk: EXPECTED_HOST_PLUGIN_SDK_VERSION,
     scriptedProviderRevision,
     pluginSdkPackage: installedSdkVersion,
+    pluginSdkSha256,
     platform: `${process.platform}-${process.arch}`,
   },
   checks: {},
@@ -290,14 +349,28 @@ try {
   );
   const responseMarker =
     "  pendingReplies.delete(id);\n  const session = sessions.get(pending.threadId);";
+  const completionMarker = `  session.activeTurn.timer = setTimeout(() => {
+    completeTurn(session, "completed", responseText);
+    emitRecoveryHint(session.threadId, recoverKind);
+  }, delayMs);`;
+  const fsImportMarker = 'import { appendFileSync } from "node:fs";';
   assert.equal(
     providerBridgeSource.split(responseMarker).length - 1,
     1,
     "Pinned scripted provider response hook changed",
   );
-  await writeFile(
-    path.join(runtime, "src-provider-bridge.ts"),
-    providerBridgeSource.replace(
+  assert.equal(
+    providerBridgeSource.split(completionMarker).length - 1,
+    1,
+    "Pinned scripted provider completion hook changed",
+  );
+  assert.equal(providerBridgeSource.split(fsImportMarker).length - 1, 1);
+  const instrumentedProviderBridge = providerBridgeSource
+    .replace(
+      fsImportMarker,
+      'import { appendFileSync, existsSync } from "node:fs";',
+    )
+    .replace(
       responseMarker,
       `  pendingReplies.delete(id);
   if (pending.kind === "tool") {
@@ -308,7 +381,28 @@ try {
     });
   }
   const session = sessions.get(pending.threadId);`,
-    ),
+    )
+    .replace(
+      completionMarker,
+      `  const releasePath = process.env.T01_BUSY_RELEASE_PATH;
+  if (releasePath !== undefined && responseText.includes("t01_core_queue_source:")) {
+    const awaitRelease = () => {
+      if (session.activeTurn === null) return;
+      if (!existsSync(releasePath)) {
+        session.activeTurn.timer = setTimeout(awaitRelease, 25);
+        return;
+      }
+      completeTurn(session, "completed", responseText);
+      emitRecoveryHint(session.threadId, recoverKind);
+    };
+    awaitRelease();
+    return;
+  }
+${completionMarker}`,
+    );
+  await writeFile(
+    path.join(runtime, "src-provider-bridge.ts"),
+    instrumentedProviderBridge,
   );
   await copyFile(
     path.join(bbSource, "LICENSE"),
@@ -555,12 +649,12 @@ export default function startupGuard(bb) {
   const countBeforeCoreQueueGate = toolCallCount(await rpc("snapshot"));
   const delayedTurn = await rpc("sendAdmissionProbe", {
     threadId,
-    prompt: `t01_core_queue_source:${randomUUID()} delay:3000`,
+    prompt: `t01_core_queue_source:${randomUUID()}`,
   });
   assert.equal(delayedTurn.status, "accepted", JSON.stringify(delayedTurn));
   await until(
     async () => (await rpc("thread", { threadId })).status === "active",
-    "delayed core-queue source turn",
+    "held core-queue source turn",
   );
   await rpc("setDispatchGate", { mode: "paused" });
   const rejectedBeforeCoreQueue = await rpc("sendAdmissionProbe", {
@@ -593,9 +687,10 @@ export default function startupGuard(bb) {
     "thread-busy",
   );
   await rpc("setDispatchGate", { mode: "paused" });
+  await writeFile(busyRelease, "release held source turn");
   await until(
     async () => (await rpc("thread", { threadId })).status === "idle",
-    "delayed core-queue source turn to finish",
+    "released core-queue source turn to finish",
   );
   const rejectedCoreQueuedRow = await until(async () => {
     const rows = await rpc("queuedMessages", { threadId });
