@@ -623,6 +623,10 @@ export default function startupGuard(bb) {
     resumeDispatchedExactlyOnce: true,
   });
 
+  await until(
+    async () => (await rpc("thread", { threadId })).status === "idle",
+    "thread to become idle before public queue creation",
+  );
   const countBeforePublicQueueCreate = toolCallCount(await rpc("snapshot"));
   const manuallyCreated = await rpc("createQueuedMessage", {
     threadId,

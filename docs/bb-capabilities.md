@@ -20,17 +20,19 @@ restart, including when Ensemble cannot load. A hook-only implementation failed:
 4. BB restarted and reported the guard plugin in `error`.
 5. BB removed the wait and delivered the held message to the scripted provider.
 
-The full T01 harness reproduced the failure in a fresh instance: counter
-**3 → 4**, guard status **error**, queue **empty**, process exit **2**. Its
-`threads.send({ mode: "start" })` call returned `delivery: "queued"` under the
-guard's public `message.dispatch` wait. The run used `--keep` to retain its
-isolated database, provider log and launcher log for inspection; the launcher
-stopped in `finally`.
+The full T01 harness reproduced the unsafe boundary in a fresh instance: guard
+and Ensemble plugin status **error**, queue **empty**, provider-observed
+`turn/start`, and process exit **2**. Its `threads.send({ mode: "start" })` call
+returned `delivery: "queued"` under the guard's public `message.dispatch` wait.
+This run did not establish a completed turn or tool effect. The run used `--keep`
+to retain its isolated database, provider log and launcher log for inspection;
+the launcher stopped in `finally`.
 
-The first run confirmed the provider's recorded `turn/start` request and an empty
-queue. The server log explicitly reported that it was clearing the wait because
-its holding plugin was not going to run. The reproducible probe below uses a
-plugin SQLite counter incremented by a real provider tool call to detect execution.
+An earlier narrow guard-only diagnostic separately observed the plugin SQLite
+tool-call counter advance **1 → 2** after the guard failed startup. Its server log
+reported that BB cleared the wait because the holding plugin would not run. That
+diagnostic proves a completed tool effect in its own setup; it is not the full
+T01 harness.
 
 **Consequence:** a plugin dispatch hook that stores an accepted send as a BB
 queue wait cannot implement the accepted startup-failure guarantee on this
