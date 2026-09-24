@@ -23,9 +23,9 @@ restart, including when Ensemble cannot load. A hook-only implementation failed:
 The full T01 harness reproduced the failure in a fresh instance: counter
 **3 → 4**, guard status **error**, queue **empty**, process exit **2**. Its
 `threads.send({ mode: "start" })` call returned `delivery: "queued"` under the
-guard's public `message.dispatch` wait. Evidence directory:
-`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-bqtRb3`.
-The launcher stopped in `finally`; this run used `--keep` for its evidence.
+guard's public `message.dispatch` wait. The run used `--keep` to retain its
+isolated database, provider log and launcher log for inspection; the launcher
+stopped in `finally`.
 
 The first run confirmed the provider's recorded `turn/start` request and an empty
 queue. The server log explicitly reported that it was clearing the wait because
@@ -116,12 +116,12 @@ no newer stable runtime was available to qualify.
 
 ## Reproduce the T01 harness
 
-From the repository after `npm ci`, using Node 24.21.0:
+From the repository root after `npm ci`, with Node 24.21.0 active, set
+`BB_APP_PACKAGE` to the installed `bb-app` package directory and
+`BB_SOURCE_CHECKOUT` to a checkout at the pinned revision below:
 
 ```sh
-node scripts/check-bb-integration.mjs \
-  /Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app \
-  /private/tmp/ensemble-bb-review-20260924
+node scripts/check-bb-integration.mjs "$BB_APP_PACKAGE" "$BB_SOURCE_CHECKOUT"
 ```
 
 The script checks installed BB package **0.43.4**, plugin SDK package **0.5.24**,
@@ -149,12 +149,10 @@ not a successful gate. Exit code **1** means fixture/setup/assertion failure.
 Exit code **0** requires every mandatory gate in this harness to pass. The
 `check:bb` npm script is available for repeatable invocation with the two paths.
 
-The earlier, narrow diagnostic remains available:
+The earlier, narrow diagnostic remains available with the same variables:
 
 ```sh
-node scripts/check-bb-startup-guard.mjs \
-  /Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app \
-  /private/tmp/ensemble-bb-review-20260924
+node scripts/check-bb-startup-guard.mjs "$BB_APP_PACKAGE" "$BB_SOURCE_CHECKOUT"
 ```
 
 It checks only the fail-open guard scenario and is not a substitute for T01.
@@ -177,11 +175,9 @@ Run `2026-09-24` on the runtime pair above, command exit **2**:
 | Lost send response | **Partial** | The harness dropped a successful `threads.send` response for both an immediately sent message and a BB-accepted, plugin-waited queue row. After restart, a unique marker found exactly one public timeline row or queue row; queue recovery preserved its public queue id. The harness did not resend and observed exactly one tool effect after release. Zero or multiple matches stay `uncertain`; the SDK exposes no caller-supplied operation id or in-flight lookup, so this is safe bounded recovery, not general idempotency or stale-generation invalidation. |
 | Startup with BB-accepted queued work | **Failed capability; harness passed** | When the external wait owner failed but the Ensemble gate loaded paused, its `reject` kept the orphaned accepted row queued with a failure reason and no tool effect; resume dispatched once. When both Ensemble and the wait owner failed, BB cleared the plugin wait, emptied its public queue, and delivered the accepted prompt to the separately loaded provider. Public thread status read `idle`; the provider observed `turn/start`, but this run did not establish a completed turn/tool effect. A guard-unavailable dispatch attempt still crosses the policy boundary. |
 
-The follow-up run directory was
-`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-NVxkhU`.
-The JSON emitted by the command is the run's capability matrix; `--keep` also
-retains the disposable BB database, provider request log and launcher log for
-inspection. Without `--keep`, the harness cleans only its isolated resources.
+The JSON emitted by the command is the run's capability matrix. Pass `--keep`
+to retain the disposable BB database, provider request log and launcher log for
+inspection; without it, the harness cleans only its isolated resources.
 
 ## Other observed behaviour
 
@@ -197,9 +193,8 @@ SQLite driver, public CLI/RPC and scripted provider:
 | Instruction application | Warm follow-up retained its session; stop/resume reconstructed with the revised instruction contribution | Provider-specific context preservation and all profile settings still need coverage |
 | Failed-turn retry | Scripted failure reached error; explicit retry returned attempt 2 and failed again as scripted | Does not prove combined BB/Ensemble automatic retry accounting |
 
-Exploratory evidence is retained at
-`/private/tmp/ensemble-bb-capability-esiygkgq`, including bridge requests and
-phase result files. It is temporary evidence, not a committed runtime dependency.
+The exploratory bridge requests and phase results were retained only as local
+temporary evidence. They are not required to run the T01 harness.
 
 ## Seven proof gates
 
