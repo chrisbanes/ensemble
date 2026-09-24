@@ -1,198 +1,87 @@
 # Ensemble
 
-Ensemble is CI for autonomous coding agents. It turns issue-tracker work into repeatable, config-driven agent pipelines: poll for eligible tickets, create isolated workspaces, run named agents through explicit steps, collect structured results, and move tracker state at workflow boundaries.
+Ensemble is being built as a BB plugin for agents working on project-scoped tasks.
+Agent instructions determine the process. Ensemble owns tasks, assignments, and
+durable coordination; BB supplies conversations, agent execution, and workspaces.
+Taskboard informs the UI design; Ensemble is an independent implementation.
 
-## First-release boundary
+## Product model
 
-The supported first release is a trusted-local, unauthenticated service for one operator. It is
-ACPX-first and supports sequential pipelines as the stable execution path. Mission Control Phase 1
-and recoverable repository finalization are included: supported delivery ends when finalization
-creates a pull request and moves the work to review. A human owns pull-request review and merge.
+- **Projects and tasks:** local or imported work, ownership, delegation, results
+  and questions needing operator attention.
+- **Agent profiles:** reusable instructions and execution settings, selected for
+  leads and assignments; BB conversations carry out the work.
+- **GitHub sync:** optional issue/Project discovery, readiness and permitted
+  progress updates using the same task model.
 
-Parallel DAG syntax, remote or multi-user control, and live replacement of process-scoped workspace
-or repository resources are not supported first-release contracts. Restart Ensemble after changing
-the workspace root or repository set.
+The interface centers on projects and tasks. Persistent bot identities, personal
+bot state and a separate bot management UI are outside scope. Instructions guide
+how agents deliver work; Ensemble retains ownership and pending work.
 
-## How it works
+## Planning checkpoint
 
-Ensemble reads issues from a tracker (GitHub Projects/repository labels, Notion, or a local TODO file), creates a workspace directory for each one, and runs a pipeline of named agents against it. Each agent gets a prompt rendered from the issue context and previous step outputs. Ensemble runs a hidden extraction turn to collect a strict `StepOutput` (`succeeded`, `failed`, or `concern`) and uses the configured pipeline policy to continue, retry, or fail the issue. Failed issues retry with exponential backoff.
+The prototype has established feasibility. Further product implementation is paused
+for review of the specification, technical design, automated acceptance plan, and
+published delivery tickets. The next handback is a complete tested flow, not
+a series of user-operated integration tests.
 
-All behavior is configured in a `config.yaml` file that lives in a configuration directory (default: `~/.config/ensemble/` on Linux, `~/Library/Application Support/ensemble/` on macOS).
+## Current status
 
-## Install
+This branch contains a bounded TypeScript prototype using BB plugin SDK 0.5.9:
 
-Pushing a version tag runs the release workflow: it builds CLI archives for macOS arm64 and Linux
-x86_64/arm64, builds signed and notarized macOS desktop artifacts, creates a GitHub Release, and
-updates the Homebrew tap. Once a release is available:
+- Local task creation in one configured BB project.
+- One worker assignment per task, launched through the BB SDK.
+- Persisted launch intent, worker identity, and reported results in SQLite.
+- Reconciliation of uncertain launches without automatic duplicate dispatch.
+- Agent tools for creation, delegation, reporting, and reading assignments.
 
-```sh
-brew install ensemble
-```
+This is not an operational autonomous coordinator. There is no task panel,
+GitHub integration, automatic result delivery, project scheduler, or enforced
+project sandbox. Local-path installation and tool registration were verified on
+BB 0.43.4 with plugin SDK 0.5.9. The user reported successful live delegation
+after configuring Haze. Automated live-provider and restart evidence is still
+outstanding. Tests use real SQLite files with a fake execution host.
 
-Or build from source:
+The accepted target adds local tasks plus multiple external sources per project,
+project leads, task owners, concurrent delegation, durable handoffs, and a BB task
+panel. GitHub repository issues and GitHub Projects are the first external sources;
+Jira and Linear remain deferred.
 
-```sh
-git clone https://github.com/chrisbanes/ensemble.git
-cd ensemble
-cargo install --path crates/ensemble-cli
-```
+## Development
 
-Source installs are headless by default and include `ensemble init`, `ensemble run`, and
-`ensemble open-config-dir`. To include the embedded web dashboard, generate the frontend first and
-enable the `web-ui` feature:
-
-```sh
-cd crates/ensemble-ui/src-ui
-pnpm install --frozen-lockfile
-pnpm run codegen
-cd ../../..
-cargo install --path crates/ensemble-cli --features web-ui
-```
-
-## Quick start
-
-**1. Create a configuration directory:**
+Use Node **24.21.0** (`.node-version`) and npm **11.19.1**:
 
 ```sh
-ensemble init
+npm ci
+npm run check
 ```
 
-This walks you through setting up your tracker, agents, and pipeline. It creates a configuration directory containing:
-- `config.yaml` — main configuration file
-- `templates/` — prompt templates
-- `.env` — environment variables (auto-loaded)
-- `~/ensemble/TODO.md` — default TODO tracker state (if using todo_file)
+`check` runs strict type checking, lint, formatting checks, compilation, and tests.
+`npm run format` applies formatting. `npm run build` emits JavaScript into `dist/`;
+it does not package or install the plugin into BB. The BB manifest points to the
+TypeScript server entry for BB's plugin tooling.
 
-**2. Or write one by hand:**
+See [the prototype guide](docs/bb-prototype.md) for configuration, tools, failure
+handling, and the live experiment still required.
 
-Create a directory for your config (e.g., `~/.config/ensemble/`) and add a `config.yaml`:
+## Design documents
 
-```yaml
-tracker:
-  kind: todo_file
-  # path defaults to ~/ensemble/TODO.md if not specified
+- [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): accepted architecture.
+- [Behavioural specification](docs/SPEC.md): target behaviour and the [first local-task journey](docs/SPEC.md#first-local-task-journey).
+- [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
+- [Acceptance plan](docs/acceptance.md): automated journeys and release gates.
+- [Delivery tickets](docs/delivery.md): published issues with dependencies and acceptance IDs.
+- [Glossary](CONTEXT.md): canonical language.
+- [Agent workflows](docs/agents/): contribution conventions.
 
-agents:
-  builder:
-    acpx_agent: claude
-    prompt_template: templates/implement.liquid
+## Previous implementation
 
-steps:
-  - name: build
-    agent: builder
-
-on_success: Done
-on_failure: Failed
-```
-
-**3. Run:**
-
-```sh
-ensemble run
-```
-
-Ensemble polls the tracker, picks up eligible issues, and runs them through the pipeline.
-
-To also start the web dashboard:
-
-```sh
-ensemble web --port 3000
-```
-
-The `web` subcommand is available in release builds and source builds installed with
-`--features web-ui`.
-
-Then open `http://localhost:3000` in your browser.
-
-### Mission Control keyboard shortcuts
-
-Mission Control keeps its pointer and touch controls available while also supporting these
-non-destructive keyboard shortcuts outside editable controls:
-
-| Shortcut | Action |
-| --- | --- |
-| `/` | Focus issue search |
-| `j` / `k` | Select the next / previous issue in the visible view order (board columns left-to-right, then top-to-bottom) |
-| `Esc` | Close the selected issue panel |
-| `r` | Focus the rendered reply field |
-| `b` / `l` | Show Board / List |
-| `a` | Toggle Attention only |
-| `Shift` + `R` | Refresh Mission Control |
-| `?` | Show the in-product shortcut reference |
-
-`Esc` only closes a selected issue panel, and `r` is available only when that panel already renders
-a reply field. Shortcuts do not run while focus is in an input, textarea, select, or editable-content
-surface; `Esc` is the scoped exception for closing the selected panel.
-
-### Mission Control preferences
-
-Mission Control stores its view mode, selected detail tab, query, status, Attention only filter,
-and desktop detail-panel width in browser-local storage. The desktop width control supports whole
-values from 28 to 48 rem (34 rem by default) and applies only at the `xl` layout; selected issues
-and reply drafts remain transient.
-
-## Web dashboard security
-
-The web and desktop dashboards control an unauthenticated, single-operator service. `ensemble web`
-therefore binds only to a loopback address by default and rejects every resolved non-loopback address
-before it loads configuration or starts runtime components. There is no `config.yaml` setting or
-environment variable that relaxes this boundary.
-
-For an exceptional local-network or container use case, `ensemble web --host <address>
---unsafe-allow-remote` permits an unauthenticated remote listener. This mode is unsupported and does
-not add authentication, authorization, TLS, or proxy trust; anyone who can reach the listener can
-operate it. WebSocket upgrades always require matching `Host` and HTTP(S) `Origin` authorities.
-
-## Configuration location
-
-By default, Ensemble looks for configuration in your system's config directory:
-- **Linux:** `~/.config/ensemble/`
-- **macOS:** `~/Library/Application Support/ensemble/`
-- **Windows:** `%APPDATA%\ensemble\`
-
-You can override this with:
-- `--config-dir <path>` flag
-- `ENSEMBLE_CONFIG_DIR` environment variable
-
-**Open the config directory:**
-
-```sh
-ensemble open-config-dir
-```
-
-This opens the resolved configuration directory in your system's file manager. If the directory doesn't exist, it will suggest running `ensemble init`.
-
-**Legacy note:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
-
-## Core concepts
-
-**Trackers** connect Ensemble to your issue source. Supported: GitHub Projects/repository labels (`github`), Notion (`notion`), and local TODO files (`todo_file`). The tracker defines which states are active (pollable) and terminal (done). For `todo_file`, the default path is `~/ensemble/TODO.md`.
-
-**Agents** are named definitions that pair an executor (like `claude-code`) with a prompt. Prompts can be inline strings or [Liquid](https://shopify.github.io/liquid/) template files with access to issue context.
-
-**Pipelines** are a DAG of steps, each referencing an agent. Sequential list-order steps are the
-supported first-release path. `depends` syntax can express branches, but it does not make guaranteed
-parallel execution a supported contract. The pipeline, not the agent, defines delivery gates. See
-the [Pipeline Guide](docs/pipelines.md).
-
-**Workspaces** are isolated directories created per-issue. They persist across retries and get cleaned up when the issue reaches a terminal state. Shell hooks run at lifecycle points (create, before/after run, remove); `before_remove` runs in an existing workspace before its worktrees and directory are removed, and failures or timeouts are logged without blocking cleanup.
-
-**Step outputs** are how Ensemble turns agent work into pipeline decisions. After the visible working turn, Ensemble asks the same runtime session for structured JSON with `result`, optional `summary`, and optional downstream `output`. Verdict files and default-success fallbacks are not part of the current runtime contract.
-
-**Human interactions** are thread-scoped and deterministic: when an agent blocks for human input, Ensemble creates a tracker thread and accepts strict slash commands (`/approve`, `/reject`, `/answer`) with first-valid-command-wins semantics.
-
-## Documentation
-
-- [Configuration Reference](docs/configuration.md) — every `config.yaml` field
-- [Pipeline Guide](docs/pipelines.md) — steps, DAGs, step outputs, retries
-- [SDD Workflow](docs/sdd-workflow.md) — parent planning issues, wave execution issues, and board rules
-- [Domain Glossary](CONTEXT.md) — canonical terms used by the runtime and documentation
-- [Architecture Decisions](docs/adr/) — durable architectural choices and their rationale
-- [Contributing](docs/contributing.md) — building, testing, project structure
-- [Roadmap](docs/roadmap.md) — what's built, what's coming
+The Rust pipeline implementation is preserved on `cb/pipeline-implementation` at
+`272adb7`. This branch is `cb/agent-coordination`. Old configuration and persisted
+runs have no compatibility requirement; finish or explicitly retire existing runs
+before operational cutover.
 
 ## License
 
-Copyright 2026 Chris Banes
-
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). No Taskboard or BB implementation source has
+been copied into this repository; dependencies retain their own licenses.

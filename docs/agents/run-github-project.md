@@ -1,5 +1,10 @@
 # Run GitHub Project
 
+Project metadata is retained from the previous implementation. Verify it and merge
+requirements against live GitHub state before execution. The TypeScript implementation runs the `check` job in `.github/workflows/ci.yml`;
+required checks must still be verified from the target branch's live protection
+rules and rulesets.
+
 ## Repository
 
 - Host: `github.com`
@@ -57,8 +62,8 @@
 - Method: `squash`
 - Issue closure: `closing-keyword`
 - Required reviews: `none`
-- Required checks: `Check, Test, Clippy, Format`; `Frontend Test and Build`;
-  `Tauri PR (Linux)`; `Tauri PR (Mac)`; `MSRV (Rust 1.95.0)`
+- Required checks: Resolve from the target branch's live protection rules and
+  rulesets before execution; do not assume an empty set while new CI is pending.
 - Done automation: `set-status`
 - Automation description: Enabled Project workflows `Item closed` and
   `Pull request merged`; verified that merged-and-closed issue #182 moved from

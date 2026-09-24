@@ -1,11 +1,17 @@
-/target
-.superpowers/
 .DS_Store
 .worktrees/
+.superpowers/
+
+# Node.js and TypeScript
 node_modules/
-crates/ensemble-ui/src-ui/dist/
-crates/ensemble-ui/src-ui/src/generated/
-crates/ensemble-ui/src-ui/openapi.json
-crates/ensemble-desktop/gen/
-crates/ensemble-cli/assets/spa/
-crates/ensemble-desktop/assets/spa/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Local environment configuration
+.env
+.env.*
+!.env.example

@@ -7,6 +7,7 @@ How the engineering skills should consume this repo's domain documentation when 
 - **`CONTEXT.md`** at the repo root, or
 - **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
 - **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`docs/SPEC.md`** — read relevant behaviour and acceptance scenarios, respecting its draft status and open choices. Keep specifications out of the glossary.
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
@@ -19,9 +20,8 @@ Single-context repo (most repos):
 ├── CONTEXT.md
 ├── docs/
 │   ├── adr/
-│   │   ├── 0001-share-one-core-runtime-across-hosts.md
-│   │   └── 0002-treat-the-config-directory-as-a-runtime-boundary.md
-└── crates/
+│   │   └── 1001-agent-coordination-architecture.md
+└── src/
 ```
 
 Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
@@ -49,4 +49,4 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (separate launch and session permissions) — but worth reopening because…_
+> _Contradicts ADR-1001 (agent coordination architecture) — but worth reopening because…_
