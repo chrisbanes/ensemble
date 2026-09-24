@@ -97,10 +97,17 @@ export default function plugin(bb: BbPluginApi) {
     parameters: z.object({ id, taskId: id, brief: text }).strict(),
     async execute(input, context) {
       await requireCoordinator(context.projectId, context.threadId);
-      const config = await settings.get();
-      if (!config.provider || !config.model)
-        throw new Error("Configure the worker provider and model first");
-      store.assign(input.id, input.taskId, context.projectId, input.brief);
+      const assignment = store.assign(
+        input.id,
+        input.taskId,
+        context.projectId,
+        input.brief,
+      );
+      if (assignment.state === "pending") {
+        const config = await settings.get();
+        if (!config.provider || !config.model)
+          throw new Error("Configure the worker provider and model first");
+      }
       return JSON.stringify(await coordinator.launch(input.id));
     },
   });

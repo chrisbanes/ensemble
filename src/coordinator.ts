@@ -21,15 +21,20 @@ export class Coordinator {
   }
 
   async reconcile(): Promise<void> {
+    const ambiguous: string[] = [];
     for (const assignment of this.store.list()) {
       if (assignment.state !== "launching") continue;
       const matches = await this.host.find(assignment);
-      if (matches.length > 1)
-        throw new Error(
-          `Multiple BB threads for assignment ${assignment.id}; operator resolution required`,
-        );
+      if (matches.length > 1) {
+        ambiguous.push(assignment.id);
+        continue;
+      }
       if (matches[0]) this.store.attach(assignment.id, matches[0]);
       // Zero matches isn't proof that an earlier request cannot still finish.
     }
+    if (ambiguous.length)
+      throw new Error(
+        `Multiple BB threads for assignments ${ambiguous.join(", ")}; operator resolution required`,
+      );
   }
 }

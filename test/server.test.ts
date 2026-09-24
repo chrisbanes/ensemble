@@ -99,18 +99,46 @@ test("plugin tools enforce actor scope and reconnect after a lost BB response", 
     // Reload the plugin over persisted storage; BB still has the worker.
     plugin(bb as unknown as BbPluginApi);
     await reconcile();
-    await call("ensemble_delegate", {
+    config.provider = "";
+    config.model = "";
+    const running = await call("ensemble_delegate", {
       id: assignmentId,
       taskId,
       brief: "Investigate",
     });
+    assert.equal(running.state, "running");
     assert.equal(spawns, 1);
     await assert.rejects(
       call("ensemble_report", { assignmentId, result: "done" }, "intruder"),
       /Only the assigned/,
     );
     await call("ensemble_report", { assignmentId, result: "done" }, "worker");
-    config.provider = ""; // Results remain available if a provider is removed.
+    const completed = await call("ensemble_delegate", {
+      id: assignmentId,
+      taskId,
+      brief: "Investigate",
+    });
+    assert.equal(completed.state, "completed");
+    assert.equal(completed.result, "done");
+    await assert.rejects(
+      call("ensemble_delegate", {
+        id: assignmentId,
+        taskId,
+        brief: "Changed request",
+      }),
+      /different|conflict/i,
+    );
+    const nextTaskId = "10000000-0000-4000-8000-000000000003";
+    await call("ensemble_create_task", { id: nextTaskId, title: "Next" });
+    await assert.rejects(
+      call("ensemble_delegate", {
+        id: "10000000-0000-4000-8000-000000000004",
+        taskId: nextTaskId,
+        brief: "New work",
+      }),
+      /Configure the worker/,
+    );
+    assert.equal(spawns, 1);
     const assignments = await call("ensemble_assignments", {});
     assert.equal(assignments[0].result, "done");
     assert.equal(assignments[0].threadId, "worker");

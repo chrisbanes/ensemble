@@ -134,3 +134,32 @@ test("concurrent delegation launches once; foreign threads cannot report", async
     f.close();
   }
 });
+
+test("ambiguous launches do not prevent later assignments from reconciling", async () => {
+  const f = fixture();
+  try {
+    for (const id of ["a-ambiguous", "b-recoverable"]) {
+      f.store.createTask(id, "project", id);
+      f.store.assign(id, id, "project", "Investigate");
+      f.store.beginLaunch(id);
+    }
+    const coordinator = new Coordinator(f.store, {
+      spawn: async () => {
+        throw new Error("must not spawn");
+      },
+      find: async (assignment) =>
+        assignment.id === "a-ambiguous"
+          ? ["duplicate-one", "duplicate-two"]
+          : ["worker"],
+    });
+    await assert.rejects(coordinator.reconcile(), /a-ambiguous/);
+    assert.equal(f.store.get("a-ambiguous").state, "launching");
+    assert.equal(f.store.get("b-recoverable").threadId, "worker");
+    assert.equal(
+      f.store.complete("b-recoverable", "project", "worker", "done").state,
+      "completed",
+    );
+  } finally {
+    f.close();
+  }
+});
