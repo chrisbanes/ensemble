@@ -4,6 +4,32 @@ Ensemble orchestrates issue-driven, multi-agent software delivery while keeping 
 
 ## Language
 
+### Proposed agent coordination model
+
+These terms describe the direction under discussion in ADR-0020.
+
+**Board**:
+A configured work queue from one tracker, with its own lead, instructions, and permissions.
+_Avoid_: Tracker when referring to a selected queue within a tracker
+
+**Board lead**:
+The agent responsible for selecting and delegating work across a board.
+_Avoid_: Issue owner when referring to board-wide responsibility
+
+**Issue owner**:
+The agent responsible for coordinating an issue's work and bringing it to an outcome.
+_Avoid_: Board lead when referring to responsibility for one issue
+
+**Agent profile**:
+An operator-defined configuration of an agent's instructions, model, and available tools.
+_Avoid_: Assignment when referring to a reusable agent configuration
+
+**Assignment**:
+A durable unit of delegated work within a board that can continue across agent conversations.
+_Avoid_: Step when referring to delegated work in the proposed coordination model
+
+### Current execution model
+
 **Issue**:
 A tracker-sourced unit of work normalized into Ensemble's tracker-independent model.
 _Avoid_: Ticket or task when referring to the normalized runtime model
