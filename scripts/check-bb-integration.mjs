@@ -24,11 +24,12 @@ const [bbPackage, bbSource] = args;
 const keep = args.includes("--keep");
 assert(
   bbPackage && bbSource,
-  "Usage: node scripts/check-bb-integration.mjs <bb-app package> <pinned BB source checkout> [--keep]",
+  "Usage: node scripts/check-bb-integration.mjs <bb-app package> <pinned provider-source checkout> [--keep]",
 );
 
 const EXPECTED_BB_VERSION = "0.43.4";
-const EXPECTED_BB_REVISION = "fdd3de3b19b97e6cd1ef7300cbb54711431249d3";
+const EXPECTED_SCRIPTED_PROVIDER_REVISION =
+  "fdd3de3b19b97e6cd1ef7300cbb54711431249d3";
 const EXPECTED_PLUGIN_SDK_PACKAGE_VERSION = "0.5.24";
 const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.9";
 const EXPECTED_NODE_VERSION = "24.21.0";
@@ -53,10 +54,10 @@ const installedSdkVersion = JSON.parse(
   ),
 ).version;
 assert.equal(installedSdkVersion, EXPECTED_PLUGIN_SDK_PACKAGE_VERSION);
-const sourceRevision = (
+const scriptedProviderRevision = (
   await exec("git", ["-C", bbSource, "rev-parse", "HEAD"])
 ).stdout.trim();
-assert.equal(sourceRevision, EXPECTED_BB_REVISION);
+assert.equal(scriptedProviderRevision, EXPECTED_SCRIPTED_PROVIDER_REVISION);
 
 const root = await mkdtemp(path.join(tmpdir(), "ensemble-bb-t01-"));
 const data = path.join(root, "data");
@@ -96,7 +97,7 @@ const evidence = {
     node: process.versions.node,
     bb: installedBbVersion,
     hostPluginSdk: EXPECTED_HOST_PLUGIN_SDK_VERSION,
-    bbSourceRevision: sourceRevision,
+    scriptedProviderRevision,
     pluginSdkPackage: installedSdkVersion,
     platform: `${process.platform}-${process.arch}`,
   },
@@ -248,9 +249,31 @@ try {
     path.join(repositoryRoot, "test/fixtures/bb-integration/server.ts"),
     path.join(fixture, "server.ts"),
   );
-  await copyFile(
+  const providerBridgeSource = await readFile(
     path.join(bbSource, "tests/scripted-echo-provider/src/provider-bridge.ts"),
+    "utf8",
+  );
+  const responseMarker =
+    "  pendingReplies.delete(id);\n  const session = sessions.get(pending.threadId);";
+  assert.equal(
+    providerBridgeSource.split(responseMarker).length - 1,
+    1,
+    "Pinned scripted provider response hook changed",
+  );
+  await writeFile(
     path.join(fixture, "src-provider-bridge.ts"),
+    providerBridgeSource.replace(
+      responseMarker,
+      `  pendingReplies.delete(id);
+  if (pending.kind === "tool") {
+    recordRequest("t01/tool-result", {
+      toolName: pending.toolName,
+      result,
+      error: error ?? null,
+    });
+  }
+  const session = sessions.get(pending.threadId);`,
+    ),
   );
   await copyFile(
     path.join(bbSource, "LICENSE"),
@@ -367,6 +390,20 @@ export default function startupGuard(bb) {
     true,
   );
   assert.ok(initialStart.params.cwd.startsWith(data));
+  const providerToolResults = providerRequests.filter(
+    (entry) =>
+      entry.method === "t01/tool-result" &&
+      entry.params.toolName === "integration_ping",
+  );
+  assert.ok(providerToolResults.length > 0);
+  assert.ok(
+    providerToolResults.some(
+      (entry) =>
+        entry.params.error === null &&
+        JSON.stringify(entry.params.result).includes("integration tool result"),
+    ),
+    "Scripted provider did not receive the tool's returned result",
+  );
   check("spawnAndRichExecutionConfig", "passed", {
     threadId,
     projectId: thread.projectId,
@@ -391,6 +428,7 @@ export default function startupGuard(bb) {
   });
   check("pluginToolAndResultRoundTrip", "passed", {
     toolCalls: toolCallCount(await rpc("snapshot")),
+    providerReceivedToolResult: true,
   });
 
   const pendingId = `pending-${randomUUID()}`;
@@ -537,6 +575,8 @@ export default function startupGuard(bb) {
   const queuePrompt = `t01_queued_startup:${randomUUID()} call_tool:integration_ping`;
   const queued = await rpc("send", { threadId, prompt: queuePrompt });
   assert.equal(queued.delivery, "queued", JSON.stringify(queued));
+  assert.equal(queued.queuedMessage.waitingOn?.kind, "plugin");
+  assert.equal(queued.queuedMessage.waitingOn?.pluginId, GUARD_ID);
   assert.equal(toolCallCount(await rpc("snapshot")), countBeforeQueuedStart);
   await writeFile(guardFailure, "intentional guard initialization error");
   await stop();
@@ -571,11 +611,23 @@ export default function startupGuard(bb) {
     conclusion:
       "Ensemble-owned unsent work survives, but accepted BB-queued work executes when its wait-owning plugin fails to load.",
   });
-  check("lifecycleEvents", "passed", {
-    eventNames: [
-      ...new Set(snapshot.events.map((event) => event.eventName)),
-    ].sort(),
-  });
+  const eventNames = [
+    ...new Set(snapshot.events.map((event) => event.eventName)),
+  ].sort();
+  const requiredEvents = [
+    "interaction.pending",
+    "message.dispatched",
+    "message.queued",
+    "thread.active",
+    "thread.created",
+    "thread.idle",
+  ];
+  assert.deepEqual(
+    requiredEvents.filter((eventName) => !eventNames.includes(eventName)),
+    [],
+    `Missing required lifecycle events: ${eventNames.join(", ")}`,
+  );
+  check("lifecycleEvents", "passed", { eventNames });
 } catch (error) {
   fatalError = error;
 } finally {
