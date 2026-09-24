@@ -397,11 +397,18 @@ export default function startupGuard(bb) {
   );
   assert.ok(providerToolResults.length > 0);
   assert.ok(
-    providerToolResults.some(
-      (entry) =>
+    providerToolResults.some((entry) => {
+      const result = entry.params.result;
+      return (
         entry.params.error === null &&
-        JSON.stringify(entry.params.result).includes("integration tool result"),
-    ),
+        result?.success === true &&
+        result.contentItems?.some(
+          (item) =>
+            item.type === "inputText" &&
+            item.text === "integration tool result",
+        )
+      );
+    }),
     "Scripted provider did not receive the tool's returned result",
   );
   check("spawnAndRichExecutionConfig", "passed", {

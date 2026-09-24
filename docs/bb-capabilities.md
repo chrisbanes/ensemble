@@ -141,12 +141,13 @@ Run `2026-09-24` on the runtime pair above, command exit **2**:
 | Plugin tool/result path | **Passed** | Scripted provider invoked the fixture's SQLite-backed tool. Test instrumentation recorded the exact tool result received by the provider bridge; the turn then completed idle. Counter was 1 afterward. |
 | Lifecycle events | **Passed** | Fixture persisted and asserted public `thread.created`, `thread.active`, `thread.idle`, `interaction.pending`, `message.queued` and `message.dispatched` events. |
 | Restart and environment retention | **Passed** | BB restart preserved the thread environment id, tool count and an unsubmitted local SQLite intent. |
+| Ensemble-owned pending intent and healthy handoff | **Passed, bounded** | The local intent survived restart and public `threads.send({ mode: "auto" })` returned `sent` after healthy plugin load; exactly one tool effect followed. This proves the direct healthy handoff only, not a crash-safe transfer if BB accepts the send but its response is lost, or if the send becomes queued behind another plugin wait. |
 | Human interaction | **Passed** | Provider raised a public native user question; the fixture resolved it through public interaction APIs and the thread returned idle. |
 | Lost send response | **Partial** | Harness dropped an accepted `threads.send` response, persisted `uncertain`, restarted, found exactly one matching public timeline row with the same message id, and observed no extra tool effect. Recovery used a unique message marker because the send receipt has no stable caller operation id; this is not general idempotency proof. |
 | Startup with BB-accepted queued work | **Failed** | `mode: "start"` returned queued while a public dispatch hook waited. When that hook's plugin failed startup, BB cleared its persisted wait and the provider executed the message. The local unsubmitted intent stayed pending. This is the mandatory open contract, not a harness setup failure. |
 
 The retained run directory was
-`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-F0BI63`.
+`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-483Mbd`.
 The JSON emitted by the command is the run's capability matrix; `--keep` also
 retains the disposable BB database, provider request log and launcher log for
 inspection.

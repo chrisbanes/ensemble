@@ -483,10 +483,13 @@ before changing entry points or triggering reloads.
 
 See [BB capability evidence](../bb-capabilities.md) for the 2026-09-24 isolated
 runtime checks. The hook-only startup approach **failed**: BB releases persisted
-plugin waits when their guard fails to load. Keeping pending work in Ensemble is
-an alternative under investigation; its handoff to BB still needs proof. The
-accepted guarantee remains unchanged. A required BB change has not yet been
-established, and unrelated design/harness work can continue.
+plugin waits when their guard fails to load. A local SQLite intent survived
+restart and was handed to a healthy idle thread through public `threads.send`
+with one observed tool effect. That proves only the direct healthy path; atomic
+handoff across a lost send response, a BB-accepted queued send, or plugin startup
+failure remains unproved. The accepted guarantee remains unchanged. A required BB
+change has not yet been established, and unrelated design/harness work can
+continue.
 
 Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
 `threads.retry`, queued-message APIs, and the `message.dispatch` hook with

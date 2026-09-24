@@ -87,7 +87,10 @@ an unsent intent survives restart, but it does not govern a message BB has alrea
 accepted into its queue. The tested public `threads.send({ mode: "start" })` can
 still return queued under a plugin wait. T01's startup/queued-dispatch gate remains
 failed; do not mark T01 or dependent execution work ready until this contract has
-a proved solution. Other harness and design work can continue.
+a proved solution. A direct handoff from local SQLite intent to a healthy idle BB
+thread succeeded once; atomic recovery across a lost send response, queued
+acceptance or startup failure remains open. This does not establish that BB must
+change. Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
