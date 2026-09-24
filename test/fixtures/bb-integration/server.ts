@@ -1,8 +1,10 @@
 import type { BbPluginApi, StandardSchemaV1 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { existsSync } from "node:fs";
 
 const providerId = "ensemble-scripted";
 const lostResponseMarkerKey = "t01_lost_response_marker";
+const failStartupPath = process.env.T01_FAIL_ENSEMBLE_STARTUP;
 
 function rpcSchema<Schema extends z.ZodType>(
   schema: Schema,
@@ -27,6 +29,9 @@ function rpcSchema<Schema extends z.ZodType>(
 }
 
 export default function integrationFixture(bb: BbPluginApi): void {
+  if (failStartupPath !== undefined && existsSync(failStartupPath)) {
+    throw new Error("Intentional T01 Ensemble startup failure");
+  }
   const database = bb.storage.database();
   database.exec(`
     CREATE TABLE IF NOT EXISTS integration_state (
@@ -52,6 +57,11 @@ export default function integrationFixture(bb: BbPluginApi): void {
       dropped_responses INTEGER NOT NULL
     );
     INSERT OR IGNORE INTO fault_injection (id, dropped_responses) VALUES (1, 0);
+    CREATE TABLE IF NOT EXISTS dispatch_control (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL CHECK (mode IN ('ready', 'paused', 'stopped'))
+    );
+    INSERT OR IGNORE INTO dispatch_control (id, mode) VALUES (1, 'ready');
   `);
   const recordEvent = (eventName: string, threadId: string) => {
     database
@@ -86,6 +96,19 @@ export default function integrationFixture(bb: BbPluginApi): void {
     recordEvent("message.dispatched", entry.threadId),
   );
 
+  bb.experimental_hooks.on("message.dispatch", ({ thread }) => {
+    if (thread.providerId !== providerId) return { action: "proceed" };
+    const { mode } = database
+      .prepare("SELECT mode FROM dispatch_control WHERE id = 1")
+      .get() as { mode: "ready" | "paused" | "stopped" };
+    return mode === "ready"
+      ? { action: "proceed" }
+      : {
+          action: "reject",
+          message: `T01 dispatch gate is ${mode}`,
+        };
+  });
+
   bb.agents.registerTool({
     name: "integration_ping",
     description: "Record one scripted BB integration tool call.",
@@ -98,58 +121,6 @@ export default function integrationFixture(bb: BbPluginApi): void {
         .run();
       return "integration tool result";
     },
-  });
-
-  bb.providers.register({
-    id: providerId,
-    displayName: "Ensemble scripted integration provider",
-    icon: "Workflow",
-    strings: {
-      signInHint: "Offline integration fixture",
-      expiredHint: "Offline integration fixture",
-      installUrl: "https://github.com/get-bb/bb",
-      brandPrefix: "Ensemble test",
-      planModeCopy: "Scripted integration test",
-      iconTint: { light: "#222222", dark: "#eeeeee" },
-    },
-    maintenance: { health: false, usage: false, installation: false },
-    capabilities: {
-      supportsServiceTier: true,
-      supportsNativeUserQuestion: true,
-      fork: "none",
-      supportsManualCompaction: false,
-      supportsThreadArchive: false,
-      supportsThreadRename: false,
-      permissionModes: ["accept-edits"],
-      reasoningLevels: ["medium", "high"],
-    },
-    composerActions: [],
-    reasoningLevels: [
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High" },
-    ],
-    serviceTiers: [
-      { id: "default", label: "Default" },
-      { id: "fast", label: "Fast" },
-    ],
-    models: {
-      fallback: [
-        {
-          id: "fixture-model",
-          displayName: "Fixture model",
-          description: "Offline scripted provider used by T01.",
-          supportedReasoningEfforts: [
-            { reasoningEffort: "medium", description: "Medium" },
-            { reasoningEffort: "high", description: "High" },
-          ],
-          defaultReasoningEffort: "medium",
-          isDefault: true,
-        },
-      ],
-    },
-    deriveProviderOptions: () => ({
-      scripted: { uniqueProviderThreadIds: true },
-    }),
   });
 
   const fault = { marker: null as string | null };
@@ -248,6 +219,36 @@ export default function integrationFixture(bb: BbPluginApi): void {
       },
       answerQuestion: {
         input: rpcSchema(z.object({ threadId: z.string() })),
+        output: anyOutput,
+      },
+      setDispatchGate: {
+        input: rpcSchema(
+          z.object({ mode: z.enum(["ready", "paused", "stopped"]) }),
+        ),
+        output: anyOutput,
+      },
+      recheckDispatch: {
+        input: emptyInput,
+        output: anyOutput,
+      },
+      sendAdmissionProbe: {
+        input: rpcSchema(
+          z.object({
+            threadId: z.string(),
+            prompt: z.string(),
+            mode: z.enum(["start", "queue-if-active"]).default("start"),
+          }),
+        ),
+        output: anyOutput,
+      },
+      queuedMessages: {
+        input: rpcSchema(z.object({ threadId: z.string() })),
+        output: anyOutput,
+      },
+      createQueuedMessage: {
+        input: rpcSchema(
+          z.object({ threadId: z.string(), prompt: z.string() }),
+        ),
         output: anyOutput,
       },
     },
@@ -398,18 +399,41 @@ export default function integrationFixture(bb: BbPluginApi): void {
             `Operation is ${operation.status}; recovery is only for uncertain sends`,
           );
         }
-        const timeline = await bb.sdk.threads.timeline({
-          threadId: operation.thread_id,
-        });
+        const [timeline, queuedMessages] = await Promise.all([
+          bb.sdk.threads.timeline({ threadId: operation.thread_id }),
+          bb.sdk.threads.queuedMessages.list({ threadId: operation.thread_id }),
+        ]);
         const marker = `${lostResponseMarkerKey}:${operationId}`;
-        const matches = JSON.stringify(timeline).split(marker).length - 1;
-        if (matches !== 1) return { status: "uncertain", matches };
+        const timelineMatches =
+          JSON.stringify(timeline).split(marker).length - 1;
+        const queuedMatches = queuedMessages.filter((message) =>
+          JSON.stringify(message.content).includes(marker),
+        );
+        const matches = timelineMatches + queuedMatches.length;
+        if (matches !== 1) {
+          return {
+            status: "uncertain",
+            matches,
+            timelineMatches,
+            queuedMatches: queuedMatches.length,
+          };
+        }
+        const queuedMessage = queuedMatches[0];
+        const delivery =
+          queuedMessage === undefined
+            ? "observed-in-timeline"
+            : "observed-in-queue";
         database
           .prepare(
-            "UPDATE pending_dispatch SET status = 'accepted', delivery = 'observed-in-timeline' WHERE operation_id = ?",
+            "UPDATE pending_dispatch SET status = 'accepted', delivery = ?, queued_message_id = ? WHERE operation_id = ?",
           )
-          .run(operationId);
-        return { status: "accepted", matches };
+          .run(delivery, queuedMessage?.id ?? null, operationId);
+        return {
+          status: "accepted",
+          matches,
+          delivery,
+          queuedMessageId: queuedMessage?.id ?? null,
+        };
       },
       answerQuestion: async ({ threadId }) => {
         const pending = await bb.sdk.threads.interactions.list({ threadId });
@@ -441,6 +465,41 @@ export default function integrationFixture(bb: BbPluginApi): void {
           },
         });
       },
+      setDispatchGate: async ({ mode }) => {
+        database
+          .prepare("UPDATE dispatch_control SET mode = ? WHERE id = 1")
+          .run(mode);
+        if (mode === "ready") {
+          await bb.experimental_hooks.recheck("message.dispatch");
+        }
+        return { mode };
+      },
+      recheckDispatch: async () => {
+        await bb.experimental_hooks.recheck("message.dispatch");
+        return { rechecked: true };
+      },
+      sendAdmissionProbe: async ({ threadId, prompt, mode }) => {
+        try {
+          const result = await bb.sdk.threads.send({
+            threadId,
+            input: [{ type: "text", text: prompt, mentions: [] }],
+            mode,
+          });
+          return { status: "accepted", sendResponse: result };
+        } catch (error) {
+          return {
+            status: "rejected",
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+      queuedMessages: ({ threadId }) =>
+        bb.sdk.threads.queuedMessages.list({ threadId }),
+      createQueuedMessage: ({ threadId, prompt }) =>
+        bb.sdk.threads.queuedMessages.create({
+          threadId,
+          input: [{ type: "text", text: prompt, mentions: [] }],
+        }),
     },
   );
 }

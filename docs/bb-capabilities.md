@@ -38,12 +38,14 @@ runtime. Do not mark T01, T06 or T08 ready based on the healthy-restart check.
 This disproves that approach, not every possible Ensemble implementation. No
 weaker product guarantee has been accepted.
 
-Candidate BB capability requirement: preserve a queued dispatch wait durably
-when its owning plugin is unavailable, with explicit recovery or operator
-resolution; alternatively, expose an atomic public send/admission operation that
-rejects without persisting whenever dispatch would wait. This is a concrete
-candidate based on the tested boundary, not a claim that no other Ensemble
-architecture exists. No upstream issue has been filed.
+Candidate capability requirement: preserve a queued dispatch wait durably when
+its owning plugin is unavailable, with explicit recovery or operator resolution;
+alternatively, expose an atomic public send/admission operation that rejects
+without persisting whenever dispatch would wait. This remains a candidate
+capability, not proof that no other BB/Ensemble design exists. Ensemble issue
+[#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the boundary and
+blocks dependent execution work; it does not yet conclude that an upstream BB
+change is necessary.
 
 ## Alternative under investigation: retain pending work in Ensemble
 
@@ -78,12 +80,39 @@ executed it. Source inspection at the pinned revision and SDK package 0.5.24 sho
   invalidation.
 
 The local pending alternative therefore protects only the pre-submission case;
-it does not establish A14's accepted-queue guarantee. Avoiding this boundary
-without changing the contract still needs design review. The harness has not
-proved pause/stop racing with submission, another plugin's wait combined with a
-pause change, or every failure point before queue receipt/cleanup. Do not add a
-second scheduler merely to imitate BB concurrency or treat instruction
-compliance as a dispatch interlock.
+it does not establish A14's accepted-queue guarantee. The 2026-09-24 live follow-up
+in this harness narrows the alternatives further:
+
+- With the external wait plugin installed before the Ensemble gate, a first
+  `wait` was collected and a later `reject` refused `threads.send` before BB
+  created a row. A persisted row waiting on the external plugin also stayed
+  queued with `failureReason` after the external plugin failed startup while the
+  Ensemble gate remained loaded and paused; rechecking after resume dispatched it
+  once.
+- A `queue-if-active` send was rejected without a queue row when the gate was
+  paused or stopped. When the gate was ready, BB accepted a core `thread-busy`
+  row; pausing before the source turn finished kept that row from reaching the
+  provider, and resuming dispatched it once. This tests Ensemble's gate decision
+  alongside BB core busy-queueing; it does not test every race with the public
+  `threads.stop` operation.
+- Public `threads.queuedMessages.create` on an idle conversation created a row
+  waiting on `thread-busy` and then immediately dispatched it. It is not a durable
+  operator-controlled hold.
+- If both the external wait owner and Ensemble fail startup, BB clears the old
+  plugin wait, empties the public queue and sends the accepted prompt to the
+  separately loaded scripted provider. The public thread status read back as
+  `idle`; the provider request was observed, but this run did not prove a
+  completed turn or tool effect. Therefore the startup gate still fails even
+  though `reject` composes correctly whenever Ensemble is available.
+
+The probes do not justify a second scheduler. Do not treat a local pending row,
+an independent plugin wait, or instruction compliance as a dispatch interlock
+when the Ensemble hook is unavailable.
+
+The GitHub releases page still lists BB desktop **0.43.4** as the latest stable
+release on 2026-09-24 ([BB releases](https://github.com/get-bb/bb/releases)). The
+installed 0.43.4 runtime is therefore the latest stable available for this test;
+no newer stable runtime was available to qualify.
 
 ## Reproduce the T01 harness
 
@@ -143,14 +172,16 @@ Run `2026-09-24` on the runtime pair above, command exit **2**:
 | Restart and environment retention | **Passed** | BB restart preserved the thread environment id, tool count and an unsubmitted local SQLite intent. |
 | Ensemble-owned pending intent and healthy handoff | **Passed, bounded** | The local intent survived restart and public `threads.send({ mode: "auto" })` returned `sent` after healthy plugin load; exactly one tool effect followed. This proves the direct healthy handoff only, not a crash-safe transfer if BB accepts the send but its response is lost, or if the send becomes queued behind another plugin wait. |
 | Human interaction | **Passed** | Provider raised a public native user question; the fixture resolved it through public interaction APIs and the thread returned idle. |
-| Lost send response | **Partial** | Harness dropped an accepted `threads.send` response, persisted `uncertain`, restarted, found exactly one matching public timeline row with the same message id, and observed no extra tool effect. Recovery used a unique message marker because the send receipt has no stable caller operation id; this is not general idempotency proof. |
-| Startup with BB-accepted queued work | **Failed** | `mode: "start"` returned queued while a public dispatch hook waited. When that hook's plugin failed startup, BB cleared its persisted wait and the provider executed the message. The local unsubmitted intent stayed pending. This is the mandatory open contract, not a harness setup failure. |
+| Dispatch hook and core queue composition | **Passed, bounded** | A later Ensemble `reject` overrode an earlier plugin `wait` without persisting a new row. A paused/stopped gate rejected `queue-if-active` before core busy-queueing. A previously accepted plugin-waited or `thread-busy` row stayed queued with a failure reason while the gate was paused, then dispatched once after recheck on resume. |
+| Public queue creation as a hold | **Not supported** | `threads.queuedMessages.create` on an idle conversation created a `thread-busy` row and immediately scheduled its dispatch. It does not provide a durable operator-controlled hold. |
+| Lost send response | **Partial** | The harness dropped a successful `threads.send` response for both an immediately sent message and a BB-accepted, plugin-waited queue row. After restart, a unique marker found exactly one public timeline row or queue row; queue recovery preserved its public queue id. The harness did not resend and observed exactly one tool effect after release. Zero or multiple matches stay `uncertain`; the SDK exposes no caller-supplied operation id or in-flight lookup, so this is safe bounded recovery, not general idempotency or stale-generation invalidation. |
+| Startup with BB-accepted queued work | **Failed capability; harness passed** | When the external wait owner failed but the Ensemble gate loaded paused, its `reject` kept the orphaned accepted row queued with a failure reason and no tool effect; resume dispatched once. When both Ensemble and the wait owner failed, BB cleared the plugin wait, emptied its public queue, and delivered the accepted prompt to the separately loaded provider. Public thread status read `idle`; the provider observed `turn/start`, but this run did not establish a completed turn/tool effect. A guard-unavailable dispatch attempt still crosses the policy boundary. |
 
-The retained run directory was
-`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-483Mbd`.
+The follow-up run directory was
+`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-bb-t01-NVxkhU`.
 The JSON emitted by the command is the run's capability matrix; `--keep` also
 retains the disposable BB database, provider request log and launcher log for
-inspection.
+inspection. Without `--keep`, the harness cleans only its isolated resources.
 
 ## Other observed behaviour
 
@@ -174,16 +205,19 @@ phase result files. It is temporary evidence, not a committed runtime dependency
 
 | Gate | Current disposition |
 | --- | --- |
-| Startup and queued dispatch | **Failed on tested runtime**: accepted `mode: "start"` send queued behind the hook; after its owner failed startup BB released and executed it. Ensemble-local unsent work did survive; this did not cover the already accepted message. |
-| Message acceptance and replay | **Partial**: dropped successful response, persisted uncertainty, recovered one timeline identity after restart and observed no second tool effect. No stable operation id, general idempotency or stale-generation invalidation was proved. |
+| Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
+| Message acceptance and replay | **Partial**: lost responses for sent and queued rows recovered by a unique public marker after restart; queue recovery retained BB's queued-message id, and neither path blindly resent. Zero or multiple matches remain uncertain; no caller operation id, general idempotency or stale-generation invalidation was proved. |
 | Composed writer admission | **Open**: no proof yet that writer reservations compose with another plugin's wait without stranding ownership |
 | Stop and writer release | **Partial**: scripted stop/resume observed; arbitrary surviving writers and delayed starts unproven |
 | Initial workspace identity | **Partial**: reuse observed; uncertain provisioning and competing launches unproven |
 | Retry ownership | **Partial**: retry API observed; global two-retry allowance across mechanisms unproven |
 | Revision application | **Partial**: instruction contribution requires session reconstruction in this fixture; product apply flow unproven |
 
-The startup contract remains unproven and blocks dependent execution work;
-unrelated design and harness work can continue. Remaining checks must not be
-labelled passed from source inspection or these narrower observations. No product
-implementation, installed Haze plugin reload, shared-instance configuration
-change, or remote mutation was performed.
+The harness/capability ticket can report this failed gate once the full command,
+matrix and dependency tracking are reviewed; the failure is not a harness setup
+failure. Issue [#665](https://github.com/chrisbanes/ensemble/issues/665) remains
+open and blocks dependent execution work until a public-API design or tested BB
+capability proves the accepted-queue guarantee. Do not label the startup gate
+passed from these narrower observations. No product implementation, installed
+Haze plugin reload, shared-instance configuration change, or remote mutation was
+performed.

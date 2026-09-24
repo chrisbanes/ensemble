@@ -80,17 +80,26 @@ runs in the isolated BB harness from T01 and adds its scenarios as it lands.
 
 ## T01 — Establish BB compatibility and automated integration harness
 
-**Unresolved dispatch boundary:** the [full isolated T01 harness](bb-capabilities.md)
-shows that BB 0.43.4 releases an accepted queued send when its wait-owning guard
-plugin fails to initialize. The Ensemble-owned SQLite alternative was exercised:
-an unsent intent survives restart, but it does not govern a message BB has already
-accepted into its queue. The tested public `threads.send({ mode: "start" })` can
-still return queued under a plugin wait. T01's startup/queued-dispatch gate remains
-failed; do not mark T01 or dependent execution work ready until this contract has
-a proved solution. A direct handoff from local SQLite intent to a healthy idle BB
-thread succeeded once; atomic recovery across a lost send response, queued
-acceptance or startup failure remains open. This does not establish that BB must
-change. Other harness and design work can continue.
+**Capability result:** the [full isolated T01 harness](bb-capabilities.md) now
+proves that a later public `message.dispatch` reject composes with another
+plugin's wait and BB core busy-queueing while Ensemble is loaded. It still fails
+the mandatory startup boundary: if Ensemble and the external wait owner both fail
+to initialize, BB releases the accepted queue row and sends it to the separately
+loaded provider. A separate public-queue probe confirms that `threads.queuedMessages.create`
+on an idle thread is automatically dispatched, not held. T01 also recovers a
+lost response for both sent and queued messages by unique public markers after
+restart; ambiguous matches remain `uncertain`, with no blind resend.
+
+Issue [#650's acceptance](https://github.com/chrisbanes/ensemble/issues/650)
+defines this as a capability/harness ticket: unsupported mandatory behaviour is
+recorded in the matrix and tracked by a concrete dependency. The harness command,
+result matrix and bounded failed capability can therefore satisfy T01 after
+review, without treating startup as passed. Issue
+[#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the unresolved
+accepted-queue/startup contract and blocks T06/T08 execution work until a public
+API design or tested BB capability proves protected work remains held while
+Ensemble is unavailable. This does not yet establish that BB must change. Other
+harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 

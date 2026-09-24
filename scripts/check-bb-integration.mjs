@@ -35,6 +35,7 @@ const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.9";
 const EXPECTED_NODE_VERSION = "24.21.0";
 const PLUGIN_ID = "ensemble-t01-integration";
 const GUARD_ID = "ensemble-t01-startup-guard";
+const RUNTIME_ID = "ensemble-t01-scripted-runtime";
 const PROVIDER_ID = "ensemble-scripted";
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
@@ -62,6 +63,8 @@ assert.equal(scriptedProviderRevision, EXPECTED_SCRIPTED_PROVIDER_REVISION);
 const root = await mkdtemp(path.join(tmpdir(), "ensemble-bb-t01-"));
 const data = path.join(root, "data");
 const providerRecord = path.join(root, "provider-record.jsonl");
+const ensembleFailure = path.join(root, "fail-ensemble-startup");
+const waiterEnabled = path.join(root, "enable-startup-waiter");
 const launcher = path.join(bbPackage, "dist/bb-app.js");
 const cli = path.join(bbPackage, "dist/bb.js");
 const env = {
@@ -70,6 +73,7 @@ const env = {
   BB_SERVER_BIND_HOST: "127.0.0.1",
   BB_TELEMETRY: "false",
   SCRIPTED_ECHO_RECORD_PATH: providerRecord,
+  T01_FAIL_ENSEMBLE_STARTUP: ensembleFailure,
 };
 
 async function freePort() {
@@ -106,6 +110,24 @@ const evidence = {
 
 function check(name, status, detail) {
   evidence.checks[name] = { status, detail };
+}
+
+function hasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForExit(child, label, timeoutMs) {
+  if (hasExited(child)) return Promise.resolve();
+  return Promise.race([
+    once(child, "exit"),
+    new Promise((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`BB launcher did not stop ${label}`)),
+        timeoutMs,
+      );
+      timer.unref();
+    }),
+  ]);
 }
 
 async function bb(...commandArgs) {
@@ -155,8 +177,8 @@ async function start() {
   });
   await until(async () => {
     assert.equal(
-      processHandle.exitCode,
-      null,
+      hasExited(processHandle),
+      false,
       `BB launcher exited: ${launcherOutput.slice(-2000)}`,
     );
     try {
@@ -170,22 +192,22 @@ async function start() {
 }
 
 async function stop() {
-  if (!processHandle || processHandle.exitCode !== null) return;
-  const exited = once(processHandle, "exit");
-  await exec(process.execPath, [launcher, "stop"], {
-    env,
-    timeout: 30000,
-  });
-  await Promise.race([
-    exited,
-    new Promise((_, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("BB launcher did not stop")),
-        10000,
-      );
-      timer.unref();
-    }),
-  ]);
+  if (!processHandle || hasExited(processHandle)) return;
+  try {
+    await exec(process.execPath, [launcher, "stop"], {
+      env,
+      timeout: 30000,
+    });
+    await waitForExit(processHandle, "after bb stop", 10000);
+  } catch (error) {
+    processHandle.kill("SIGTERM");
+    await waitForExit(processHandle, "after SIGTERM", 5000).catch(() => {});
+    if (!hasExited(processHandle)) {
+      processHandle.kill("SIGKILL");
+      await waitForExit(processHandle, "after SIGKILL", 5000);
+    }
+    throw new Error("BB launcher required forced cleanup", { cause: error });
+  }
 }
 
 async function writeManifest(directory, name, extra = {}) {
@@ -233,21 +255,34 @@ let fatalError;
 try {
   const fixture = path.join(root, "integration-plugin");
   const guard = path.join(root, "startup-guard-plugin");
+  const runtime = path.join(root, "scripted-runtime-plugin");
   const tempRepo = path.join(root, "repo");
   const guardFailure = path.join(root, "fail-startup-guard");
   await mkdir(fixture, { recursive: true });
   await mkdir(guard, { recursive: true });
+  await mkdir(runtime, { recursive: true });
   await symlink(
     path.join(repositoryRoot, "node_modules"),
     path.join(fixture, "node_modules"),
     "dir",
   );
-  await writeManifest(fixture, "ensemble-t01-integration", {
-    host: "./host.ts",
-  });
+  await symlink(
+    path.join(repositoryRoot, "node_modules"),
+    path.join(runtime, "node_modules"),
+    "dir",
+  );
+  await writeManifest(fixture, "ensemble-t01-integration");
+  await writeManifest(runtime, RUNTIME_ID, { host: "./host.ts" });
   await copyFile(
     path.join(repositoryRoot, "test/fixtures/bb-integration/server.ts"),
     path.join(fixture, "server.ts"),
+  );
+  await copyFile(
+    path.join(
+      repositoryRoot,
+      "test/fixtures/bb-integration/scripted-runtime.ts",
+    ),
+    path.join(runtime, "server.ts"),
   );
   const providerBridgeSource = await readFile(
     path.join(bbSource, "tests/scripted-echo-provider/src/provider-bridge.ts"),
@@ -261,7 +296,7 @@ try {
     "Pinned scripted provider response hook changed",
   );
   await writeFile(
-    path.join(fixture, "src-provider-bridge.ts"),
+    path.join(runtime, "src-provider-bridge.ts"),
     providerBridgeSource.replace(
       responseMarker,
       `  pendingReplies.delete(id);
@@ -277,10 +312,10 @@ try {
   );
   await copyFile(
     path.join(bbSource, "LICENSE"),
-    path.join(fixture, "UPSTREAM-LICENSE"),
+    path.join(runtime, "UPSTREAM-LICENSE"),
   );
   await writeFile(
-    path.join(fixture, "host.ts"),
+    path.join(runtime, "host.ts"),
     'export { experimental_providerBridge } from "./src-provider-bridge.js";\n',
   );
   await writeManifest(guard, "ensemble-t01-startup-guard");
@@ -292,7 +327,7 @@ export default function startupGuard(bb) {
     throw new Error("Intentional T01 startup guard failure");
   }
   bb.experimental_hooks.on("message.dispatch", ({ thread }) =>
-    thread.providerId === ${JSON.stringify(PROVIDER_ID)} || thread.provider === ${JSON.stringify(PROVIDER_ID)}
+    (thread.providerId === ${JSON.stringify(PROVIDER_ID)} || thread.provider === ${JSON.stringify(PROVIDER_ID)}) && existsSync(${JSON.stringify(waiterEnabled)})
       ? { action: "wait", reason: "T01 startup queue proof" }
       : { action: "proceed" },
   );
@@ -318,11 +353,11 @@ export default function startupGuard(bb) {
     "passed",
     "Dedicated BB_DATA_DIR and loopback ports",
   );
-  check(
-    "publicPluginLoader",
-    "passed",
-    await installPlugin(fixture, PLUGIN_ID),
-  );
+  check("publicPluginLoader", "passed", {
+    externalWaiter: await installPlugin(guard, GUARD_ID),
+    scriptedRuntime: await installPlugin(runtime, RUNTIME_ID),
+    ensembleFixture: await installPlugin(fixture, PLUGIN_ID),
+  });
   const machine = (await bb("machine", "list")).find(
     (item) => item.status === "connected",
   );
@@ -436,6 +471,173 @@ export default function startupGuard(bb) {
   check("pluginToolAndResultRoundTrip", "passed", {
     toolCalls: toolCallCount(await rpc("snapshot")),
     providerReceivedToolResult: true,
+  });
+
+  const startCountBeforeWaitComposition = toolCallCount(await rpc("snapshot"));
+  await writeFile(waiterEnabled, "enabled");
+  const externallyWaited = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_waiter_order:${randomUUID()} call_tool:integration_ping`,
+  });
+  assert.equal(
+    externallyWaited.status,
+    "accepted",
+    JSON.stringify(externallyWaited),
+  );
+  assert.equal(externallyWaited.sendResponse.delivery, "queued");
+  assert.equal(
+    externallyWaited.sendResponse.queuedMessage.waitingOn?.pluginId,
+    GUARD_ID,
+  );
+  const externallyWaitedRows = await rpc("queuedMessages", { threadId });
+  assert.equal(externallyWaitedRows.length, 1);
+  await rpc("setDispatchGate", { mode: "paused" });
+  const rejectedAfterWait = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_reject_after_wait:${randomUUID()} call_tool:integration_ping`,
+  });
+  assert.equal(rejectedAfterWait.status, "rejected");
+  assert.match(rejectedAfterWait.message, /T01 dispatch gate is paused/u);
+  assert.equal(
+    (await rpc("queuedMessages", { threadId })).length,
+    externallyWaitedRows.length,
+    "A later Ensemble reject persisted a row after an earlier plugin voted wait",
+  );
+  await rpc("setDispatchGate", { mode: "stopped" });
+  const rejectedDuringStop = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_reject_during_stop:${randomUUID()} call_tool:integration_ping`,
+  });
+  assert.equal(rejectedDuringStop.status, "rejected");
+  assert.match(rejectedDuringStop.message, /T01 dispatch gate is stopped/u);
+  assert.equal(
+    (await rpc("queuedMessages", { threadId })).length,
+    externallyWaitedRows.length,
+  );
+  await rpc("setDispatchGate", { mode: "paused" });
+  assert.equal(
+    toolCallCount(await rpc("snapshot")),
+    startCountBeforeWaitComposition,
+  );
+  await rm(waiterEnabled, { force: true });
+  await rpc("recheckDispatch");
+  const rejectedQueuedRow = await until(async () => {
+    const rows = await rpc("queuedMessages", { threadId });
+    return rows.length === 1 && rows[0].failureReason !== null ? rows : false;
+  }, "queued plugin wait to be rejected by paused Ensemble gate");
+  assert.equal(
+    rejectedQueuedRow[0].failureReason,
+    "T01 dispatch gate is paused",
+  );
+  assert.equal(
+    toolCallCount(await rpc("snapshot")),
+    startCountBeforeWaitComposition,
+  );
+  await rpc("setDispatchGate", { mode: "ready" });
+  await until(
+    async () =>
+      toolCallCount(await rpc("snapshot")) ===
+      startCountBeforeWaitComposition + 1,
+    "accepted plugin-waited row to dispatch after gate resume",
+  );
+  await until(
+    async () => (await rpc("queuedMessages", { threadId })).length === 0,
+    "accepted plugin-waited row to leave queue after resume",
+  );
+  check("rejectComposesWithAnotherPluginWait", "passed", {
+    pluginInstallOrder: [GUARD_ID, PLUGIN_ID],
+    firstPluginWaitWasAccepted: true,
+    laterRejectDidNotCreateAnotherQueueRow: true,
+    rejectedExistingQueueRowStayedHeld: true,
+    resumeDispatchedExactlyOnce: true,
+  });
+
+  const countBeforeCoreQueueGate = toolCallCount(await rpc("snapshot"));
+  const delayedTurn = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_core_queue_source:${randomUUID()} delay:3000`,
+  });
+  assert.equal(delayedTurn.status, "accepted", JSON.stringify(delayedTurn));
+  await until(
+    async () => (await rpc("thread", { threadId })).status === "active",
+    "delayed core-queue source turn",
+  );
+  await rpc("setDispatchGate", { mode: "paused" });
+  const rejectedBeforeCoreQueue = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_core_queue_reject:${randomUUID()} call_tool:integration_ping`,
+    mode: "queue-if-active",
+  });
+  assert.equal(rejectedBeforeCoreQueue.status, "rejected");
+  assert.match(rejectedBeforeCoreQueue.message, /T01 dispatch gate is paused/u);
+  assert.equal((await rpc("queuedMessages", { threadId })).length, 0);
+  await rpc("setDispatchGate", { mode: "stopped" });
+  const rejectedAfterCoreStop = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_core_queue_stop:${randomUUID()} call_tool:integration_ping`,
+    mode: "queue-if-active",
+  });
+  assert.equal(rejectedAfterCoreStop.status, "rejected");
+  assert.match(rejectedAfterCoreStop.message, /T01 dispatch gate is stopped/u);
+  assert.equal((await rpc("queuedMessages", { threadId })).length, 0);
+  await rpc("setDispatchGate", { mode: "ready" });
+  const coreQueued = await rpc("sendAdmissionProbe", {
+    threadId,
+    prompt: `t01_core_queue_accepted:${randomUUID()} call_tool:integration_ping`,
+    mode: "queue-if-active",
+  });
+  assert.equal(coreQueued.status, "accepted", JSON.stringify(coreQueued));
+  assert.equal(coreQueued.sendResponse.delivery, "queued");
+  assert.equal(
+    coreQueued.sendResponse.queuedMessage.waitingOn?.kind,
+    "thread-busy",
+  );
+  await rpc("setDispatchGate", { mode: "paused" });
+  await until(
+    async () => (await rpc("thread", { threadId })).status === "idle",
+    "delayed core-queue source turn to finish",
+  );
+  const rejectedCoreQueuedRow = await until(async () => {
+    const rows = await rpc("queuedMessages", { threadId });
+    return rows.length === 1 && rows[0].failureReason !== null ? rows : false;
+  }, "core-busy row to be rejected before dispatch");
+  assert.equal(
+    rejectedCoreQueuedRow[0].failureReason,
+    "T01 dispatch gate is paused",
+  );
+  assert.equal(toolCallCount(await rpc("snapshot")), countBeforeCoreQueueGate);
+  await rpc("setDispatchGate", { mode: "ready" });
+  await until(
+    async () =>
+      toolCallCount(await rpc("snapshot")) === countBeforeCoreQueueGate + 1,
+    "core-busy row to dispatch after gate resume",
+  );
+  await until(
+    async () => (await rpc("queuedMessages", { threadId })).length === 0,
+    "core-busy row to leave queue after resume",
+  );
+  check("rejectRunsBeforeCoreQueueing", "passed", {
+    sourceTurnHeldThreadBusy: true,
+    rejectWithQueueIfActiveCreatedNoQueueRow: true,
+    acceptedCoreBusyRowStayedHeldWhilePaused: true,
+    resumeDispatchedExactlyOnce: true,
+  });
+
+  const countBeforePublicQueueCreate = toolCallCount(await rpc("snapshot"));
+  const manuallyCreated = await rpc("createQueuedMessage", {
+    threadId,
+    prompt: `t01_public_queue_create:${randomUUID()} call_tool:integration_ping`,
+  });
+  assert.equal(manuallyCreated.waitingOn?.kind, "thread-busy");
+  await until(
+    async () =>
+      toolCallCount(await rpc("snapshot")) === countBeforePublicQueueCreate + 1,
+    "public queuedMessages.create on an idle conversation",
+  );
+  check("queuedMessagesCreateIsDispatching", "passed", {
+    rowInitiallyWaitedFor: "thread-busy",
+    idleConversationDispatchedIt: true,
+    implication: "create does not provide a durable operator-controlled hold",
   });
 
   const pendingId = `pending-${randomUUID()}`;
@@ -552,7 +754,10 @@ export default function startupGuard(bb) {
     "uncertain",
   );
   const recovered = await rpc("recoverLostResponse", { operationId: lostId });
-  assert.deepEqual(recovered, { status: "accepted", matches: 1 });
+  assert.equal(recovered.status, "accepted");
+  assert.equal(recovered.matches, 1);
+  assert.equal(recovered.delivery, "observed-in-timeline");
+  assert.equal(recovered.queuedMessageId, null);
   timeline = await rpc("timeline", { threadId });
   const recoveredRows = await countMarkerRows(timeline, expectedLostMarker);
   assert.equal(recoveredRows.length, 1);
@@ -571,13 +776,74 @@ export default function startupGuard(bb) {
       "Send receipt has no stable operation id; correlation used a unique marker in the public timeline.",
   });
 
+  const queuedLostId = `lost-queued-${randomUUID()}`;
+  const queuedLostMarker = `t01_lost_response_marker:${queuedLostId}`;
+  const countBeforeQueuedLostResponse = toolCallCount(await rpc("snapshot"));
+  await writeFile(waiterEnabled, "enabled");
+  const queuedLostResponse = await rpc("sendWithLostResponse", {
+    operationId: queuedLostId,
+    threadId,
+  });
+  assert.equal(queuedLostResponse.status, "uncertain");
+  const queuedBeforeLostResponseRestart = await rpc("queuedMessages", {
+    threadId,
+  });
+  const queuedLostRows = queuedBeforeLostResponseRestart.filter((row) =>
+    JSON.stringify(row.content).includes(queuedLostMarker),
+  );
+  assert.equal(queuedLostRows.length, 1);
+  assert.equal(queuedLostRows[0].waitingOn?.pluginId, GUARD_ID);
+  await stop();
+  await start();
+  const recoveredQueuedLost = await rpc("recoverLostResponse", {
+    operationId: queuedLostId,
+  });
+  assert.equal(recoveredQueuedLost.status, "accepted");
+  assert.equal(recoveredQueuedLost.matches, 1);
+  assert.equal(recoveredQueuedLost.delivery, "observed-in-queue");
+  assert.equal(recoveredQueuedLost.queuedMessageId, queuedLostRows[0].id);
+  snapshot = await rpc("snapshot");
+  assert.equal(toolCallCount(snapshot), countBeforeQueuedLostResponse);
+  assert.equal(
+    snapshot.pending.find((item) => item.operation_id === queuedLostId)
+      ?.queued_message_id,
+    queuedLostRows[0].id,
+  );
+  assert.equal(
+    (await rpc("queuedMessages", { threadId })).some(
+      (row) => row.id === queuedLostRows[0].id,
+    ),
+    true,
+  );
+  await rm(waiterEnabled, { force: true });
+  await rpc("recheckDispatch");
+  await until(
+    async () =>
+      toolCallCount(await rpc("snapshot")) ===
+      countBeforeQueuedLostResponse + 1,
+    "queued send to execute after lost response recovery",
+  );
+  await until(
+    async () => (await rpc("queuedMessages", { threadId })).length === 0,
+    "recovered queued send to leave queue",
+  );
+  check("lostQueuedResponseAcceptance", "partial", {
+    droppedAcceptedQueuedResponse: true,
+    restartedBeforeRecovery: true,
+    recoveredFromPublicQueue: true,
+    queuedMessageId: recoveredQueuedLost.queuedMessageId,
+    duplicateToolEffectObserved: false,
+    limitation:
+      "A unique marker found one accepted public queue row and avoided resend; zero or multiple matches remain uncertain because BB exposes no caller operation id or in-flight request lookup.",
+  });
+
   const localPendingAfterFailureId = `pending-at-failure-${randomUUID()}`;
   await rpc("stagePending", {
     operationId: localPendingAfterFailureId,
     threadId,
     prompt: `t01_unsent:${localPendingAfterFailureId} call_tool:integration_ping`,
   });
-  await installPlugin(guard, GUARD_ID);
+  await writeFile(waiterEnabled, "enabled");
   const countBeforeQueuedStart = toolCallCount(await rpc("snapshot"));
   const queuePrompt = `t01_queued_startup:${randomUUID()} call_tool:integration_ping`;
   const queued = await rpc("send", { threadId, prompt: queuePrompt });
@@ -585,6 +851,7 @@ export default function startupGuard(bb) {
   assert.equal(queued.queuedMessage.waitingOn?.kind, "plugin");
   assert.equal(queued.queuedMessage.waitingOn?.pluginId, GUARD_ID);
   assert.equal(toolCallCount(await rpc("snapshot")), countBeforeQueuedStart);
+  await rpc("setDispatchGate", { mode: "paused" });
   await writeFile(guardFailure, "intentional guard initialization error");
   await stop();
   await start();
@@ -592,31 +859,116 @@ export default function startupGuard(bb) {
   const guardState = pluginList.plugins.find(
     (plugin) => plugin.id === GUARD_ID,
   );
-  assert.equal(guardState.status, "error");
-  await until(
-    async () =>
-      toolCallCount(await rpc("snapshot")) === countBeforeQueuedStart + 1,
-    "queued send dispatch after guard failure",
+  const ensembleState = pluginList.plugins.find(
+    (plugin) => plugin.id === PLUGIN_ID,
   );
-  const queueAfterRestart = await bb("thread", "queue", "list", threadId);
-  assert.equal(queueAfterRestart.length, 0);
+  assert.equal(guardState.status, "error");
+  assert.equal(ensembleState.status, "running");
+  const gateHeldQueue = await until(async () => {
+    const rows = await rpc("queuedMessages", { threadId });
+    return rows.length === 1 && rows[0].failureReason !== null ? rows : false;
+  }, "Ensemble reject to hold orphaned queue after another plugin fails startup");
+  assert.equal(gateHeldQueue[0].failureReason, "T01 dispatch gate is paused");
   snapshot = await rpc("snapshot");
+  assert.equal(toolCallCount(snapshot), countBeforeQueuedStart);
   assert.equal(
     snapshot.pending.find(
       (item) => item.operation_id === localPendingAfterFailureId,
     )?.status,
     "pending",
   );
-  check("startupQueuedDispatch", "failed", {
+  check("startupGuardFailureWithEnsembleLoaded", "passed", {
     beforeRestartCount: countBeforeQueuedStart,
     afterRestartCount: toolCallCount(snapshot),
     failedPluginStatus: guardState.status,
-    bbQueueAfterRestart: queueAfterRestart.length,
-    acceptedQueuedMessageExecuted: true,
+    ensembleStatus: ensembleState.status,
+    bbAcceptedQueuedMessageStayedHeld: true,
+    failureReason: gateHeldQueue[0].failureReason,
     requestedSendMode: "start",
     localUnsentIntentStayedPending: true,
-    conclusion:
-      "Ensemble-owned unsent work survives, but accepted BB-queued work executes when its wait-owning plugin fails to load.",
+  });
+  await rpc("setDispatchGate", { mode: "ready" });
+  await until(
+    async () =>
+      toolCallCount(await rpc("snapshot")) === countBeforeQueuedStart + 1,
+    "queued send dispatch after Ensemble gate resumes",
+  );
+  await until(
+    async () => (await rpc("queuedMessages", { threadId })).length === 0,
+    "queued send to leave queue after Ensemble gate resumes",
+  );
+
+  await rm(guardFailure, { force: true });
+  await stop();
+  await start();
+  const recoveredPluginList = await bb("plugin", "list");
+  assert.equal(
+    recoveredPluginList.plugins.find((plugin) => plugin.id === GUARD_ID).status,
+    "running",
+  );
+  assert.equal(
+    recoveredPluginList.plugins.find((plugin) => plugin.id === PLUGIN_ID)
+      .status,
+    "running",
+  );
+  const countBeforeEnsembleUnavailable = toolCallCount(await rpc("snapshot"));
+  await writeFile(waiterEnabled, "enabled");
+  const noEnsembleMarker = `t01_no_ensemble:${randomUUID()}`;
+  const queuedWithoutEnsemble = await rpc("send", {
+    threadId,
+    prompt: noEnsembleMarker,
+  });
+  assert.equal(queuedWithoutEnsemble.delivery, "queued");
+  assert.equal(
+    queuedWithoutEnsemble.queuedMessage.waitingOn?.pluginId,
+    GUARD_ID,
+  );
+  await writeFile(guardFailure, "intentional guard initialization error");
+  await writeFile(ensembleFailure, "intentional Ensemble initialization error");
+  await stop();
+  await start();
+  const unavailablePluginList = await bb("plugin", "list");
+  const unavailableGuardState = unavailablePluginList.plugins.find(
+    (plugin) => plugin.id === GUARD_ID,
+  );
+  const unavailableEnsembleState = unavailablePluginList.plugins.find(
+    (plugin) => plugin.id === PLUGIN_ID,
+  );
+  assert.equal(unavailableGuardState.status, "error");
+  assert.equal(unavailableEnsembleState.status, "error");
+  await until(async () => {
+    const lines = (await readFile(providerRecord, "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+    return lines.some(
+      (entry) =>
+        entry.method === "turn/start" &&
+        entry.params.input.some((item) => item.text === noEnsembleMarker),
+    );
+  }, "previously accepted queued row to start while Ensemble is unavailable");
+  const publicThreadAfterUnavailableDispatch = await bb(
+    "thread",
+    "get",
+    threadId,
+  );
+  const publicLogAfterUnavailableDispatch = await bb("thread", "log", threadId);
+  const publicLogMarkerMatches =
+    JSON.stringify(publicLogAfterUnavailableDispatch).split(noEnsembleMarker)
+      .length - 1;
+  const queueWithoutEnsemble = await bb("thread", "queue", "list", threadId);
+  assert.equal(queueWithoutEnsemble.length, 0);
+  check("startupWithoutEnsembleDispatchesAcceptedQueue", "failed", {
+    beforeRestartCount: countBeforeEnsembleUnavailable,
+    ensembleStatus: unavailableEnsembleState.status,
+    externalWaitOwnerStatus: unavailableGuardState.status,
+    providerObservedPreviouslyAcceptedPrompt: noEnsembleMarker,
+    publicThreadStatusAfterProviderAttempt:
+      publicThreadAfterUnavailableDispatch.thread.status,
+    publicTimelineMarkerMatches: publicLogMarkerMatches,
+    queueAfterRestart: queueWithoutEnsemble.length,
+    limitation:
+      "With both dispatch hooks unavailable, BB orphan recovery clears the persisted plugin wait and dispatches the accepted row through the separately loaded provider.",
   });
   const eventNames = [
     ...new Set(snapshot.events.map((event) => event.eventName)),
