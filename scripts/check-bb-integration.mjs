@@ -733,6 +733,10 @@ export default function startupGuard(bb) {
       toolCallCount(await rpc("snapshot")) === countBeforePublicQueueCreate + 1,
     "public queuedMessages.create on an idle conversation",
   );
+  await until(
+    async () => (await rpc("thread", { threadId })).status === "idle",
+    "public queuedMessages.create turn to finish before restart",
+  );
   check("queuedMessagesCreateIsDispatching", "passed", {
     rowInitiallyWaitedFor: "thread-busy",
     idleConversationDispatchedIt: true,
