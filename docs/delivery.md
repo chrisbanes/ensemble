@@ -1,16 +1,32 @@
-# Delivery ticket drafts
+# Delivery tickets
 
-Status: review draft. These are issue-ready briefs, not published GitHub issues or
-approved implementation work. After design review, publish one parent epic and
-these children in the repository's GitHub tracker, with native dependencies and
-links to the reviewed document revision. Do not add ready-for-agent until each
-applicable design gate is resolved. Do not close or repurpose legacy Rust tickets
-without reviewing their scope separately.
+Published as [epic #649](https://github.com/chrisbanes/ensemble/issues/649) and
+native sub-issues, with blocking dependencies. GitHub issues track execution;
+these briefs retain the reviewed scope and decision history. Publication does not
+resolve capability gates or mark dependent features ready-for-agent. The legacy
+backlog is retired as superseded by the TypeScript BB plugin direction.
 
 Parent epic: **Deliver Ensemble's BB-based autonomous project coordination MVP**.
 Outcome: an operator configures projects, adds local or selected GitHub tasks, and
 supervises concurrent agent-led delivery with durable handoffs and recovery.
 Acceptance: [release gates](acceptance.md#gates), not a collection of merged PRs.
+
+## Published issues
+
+| Ticket | GitHub issue |
+| --- | --- |
+| T01 | [#650 — Establish BB compatibility and automated integration harness](https://github.com/chrisbanes/ensemble/issues/650) |
+| T02 | [#651 — Prove execution access and workspace retention boundaries](https://github.com/chrisbanes/ensemble/issues/651) |
+| T03 | [#652 — Implement durable domain records and idempotent commands](https://github.com/chrisbanes/ensemble/issues/652) |
+| T04 | [#653 — Add project and profile configuration in BB](https://github.com/chrisbanes/ensemble/issues/653) |
+| T05 | [#654 — Deliver local task list, detail, and creation UI](https://github.com/chrisbanes/ensemble/issues/654) |
+| T06 | [#655 — Launch assignment threads and reconcile execution](https://github.com/chrisbanes/ensemble/issues/655) |
+| T07 | [#656 — Deliver results and resume waiting owners](https://github.com/chrisbanes/ensemble/issues/656) |
+| T08 | [#657 — Coordinate dispatch with BB concurrency and bounded retries](https://github.com/chrisbanes/ensemble/issues/657) |
+| T09 | [#658 — Add durable human questions and execution controls](https://github.com/chrisbanes/ensemble/issues/658) |
+| T10 | [#659 — Qualify the complete local-task milestone](https://github.com/chrisbanes/ensemble/issues/659) |
+| T11 | [#660 — Discover GitHub tasks with source memberships](https://github.com/chrisbanes/ensemble/issues/660) |
+| T12 | [#661 — Reconcile external writes and qualify the operational release](https://github.com/chrisbanes/ensemble/issues/661) |
 
 ## Delivery focus
 

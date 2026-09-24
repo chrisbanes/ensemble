@@ -22,7 +22,7 @@ how agents deliver work; Ensemble retains ownership and pending work.
 
 The prototype has established feasibility. Further product implementation is paused
 for review of the specification, technical design, automated acceptance plan, and
-dependency-ordered ticket drafts. The next handback is a complete tested flow, not
+published delivery tickets. The next handback is a complete tested flow, not
 a series of user-operated integration tests.
 
 ## Current status
@@ -70,7 +70,7 @@ handling, and the live experiment still required.
 - [Behavioural specification](docs/SPEC.md): target behaviour and the [first local-task journey](docs/SPEC.md#first-local-task-journey).
 - [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
 - [Acceptance plan](docs/acceptance.md): automated journeys and release gates.
-- [Delivery tickets](docs/delivery.md): review drafts with dependencies and acceptance IDs.
+- [Delivery tickets](docs/delivery.md): published issues with dependencies and acceptance IDs.
 - [Glossary](CONTEXT.md): canonical language.
 - [Agent workflows](docs/agents/): contribution conventions.
 

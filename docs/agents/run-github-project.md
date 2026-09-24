@@ -1,9 +1,9 @@
 # Run GitHub Project
 
 Project metadata is retained from the previous implementation. Verify it and merge
-requirements against live GitHub state before execution. The new implementation
-branch has no CI configured yet; required checks must come from the target branch's
-live protection rules and rulesets.
+requirements against live GitHub state before execution. The TypeScript implementation runs the `check` job in `.github/workflows/ci.yml`;
+required checks must still be verified from the target branch's live protection
+rules and rulesets.
 
 ## Repository
 
