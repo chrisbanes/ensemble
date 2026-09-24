@@ -3,6 +3,21 @@
 Status: proposal for review. This is the release evidence contract, not a list of
 manual steps for the user. Every delivery ticket names the scenarios it proves.
 
+## First journey to prove
+
+Automate the [first local-task journey](SPEC.md#first-local-task-journey) through
+real BB UI/RPC and storage. Use shared profiles as configuration, with no bot
+creation prerequisite, external source or manual thread-ID entry. Exercise direct
+owner work, bounded delegation and a structured question as separate scripted
+paths. Assert the artifact and completion evidence, one accountable owner,
+retained history and default conversation retention. A green BB status alone
+must not complete the task.
+
+Then apply the existing restart, pause/stop, uncertain launch, message replay and
+writer-exclusion scenarios to that same fixture. T10 assembles the journey;
+feature tickets establish their portions as they land. No user-run integration
+loop or additional model evaluation campaign is required.
+
 ## Environments
 
 1. Fast tests: domain services with the actual migration schema in SQLite files;
@@ -56,6 +71,39 @@ required events, or duplicate operation effects.
 | A25 | Configure permissions; attempt denied Ensemble action | Ensemble action is rejected; BB/provider controls are passed correctly and their shell/API limits are disclosed | BB + UI |
 | A26 | Hand back PR, receive feedback, restart, then merge or explicitly accept/close | Owner resumes on CI/review feedback; task remains waiting until settled; only through-merge projects merge autonomously; history persists | UI + BB + adapter |
 | A27 | Capacity exhausted or repeatedly failing worker | Ordinary dispatch honors BB limiter; capacity one does not deadlock parent/child work; confirmed transient failures retry at most twice; uncertainty holds; prolonged inactivity flags attention without automatic termination/restart | BB |
+
+## State and recovery boundary cases
+
+These extend existing scenario IDs; they are required evidence for the proposed
+state/recovery contract, not claims that the prototype implements it.
+
+| Scenario | Additional boundary to prove |
+| --- | --- |
+| A07 | Matching command retry replays the receipt despite an old expected version; changed payload conflicts; in-flight duplicate returns the original pending operation |
+| A09 | Wake-up acknowledgement precedes a delayed send response; no state regression. Crash after a recorded action but before inbox acknowledgement; redelivery returns the recorded event disposition and caused-operation identities, rather than creating fresh commands |
+| A14 | Pause after BB accepts a queued message but before it starts; restart; queued first turns and follow-ups remain held until resume |
+| A15 | Stop races with delegation, result reporting and a delayed spawn response; hold survives restart, late conversations are reconciled/stopped, and resume clears only the operator stop |
+| A16 | A writer queued behind BB concurrency does not retain a reservation; owner yields writing to child and later resumes; an early result does not release a still-active writer. Unknown execution or surviving background writer keeps workspace held |
+| A18 | Replacement conversation receives pending events; stale destination messages/results cannot mutate current work; assignment instruction revision remains unchanged without explicit apply |
+| A26 | PR handback keeps owner assignment open for feedback; task completion cannot silently leave active children or unresolved effects; child follow-up reopens the same assignment with a new work revision, preserving prior results and rejecting stale revision reports |
+| A27 | Retry counter survives restart; BB and Ensemble retries cannot multiply the two-retry allowance; unknown effects and permanent failures do not retry automatically |
+
+A06/A09 cover several results arriving while the owner is active: no automatic
+steer, one eligible continuation for pending events, individual acknowledgements,
+and no lost wake-up when another event arrives while the batch is processed.
+
+A06/A09 also cover a completed turn without a result or wait: send one durable
+reporting prompt, hold if its reply also omits a report, and do not duplicate the
+prompt across restart or bypass project pause/task stop.
+
+A08/A09/A24 verify automatic resumption of reconciled, previously enabled work
+without clearing prior pause/stop holds. Uncertain effects block dependent work;
+established independent work can proceed, while unknown writers prevent further
+writes to their workspace.
+
+A27 also verifies that exhausted worker retries hold that assignment and notify
+the owner. The owner may diagnose and arrange a revised approach, but reopening
+or renaming the same work cannot silently replenish automatic retries.
 
 ## Operator experience coverage
 

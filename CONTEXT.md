@@ -30,8 +30,8 @@ The agent responsible for coordinating a task's work and bringing it to an outco
 _Avoid_: Project lead when referring to responsibility for one task
 
 **Agent profile**:
-An operator-defined configuration of an agent's instructions, model, and available tools.
-_Avoid_: Assignment when referring to a reusable agent configuration
+A reusable, operator-defined configuration of instructions, provider, model, and available tools, selected for project leads and task assignments.
+_Avoid_: Bot identity or assignment when referring to reusable configuration
 
 **Assignment**:
 A durable unit of work delegated to an agent within a task that can continue across agent conversations.

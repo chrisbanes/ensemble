@@ -5,6 +5,19 @@ Agent instructions determine the process. Ensemble owns tasks, assignments, and
 durable coordination; BB supplies conversations, agent execution, and workspaces.
 Taskboard informs the UI design; Ensemble is an independent implementation.
 
+## Product model
+
+- **Projects and tasks:** local or imported work, ownership, delegation, results
+  and questions needing operator attention.
+- **Agent profiles:** reusable instructions and execution settings, selected for
+  leads and assignments; BB conversations carry out the work.
+- **GitHub sync:** optional issue/Project discovery, readiness and permitted
+  progress updates using the same task model.
+
+The interface centers on projects and tasks. Persistent bot identities, personal
+bot state and a separate bot management UI are outside scope. Instructions guide
+how agents deliver work; Ensemble retains ownership and pending work.
+
 ## Planning checkpoint
 
 The prototype has established feasibility. Further product implementation is paused
@@ -54,7 +67,7 @@ handling, and the live experiment still required.
 ## Design documents
 
 - [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): accepted architecture.
-- [Behavioural specification](docs/SPEC.md): target behaviour and open choices.
+- [Behavioural specification](docs/SPEC.md): target behaviour and the [first local-task journey](docs/SPEC.md#first-local-task-journey).
 - [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
 - [Acceptance plan](docs/acceptance.md): automated journeys and release gates.
 - [Delivery tickets](docs/delivery.md): review drafts with dependencies and acceptance IDs.

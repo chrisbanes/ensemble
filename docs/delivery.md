@@ -12,6 +12,29 @@ Outcome: an operator configures projects, adds local or selected GitHub tasks, a
 supervises concurrent agent-led delivery with durable handoffs and recovery.
 Acceptance: [release gates](acceptance.md#gates), not a collection of merged PRs.
 
+## Delivery focus
+
+Build the [first local-task journey](SPEC.md#first-local-task-journey) across
+T04–T10, supported by T01–T03. Profiles are reusable configuration; do not add bot
+identities, personal bot state or a bot management ticket. T11–T12 add GitHub sync
+to the same task model after the local journey passes.
+
+Remaining technical work is tied to observable points in that journey:
+
+| Journey boundary | Unresolved proof | Existing tickets |
+| --- | --- | --- |
+| Owner/worker starts | Reconcile uncertain spawn and workspace provisioning; acquire a writer only at effective admission | T01/T02/T06 |
+| Eligible work waits or resumes | Resolve Ensemble-to-BB dispatch handoff, including pause/stop during queueing and plugin startup failure; compose with BB concurrency | T01/T06/T08 |
+| Result or answer resumes work | Reconcile accepted sends after lost responses, retain event acknowledgements and reject stale destinations | T01/T07/T09 |
+| Stop, retry or apply settings | Confirm writer termination, shared retry allowance and revised settings on the intended next turn | T01/T02/T04/T06/T08 |
+
+These are implementation investigations against accepted behaviour, not a new
+product questionnaire. The [capability evidence](bb-capabilities.md) records the
+partial results and open gates. Resolve each gate before its dependent feature;
+do not treat the failed hook-only approach as proof that all development needs an
+upstream BB change. Keep the existing dependency map until the relevant gate is
+resolved rather than silently marking dependent tickets ready.
+
 ## Dependency map
 
 ```mermaid
@@ -23,7 +46,7 @@ flowchart TD
   T04 --> T05[Local tasks and operator UI]
   T04 --> T06[Assignment execution and recovery]
   T06 --> T07[Inbox and result continuations]
-  T07 --> T08[Lead scheduling and capacity]
+  T07 --> T08[BB dispatch and bounded retries]
   T06 --> T09[Human requests and controls]
   T05 --> T10[Complete local-task milestone]
   T08 --> T10
@@ -39,6 +62,13 @@ runs in the isolated BB harness from T01 and adds its scenarios as it lands.
 
 ## T01 — Establish BB compatibility and automated integration harness
 
+**Unresolved dispatch boundary:** [isolated startup probe](bb-capabilities.md)
+shows that BB 0.43.4 releases queued work when its guard plugin fails to initialize.
+The hook-only approach fails; investigate Ensemble-owned pending work and its
+handoff to BB before concluding that an upstream change is required. Prove the
+startup contract before dependent execution work; other harness and design work
+can continue. The diagnostic probe is not the full T01 harness.
+
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
 Build an isolated, pinned BB installation with actual plugin loading, SQLite,
@@ -51,6 +81,8 @@ Done when one command starts the instance, loads a fixture plugin, exercises a
 scripted tool/result round trip, restarts BB, asserts persisted state, and cleans
 up only its own resources. Include a lost-response injection. Produce a capability
 matrix; unsupported mandatory behaviour gets a concrete BB dependency ticket.
+Cover the [state/recovery proof gates](design/bb-plugin.md#remaining-proof-gates-for-state-and-recovery),
+including queued dispatch during startup and lost-message acceptance.
 No internal BB imports, production data paths, authenticated model, or shared Haze
 checkout in this test. A type-check-only harness does not satisfy the ticket.
 
@@ -78,7 +110,8 @@ custom host sandboxing is outside this release.
 Implement migrations, task/assignment identity, profile revisions, conversation
 generations, owner uniqueness, launch intent, inbox/outbox records, results and
 human requests from the design. Expose one validated command service to tools/RPC.
-Use expected versions for competing edits and operation IDs for retries. Keep
+Use expected versions for competing edits and durable command receipts for
+operation retries, including payload conflicts and pending-response replay. Keep
 provider statuses separate from task and execution state.
 
 Done when transaction rollback, file reopen, conflicting retry, concurrent owner
@@ -224,6 +257,12 @@ implementation is not handed back as a sequence of manual smoke-test requests.
 
 ## Decisions before publication
 
+**Product framing — accepted:** projects and tasks, reusable agent profiles and
+optional GitHub sync. Conversations serve project leads and task assignments.
+Persistent bot identities, personal bot state and a bot management UI are outside
+scope. Bots Sidebar is a reference for conversation binding/navigation only.
+
+
 - **D1 — accepted:** completion is configured per project from the first release:
   reviewable PR or through merge, subject to granted permissions and completion
   conditions. Non-code tasks finish with their agreed artifact.
@@ -341,3 +380,47 @@ Source query and BB notification capabilities remain technical verification work
 Integration scope I1–I3 and the notification limitation are confirmed. BB supports in-app plugin
 alerts and built-in thread notifications; arbitrary Ensemble OS/push alerts are
 not established. API contracts and live compatibility still require verification.
+
+
+## State and recovery design review
+
+The technical design now separates durable assignment lifecycle from BB execution
+observations and defines command receipts, independent hold reasons, writer
+handoff, inbox acknowledgement, and ordered restart reconciliation. The acceptance
+plan adds race and crash cases under existing A07–A27 IDs. These are proposed
+technical contracts implementing the accepted policy; BB proof gates remain open.
+No feature implementation or shared BB changes are authorized by this review.
+
+Independent review identified two contract gaps: writer reservation before BB
+admission and missing links between inbox events and resulting operations. Both
+were corrected in the draft and added to A09/A16 boundary checks. This review is
+of documentation only; none of the BB proof gates is marked passed.
+
+
+## Technical walkthrough decisions
+
+- **R1 — accepted:** reopen the same assignment for follow-up on the same work,
+  recording a new request/work revision and retaining earlier immutable results.
+  Reuse the conversation when available; replacement conversation identity remains
+  separate from work revision.
+- **R2 — accepted:** after a confirmed turn ends without result or explicit wait,
+  send one persisted reporting prompt. If that repair turn also omits a report,
+  hold for attention. Respect pause/stop and preserve the allowance across restart.
+
+- **R3 — accepted:** results arriving during an owner's active turn remain queued
+  for its next turn; voluntary inbox reads are allowed, automatic steering is not.
+- **R4 — accepted:** coalesce pending results into one continuation while retaining
+  each event and its processing acknowledgement separately.
+
+- **R5 — accepted:** previously enabled work resumes automatically after successful
+  reconciliation; existing pause/stop controls remain in force.
+- **R6 — accepted:** uncertainty holds affected operations and dependent work;
+  reconciliation and established independent work may continue. Unknown writer
+  status blocks further workspace writes; unclear independence remains held.
+
+- **R7 — accepted:** exhausted delegated-worker retries hold that assignment and
+  notify the owner first. The owner may diagnose, take over or choose another
+  approach within scope; blind relaunches cannot reset the retry allowance.
+
+Technical walkthrough choices R1–R7 are confirmed.
+Detailed BB proof gates remain open.

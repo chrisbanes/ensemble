@@ -10,6 +10,16 @@ Ensemble owns durable coordination and its recovery; BB provides agent execution
 allows the process to adapt to each task, at the cost of a predetermined sequence
 of steps.
 
+## Product shape
+
+Center the product on projects and tasks, with reusable agent profiles and
+optional GitHub sync. Profiles supply instructions and execution settings;
+project leads and task assignments have conversations for their work. Ensemble
+does not require persistent bot identities, personal bot state or a bot management
+surface. This keeps configuration reusable while work history belongs to its
+project or task. Bots Sidebar informs conversation binding and navigation only;
+its broader bot model is not part of Ensemble.
+
 ## Coordination
 
 Ensemble attaches its project configuration to BB projects, each containing tasks,

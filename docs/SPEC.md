@@ -32,6 +32,19 @@ in instructions. They are not required assignment types or stages. Changing thei
 order, adding a specialist, or skipping an unnecessary review must not require a
 new runtime feature, process graph, or result schema.
 
+### Product model
+
+| Part | Operator sees | Responsibility |
+| --- | --- | --- |
+| Projects and tasks | Project task list, task detail, results and attention inbox | Keep work, accountable ownership and decisions together |
+| Agent profiles | Reusable instructions and provider/model settings in configuration | Configure project leads and assignment conversations |
+| Optional GitHub sync | Sources, readiness, last successful sync and confirmed updates | Connect external work to the same task model |
+
+Profiles are reusable configuration. Conversations belong to project leadership
+or task assignments. There is no persistent bot identity, personal bot state or
+separate bot management UI. Agent instructions decide the process; the task
+records retain ownership, outcomes and pending work.
+
 ## Delivery scope and user journeys
 
 **Release proposal; review required.** Feasibility is established; the current
@@ -54,6 +67,34 @@ The user does not supply thread IDs or UUIDs, configure the plugin with CLI
 commands, poll conversations for results, or manually nudge each stage. A restart
 preserves ownership and pending work without duplicate dispatch. The complete flow
 is tested automatically before handback, including the operator-facing UI.
+
+### First local-task journey
+
+Use a disposable linked repository and a local, non-code task requesting a
+repository summary artifact for the first automated journey. No external task
+source is configured. This
+walkthrough joins the existing acceptance scenarios; it adds no mandatory work
+stages. Separate scenarios prove repository-free work and other delivery modes.
+
+| Step | Operator and agent experience | Tickets / evidence |
+| --- | --- | --- |
+| Configure | Select a BB project, its repository, a lead profile and allowed assignment profiles. Save instructions and permissions. Project remains paused. | T04 / A02, A25 |
+| Add work | Create a local task describing the requested artifact. It starts unready; marking it Ready does not enable the project. | T05 / A03 |
+| Enable | Enable the project. The lead selects Ready work and assigns one accountable owner using an allowed profile. Conversation links appear automatically. | T06, T08 / A04, A05 |
+| Work | The owner works directly or delegates a bounded assignment according to instructions. In the delegation fixture, the owner yields the workspace before the worker writes. | T06 / A05, A16, A27 |
+| Receive a result | A worker records its result and evidence. The owner receives it on an eligible next turn and decides what to do next. The operator sees both result and conversation links. | T07 / A06, A09, A10 |
+| Resolve a question | In the question fixture, a structured request appears in the attention inbox and task detail. The operator answers; the correct assignment resumes within that answer's scope. | T09 / A12, A13 |
+| Finish | The owner records the requested artifact and evidence once obligations are settled. Task detail retains outcome, assignment history and conversations. Default cleanup retains conversations until archival. | T10 / A17 and local completion assertions |
+
+The result and question fixtures exercise alternative paths; every task need not
+delegate or ask a question. Coding tasks that require PR delivery still follow
+the configured PR/merge completion conditions. An artifact-only fixture does not
+establish GitHub delivery readiness.
+
+At each step the UI distinguishes waiting for capacity, waiting for an answer,
+paused, stopping and uncertain execution. Pause/resume, task stop and restart are
+variations on this journey, verified by the implementation agent in isolated BB.
+They are not additional setup steps for the operator.
 
 ### First operational release
 
@@ -96,7 +137,8 @@ Task completion never follows merely from a green conversation indicator.
 
 ### Exclusions from these milestones
 
-Jira/Linear, autonomous creation of profiles, plugin marketplaces, a configurable
+Persistent bot identities, personal bot state, a bot management UI, Jira/Linear,
+autonomous creation of profiles, plugin marketplaces, a configurable
 process DAG, multiple execution hosts, team/RBAC administration, mobile-specific
 screens, transfers of already-owned tasks between projects, a separate workspace
 cleanup engine, and migration of Rust pipeline
@@ -280,7 +322,9 @@ the first release adds no separate global default or per-project execution cap.
 Agents waiting for human input or another assignment yield their active turn so
 BB can admit other work. Retain Ensemble ownership and task writer checks.
 Confirmed transient execution failures receive at most two retries with backoff,
-then hold for attention. Reconcile uncertain launches/effects before retrying;
+then hold the failed assignment and notify its owner. The owner diagnoses and
+may perform the work or choose a revised approach within scope; blind relaunches
+must not reset the retry allowance. Reconcile uncertain launches/effects before retrying;
 ordinary task problems remain agent-directed.
 
 ## Task identity, discovery, and ownership
@@ -327,6 +371,15 @@ task owner may delegate bounded work to other configured profiles and later
 continue with their results. One task can have concurrent assignments while
 retaining one accountable owner.
 
+Follow-up on the same piece of work reopens its assignment with a new request
+and result revision, retaining prior results and reusing the conversation when
+available. Results from earlier work revisions cannot complete the new revision.
+
+If a confirmed completed turn records neither a result nor a waiting reason,
+Ensemble sends one reporting prompt. If that repair turn still fails to report,
+hold for attention. Persist the allowance across restart and respect execution
+controls; do not treat an idle conversation as successful work.
+
 Each assignment needs enough durable information to answer:
 
 - Who requested this work, who is responsible, and which project and task own it?
@@ -346,6 +399,11 @@ reviewer returns findings referring to that commit, and the owner decides whethe
 to revise, seek another opinion, or ask the operator. Ensemble preserves the
 request and material references. It does not impose a review verdict taxonomy,
 adjudication stage, or universal review requirement.
+
+Results arriving while their owner is active are queued for its next turn rather
+than automatically steering the current conversation. The owner may check its
+inbox voluntarily. Multiple pending events cause one continuation, with individual
+results and acknowledgements retained.
 
 A result that arrives while its recipient is stopped or the project is paused stays
 available. Repeated delivery of the same result must not create duplicate pending
@@ -431,8 +489,12 @@ Ensemble does not promise exactly-once external execution through arbitrary APIs
 Recovery restores task ownership, assignments, human requests, workspaces, and
 pending effects before new work can compete for them. It reconciles live processes
 and remote effects where present, then resumes eligible work under current
-permissions and limits. Uncertainty affecting one task should remain visible without stopping
-unrelated projects.
+permissions and limits. Previously enabled work resumes automatically after successful reconciliation,
+while all existing pause/stop controls remain in force. Uncertainty holds the
+operation and dependent work. Reconciliation and established independent work
+may continue; uncertain writer status blocks further workspace writes. If
+independence cannot be established, keep affected work held. Unrelated projects
+continue.
 
 Agent instructions determine when the requested work is complete. Recording an
 assignment outcome does not automatically complete its task, close an external
