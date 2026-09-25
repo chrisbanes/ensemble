@@ -8,12 +8,15 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
           cache: npm
-      - run: npm install --global npm@11.19.1
+      - run: npm install --global npm@11.20.0
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - run: npm run check
+      - run: npm run test:bb-integration

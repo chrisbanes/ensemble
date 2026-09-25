@@ -463,15 +463,22 @@ live authentication or notification-delivery test.
 
 ## 8. BB compatibility and rollout
 
-Installed evidence: BB 0.43.4 with SDK 0.5.9 loads the prototype; source-only type
-checks against newer SDKs did not establish installed compatibility. User reported
-successful live delegation. Real restart, result wakeups, permissions and task UI
-are not yet proven. Pin the tested BB artifact and SDK in integration CI.
+The isolated T1–T5 harness exercised BB 0.43.4, host plugin SDK 0.5.9, package
+SDK 0.5.24, Node 24.21.0, the actual plugin loader and SQLite driver, public RPC,
+temporary Git environments, scripted provider turns and automated Chromium. It
+records tool-result round trips and persisted state across restart. This is
+capability evidence for a disposable fixture, not an implemented Ensemble product
+flow or authenticated-provider smoke. The suite checks lockfile tarball integrity
+separately from SHA-256 hashes of the installed BB and SDK package trees, and
+records the tested source revision and digest; it imports no BB private API.
 
-T01 must exercise the actual plugin loader and BB database driver, a scripted
-provider, environment provisioning, restart and message recovery. Use public APIs;
-any necessary BB change gets a separate dependency ticket. Do not import internal
-modules or accumulate runtime-version branches to get a green test.
+The T4 diagnostic deliberately fails because BB dispatched an accepted queue row
+after both hook owners failed initialization. The aggregate T1–T5 command accepts
+only that exact observed #665 diagnosis after checking row identity, one provider
+turn, one tool-effect delta, failed plugin status and clean process shutdown. The
+report preserves startup as `failed-capability` and keeps T06/T08 blocked. Other
+T5 recovery observations are bounded fixture tests; their product gates remain
+open. Use public APIs; any necessary BB change gets a separate dependency ticket.
 
 The existing Haze prototype remains an experiment. Production code is built and
 tested in an isolated BB instance/data directory. Upgrade the installed plugin
@@ -481,12 +488,20 @@ before changing entry points or triggering reloads.
 
 ### Remaining proof gates for state and recovery
 
-See [BB capability evidence](../bb-capabilities.md) for the 2026-09-24 isolated
-runtime checks. The hook-only startup approach **failed**: BB releases persisted
-plugin waits when their guard fails to load. Keeping pending work in Ensemble is
-an alternative under investigation; its handoff to BB still needs proof. The
-accepted guarantee remains unchanged. A required BB change has not yet been
-established, and unrelated design/harness work can continue.
+See [BB capability evidence](../bb-capabilities.md) for the pinned T1–T5 live
+report. T3 recovered bounded lost spawn/send responses by unique public markers
+after restart and observed no second provider effect; zero or multiple matches
+remain held, and general idempotency is unproved. Its public stale-generation
+delete scenario prevented one queued provider effect but did not prove an atomic
+generation interlock. T4 reproduced the startup safety violation and keeps #665
+open. T5 exercised wait composition, stop observations, competing intent attempts,
+retry across restart, instruction contribution and shared-worktree retention. Each
+Other T5 gates remain open because fixture tests do not implement the corresponding
+Ensemble ownership, apply or cleanup policy. The delayed-stop probe now records
+a failed BB capability: `threads.stop` returned `ok` while the plugin-held thread
+remained pending, so the fixture withheld recheck and could not prove safe writer
+release. [#676](https://github.com/chrisbanes/ensemble/issues/676) tracks the
+unresolved confirmation path. The accepted guarantees remain unchanged.
 
 Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
 `threads.retry`, queued-message APIs, and the `message.dispatch` hook with
@@ -494,15 +509,15 @@ Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
 hooks cover queue drains and retries, with an explicit Send-now bypass. These
 are source-level contracts, not integration test results.
 
-| Gate | Evidence required before dependent feature work | Ticket |
-| --- | --- | --- |
-| Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | T01/T06/T08 |
-| Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | T01/T07 |
-| Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | T02/T06 |
-| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | T01/T02/T06 |
-| Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | T01/T08 |
-| Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | T01/T04/T06 |
+| Gate | Evidence required before dependent feature work | T1–T5 observation | Ticket |
+| --- | --- | --- | --- |
+| Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
+| Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
+| Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Failed capability** for the plugin-held delayed start: BB returned `ok` to stop but the thread stayed pending; recheck was withheld. Active-turn stop was confirmed; no Ensemble writer release policy was exercised | [#676](https://github.com/chrisbanes/ensemble/issues/676); T02/T06 blocked |
+| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent chose one thread/environment after restart; two raw parallel BB spawns created separate environments | T01/T02/T06 |
+| Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
+| Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |
 
 If a gate cannot be met using public BB APIs, record the precise dependency or
 bring back a concrete product limitation for review. A metadata tag, mocked host

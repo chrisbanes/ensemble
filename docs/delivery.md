@@ -80,20 +80,38 @@ runs in the isolated BB harness from T01 and adds its scenarios as it lands.
 
 ## T01 — Establish BB compatibility and automated integration harness
 
-**Unresolved dispatch boundary:** [isolated startup probe](bb-capabilities.md)
-shows that BB 0.43.4 releases queued work when its guard plugin fails to initialize.
-The hook-only approach fails; investigate Ensemble-owned pending work and its
-handoff to BB before concluding that an upstream change is required. Prove the
-startup contract before dependent execution work; other harness and design work
-can continue. The diagnostic probe is not the full T01 harness.
+**Capability result:** the [full isolated T01 harness](bb-capabilities.md) now
+proves that a later public `message.dispatch` reject composes with another
+plugin's wait and BB core busy-queueing while Ensemble is loaded. It still fails
+the mandatory startup boundary: if Ensemble and the external wait owner both fail
+to initialize, BB releases the accepted queue row and sends it to the separately
+loaded provider. A separate public-queue probe confirms that `threads.queuedMessages.create`
+on an idle thread is automatically dispatched, not held. T01 also recovers a
+lost response for both sent and queued messages by unique public markers after
+restart; ambiguous matches remain `uncertain`, with no blind resend.
+
+Issue [#650's acceptance](https://github.com/chrisbanes/ensemble/issues/650)
+defines this as a capability/harness ticket: unsupported mandatory behaviour is
+recorded in the matrix and tracked by a concrete dependency. The harness command,
+result matrix and bounded failed capability can therefore satisfy T01 after
+review, without treating startup as passed. Issue
+[#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the unresolved
+accepted-queue/startup contract and blocks T06/T08 execution work until a public
+API design or tested BB capability proves protected work remains held while
+Ensemble is unavailable. The T5 delayed-stop probe also blocks T02/T06 writer
+release: BB acknowledged stop while the plugin-held thread remained pending, so
+the harness did not recheck it. [#676](https://github.com/chrisbanes/ensemble/issues/676)
+tracks that boundary. These findings do not yet establish that BB must
+change. Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
-Build an isolated, pinned BB installation with actual plugin loading, SQLite,
-temporary repositories, and a scripted provider. Prove public API support for
-spawn, rich execution configuration, lifecycle events, restart, message identity,
-plugin tools, human interactions, and environment retention. Record supported
-behaviour for SDK 0.5.9/BB 0.43.4 or select a tested replacement together.
+Build an isolated, version-checked BB installation with actual plugin loading,
+SQLite, temporary repositories, and a scripted provider. Prove public API support
+for spawn, rich execution configuration, lifecycle events, restart, message
+identity, plugin tools, human interactions, and environment retention. Record
+supported behaviour for the tested plugin SDK 0.5.24 package on BB 0.43.4's
+declared SDK 0.5.9 host compatibility, or select a tested replacement together.
 
 Done when one command starts the instance, loads a fixture plugin, exercises a
 scripted tool/result round trip, restarts BB, asserts persisted state, and cleans
