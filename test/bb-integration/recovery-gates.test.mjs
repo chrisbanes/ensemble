@@ -13,17 +13,20 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import { bbCli, restartBb, rpc, waitFor, withFixture } from "./harness.mjs";
 
 const exec = promisify(execFile);
 const fixturePluginId = "ensemble-t1-fixture";
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
-const gateReportsDirectory = path.join(
-  repositoryRoot,
-  "node_modules/.cache/ensemble-bb-integration/t5-gates",
-  randomUUID(),
-);
+const gateReportsDirectory = process.env.ENSEMBLE_T5_GATE_REPORT_DIRECTORY
+  ? path.resolve(process.env.ENSEMBLE_T5_GATE_REPORT_DIRECTORY)
+  : path.join(
+      repositoryRoot,
+      "node_modules/.cache/ensemble-bb-integration/t5-gates",
+      randomUUID(),
+    );
+let reportStoreInitialization;
 
 async function createProject(instance, label) {
   const machine = (await bbCli(instance, "machine", "list")).find(
@@ -191,10 +194,6 @@ async function execution(instance, operation, args = {}) {
   return rpc(instance, "execution.run", { operation, args });
 }
 
-async function loss(instance, operation, args = {}) {
-  return rpc(instance, "loss.run", { operation, args });
-}
-
 async function spawnThread(instance, project, machine, prompt, environment) {
   return execution(instance, "spawn", {
     projectId: project.id,
@@ -254,12 +253,20 @@ async function fileExists(filePath) {
   }
 }
 
-async function recordGate(instance, name, result) {
-  const report = { name, ...result };
-  instance.runtimeManifest.checks[`T5:${name}`] = report;
-  const reportPath = path.join(gateReportsDirectory, `${name}.json`);
+async function initializeGateReportStore() {
+  if (reportStoreInitialization === undefined) {
+    reportStoreInitialization = (async () => {
+      await mkdir(gateReportsDirectory, { recursive: true });
+      await writeFile(path.join(gateReportsDirectory, "reports.jsonl"), "");
+    })();
+  }
+  await reportStoreInitialization;
+}
+
+async function writeGateReport(report) {
+  await initializeGateReportStore();
+  const reportPath = path.join(gateReportsDirectory, `${report.name}.json`);
   const reportLine = `${JSON.stringify(report)}\n`;
-  await mkdir(gateReportsDirectory, { recursive: true });
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   await appendFile(
     path.join(gateReportsDirectory, "reports.jsonl"),
@@ -269,11 +276,80 @@ async function recordGate(instance, name, result) {
   process.stdout.write(`T5_GATE ${reportLine}`);
 }
 
-test("T5 composed writer admission records the second-plugin wait without claiming a safe reservation", async () => {
-  await withFixture(async (instance) => {
+async function runGate(name, run) {
+  const evidence = {
+    stage: "test started",
+    identities: {},
+    observed: {},
+    limits: [],
+  };
+  const capture = (update) => {
+    if (update.stage !== undefined) evidence.stage = update.stage;
+    if (update.identities !== undefined) {
+      Object.assign(evidence.identities, update.identities);
+    }
+    if (update.observed !== undefined) {
+      Object.assign(evidence.observed, update.observed);
+    }
+    if (update.limits !== undefined) evidence.limits = update.limits;
+  };
+
+  let report;
+  try {
+    report = await run(capture);
+    if (!report || !["pass", "fail", "open"].includes(report.verdict)) {
+      throw new Error(`T5 case ${name} returned no valid gate verdict`);
+    }
+  } catch (error) {
+    const failure = {
+      stage: evidence.stage,
+      name: error?.name ?? "Error",
+      message: String(error?.message ?? error),
+      ...(typeof error?.stack === "string" ? { stack: error.stack } : {}),
+    };
+    const limits = [
+      ...evidence.limits,
+      `Evidence capture ended at stage '${evidence.stage}'; later runtime identities, statuses, and effects were unavailable after this failure.`,
+    ];
+    try {
+      await writeGateReport({
+        name,
+        verdict: "fail",
+        identities: evidence.identities,
+        observed: evidence.observed,
+        failure,
+        limits,
+      });
+    } catch (reportError) {
+      if (error && typeof error === "object") {
+        error.reportWriteError = String(reportError);
+      }
+    }
+    throw error;
+  }
+
+  await writeGateReport({ name, ...report });
+}
+
+function gateTest(name, title, callback) {
+  return nodeTest(title, () =>
+    runGate(name, (capture) =>
+      withFixture((instance) => callback(instance, capture)),
+    ),
+  );
+}
+
+gateTest(
+  "composed-writer-admission",
+  "T5 composed writer admission records the second-plugin wait without claiming a safe reservation",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const guardId = await installWaitGuard(instance);
     const { project, machine } = await createProject(instance, "admission");
+    capture({
+      stage: "isolated project and second-plugin wait guard ready",
+      identities: { projectId: project.id, guardPluginId: guardId },
+    });
     const spawned = await execution(instance, "spawn", {
       projectId: project.id,
       providerId: "ensemble-scripted",
@@ -292,6 +368,10 @@ test("T5 composed writer admission records the second-plugin wait without claimi
       },
     });
     assert.equal(typeof spawned.id, "string");
+    capture({
+      stage: "writer thread spawned",
+      identities: { threadId: spawned.id },
+    });
     const thread = await waitFor(async () => {
       const observed = await execution(instance, "get", {
         threadId: spawned.id,
@@ -319,6 +399,14 @@ test("T5 composed writer admission records the second-plugin wait without claimi
         taskId: "admission",
       },
     );
+    capture({
+      stage: "writer held by second-plugin dispatch wait",
+      identities: { queuedMessageId: queued.id },
+      observed: {
+        threadStatus: thread.status,
+        hookObservations: observations,
+      },
+    });
     assert.equal(observations.length, 1);
     assert.equal(observations[0].threadId, spawned.id);
     assert.equal(observations[0].environmentId, null);
@@ -326,6 +414,10 @@ test("T5 composed writer admission records the second-plugin wait without claimi
     const effectsBeforeRelease = (await providerTrace(instance)).filter(
       (entry) => entry.method === "t1/tool-result",
     );
+    capture({
+      stage: "provider trace captured before wait release",
+      observed: { preReleaseProviderEffects: effectsBeforeRelease.length },
+    });
     assert.equal(effectsBeforeRelease.length, 0);
 
     await pluginRpc(instance, guardId, "wait.run", {
@@ -344,9 +436,14 @@ test("T5 composed writer admission records the second-plugin wait without claimi
     const toolEffects = trace.filter(
       (entry) => entry.method === "t1/tool-result",
     );
+    capture({
+      stage: "provider trace captured after wait release",
+      identities: { environmentId: completed.environmentId },
+      observed: { postReleaseToolEffects: toolEffects.length },
+    });
     assert.equal(toolEffects.length, 1);
     assert.equal(toolEffects[0].params.toolName, "capability_ping");
-    await recordGate(instance, "composed-writer-admission", {
+    return {
       verdict: "open",
       identities: {
         projectId: project.id,
@@ -364,14 +461,20 @@ test("T5 composed writer admission records the second-plugin wait without claimi
       limits: [
         "BB exposes per-plugin waits and hook observations, but this fixture has no Ensemble writer reservation to prove release or serialization of two task writers.",
       ],
-    });
-  });
-});
+    };
+  },
+);
 
-test("T5 stop confirms active and delayed-start observations before release", async () => {
-  await withFixture(async (instance) => {
+gateTest(
+  "stop-writer-release",
+  "T5 stop confirms active and delayed-start observations before release",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const { project, machine } = await createProject(instance, "stop");
+    capture({
+      stage: "isolated stop project ready",
+      identities: { projectId: project.id },
+    });
 
     const active = await spawnThread(
       instance,
@@ -380,7 +483,9 @@ test("T5 stop confirms active and delayed-start observations before release", as
       "T5_TASK=active-stop hold_turn",
     );
     const running = await waitFor(async () => {
-      const thread = await execution(instance, "get", { threadId: active.id });
+      const thread = await execution(instance, "get", {
+        threadId: active.id,
+      });
       return thread.status === "active" ? thread : false;
     }, "active scripted provider turn before stop");
     const activeEnvironment = await pluginRpc(
@@ -394,6 +499,18 @@ test("T5 stop confirms active and delayed-start observations before release", as
     assert.equal(activeEnvironment.environment.id, running.environmentId);
     assert.equal(activeEnvironment.environment.status, "ready");
     assert.equal(typeof activeEnvironment.environment.path, "string");
+    capture({
+      stage: "active provider turn and workspace observed before stop",
+      identities: {
+        activeThreadId: active.id,
+        activeEnvironmentId: running.environmentId,
+      },
+      observed: {
+        activeStatusBeforeStop: running.status,
+        activeEnvironmentStatus: activeEnvironment.environment.status,
+        activeWorkspacePath: activeEnvironment.environment.path,
+      },
+    });
 
     const activeStop = await pluginRpc(
       instance,
@@ -403,7 +520,9 @@ test("T5 stop confirms active and delayed-start observations before release", as
     );
     assert.equal(activeStop.stopResponse.ok, true);
     const stoppedActive = await waitFor(async () => {
-      const thread = await execution(instance, "get", { threadId: active.id });
+      const thread = await execution(instance, "get", {
+        threadId: active.id,
+      });
       return thread.status === "idle" || thread.status === "error"
         ? thread
         : false;
@@ -418,6 +537,14 @@ test("T5 stop confirms active and delayed-start observations before release", as
       (entry) => entry.method === "t1/tool-result",
     );
     assert.equal(activeEffects.length, 0);
+    capture({
+      stage: "active stop confirmed and provider trace captured",
+      observed: {
+        activeStatusAfterStop: stoppedActive.status,
+        activeProviderStopRequests: activeStopRequests.length,
+        activeToolEffects: activeEffects.length,
+      },
+    });
 
     await pluginRpc(instance, fixturePluginId, "recovery.run", {
       operation: "set-task-wait",
@@ -441,6 +568,14 @@ test("T5 stop confirms active and delayed-start observations before release", as
       threadId: delayed.id,
     });
     assert.equal(delayedBeforeStop.status, "pending");
+    capture({
+      stage: "delayed-start writer held in the plugin queue",
+      identities: {
+        delayedThreadId: delayed.id,
+        delayedQueuedMessageId: delayedQueued.id,
+      },
+      observed: { delayedStatusBeforeStop: delayedBeforeStop.status },
+    });
     const delayedStop = await pluginRpc(
       instance,
       fixturePluginId,
@@ -482,6 +617,18 @@ test("T5 stop confirms active and delayed-start observations before release", as
     const effectsBeforeRelease = preReleaseTrace.filter(
       (entry) => entry.method === "t1/tool-result",
     );
+    capture({
+      stage: "delayed stop disposition observed before any release",
+      observed: {
+        delayedStatusAfterStop: delayedAfterStop.status,
+        delayedStopConfirmed,
+        delayedProviderTurnStartsBeforeRelease:
+          delayedStartsBeforeRelease.length,
+        delayedProviderToolEffectsBeforeRelease: effectsBeforeRelease.length,
+        delayedQueueAfterStopBeforeRelease: preReleaseQueue,
+        delayedHookObservations: preReleaseObservations,
+      },
+    });
     let releaseAttempted = false;
     let releaseEvidence = null;
     if (delayedStopConfirmed) {
@@ -543,7 +690,7 @@ test("T5 stop confirms active and delayed-start observations before release", as
       releaseEvidence?.trace ?? preReleaseTrace
     ).filter((entry) => entry.method === "t1/tool-result");
     const policyViolation = !delayedStopConfirmed && releaseAttempted;
-    await recordGate(instance, "stop-writer-release", {
+    const report = {
       verdict:
         policyViolation ||
         delayedStartsBeforeRelease.length > 0 ||
@@ -608,6 +755,18 @@ test("T5 stop confirms active and delayed-start observations before release", as
       limits: [
         "The fixture observes BB's scripted provider and a plugin-held delayed start only; it does not implement an Ensemble writer reservation or enumerate arbitrary surviving workspace processes. If BB's stop leaves the thread pending, the fixture withholds recheck and cannot establish release behavior after a confirmed stop.",
       ],
+    };
+    capture({
+      stage: "stop and release traces collected before safety assertions",
+      observed: {
+        delayedStopConfirmed,
+        releaseAttempted,
+        releaseWithheldReason: report.observed.releaseWithheldReason,
+        delayedProviderTurnStartsAfterRelease: delayedStartsAfterRelease.length,
+        delayedProviderToolEffectsAfterRelease:
+          effectsAfterRelease.length - effectsBeforeRelease.length,
+        releaseEvidence: report.observed.releaseEvidence,
+      },
     });
     assert.equal(
       releaseAttempted,
@@ -634,13 +793,21 @@ test("T5 stop confirms active and delayed-start observations before release", as
       0,
       "A confirmed stop must not allow provider effects after release",
     );
-  });
-});
+    return report;
+  },
+);
 
-test("T5 concurrent initial workspace launches retain their actual environment identities", async () => {
-  await withFixture(async (instance) => {
+gateTest(
+  "initial-workspace-identity",
+  "T5 competing task workspace attempts reconcile to one BB environment",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const { project, machine } = await createProject(instance, "workspace");
+    capture({
+      stage: "isolated workspace project ready",
+      identities: { projectId: project.id },
+    });
+
     const [left, right] = await Promise.all([
       spawnThread(
         instance,
@@ -666,116 +833,241 @@ test("T5 concurrent initial workspace launches retain their actual environment i
     ]);
     assert.equal(typeof leftReady.environmentId, "string");
     assert.equal(typeof rightReady.environmentId, "string");
-    const trace = await providerTrace(instance);
-    const effects = trace.filter((entry) => entry.method === "t1/tool-result");
-    assert.equal(effects.length, 2);
-    const observations = await pluginRpc(
+    const rawEnvironmentIds = [
+      leftReady.environmentId,
+      rightReady.environmentId,
+    ];
+    const rawDistinctEnvironmentCount = new Set(rawEnvironmentIds).size;
+    assert.equal(
+      rawDistinctEnvironmentCount,
+      2,
+      "two unrelated raw BB spawns should retain their distinct environments",
+    );
+    const rawTrace = await providerTrace(instance);
+    const rawEffects = rawTrace.filter(
+      (entry) => entry.method === "t1/tool-result",
+    );
+    assert.equal(rawEffects.length, 2);
+    const rawObservations = await pluginRpc(
       instance,
       fixturePluginId,
       "recovery.run",
       { operation: "observations", taskId: "initial-workspace" },
     );
-    assert.equal(observations.length, 2);
+    assert.equal(rawObservations.length, 2);
     assert.deepEqual(
-      observations.map((entry) => entry.threadId).sort(),
+      rawObservations.map((entry) => entry.threadId).sort(),
       [left.id, right.id].sort(),
     );
-    const environmentIds = [leftReady.environmentId, rightReady.environmentId];
+    capture({
+      stage: "independent raw BB spawns each retain a distinct environment",
+      identities: {
+        rawThreadIds: [left.id, right.id],
+        rawEnvironmentIds,
+      },
+      observed: {
+        rawSpawnCount: 2,
+        rawDistinctEnvironmentCount,
+        rawThreadStatuses: [leftReady.status, rightReady.status],
+        rawProviderToolEffects: rawEffects.length,
+        rawHookObservations: rawObservations,
+      },
+    });
+
     const operationId = `t5-workspace-${randomUUID()}`;
-    const uncertainSpawnRequest = {
-      operationId,
-      projectId: project.id,
+    const taskId = `initial-workspace-${randomUUID().replaceAll("-", "")}`;
+    const taskPrompt = `T5_TASK=${taskId} call_tool:capability_ping`;
+    const environment = {
+      type: "host",
       hostId: machine.id,
-      prompt: "T5_TASK=initial-workspace-uncertain call_tool:capability_ping",
-      environment: {
-        type: "host",
-        hostId: machine.id,
-        workspace: {
-          type: "managed-worktree",
-          baseBranch: { kind: "default" },
-        },
+      workspace: {
+        type: "managed-worktree",
+        baseBranch: { kind: "default" },
       },
     };
-    let droppedResponse;
-    try {
-      await loss(instance, "spawn", {
-        ...uncertainSpawnRequest,
-        dropCallerResponse: true,
-      });
-      droppedResponse = "unexpected response";
-    } catch (error) {
-      droppedResponse = String(error);
-    }
-    const uncertainIntent = await loss(instance, "intent", { operationId });
-    const acceptedMatch = await waitFor(async () => {
-      const lookup = await loss(instance, "find-spawn-matches", {
+    const operation = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      {
+        operation: "workspace-prepare",
         operationId,
-      });
-      return lookup.matches.length === 1 && lookup.matches[0].status === "idle"
-        ? lookup.matches[0]
-        : false;
-    }, "one accepted initial-workspace spawn after its caller response is dropped");
-    await restartBb(instance);
-    const reconciled = await loss(instance, "reconcile-spawn", { operationId });
-    const chosenThread = await execution(instance, "get", {
-      threadId: reconciled.threadId,
+        taskId,
+        projectId: project.id,
+        hostId: machine.id,
+        prompt: taskPrompt,
+        environment,
+      },
+    );
+    assert.equal(operation.state, "pending");
+    capture({
+      stage: "test-local SQLite workspace operation prepared",
+      identities: { taskId, taskOperationId: operationId },
+      observed: { taskOperationState: operation.state },
     });
-    const replay = await loss(instance, "spawn", uncertainSpawnRequest);
-    const taskEffects = await loss(instance, "effects", { operationId });
+
+    const competingAttemptIds = [
+      `attempt-a-${randomUUID()}`,
+      `attempt-b-${randomUUID()}`,
+    ];
+    const competingAttempts = await Promise.allSettled(
+      competingAttemptIds.map((attemptId) =>
+        pluginRpc(instance, fixturePluginId, "recovery.run", {
+          operation: "workspace-attempt",
+          operationId,
+          attemptId,
+        }),
+      ),
+    );
+    const droppedAttempt = competingAttempts.find(
+      (result) => result.status === "rejected",
+    );
+    const joinedAttempt = competingAttempts.find(
+      (result) => result.status === "fulfilled",
+    );
+    assert(droppedAttempt && droppedAttempt.status === "rejected");
+    assert.match(
+      String(droppedAttempt.reason),
+      /T5_WORKSPACE_RESPONSE_DROPPED_AFTER_ACCEPTANCE/u,
+    );
+    assert(joinedAttempt && joinedAttempt.status === "fulfilled");
+    assert.equal(joinedAttempt.value.disposition, "joined");
+    assert.equal(joinedAttempt.value.spawnCalls, 1);
+    capture({
+      stage: "two competing SQLite attempts resulted in one accepted spawn",
+      observed: {
+        competingAttemptIds,
+        droppedAttemptError: String(droppedAttempt.reason),
+        joinedAttempt: joinedAttempt.value,
+      },
+    });
+
+    const publicReconciliationAttempts = [];
+    const acceptedMatch = await waitFor(async () => {
+      const result = await pluginRpc(
+        instance,
+        fixturePluginId,
+        "recovery.run",
+        { operation: "workspace-reconcile", operationId },
+      );
+      publicReconciliationAttempts.push({
+        state: result.state,
+        spawnCalls: result.spawnCalls,
+        matches: result.matches,
+        attempts: result.attempts,
+      });
+      capture({
+        stage: "public reconciliation queried after dropped response",
+        observed: {
+          publicReconciliationCallCount: publicReconciliationAttempts.length,
+          latestPublicReconciliation: publicReconciliationAttempts.at(-1),
+        },
+      });
+      return result.matches.length === 1 && result.matches[0].status === "idle"
+        ? result
+        : false;
+    }, "public reconciliation finds one settled thread after the dropped response");
+    const acceptedCandidate = acceptedMatch.matches[0];
+    assert(acceptedCandidate);
+    assert.equal(acceptedCandidate.environmentStatus, "ready");
+    await restartBb(instance);
+    const reconciled = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      { operation: "workspace-reconcile", operationId },
+    );
+    const chosen = reconciled.matches[0];
+    const chosenThread = await execution(instance, "get", {
+      threadId: chosen.threadId,
+    });
+    assert.equal(reconciled.state, "confirmed");
+    assert.equal(reconciled.matches.length, 1);
+    assert.equal(acceptedCandidate.threadId, chosen.threadId);
+    assert.equal(acceptedCandidate.environmentId, chosen.environmentId);
+    assert.equal(chosenThread.id, chosen.threadId);
+    assert.equal(chosenThread.status, "idle");
+    assert.equal(typeof chosen.threadId, "string");
+    assert.equal(typeof chosen.environmentId, "string");
+    assert.equal(chosen.environmentStatus, "ready");
+    assert.equal(reconciled.spawnCalls, 1);
+    assert.equal(reconciled.attempts.length, 2);
+    assert.deepEqual(
+      reconciled.attempts.map((attempt) => attempt.disposition).sort(),
+      ["joined", "owner"],
+    );
+    assert.equal(
+      reconciled.ownerAttemptId,
+      reconciled.attempts.find((attempt) => attempt.disposition === "owner")
+        .attemptId,
+    );
+    const taskObservations = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      { operation: "observations", taskId },
+    );
+    assert.equal(taskObservations.length, 1);
+    assert.equal(taskObservations[0].threadId, chosen.threadId);
     const allToolEffects = (await providerTrace(instance)).filter(
       (entry) => entry.method === "t1/tool-result",
     );
-    await recordGate(instance, "initial-workspace-identity", {
+    assert.equal(allToolEffects.length, 3);
+    capture({
+      stage: "restart recovery chose one public thread and environment",
+      identities: {
+        chosenTaskThreadId: chosen.threadId,
+        chosenTaskEnvironmentId: chosen.environmentId,
+      },
+      observed: {
+        acceptedReconciliationBeforeRestart: acceptedMatch,
+        reconciliation: reconciled,
+        taskHookObservations: taskObservations,
+        totalProviderToolEffects: allToolEffects.length,
+      },
+    });
+
+    return {
       verdict: "open",
       identities: {
         projectId: project.id,
-        concurrentRawSpawnThreadIds: [left.id, right.id],
-        environmentIds,
+        rawConcurrentSpawnThreadIds: [left.id, right.id],
+        rawEnvironmentIds,
+        taskId,
         taskOperationId: operationId,
-        chosenTaskThreadId: reconciled.threadId,
-        chosenTaskEnvironmentId: chosenThread.environmentId,
+        competingAttemptIds,
+        chosenTaskThreadId: chosen.threadId,
+        chosenTaskEnvironmentId: chosen.environmentId,
       },
       observed: {
         rawConcurrentSpawnCount: 2,
-        threadStatuses: [leftReady.status, rightReady.status],
-        distinctEnvironmentCount: new Set(environmentIds).size,
-        concurrentProviderToolEffects: effects.length,
-        hookObservations: observations,
-        droppedSpawnResponse: droppedResponse,
-        uncertainIntent,
-        acceptedPublicMatch: acceptedMatch,
+        rawDistinctEnvironmentCount,
+        rawProviderToolEffects: rawEffects.length,
+        rawHookObservations: rawObservations,
+        droppedAttemptError: String(droppedAttempt.reason),
+        joinedAttempt: joinedAttempt.value,
+        acceptedReconciliationBeforeRestart: acceptedMatch,
         reconciliation: reconciled,
-        chosenThreadStatus: chosenThread.status,
-        chosenThreadEnvironmentId: chosenThread.environmentId,
-        idempotentReplay: replay,
-        taskSpawnEffects: taskEffects,
+        taskHookObservations: taskObservations,
         totalProviderToolEffects: allToolEffects.length,
       },
       limits: [
-        "The two raw concurrent BB spawns made two threads and two environments and do not themselves identify one Ensemble task. A separate T3-style SQLite intent reconciled one accepted spawn to one BB thread/environment after a dropped response and restart; this test fixture does not create the production Ensemble task-to-environment binding.",
+        "Two separate raw BB spawns created two environments and do not establish one-task identity. A test-local SQLite operation arbitrated two competing attempts, simulated a dropped accepted response, then public BB thread/metadata reads reconciled exactly one task thread and environment after restart; this does not establish the production Ensemble task-to-environment binding or its concurrency policy.",
       ],
-    });
-    assert.match(droppedResponse, /T3_RESPONSE_DROPPED_AFTER_ACCEPTANCE/u);
-    assert.equal(uncertainIntent.state, "uncertain");
-    assert.equal(uncertainIntent.spawnCalls, 1);
-    assert.equal(reconciled.state, "confirmed");
-    assert.equal(reconciled.matches.length, 1);
-    assert.equal(reconciled.threadId, acceptedMatch.threadId);
-    assert.equal(typeof chosenThread.environmentId, "string");
-    assert.equal(replay.replayed, true);
-    assert.equal(replay.spawnCalls, 1);
-    assert.deepEqual(
-      taskEffects.map((effect) => effect.kind),
-      ["spawn"],
-    );
-    assert.equal(allToolEffects.length, 3);
-  });
-});
+    };
+  },
+);
 
-test("T5 BB retry ownership remains observable across restart", async () => {
-  await withFixture(async (instance) => {
+gateTest(
+  "retry-ownership",
+  "T5 BB retry ownership remains observable across restart",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const { project, machine } = await createProject(instance, "retry");
+    capture({
+      stage: "isolated retry project ready",
+      identities: { projectId: project.id },
+    });
     const thread = await spawnThread(
       instance,
       project,
@@ -788,6 +1080,11 @@ test("T5 BB retry ownership remains observable across restart", async () => {
       "retry fixture initial turn idle",
     );
     const environmentId = initial.environmentId;
+    capture({
+      stage: "retry thread and environment provisioned",
+      identities: { threadId: thread.id, environmentId },
+      observed: { initialStatus: initial.status },
+    });
     const turns = [];
     const effectsByRetry = [];
     const retriedFailureIds = new Set();
@@ -873,11 +1170,22 @@ test("T5 BB retry ownership remains observable across restart", async () => {
       );
       effectsByRetry.push(toolEffects.length);
       assert.equal(toolEffects.length, retryNumber);
+      capture({
+        stage: `retry round ${retryNumber} recovered after failure`,
+        observed: {
+          failedAndRetriedTurns: [...turns],
+          cumulativeToolEffectsAfterEachRetry: [...effectsByRetry],
+        },
+      });
     }
 
-    await recordGate(instance, "retry-ownership", {
+    return {
       verdict: "open",
-      identities: { projectId: project.id, threadId: thread.id, environmentId },
+      identities: {
+        projectId: project.id,
+        threadId: thread.id,
+        environmentId,
+      },
       observed: {
         failedAndRetriedTurns: turns,
         cumulativeToolEffectsAfterEachRetry: effectsByRetry,
@@ -891,17 +1199,23 @@ test("T5 BB retry ownership remains observable across restart", async () => {
       limits: [
         "BB records per-turn retry attempts and survives restart; the fixture has no Ensemble logical work revision or shared retry counter, so it cannot prove the two-retry ceiling across BB and Ensemble mechanisms.",
       ],
-    });
-  });
-});
+    };
+  },
+);
 
-test("T5 dynamic instruction revisions are observed on a settled conversation", async () => {
-  await withFixture(async (instance) => {
+gateTest(
+  "revision-application",
+  "T5 dynamic instruction contribution reaches the provider on the next turn",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const { project, machine } = await createProject(instance, "revision");
     await pluginRpc(instance, fixturePluginId, "recovery.run", {
       operation: "set-instructions",
       instructions: "T5_INSTRUCTIONS_REV=one",
+    });
+    capture({
+      stage: "initial dynamic instruction contribution configured",
+      identities: { projectId: project.id },
     });
     const thread = await spawnThread(
       instance,
@@ -909,11 +1223,56 @@ test("T5 dynamic instruction revisions are observed on a settled conversation", 
       machine,
       "T5_TASK=revision initial turn",
     );
-    await waitForIdle(instance, thread.id, "revision initial turn idle");
+    const initialIdle = await waitForIdle(
+      instance,
+      thread.id,
+      "revision initial turn idle",
+    );
     const firstTrace = await providerTrace(instance);
-    const hasRevisionOne = firstTrace.some((entry) =>
+    const providerInputText = (entry) =>
+      Array.isArray(entry.params?.input)
+        ? entry.params.input
+            .map((block) => (typeof block?.text === "string" ? block.text : ""))
+            .filter(Boolean)
+            .join("\n")
+        : "";
+    const providerRequestsFor = (trace, promptMarker) =>
+      trace.filter(
+        (entry) =>
+          ["thread/start", "turn/start"].includes(entry.method) &&
+          providerInputText(entry).includes(promptMarker),
+      );
+    const initialRequests = providerRequestsFor(
+      firstTrace,
+      "T5_TASK=revision initial turn",
+    );
+    const revisionOneRequests = initialRequests.filter((entry) =>
       JSON.stringify(entry.params).includes("T5_INSTRUCTIONS_REV=one"),
     );
+    assert(initialRequests.length > 0, "initial prompt reached provider");
+    assert(
+      initialRequests.every((entry) => entry.params.threadId === thread.id),
+    );
+    assert(
+      revisionOneRequests.length > 0,
+      "revision one reached matching request",
+    );
+    capture({
+      stage: "initial prompt and revision one matched provider requests",
+      identities: {
+        threadId: thread.id,
+        environmentId: initialIdle.environmentId,
+      },
+      observed: {
+        initialProviderRequests: initialRequests.map((entry) => ({
+          method: entry.method,
+          threadId: entry.params.threadId,
+          hasRevisionOne: JSON.stringify(entry.params).includes(
+            "T5_INSTRUCTIONS_REV=one",
+          ),
+        })),
+      },
+    });
 
     await pluginRpc(instance, fixturePluginId, "recovery.run", {
       operation: "set-instructions",
@@ -931,56 +1290,28 @@ test("T5 dynamic instruction revisions are observed on a settled conversation", 
       "revision ordinary next turn idle",
     );
     const ordinaryTrace = await providerTrace(instance);
-    const providerInputText = (entry) =>
-      Array.isArray(entry.params?.input)
-        ? entry.params.input
-            .map((block) => (typeof block?.text === "string" ? block.text : ""))
-            .filter(Boolean)
-            .join("\n")
-        : "";
-    const ordinaryNextTurnRequests = ordinaryTrace.filter((entry) =>
-      providerInputText(entry).includes("T5_TASK=revision ordinary next turn"),
+    const ordinaryNextTurnRequests = providerRequestsFor(
+      ordinaryTrace,
+      "T5_TASK=revision ordinary next turn",
     );
-    const ordinaryHasRevisionTwo = ordinaryNextTurnRequests.some((entry) =>
+    const revisionTwoRequests = ordinaryNextTurnRequests.filter((entry) =>
       JSON.stringify(entry.params).includes("T5_INSTRUCTIONS_REV=two"),
     );
-
-    const settledStop = await pluginRpc(
-      instance,
-      fixturePluginId,
-      "recovery.run",
-      { operation: "stop", threadId: thread.id },
+    assert(
+      ordinaryNextTurnRequests.length > 0,
+      "ordinary next-turn prompt reached provider",
     );
-    assert.equal(settledStop.stopResponse.ok, true);
-    const explicitlyApplied = await execution(instance, "send", {
-      threadId: thread.id,
-      mode: "auto",
-      input: [
-        { type: "text", text: "T5_TASK=revision explicit apply next turn" },
-      ],
-    });
-    assert.equal(explicitlyApplied.delivery, "sent");
-    const finalIdle = await waitForIdle(
-      instance,
-      thread.id,
-      "revision explicit apply next turn idle",
-    );
-    const finalTrace = await providerTrace(instance);
-    const explicitNextTurnRequests = finalTrace.filter((entry) =>
-      providerInputText(entry).includes(
-        "T5_TASK=revision explicit apply next turn",
+    assert(
+      ordinaryNextTurnRequests.every(
+        (entry) => entry.params.threadId === thread.id,
       ),
+      "ordinary next-turn requests match the observed thread",
     );
-    const hasRevisionTwoAfterStop = explicitNextTurnRequests.some((entry) =>
-      JSON.stringify(entry.params).includes("T5_INSTRUCTIONS_REV=two"),
+    assert(
+      revisionTwoRequests.length > 0,
+      "dynamic revision two reached the ordinary next-turn provider request",
     );
-    const revisionOneEntries = firstTrace.filter((entry) =>
-      JSON.stringify(entry.params).includes("T5_INSTRUCTIONS_REV=one"),
-    );
-    const revisionTwoEntries = finalTrace.filter((entry) =>
-      JSON.stringify(entry.params).includes("T5_INSTRUCTIONS_REV=two"),
-    );
-    const instructionProviderTrace = finalTrace
+    const instructionProviderTrace = ordinaryTrace
       .filter((entry) => {
         const serialized = JSON.stringify(entry.params);
         return (
@@ -998,57 +1329,68 @@ test("T5 dynamic instruction revisions are observed on a settled conversation", 
           ? "one"
           : "two",
       }));
-    await recordGate(instance, "revision-application", {
+    capture({
+      stage:
+        "dynamic revision two matched ordinary next-turn provider requests",
+      observed: {
+        ordinaryNextTurnStatus: ordinaryIdle.status,
+        ordinaryNextTurnProviderRequests: ordinaryNextTurnRequests.map(
+          (entry) => ({
+            method: entry.method,
+            threadId: entry.params.threadId,
+            hasRevisionTwo: JSON.stringify(entry.params).includes(
+              "T5_INSTRUCTIONS_REV=two",
+            ),
+          }),
+        ),
+        revisionTwoRequestCount: revisionTwoRequests.length,
+        instructionProviderTrace,
+      },
+    });
+
+    return {
       verdict: "open",
       identities: {
         projectId: project.id,
         threadId: thread.id,
-        environmentId: finalIdle.environmentId,
+        environmentId: ordinaryIdle.environmentId,
       },
       observed: {
-        revisionOneReachedProvider: hasRevisionOne,
-        revisionOneRequests: revisionOneEntries.length,
+        initialStatus: initialIdle.status,
+        initialProviderRequestCount: initialRequests.length,
+        revisionOneReachedMatchingProviderRequest:
+          revisionOneRequests.length > 0,
         ordinaryNextTurnStatus: ordinaryIdle.status,
-        revisionTwoVisibleBeforeExplicitStop: ordinaryHasRevisionTwo,
-        stopConfirmed: settledStop.stopResponse.ok,
-        revisionTwoVisibleAfterStopAndNextTurn: hasRevisionTwoAfterStop,
-        revisionTwoRequests: revisionTwoEntries.length,
         ordinaryNextTurnProviderRequests: ordinaryNextTurnRequests.map(
           (entry) => ({
             method: entry.method,
-            threadId: entry.params?.threadId,
-            inputText: providerInputText(entry),
+            threadId: entry.params.threadId,
             hasRevisionTwo: JSON.stringify(entry.params).includes(
               "T5_INSTRUCTIONS_REV=two",
             ),
           }),
         ),
-        explicitNextTurnProviderRequests: explicitNextTurnRequests.map(
-          (entry) => ({
-            method: entry.method,
-            threadId: entry.params?.threadId,
-            inputText: providerInputText(entry),
-            hasRevisionTwo: JSON.stringify(entry.params).includes(
-              "T5_INSTRUCTIONS_REV=two",
-            ),
-          }),
-        ),
+        revisionTwoReachedMatchingProviderRequest:
+          revisionTwoRequests.length > 0,
         instructionProviderTrace,
-        providerTraceMethods: finalTrace
-          .filter((entry) => entry.params?.threadId === thread.id)
-          .map((entry) => entry.method),
       },
       limits: [
-        "The fixture changes a global dynamic instruction contribution, not an immutable task assignment snapshot; the evidence cannot prove operator authorization or same-assignment revision policy.",
+        "The fixture verifies a dynamic plugin instruction contribution on an ordinary next turn. It has no Ensemble operator-authorized apply operation or immutable task-assignment snapshot, so the revision-application policy remains open.",
       ],
-    });
-  });
-});
+    };
+  },
+);
 
-test("T5 shared worktree remains while another live thread retains it", async () => {
-  await withFixture(async (instance) => {
+gateTest(
+  "a17-shared-worktree-retention",
+  "T5 shared worktree remains while another live thread retains it",
+  async (instance, capture) => {
     await installRecoveryFixture(instance);
     const { project, machine } = await createProject(instance, "retention");
+    capture({
+      stage: "isolated retention project ready",
+      identities: { projectId: project.id },
+    });
     const first = await spawnThread(
       instance,
       project,
@@ -1061,6 +1403,11 @@ test("T5 shared worktree remains while another live thread retains it", async ()
       "first shared-worktree thread idle",
     );
     const environmentId = firstIdle.environmentId;
+    capture({
+      stage: "first thread provisioned shared-worktree environment",
+      identities: { firstThreadId: first.id, environmentId },
+      observed: { firstThreadStatus: firstIdle.status },
+    });
     const second = await spawnThread(
       instance,
       project,
@@ -1074,6 +1421,11 @@ test("T5 shared worktree remains while another live thread retains it", async ()
       "second shared-worktree thread idle",
     );
     assert.equal(secondIdle.environmentId, environmentId);
+    capture({
+      stage: "second live thread shares the environment",
+      identities: { secondThreadId: second.id },
+      observed: { secondThreadStatus: secondIdle.status },
+    });
     const envRecord = await pluginRpc(
       instance,
       fixturePluginId,
@@ -1092,6 +1444,11 @@ test("T5 shared worktree remains while another live thread retains it", async ()
     );
     const markerPath = path.join(workspacePath, "T5-A17-retention.txt");
     await writeFile(markerPath, "Retain while second thread is live.\n");
+    capture({
+      stage: "shared workspace and retention marker observed",
+      identities: { workspacePath },
+      observed: { markerPath },
+    });
 
     let firstArchive;
     try {
@@ -1137,6 +1494,18 @@ test("T5 shared worktree remains while another live thread retains it", async ()
       markerAfterArchive &&
       markerRetained &&
       secondAfterArchive.environmentId === environmentId;
+    capture({
+      stage: "first thread archive and delete retention observed",
+      observed: {
+        firstThreadArchive: firstArchive,
+        firstThreadDelete: firstDeletion,
+        sharedEnvironmentAfterArchiveAndDelete:
+          environmentSharedAfterArchiveAndDelete,
+        markerRetainedAfterArchive: markerAfterArchive,
+        markerRetainedAfterDelete: markerRetained,
+        secondThreadAfterArchive: secondAfterArchive,
+      },
+    });
     const remainingLiveThread = await execution(instance, "get", {
       threadId: second.id,
     }).catch((error) => ({ error: String(error) }));
@@ -1198,11 +1567,20 @@ test("T5 shared worktree remains while another live thread retains it", async ()
         "Direct BB archive and delete were exercised for this fixture provider; this does not establish Ensemble cleanup modes, preservation checks, or delivery confirmation.",
       ],
     };
-    await recordGate(instance, "a17-shared-worktree-retention", finalReport);
     assert.equal(firstDeletion.ok, true, JSON.stringify(firstDeletion));
     assert.equal(lastDeletion.ok, true, JSON.stringify(lastDeletion));
     assert.equal(retentionPassed, true);
     assert.equal(remainingLiveThread.status, "idle");
     assert.equal(remainingLiveThread.environmentId, environmentId);
-  });
-});
+    capture({
+      stage: "A17 second-thread retention assertions passed",
+      observed: {
+        retentionPassed,
+        remainingLiveThread,
+        secondThreadDelete: lastDeletion,
+        markerExistsAfterLastDelete,
+      },
+    });
+    return finalReport;
+  },
+);

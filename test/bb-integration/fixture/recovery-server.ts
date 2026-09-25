@@ -25,7 +25,9 @@ function rpcSchema<Schema extends z.ZodType>(
 }
 
 type RecoveryArgs = {
+  attemptId?: string | undefined;
   environmentId?: string | undefined;
+  environment?: unknown;
   instructions?: string | undefined;
   mode?: "wait" | "ready" | undefined;
   operation:
@@ -36,7 +38,18 @@ type RecoveryArgs = {
     | "observations"
     | "set-instructions"
     | "set-task-wait"
-    | "stop";
+    | "stop"
+    | "workspace-attempt"
+    | "workspace-prepare"
+    | "workspace-reconcile";
+  operationId?: string | undefined;
+  hostId?: string | undefined;
+  model?: string | undefined;
+  permissionMode?: string | undefined;
+  projectId?: string | undefined;
+  prompt?: string | undefined;
+  reasoningLevel?: string | undefined;
+  serviceTier?: string | undefined;
   taskId?: string | undefined;
   threadId?: string | undefined;
 };
@@ -71,6 +84,26 @@ export default function recoveryFixture(bb: BbPluginApi): void {
       queued_message_ids TEXT NOT NULL,
       input_text TEXT NOT NULL,
       created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS t5_workspace_operations (
+      operation_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL UNIQUE,
+      project_id TEXT NOT NULL,
+      host_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_json TEXT NOT NULL,
+      state TEXT NOT NULL,
+      owner_attempt_id TEXT,
+      spawn_calls INTEGER NOT NULL DEFAULT 0,
+      chosen_thread_id TEXT,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS t5_workspace_attempts (
+      operation_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      disposition TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(operation_id, attempt_id)
     );
     INSERT OR IGNORE INTO t5_recovery_settings (key, value)
       VALUES ('instructions', 'T5_INSTRUCTIONS_REV=initial');
@@ -130,10 +163,23 @@ export default function recoveryFixture(bb: BbPluginApi): void {
               "set-instructions",
               "set-task-wait",
               "stop",
+              "workspace-attempt",
+              "workspace-prepare",
+              "workspace-reconcile",
             ]),
             instructions: z.string().optional(),
             mode: z.enum(["wait", "ready"]).optional(),
             environmentId: z.string().optional(),
+            environment: z.unknown().optional(),
+            attemptId: z.string().optional(),
+            operationId: z.string().optional(),
+            hostId: z.string().optional(),
+            model: z.string().optional(),
+            permissionMode: z.string().optional(),
+            projectId: z.string().optional(),
+            prompt: z.string().optional(),
+            reasoningLevel: z.string().optional(),
+            serviceTier: z.string().optional(),
             taskId: z.string().optional(),
             threadId: z.string().optional(),
           }),
@@ -257,6 +303,298 @@ export default function recoveryFixture(bb: BbPluginApi): void {
               environment: await bb.sdk.environments.get({
                 environmentId: args.environmentId,
               }),
+            };
+          }
+          case "workspace-prepare": {
+            if (
+              args.operationId === undefined ||
+              args.taskId === undefined ||
+              args.projectId === undefined ||
+              args.hostId === undefined ||
+              args.prompt === undefined ||
+              args.environment === undefined
+            ) {
+              throw new Error(
+                "workspace-prepare requires operationId, taskId, projectId, hostId, prompt, and environment",
+              );
+            }
+            const environmentJson = JSON.stringify(args.environment);
+            database
+              .prepare(
+                `INSERT OR IGNORE INTO t5_workspace_operations
+                  (operation_id, task_id, project_id, host_id, prompt,
+                   environment_json, state, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+              )
+              .run(
+                args.operationId,
+                args.taskId,
+                args.projectId,
+                args.hostId,
+                args.prompt,
+                environmentJson,
+                Date.now(),
+              );
+            const operation = database
+              .prepare(
+                `SELECT operation_id AS operationId, task_id AS taskId,
+                        project_id AS projectId, state,
+                        owner_attempt_id AS ownerAttemptId,
+                        spawn_calls AS spawnCalls,
+                        chosen_thread_id AS chosenThreadId
+                 FROM t5_workspace_operations WHERE operation_id = ?`,
+              )
+              .get(args.operationId) as
+              | {
+                  operationId: string;
+                  taskId: string;
+                  projectId: string;
+                  state: string;
+                  ownerAttemptId: string | null;
+                  spawnCalls: number;
+                  chosenThreadId: string | null;
+                }
+              | undefined;
+            if (
+              operation === undefined ||
+              operation.taskId !== args.taskId ||
+              operation.projectId !== args.projectId
+            ) {
+              throw new Error("workspace operation identity conflict");
+            }
+            const storedPayload = database
+              .prepare(
+                `SELECT host_id AS hostId, prompt, environment_json AS environmentJson
+                 FROM t5_workspace_operations WHERE operation_id = ?`,
+              )
+              .get(args.operationId) as
+              | { hostId: string; prompt: string; environmentJson: string }
+              | undefined;
+            if (
+              storedPayload === undefined ||
+              storedPayload.hostId !== args.hostId ||
+              storedPayload.prompt !== args.prompt ||
+              storedPayload.environmentJson !== environmentJson
+            ) {
+              throw new Error("workspace operation payload conflict");
+            }
+            return operation;
+          }
+          case "workspace-attempt": {
+            if (
+              args.operationId === undefined ||
+              args.attemptId === undefined
+            ) {
+              throw new Error(
+                "workspace-attempt requires operationId and attemptId",
+              );
+            }
+            const operationQuery = database.prepare(
+              `SELECT operation_id AS operationId, task_id AS taskId,
+                      project_id AS projectId, host_id AS hostId, prompt,
+                      environment_json AS environmentJson, state,
+                      owner_attempt_id AS ownerAttemptId,
+                      spawn_calls AS spawnCalls,
+                      chosen_thread_id AS chosenThreadId
+               FROM t5_workspace_operations WHERE operation_id = ?`,
+            );
+            const readOperation = () =>
+              operationQuery.get(args.operationId) as
+                | {
+                    operationId: string;
+                    taskId: string;
+                    projectId: string;
+                    hostId: string;
+                    prompt: string;
+                    environmentJson: string;
+                    state: string;
+                    ownerAttemptId: string | null;
+                    spawnCalls: number;
+                    chosenThreadId: string | null;
+                  }
+                | undefined;
+            const existingAttempt = database
+              .prepare(
+                `SELECT disposition FROM t5_workspace_attempts
+                 WHERE operation_id = ? AND attempt_id = ?`,
+              )
+              .get(args.operationId, args.attemptId) as
+              | { disposition: string }
+              | undefined;
+            let operation = readOperation();
+            if (operation === undefined) {
+              throw new Error("unknown workspace operation");
+            }
+            if (existingAttempt !== undefined) {
+              return {
+                operationId: args.operationId,
+                taskId: operation.taskId,
+                attemptId: args.attemptId,
+                disposition: existingAttempt.disposition,
+                state: operation.state,
+                ownerAttemptId: operation.ownerAttemptId,
+                spawnCalls: operation.spawnCalls,
+                chosenThreadId: operation.chosenThreadId,
+                replayed: true,
+              };
+            }
+            const claimed =
+              database
+                .prepare(
+                  `UPDATE t5_workspace_operations
+                 SET state = 'provisioning', owner_attempt_id = ?,
+                     spawn_calls = spawn_calls + 1, updated_at = ?
+                 WHERE operation_id = ? AND state = 'pending'`,
+                )
+                .run(args.attemptId, Date.now(), args.operationId).changes ===
+              1;
+            const disposition = claimed ? "owner" : "joined";
+            database
+              .prepare(
+                `INSERT INTO t5_workspace_attempts
+                  (operation_id, attempt_id, disposition, created_at)
+                 VALUES (?, ?, ?, ?)`,
+              )
+              .run(args.operationId, args.attemptId, disposition, Date.now());
+            operation = readOperation();
+            if (operation === undefined) {
+              throw new Error("workspace operation disappeared");
+            }
+            if (!claimed) {
+              return {
+                operationId: args.operationId,
+                taskId: operation.taskId,
+                attemptId: args.attemptId,
+                disposition,
+                state: operation.state,
+                ownerAttemptId: operation.ownerAttemptId,
+                spawnCalls: operation.spawnCalls,
+                chosenThreadId: operation.chosenThreadId,
+                replayed: false,
+              };
+            }
+
+            try {
+              const request = {
+                projectId: operation.projectId,
+                providerId: "ensemble-scripted",
+                model: "fixture-model",
+                reasoningLevel: "medium",
+                serviceTier: "default",
+                permissionMode: "accept-edits",
+                prompt: operation.prompt,
+                environment: JSON.parse(operation.environmentJson),
+                pluginMetadata: {
+                  t5_task_id: operation.taskId,
+                  t5_operation_id: operation.operationId,
+                },
+              } as Parameters<typeof bb.sdk.threads.spawn>[0];
+              await bb.sdk.threads.spawn(request);
+              database
+                .prepare(
+                  `UPDATE t5_workspace_operations SET state = 'uncertain',
+                   updated_at = ? WHERE operation_id = ?`,
+                )
+                .run(Date.now(), args.operationId);
+              throw new Error(
+                `T5_WORKSPACE_RESPONSE_DROPPED_AFTER_ACCEPTANCE:${args.attemptId}`,
+              );
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                error.message.startsWith(
+                  "T5_WORKSPACE_RESPONSE_DROPPED_AFTER_ACCEPTANCE:",
+                )
+              ) {
+                throw error;
+              }
+              database
+                .prepare(
+                  `UPDATE t5_workspace_operations SET state = 'failed',
+                   updated_at = ? WHERE operation_id = ?`,
+                )
+                .run(Date.now(), args.operationId);
+              throw error;
+            }
+          }
+          case "workspace-reconcile": {
+            if (args.operationId === undefined) {
+              throw new Error("workspace-reconcile requires operationId");
+            }
+            const operation = database
+              .prepare(
+                `SELECT operation_id AS operationId, task_id AS taskId,
+                        project_id AS projectId, state,
+                        owner_attempt_id AS ownerAttemptId,
+                        spawn_calls AS spawnCalls,
+                        chosen_thread_id AS chosenThreadId
+                 FROM t5_workspace_operations WHERE operation_id = ?`,
+              )
+              .get(args.operationId) as
+              | {
+                  operationId: string;
+                  taskId: string;
+                  projectId: string;
+                  state: string;
+                  ownerAttemptId: string | null;
+                  spawnCalls: number;
+                  chosenThreadId: string | null;
+                }
+              | undefined;
+            if (operation === undefined) {
+              throw new Error("unknown workspace operation");
+            }
+            const candidates = await bb.sdk.threads.list({
+              projectId: operation.projectId,
+              originPluginId: "ensemble-t1-fixture",
+              limit: 100,
+            });
+            const matches = [];
+            for (const candidate of candidates) {
+              const metadata = await bb.sdk.threads.getPluginMetadata({
+                threadId: candidate.id,
+                pluginId: "ensemble-t1-fixture",
+              });
+              if (metadata.t5_operation_id === operation.operationId) {
+                const thread = await bb.sdk.threads.get({
+                  threadId: candidate.id,
+                });
+                const environment =
+                  thread.environmentId === null
+                    ? null
+                    : await bb.sdk.environments.get({
+                        environmentId: thread.environmentId,
+                      });
+                matches.push({
+                  threadId: thread.id,
+                  status: thread.status,
+                  environmentId: thread.environmentId,
+                  environmentStatus: environment?.status ?? null,
+                });
+              }
+            }
+            const state = matches.length === 1 ? "confirmed" : "held";
+            const chosenThreadId =
+              matches.length === 1 ? (matches[0]?.threadId ?? null) : null;
+            database
+              .prepare(
+                `UPDATE t5_workspace_operations SET state = ?, chosen_thread_id = ?,
+                 updated_at = ? WHERE operation_id = ?`,
+              )
+              .run(state, chosenThreadId, Date.now(), args.operationId);
+            const attempts = database
+              .prepare(
+                `SELECT attempt_id AS attemptId, disposition FROM t5_workspace_attempts
+                 WHERE operation_id = ? ORDER BY created_at, attempt_id`,
+              )
+              .all(args.operationId);
+            return {
+              ...operation,
+              state,
+              chosenThreadId,
+              matches,
+              attempts,
+              publicLookup: "threads.list + getPluginMetadata + threads.get",
             };
           }
         }
