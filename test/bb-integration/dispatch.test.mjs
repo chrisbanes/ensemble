@@ -26,7 +26,12 @@ const fixturePluginId = "ensemble-t1-fixture";
 const gatePluginId = "t4-dispatch-gate";
 const waitPluginId = "t4-other-wait";
 
-async function installFixturePlugin(instance, packageName, sourceName) {
+async function installFixturePlugin(
+  instance,
+  packageName,
+  sourceName,
+  minimumSdk = ">=0.5.9",
+) {
   const directory = path.join(instance.root, packageName);
   await mkdir(directory, { recursive: true });
   await copyFile(
@@ -40,7 +45,7 @@ async function installFixturePlugin(instance, packageName, sourceName) {
       version: "0.0.1",
       private: true,
       type: "module",
-      engines: { node: ">=24 <25", bb: ">=0.43.4", bbPluginSdk: ">=0.5.9" },
+      engines: { node: ">=24 <25", bb: ">=0.43.4", bbPluginSdk: minimumSdk },
       dependencies: { "@get-bb/plugin-sdk": "0.5.24", zod: "4.3.6" },
       bb: {
         name: packageName,
@@ -168,14 +173,30 @@ test("public dispatch handoff records bounded holds and an open startup capabili
     );
     assert.equal(fixture.plugin.id, fixturePluginId);
     assert.equal((await dispatch(instance, "state")).mode, "ready");
+    const incompatible = await installFixturePlugin(
+      instance,
+      "t4-sdk-floor-probe",
+      "other-wait-server.ts",
+      ">=0.5.24",
+    );
+    assert.equal(incompatible.status, "incompatible");
+    const hostSdkMatch = incompatible.statusDetail?.match(
+      /^requires bb plugin SDK >=0\.5\.24, running SDK is (\d+\.\d+\.\d+)$/u,
+    );
+    assert(hostSdkMatch, "BB did not report its running plugin SDK version");
+    assert.equal(hostSdkMatch[1], "0.5.9");
     record(instance, "t4PluginSdkCompatibility", {
       status: "passed",
       runtimeNode: process.versions.node,
       bbArtifact: instance.runtimeManifest.bb,
       installedPluginSdkPackage: instance.runtimeManifest.pluginSdk,
-      bbHostPluginSdk: "0.5.9",
-      hostVersionEvidence:
-        "BB rejected a fixture minimum of >=0.5.24 with running SDK 0.5.9; the >=0.5.9 fixture then loaded and answered dispatch.run",
+      bbHostPluginSdk: hostSdkMatch[1],
+      incompatibleFixture: {
+        id: incompatible.id,
+        status: incompatible.status,
+        statusDetail: incompatible.statusDetail,
+      },
+      compatibleFixtureResponded: true,
     });
 
     const { project, machine } = await createProject(instance);

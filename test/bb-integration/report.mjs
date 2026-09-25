@@ -1045,6 +1045,16 @@ export function assertExpectedT4Failure({
   assert.equal(diagnostic?.diagnosticCompleted, true);
   assert.equal(diagnostic?.rawTestOutcome, "fail");
   assert.equal(diagnostic?.dependency, "#665");
+  const compatibility = manifest.checks?.t4PluginSdkCompatibility;
+  assert.equal(compatibility?.status, "passed");
+  assert.equal(compatibility?.incompatibleFixture?.status, "incompatible");
+  const hostSdkMatch = compatibility.incompatibleFixture.statusDetail?.match(
+    /^requires bb plugin SDK >=0\.5\.24, running SDK is (\d+\.\d+\.\d+)$/u,
+  );
+  assert(hostSdkMatch, "BB host SDK version evidence is missing");
+  assert.equal(compatibility.bbHostPluginSdk, hostSdkMatch[1]);
+  assert.equal(compatibility.bbHostPluginSdk, "0.5.9");
+  assert.equal(compatibility.compatibleFixtureResponded, true);
   const cleanup = manifest.checks?.ownedProcessCleanup;
   assert(cleanup, "T4 cleanup evidence is missing");
   assert.equal(cleanup.allExited, true, "T4 cleanup leaked owned processes");

@@ -163,6 +163,16 @@ function validT4Evidence() {
       t4DependencyStatus: "open",
       dependentExecutionBlocked: ["T06", "T08"],
       checks: {
+        t4PluginSdkCompatibility: {
+          status: "passed",
+          bbHostPluginSdk: "0.5.9",
+          incompatibleFixture: {
+            status: "incompatible",
+            statusDetail:
+              "requires bb plugin SDK >=0.5.24, running SDK is 0.5.9",
+          },
+          compatibleFixtureResponded: true,
+        },
         ownedProcessCleanup: {
           allExited: true,
           serverPortClosed: true,
@@ -354,6 +364,11 @@ test("known T4 failure is accepted only with exact diagnostic, state, and cleanu
   const leakedProcess = validT4Evidence();
   leakedProcess.manifest.checks.ownedProcessCleanup.allExited = false;
   assert.throws(() => assertExpectedT4Failure(leakedProcess), /cleanup/u);
+
+  const inventedHostSdk = validT4Evidence();
+  inventedHostSdk.manifest.checks.t4PluginSdkCompatibility.bbHostPluginSdk =
+    "0.5.24";
+  assert.throws(() => assertExpectedT4Failure(inventedHostSdk));
 
   const missingDiagnostic = validT4Evidence();
   missingDiagnostic.output = "the test failed for an unrelated reason";

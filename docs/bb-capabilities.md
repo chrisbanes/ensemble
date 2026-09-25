@@ -266,6 +266,10 @@ are validated before the report is accepted. The report ends in
 `completed-with-capability-gaps` when the harness ran successfully while #665
 remains failed/open; this does not unblock T06 or T08.
 
+The host SDK version comes from BB's public `incompatible` install status for a
+disposable fixture requiring `bbPluginSdk >=0.5.24`. BB reports the running SDK
+as 0.5.9; a separate `>=0.5.9` fixture loads and answers `dispatch.run`.
+
 For `bb-app` and `@get-bb/plugin-sdk`, the report distinguishes lockfile tarball
 integrity from SHA-256 hashes of the installed package trees. The committed
 tree pins were measured after clean `npm ci` with Node 24.21.0/npm 11.20.0 on
