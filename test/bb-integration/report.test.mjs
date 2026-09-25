@@ -126,7 +126,7 @@ function validReport() {
     sourceRevision: "abc123",
     integrationSourceDigest: "digest-abc123",
     outcome: "completed-with-capability-gaps",
-    toolchain: { node: "24.21.0", npm: "11.19.1" },
+    toolchain: { node: "24.21.0", npm: "11.20.0" },
     rows: [
       ...apiRows,
       ...REQUIRED_PROOF_GATES.map((id) =>

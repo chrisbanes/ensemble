@@ -47,7 +47,7 @@ const packageTreePins = JSON.parse(
 assert.equal(packageTreePins.schemaVersion, 1);
 assert.equal(packageTreePins.hashAlgorithm, "sha256");
 assert.equal(packageTreePins.measuredWith.node, expected.node);
-assert.equal(packageTreePins.measuredWith.npm, "11.19.1");
+assert.equal(packageTreePins.measuredWith.npm, "11.20.0");
 assert.equal(packageTreePins.packages["bb-app"].version, expected.bb);
 assert.equal(
   packageTreePins.packages["@get-bb/plugin-sdk"].version,

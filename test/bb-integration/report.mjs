@@ -1077,7 +1077,7 @@ export function assertIntegrationReport(report) {
     "report.integrationSourceDigest",
   );
   assert.equal(report.toolchain?.node, "24.21.0", "report Node.js pin changed");
-  assert.equal(report.toolchain?.npm, "11.19.1", "report npm pin changed");
+  assert.equal(report.toolchain?.npm, "11.20.0", "report npm pin changed");
   assert(Array.isArray(report.rows), "report.rows must be an array");
   const keyed = new Map();
   for (const entry of report.rows) {

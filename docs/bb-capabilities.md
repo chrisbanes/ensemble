@@ -246,7 +246,7 @@ After installing the pinned toolchain and dependencies, run the same isolated
 suite used by CI:
 
 ```sh
-npm install --global npm@11.19.1
+npm install --global npm@11.20.0
 npm ci
 npx playwright install chromium
 npm run test:bb-integration
@@ -268,7 +268,7 @@ remains failed/open; this does not unblock T06 or T08.
 
 For `bb-app` and `@get-bb/plugin-sdk`, the report distinguishes lockfile tarball
 integrity from SHA-256 hashes of the installed package trees. The committed
-tree pins were measured after clean `npm ci` with Node 24.21.0/npm 11.19.1 on
+tree pins were measured after clean `npm ci` with Node 24.21.0/npm 11.20.0 on
 darwin-arm64; CI recomputes those package-scoped hashes on Ubuntu and fails if
 either installed tree differs. The tree hash sorts relative paths and includes
 entry type, path bytes, and file bytes; symlinks and unsupported entry types are

@@ -503,10 +503,10 @@ async function main() {
   const packageJson = JSON.parse(
     await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
   );
-  assert.equal(packageJson.packageManager, "npm@11.19.1", "npm pin changed");
+  assert.equal(packageJson.packageManager, "npm@11.20.0", "npm pin changed");
   const npmVersion =
     process.env.npm_config_user_agent?.match(/npm\/(\d+\.\d+\.\d+)/u)?.[1];
-  assert.equal(npmVersion, "11.19.1", "Run through pinned npm@11.19.1");
+  assert.equal(npmVersion, "11.20.0", "Run through pinned npm@11.20.0");
   assert.equal(packageTreePins.measuredWith.node, nodePin);
   assert.equal(packageTreePins.measuredWith.npm, npmVersion);
   await rm(suiteRunDirectory, { recursive: true, force: true });
