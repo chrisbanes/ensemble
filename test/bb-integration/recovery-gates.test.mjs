@@ -1469,6 +1469,11 @@ gateTest(
       { operation: "environment-by-id", environmentId },
     ).catch((error) => ({ error: String(error) }));
     const markerAfterArchive = await fileExists(markerPath);
+    const firstThreadArchived =
+      firstArchive.archiveResponse?.ok === true &&
+      firstArchive.archiveResponse.archivedThreadIds?.includes(first.id) &&
+      firstArchive.thread?.id === first.id &&
+      typeof firstArchive.thread.archivedAt === "number";
     const secondAfterArchive = await execution(instance, "get", {
       threadId: second.id,
     }).catch((error) => ({ error: String(error) }));
@@ -1525,6 +1530,7 @@ gateTest(
     ).catch((error) => ({ error: String(error) }));
     const markerExistsAfterLastDelete = await fileExists(markerPath);
     const retentionPassed =
+      firstThreadArchived &&
       firstDeletion.ok === true &&
       lastDeletion.ok === true &&
       environmentRetainedAfterArchive &&
@@ -1543,6 +1549,7 @@ gateTest(
       observed: {
         statusesBeforeCleanup: [firstIdle.status, secondIdle.status],
         firstThreadArchive: firstArchive,
+        firstThreadArchived,
         environmentAfterArchive: environmentAfterArchive.environment,
         markerRetainedAfterArchive: markerAfterArchive,
         environmentRetainedAfterArchive,

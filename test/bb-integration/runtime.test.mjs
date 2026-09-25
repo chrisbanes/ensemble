@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -172,6 +172,17 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
     assert(ownedProcessRoles.includes("bb-host-daemon"));
     assert(ownedProcessRoles.includes("scripted-provider"));
     assert(ownedProcessRoles.includes("chromium"));
+    await appendFile(
+      instance.env.SCRIPTED_ECHO_PROCESS_LOG_PATH,
+      `spawn:${process.pid}\n`,
+    );
+    const withStaleProviderPid = await captureOwnedProcesses(instance);
+    assert(
+      !withStaleProviderPid.some(
+        ({ pid, role }) => pid === process.pid && role === "scripted-provider",
+      ),
+      "An unrelated logged PID must not become an owned provider process",
+    );
     record(instance, "ownedProcessRoles", ownedProcessRoles);
     record(instance, "scriptedToolResult", {
       providerId: completed.thread.providerId,
@@ -195,6 +206,12 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
     });
 
     await restartBb(instance);
+    assert(
+      !(await readFile(instance.env.SCRIPTED_ECHO_PROCESS_LOG_PATH, "utf8"))
+        .split("\n")
+        .includes(`spawn:${process.pid}`),
+      "Provider PIDs from the previous BB run must not survive restart",
+    );
     const afterRestart = await waitFor(async () => {
       const snapshot = await rpc(instance, "snapshot");
       return snapshot.state.serverLoads === 3 ? snapshot : false;

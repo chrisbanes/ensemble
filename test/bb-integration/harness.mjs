@@ -327,12 +327,15 @@ export async function captureOwnedProcesses(instance) {
     processes = await readProcessTable();
   }
   const roots = [{ pid: instance.processHandle.pid, role: "bb-app" }];
+  const bbDescendants = descendants(processes, instance.processHandle.pid);
   for (const server of instance.browserServers) {
     roots.push({ pid: server.process().pid, role: "chromium" });
   }
 
   for (const root of roots) {
-    for (const pid of descendants(processes, root.pid)) {
+    const ownedDescendants =
+      root.role === "bb-app" ? bbDescendants : descendants(processes, root.pid);
+    for (const pid of ownedDescendants) {
       const processInfo = processes.get(pid);
       if (processInfo) {
         const role = processRole(processInfo, instance, root);
@@ -351,8 +354,15 @@ export async function captureOwnedProcesses(instance) {
   for (const pid of providerPids) {
     const processInfo = processes.get(pid);
     const previous = instance.ownedProcesses.get(pid);
+    if (
+      !processInfo ||
+      (!bbDescendants.has(pid) &&
+        !previous?.identities.has(processIdentity(processInfo)))
+    ) {
+      continue;
+    }
     const identities = new Set(previous?.identities ?? []);
-    if (processInfo) identities.add(processIdentity(processInfo));
+    identities.add(processIdentity(processInfo));
     instance.ownedProcesses.set(pid, {
       pid,
       role: "scripted-provider",
@@ -384,7 +394,6 @@ async function liveOwnedProcesses(instance) {
   return [...instance.ownedProcesses.values()].filter((owned) => {
     const current = processes.get(owned.pid);
     if (!current) return false;
-    if (owned.identities.size === 0) return owned.role === "scripted-provider";
     return owned.identities.has(processIdentity(current));
   });
 }
@@ -564,6 +573,7 @@ export async function startBb(root, previousManifest) {
   );
   assert.equal(path.dirname(env.SCRIPTED_ECHO_RECORD_PATH), root);
   assert.equal(path.dirname(env.SCRIPTED_ECHO_PROCESS_LOG_PATH), root);
+  await writeFile(env.SCRIPTED_ECHO_PROCESS_LOG_PATH, "");
   const runtimeManifest = {
     node: process.versions.node,
     bb: expected.bb,
