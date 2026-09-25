@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@types/node": "26.6.2",
+    "@types/node": "26.6.3",
     "bb-app": "0.43.4",
     "playwright": "1.63.0",
     "typescript": "7.0.2"
