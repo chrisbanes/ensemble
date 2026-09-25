@@ -14,6 +14,7 @@ import {
   sanitizeIntegrationData,
   writeIntegrationReport,
 } from "../test/bb-integration/report.mjs";
+import { terminateOwnedProcessGroup } from "../test/bb-integration/owned-process-group.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const nodePin = "24.21.0";
@@ -118,28 +119,6 @@ async function integrationSourceDigest() {
   return digest.digest("hex");
 }
 
-function elapsedDelay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function signalProcessGroup(child, signal) {
-  if (!child.pid) return;
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if (error.code !== "ESRCH") throw error;
-  }
-}
-
-async function terminateProcessGroup(child) {
-  signalProcessGroup(child, "SIGTERM");
-  await elapsedDelay(2_000);
-  if (child.exitCode === null && child.signalCode === null) {
-    signalProcessGroup(child, "SIGKILL");
-  }
-}
-
 async function runScenario(scenario, manifestFile) {
   const command = `${process.execPath} --test --test-reporter=tap ${scenario.file}`;
   const child = spawn(
@@ -156,6 +135,7 @@ async function runScenario(scenario, manifestFile) {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const processGroupId = child.pid;
   let output = "";
   let outputBytes = 0;
   let outputExceeded = false;
@@ -170,29 +150,42 @@ async function runScenario(scenario, manifestFile) {
   child.stdout.on("data", collect);
   child.stderr.on("data", collect);
 
-  let timedOut = false;
-  let timeoutHandle;
   const closeResult = new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (exitCode, signal) => resolve({ exitCode, signal }));
   });
-  timeoutHandle = setTimeout(() => {
-    timedOut = true;
-    void terminateProcessGroup(child);
-  }, scenarioTimeoutMs);
-
+  let timedOut = false;
   let closed;
+  let timeoutCleanupError;
+  let timeoutHandle;
+  const timeoutResult = new Promise((resolve) => {
+    timeoutHandle = setTimeout(
+      () => resolve({ timedOut: true }),
+      scenarioTimeoutMs,
+    );
+  });
   try {
-    closed = await closeResult;
+    const first = await Promise.race([
+      closeResult.then((result) => ({ result })),
+      timeoutResult,
+    ]);
+    if (first.timedOut) {
+      timedOut = true;
+      try {
+        closed = await terminateOwnedProcessGroup({
+          child,
+          processGroupId,
+          closePromise: closeResult,
+        });
+      } catch (error) {
+        timeoutCleanupError = String(error);
+      }
+    } else {
+      closed = first.result;
+    }
   } finally {
     clearTimeout(timeoutHandle);
   }
-  if (outputExceeded) {
-    throw new Error(
-      `${scenario.id} child output exceeded ${maxOutputBytes} bytes`,
-    );
-  }
-
   let manifest;
   try {
     manifest = JSON.parse(await readFile(manifestFile, "utf8"));
@@ -204,10 +197,12 @@ async function runScenario(scenario, manifestFile) {
     id: scenario.id,
     file: scenario.file,
     command,
-    exitCode: closed.exitCode,
-    signal: closed.signal,
+    exitCode: closed?.exitCode ?? null,
+    signal: closed?.signal ?? null,
     expectedExitCode: scenario.expectedExitCode,
     timedOut,
+    outputExceeded,
+    timeoutCleanupError,
     testOutcome: timedOut
       ? "timeout"
       : closed.exitCode === scenario.expectedExitCode
@@ -514,6 +509,11 @@ async function main() {
     try {
       result = await runScenario(scenario, runManifestPath);
       slices[scenario.id] = result;
+      assert.equal(
+        result.outputExceeded,
+        false,
+        `${scenario.id} child output exceeded ${maxOutputBytes} bytes`,
+      );
       if (scenario.id === "T4") {
         const observed = assertExpectedT4Failure({
           exitCode: result.exitCode,
@@ -526,7 +526,7 @@ async function main() {
         assert.equal(
           result.timedOut,
           false,
-          `${scenario.id} timed out after ${scenarioTimeoutMs} ms`,
+          `${scenario.id} timed out after ${scenarioTimeoutMs} ms${result.timeoutCleanupError ? `; ${result.timeoutCleanupError}` : ""}`,
         );
         assert.equal(
           result.exitCode,
