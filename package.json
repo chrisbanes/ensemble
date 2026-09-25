@@ -28,7 +28,7 @@
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "0.5.24",
+    "@get-bb/plugin-sdk": "0.5.27",
     "zod": "4.6.5"
   },
   "devDependencies": {
