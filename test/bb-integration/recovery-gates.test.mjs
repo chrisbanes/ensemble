@@ -709,6 +709,7 @@ gateTest(
       },
       observed: {
         activeStatusBeforeStop: running.status,
+        activeStopResponse: activeStop.stopResponse,
         activeStatusAfterStop: stoppedActive.status,
         activeProviderStopRequests: activeStopRequests.length,
         activeToolEffects: activeEffects.length,

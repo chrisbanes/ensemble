@@ -18,6 +18,10 @@ import {
 
 function evidenceValue(fieldPath) {
   const field = fieldPath.split(".").at(-1);
+  if (fieldPath === "stop.response.ok") return true;
+  if (fieldPath === "stop.statusAfterStop") return "idle";
+  if (fieldPath === "stop.providerStopRequests") return 1;
+  if (fieldPath === "stop.toolEffects") return 0;
   if (field === "effectCount") return 1;
   if (
     field === "providerToolEffectsAfterInvalidation" ||
@@ -165,6 +169,7 @@ function validT4Evidence() {
           daemonPortClosed: true,
           forced: false,
         },
+        disposableRootCleanup: { removed: true },
         startupWithoutBothGateOwners: {
           status: "failed",
           safety: false,
@@ -199,6 +204,16 @@ test("integration report requires one complete row per API and proof gate", () =
     (entry) => entry.id !== "startup-queued-dispatch",
   );
   assert.throws(() => assertIntegrationReport(missingGate), /proof-gate/u);
+});
+
+test("combined stop and retry row requires confirmed stop evidence", () => {
+  const report = validReport();
+  const row = report.rows.find((entry) => entry.id === "thread-stop-and-retry");
+  row.observed.stop.statusAfterStop = "active";
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /post-stop thread status/u,
+  );
 });
 
 test("report writer and reader round-trip deterministic JSON", async () => {

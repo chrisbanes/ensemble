@@ -161,6 +161,7 @@ async function writeFailureEvidence(instance, error, root, fallbackManifest) {
     `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
   );
   await persistRunManifest(manifest, root);
+  return manifest;
 }
 
 async function persistRunManifest(manifest, root) {
@@ -916,6 +917,7 @@ export async function withFixture(callback) {
       maxRetries: 8,
       retryDelay: 100,
     });
+    instance.runtimeManifest.checks.disposableRootCleanup = { removed: true };
     instance.runtimeManifest.outcome = "passed";
     await persistRunManifest(instance.runtimeManifest, root);
     process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
@@ -940,14 +942,22 @@ export async function withFixture(callback) {
           },
         )
       : error;
-    await writeFailureEvidence(
+    const failureManifest = await writeFailureEvidence(
       failedInstance,
       failure,
       root,
       failureManifestBaseline(),
     );
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 100,
+    });
+    failureManifest.checks.disposableRootCleanup = { removed: true };
+    await persistRunManifest(failureManifest, root);
     process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
-    throw error;
+    throw failure;
   } finally {
     if (passed && instance) assert(hasExited(instance.processHandle));
   }

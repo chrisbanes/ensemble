@@ -70,6 +70,10 @@ export const REQUIRED_API_EVIDENCE = {
   ],
   "queued-message-send-cancel": ["queueEvents"],
   "thread-stop-and-retry": [
+    "stop.response.ok",
+    "stop.statusAfterStop",
+    "stop.providerStopRequests",
+    "stop.toolEffects",
     "failedTurnRequestId",
     "firstAttempt",
     "retry.attempt",
@@ -370,6 +374,7 @@ export function buildIntegrationReport({
   const t3Checks = lost?.manifest?.checks ?? {};
   const t4Checks = dispatch?.manifest?.checks ?? {};
   const t5Gate = (name) => t5.get(name);
+  const stopEvidence = t5Gate("stop-writer-release")?.observed;
   const staleEffectBaseline =
     t3Checks.lostResponse?.queuedSendRecovered?.providerToolEffectCount;
   const staleEffectCount =
@@ -591,9 +596,16 @@ export function buildIntegrationReport({
       id: REQUIRED_API_ROWS[8],
       api: "threads.stop and threads.retry",
       scenario:
-        "T2 confirms stop/retry observations and retry attempt identity across restart.",
+        "T5 confirms an active stop and post-stop status; T2 confirms retry identity across restart.",
       slice: execution,
       observed: {
+        stop: {
+          response: stopEvidence?.activeStopResponse ?? null,
+          statusAfterStop: stopEvidence?.activeStatusAfterStop ?? null,
+          providerStopRequests:
+            stopEvidence?.activeProviderStopRequests ?? null,
+          toolEffects: stopEvidence?.activeToolEffects ?? null,
+        },
         failedTurnRequestId:
           t2Checks.executionRetry?.failedTurnRequestId ?? null,
         firstAttempt: t2Checks.executionRetry?.failureAttempt ?? null,
@@ -604,6 +616,11 @@ export function buildIntegrationReport({
       evidenceLimit:
         "The retry is explicit and per-thread; a global two-retry owner is not implemented or proved.",
       evidencePresent:
+        recovery?.testOutcome === "passed" &&
+        stopEvidence?.activeStopResponse?.ok === true &&
+        ["idle", "error"].includes(stopEvidence?.activeStatusAfterStop) &&
+        stopEvidence?.activeProviderStopRequests === 1 &&
+        stopEvidence?.activeToolEffects === 0 &&
         typeof t2Checks.executionRetry?.failedTurnRequestId === "string" &&
         t2Checks.executionRetry?.failureAttempt === 1 &&
         t2Checks.executionRetry?.retry?.attempt === 2 &&
@@ -1034,6 +1051,11 @@ export function assertExpectedT4Failure({
   assert.equal(cleanup.serverPortClosed, true, "T4 server port remained open");
   assert.equal(cleanup.daemonPortClosed, true, "T4 daemon port remained open");
   assert.equal(cleanup.forced, false, "T4 required forced process cleanup");
+  assert.equal(
+    manifest.checks?.disposableRootCleanup?.removed,
+    true,
+    "T4 disposable BB root was not removed",
+  );
   return {
     queueId: startup.queueId,
     providerTurns: startup.providerTurnCount,
@@ -1178,6 +1200,14 @@ export function assertIntegrationReport(report) {
       .map((entry) => entry.id);
     assert.deepEqual(found, required, `unexpected or reordered ${type} rows`);
   }
+  const stop = keyed.get("public-api:thread-stop-and-retry")?.observed?.stop;
+  assert.equal(stop?.response?.ok, true, "stop response must be confirmed");
+  assert(
+    ["idle", "error"].includes(stop?.statusAfterStop),
+    "post-stop thread status must be confirmed",
+  );
+  assert.equal(stop?.providerStopRequests, 1);
+  assert.equal(stop?.toolEffects, 0);
   const startup = keyed.get("proof-gate:startup-queued-dispatch");
   assert.equal(
     startup.verdict,
