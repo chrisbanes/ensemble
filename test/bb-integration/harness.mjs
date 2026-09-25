@@ -523,6 +523,16 @@ export async function startBb(root, previousManifest) {
       "utf8",
     ),
   );
+  assert.equal(
+    providerProvenance.revision,
+    expected.providerBridgeRevision,
+    "Scripted provider provenance revision differs from the fixed pin",
+  );
+  assert.equal(
+    providerProvenance.upstreamSourceSha256,
+    expected.providerBridgeUpstreamSha256,
+    "Scripted provider provenance source hash differs from the fixed pin",
+  );
   const providerBridgePath = path.join(
     repositoryRoot,
     "test/bb-integration/fixture/provider-bridge.ts",
