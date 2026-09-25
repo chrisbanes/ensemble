@@ -56,6 +56,7 @@ No silent migration or reset of the installed Haze prototype.
 | Task | ID, project ID, title/body, work status, readiness provenance, control revision, holds, version, current owner assignment; local or external origin |
 | External item | Provider instance and stable item ID, canonical task ID, authoritative content/version; unique across the installation |
 | Source membership | Source configuration ID, external item ID, current membership and observed time; unique pair |
+| Task dependency | Dependent task ID, blocker task ID or external issue reference, owning authority, confirmed blocker state and observation time; unique dependent/blocker/authority |
 | Assignment | ID, task ID, parent assignment or project-lead reference, requested outcome, profile revision, instruction/policy snapshot, lifecycle/version, work revision, dependencies and holds |
 | Conversation binding | Assignment or project lead, generation, BB thread ID, observed status; at most one current generation |
 | Workspace binding | Task/assignment, BB environment ID, repository scope, writer reservation and retention reason |
@@ -90,6 +91,7 @@ It describes coordination, not development stages.
 | --- | --- |
 | Task work status | `queued`, `active`, `waiting`, `done`, or `canceled`; an outcome decision, never inferred from a process exit |
 | Readiness | Explicit admission decision with provenance, independent of source membership and work status; unready tasks can remain queued |
+| Task dependency | Separate task-level execution gate; Ready remains true while any blocker is open or its state is unknown |
 | Assignment lifecycle | `open`, `completed`, or `canceled`; open assignments can execute, wait, or be held |
 | Conversation generation | Current BB conversation binding; increment only when replacing a conversation, not for ordinary follow-ups |
 | Execution observation | BB thread/turn identity, observed running/idle/stopping/error state, and observation time; unavailable observations mean unknown, not stopped |
@@ -128,12 +130,21 @@ Delegation from an active turn may record queued work but cannot start a new tur
 while paused. A stopped task rejects new delegation until resumed. A result that
 races with stop is retained, but cannot clear the hold or wake a stopped task.
 
-On every dispatch, recheck project pause, task holds, current generation, current
-permissions, and writer admission. Persist a control revision so a prepared send
-cannot bypass a later pause/stop. A send already accepted by BB must still pass
-its dispatch hook when drained; checking only before `threads.send` is insufficient.
+On every dispatch, recheck project pause, task dependencies, task holds, current
+generation, current permissions, and writer admission. Persist a control
+revision so a prepared send cannot bypass a later pause, stop or dependency
+change. A send already accepted by BB must still pass its dispatch hook when
+drained; checking only before `threads.send` is insufficient.
 A turn admitted before pause may finish. Stop instead requests its termination.
-BB's explicit Send-now override remains outside this enforcement guarantee.
+BB's explicit Send-now override remains outside this enforcement guarantee,
+including the task dependency gate; disclose it in the operator UI.
+
+Before claiming a Ready task, require a complete, confirmed dependency view and
+no unresolved blocker. A dependency added or changed while a task is active
+invalidates queued admission, holds later turns and delegation, and leaves the
+current turn to finish safely. Retain owner, pending results and history. Once
+the last blocker clears, re-evaluate all other gates and wake eligible work;
+dependency resolution does not clear an unrelated pause or stop hold.
 
 ### Turn ends without a report
 
@@ -178,6 +189,7 @@ must be proved in T01/T02; the plugin does not claim to secure the BB host API.
 | Command | Caller | Effect and retry behaviour |
 | --- | --- | --- |
 | Create/edit task | Operator; scoped agent capability | Stable operation ID; retries return original result; edits require expected version |
+| Add/remove local task dependency | Operator only | Expected dependent-task version; validate scope and cycles; atomically change edge and control revision with a command receipt; matching retries replay, conflicts reject |
 | Claim task | Project lead | Atomic owner assignment; conflicting claim returns conflict; claiming alone does not reserve a writer |
 | Delegate | Current owner/authorized parent assignment | Child assignment plus launch intent; same operation ID and payload returns same assignment |
 | Report result | Bound current assignment conversation and work revision | Immutable result plus recipient delivery in one transaction; conflicting retry is rejected |
@@ -371,6 +383,34 @@ Polling is the accepted initial mechanism, with manual refresh and visible last
 success; recheck relevant state before consequential actions. Webhooks are deferred. Periodic reconciliation is required either
 way. Exclude PRs and draft items. Page complete selections and retain prior state
 on partial failures; bounded recent-item caches are not complete discovery.
+
+Task dependencies are distinct from assignment waits and source selection.
+Ensemble owns edges from local dependent tasks to local or imported tasks in the
+same project. Only the operator may create or remove these edges, through the
+explicit dependency command. The generic task-edit command must not change them,
+even for an agent with scoped task-edit permission. Validate the dependent task's
+expected version, reject self-edges and cycles, and persist the edge change with
+its control revision and operation receipt in one transaction. Matching retries
+return the recorded result; stale versions or changed payloads conflict. Retain
+the relationship and outcome across restart. A local blocker clears only when
+its task is Done; cancellation leaves the dependent held until the operator
+changes the edge. No authored edge crosses Ensemble projects.
+
+For imported GitHub dependent issues, read native
+[`blocked_by` relationships](https://docs.github.com/en/rest/issues/issue-dependencies) and
+the current issue state of each blocker. Retain provider identity and provenance;
+an external blocker need not be selected as an Ensemble task. Fetch complete
+paginated dependency results and confirm blocker state before dispatch, including
+for cross-repository issues; discovery never grants repository execution access.
+GitHub issue closure or native edge removal clears that blocker. Reopening or
+adding an open blocker re-applies the execution gate. Do not write a parallel
+Ensemble edge or provide an override for an imported issue. On inaccessible,
+partial or failed reads, including the first dependency-list or blocker-state
+read for a newly discovered issue, leave dependency state unknown and hold
+dispatch. Never initialize an unfetched issue as unblocked. Keep any last
+confirmed view for explanation until a complete refresh succeeds. Polling and
+manual refresh re-evaluate blocked Ready tasks, while local state changes
+trigger immediate re-evaluation.
 
 Accepted overlap policy: show the conflict and require explicit operator placement.
 Retain an existing owner's work; a newly conflicted, unowned issue cannot dispatch.

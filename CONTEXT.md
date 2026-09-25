@@ -13,6 +13,12 @@ _Avoid_: Board or GitHub Project when referring to the Ensemble container
 A piece of work belonging to one project, created locally or linked to an external item.
 _Avoid_: Issue when referring to work independently of its external provider
 
+**Task dependency**:
+A directed relationship in which a task's work depends on another task or an
+external work item. It is distinct from readiness, source membership, and
+dependencies between assignments within a task.
+_Avoid_: Assignment dependency when referring to a relationship between tasks
+
 **Task source**:
 A project-scoped origin of tasks: built-in local creation or a configured external source supplied by a plugin.
 _Avoid_: Project when referring to a source such as a GitHub Project
