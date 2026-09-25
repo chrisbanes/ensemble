@@ -5,6 +5,8 @@ native sub-issues, with blocking dependencies. GitHub issues track execution;
 these briefs retain the reviewed scope and decision history. Publication does not
 resolve capability gates or mark dependent features ready-for-agent. The legacy
 backlog is retired as superseded by the TypeScript BB plugin direction.
+This delivery-ticket dependency map is distinct from the product's task
+dependency gate.
 
 Parent epic: **Deliver Ensemble's BB-based autonomous project coordination MVP**.
 Outcome: an operator configures projects, adds local or selected GitHub tasks, and
@@ -121,14 +123,16 @@ custom host sandboxing is outside this release.
 
 ## T03 — Implement durable domain records and idempotent commands
 
-**Depends on:** T01 and reviewed state/command contracts. **Acceptance:** A03, A07, A18, A22 foundations.
+**Depends on:** T01 and reviewed state/command contracts. **Acceptance:** A03, A07, A18, A22, A28 foundations.
 
 Implement migrations, task/assignment identity, profile revisions, conversation
 generations, owner uniqueness, launch intent, inbox/outbox records, results and
 human requests from the design. Expose one validated command service to tools/RPC.
 Use expected versions for competing edits and durable command receipts for
 operation retries, including payload conflicts and pending-response replay. Keep
-provider statuses separate from task and execution state.
+provider statuses separate from task and execution state. Persist local task
+dependency edges separately from readiness and assignment waits, with versioned
+edits and cycle rejection.
 
 Done when transaction rollback, file reopen, conflicting retry, concurrent owner
 claims, stale generation results and migration replay are tested using real
@@ -155,13 +159,15 @@ cannot alter configuration or broaden access.
 
 ## T05 — Deliver local task list, detail, and creation UI
 
-**Depends on:** T04. **Acceptance:** A03 and task-facing portions of A26.
+**Depends on:** T04. **Acceptance:** A03, A28 UI and task-facing portions of A26.
 
 Add Ensemble's navigation panel, task creation/editing, project task list and task
 detail with assignments, results, source provenance and BB conversation links.
 Start with a list view; Kanban is optional after acceptance, not a release blocker.
-Display work status independently from execution and external state. Provide
-clear empty, loading, unavailable, conflict and error states.
+Display work status independently from execution and external state. Show
+blockers and their provenance; let operators add or remove local task edges
+within the project. Provide clear empty, loading, unavailable, conflict and
+error states.
 
 Done when browser tests create/edit/reopen a task and inspect persisted records
 through real RPC. The operator never supplies UUIDs or runs a setup CLI. Local
@@ -200,16 +206,17 @@ A duplicate wakeup must not duplicate work or external effects.
 
 ## T08 — Coordinate dispatch with BB concurrency and bounded retries
 
-**Depends on:** T07; dispatch decision D2. **Acceptance:** A04/A11/A14/A27.
+**Depends on:** T07; dispatch decision D2. **Acceptance:** A04/A11/A14/A27/A28.
 
 Wake project leads for eligible task changes and durable events. Leads choose
-work using instructions; the runtime enforces ownership, eligibility and resource
-admission. Honor BB’s Concurrency limit plugin without separate Ensemble caps; owners and
+work using instructions; the runtime enforces ownership, dependency eligibility
+and resource admission. Honor BB’s Concurrency limit plugin without separate Ensemble caps; owners and
 leads yield while waiting for children or human input. Prove progress at capacity one. Persist pause intent and retry budgets. Surface BB manual
 overrides honestly. Failed work does not retry indefinitely.
 
 Done when two-project scripted tests show independent progress, bounded execution,
-no competing owner, and retained wakeups across pause/restart. Changing reviewer
+no competing owner, blocked Ready tasks held until confirmed clearance, and
+retained wakeups across pause/restart. Changing reviewer
 count or order requires instructions only. No hard-coded planning/review stages.
 
 ## T09 — Add durable human questions and execution controls
@@ -231,7 +238,8 @@ confirms actual termination. Include unavailable-machine and canceled-request UI
 
 Automate the full UI-to-lead-to-owner-to-worker-to-result journey, including a
 review/revision chosen by instructions, human question, restart and duplicate
-command delivery. Run one bounded real-provider smoke in a disposable repository;
+command delivery. Exercise a local Ready task held by another local task until
+confirmed completion. Run one bounded real-provider smoke in a disposable repository;
 the implementation agent executes and inspects it. Produce a reviewable demo and
 scenario evidence report. Fix integration failures within this milestone.
 
@@ -242,19 +250,25 @@ moving the shared installation beyond the prototype.
 
 ## T11 — Discover GitHub tasks with source memberships
 
-**Depends on:** T10. **Acceptance:** A19–A23.
+**Depends on:** T10. **Acceptance:** A19–A23, A28 imported-blocker path, A29–A30.
 
 Add project-scoped linked-repository issue and GitHub Project selections. Page
 complete results, preserve provider field provenance and canonical identity, and
 retain source memberships. Implement reviewed overlap and withdrawal policies.
 Exclude PRs/drafts; discovery cannot add repository access. Local tasks remain
 available alongside external ones. Reuse BB GitHub capabilities only where their
-contracts meet full discovery requirements.
+contracts meet full discovery requirements. Import complete native dependency
+observations, including blockers outside the selection; unreadable or partial
+blocker state holds dispatch. Do not create parallel Ensemble edges for imported
+issues.
 
 Done when deterministic provider fixtures prove pagination, partial errors,
 missing/duplicate observations, overlap and withdrawals, and a designated test
 repository/Project proves the same mapping live. UI shows synchronization state
-and conflicts. No live Haze queue is imported until explicit rollout.
+and conflicts. Exercise native blocker closure, removal, reopening and mid-work
+addition, plus an unreadable imported blocker of a local task, in the scripted
+adapter and designated live fixture. No live Haze queue is imported until
+explicit rollout.
 
 ## T12 — Reconcile external writes and qualify the operational release
 
@@ -297,11 +311,18 @@ scope. Bots Sidebar is a reference for conversation binding/navigation only.
 - **D7 — accepted:** merge readiness follows project instructions and actual
   GitHub requirements. Ensemble checks authority and records evidence; no universal
   structured review policy is introduced.
+- **D8 — accepted:** task dependencies are a separate execution gate for Ready
+  work. Local dependent tasks use Ensemble-owned edges within a project; imported
+  GitHub issues follow native edges, even when the blocker is outside the selected
+  source or Ensemble project. Hold unknown blocker state and later turns when a
+  blocker appears; provide no Ensemble bypass for an extant edge. Re-evaluate
+  automatically after confirmed clearance, without clearing unrelated holds.
+  Disclose BB's direct Send-now override as outside this enforcement boundary.
 - **D4:** operational choices are recorded as O1–O11 below; review their technical
   contracts and prove BB integration capabilities before implementation.
 
 T01/T02 are bounded evidence/design tickets, not permission to resume incremental
-product implementation. High-level choices D1/D2/D3/D5/D6/D7 are confirmed. Review D4 technical contracts and prove BB capability gaps
+product implementation. High-level choices D1/D2/D3/D5/D6/D7/D8 are confirmed. Review D4 technical contracts and prove BB capability gaps
 before marking dependent feature tickets ready.
 
 ## GitHub interview decisions

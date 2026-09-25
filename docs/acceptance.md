@@ -71,6 +71,9 @@ required events, or duplicate operation effects.
 | A25 | Configure permissions; attempt denied Ensemble action | Ensemble action is rejected; BB/provider controls are passed correctly and their shell/API limits are disclosed | BB + UI |
 | A26 | Hand back PR, receive feedback, restart, then merge or explicitly accept/close | Owner resumes on CI/review feedback; task remains waiting until settled; only through-merge projects merge autonomously; history persists | UI + BB + adapter |
 | A27 | Capacity exhausted or repeatedly failing worker | Ordinary dispatch honors BB limiter; capacity one does not deadlock parent/child work; confirmed transient failures retry at most twice; uncertainty holds; prolonged inactivity flags attention without automatic termination/restart | BB |
+| A28 | Ready local task depends on another local or imported task in its project | Blocked task stays Ready and visible but starts no owner or new turn through Ensemble; local blocker Done or confirmed imported issue closure releases it automatically; cancellation does not; obsolete edge removal works; self/cyclic and cross-project authored edges are rejected | UI + SQLite + BB |
+| A29 | Ready imported issue has native GitHub blocker outside selection or project | Full native dependency read holds Ensemble dispatch while blocker is open; no task import or repository access is inferred; closure or edge removal releases it, and reopening re-applies the gate | Adapter + BB + UI |
+| A30 | Native dependency read or an imported blocker of a local task becomes unreadable, or a blocker appears during active work | Unknown state holds dispatch even after a previously clear read; current turn may finish, but queued/new turns and delegation wait; ownership/results persist across restart; complete confirmed refresh resumes only when other controls permit | Adapter fault injection + BB |
 
 ## State and recovery boundary cases
 
@@ -115,6 +118,8 @@ unchanged items. Include failures and placement conflicts in the inbox journeys.
 A19–A23 must cover query validation/preview and readiness all/any rules separately
 from source membership. Non-code A26 journeys complete on the owner's recorded
 outcome and evidence unless project instructions or permissions require approval.
+A25 must disclose that BB's direct Send-now override is outside Ensemble's task
+dependency gate.
 
 ## Complete local-task journey
 
@@ -145,8 +150,9 @@ Avoid blanket coverage percentages as a substitute for scenario evidence.
 
 - Design gate: consequential decisions and BB gaps resolved before dependent code.
 - Local milestone: A01–A18, A25–A27 as applicable to local tasks, automated UI journey,
-  and one successful bounded real-provider smoke. No GitHub discovery required.
-- Operational release: all applicable A01–A27 plus repository issue and GitHub
+  A28 for local-to-local dependencies, and one successful bounded real-provider
+  smoke. No GitHub discovery required.
+- Operational release: all applicable A01–A30 plus repository issue and GitHub
   Project live integration. PR/merge acceptance follows the confirmed D1 choice.
 - Handback: user reviews the finished flow and evidence, rather than performing
   incremental integration tests. Any manual-only boundary must be disclosed and

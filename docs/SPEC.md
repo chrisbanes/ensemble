@@ -109,8 +109,9 @@ For non-code tasks, the owner records the outcome and supporting evidence agains
 the request. No universal operator acceptance step is required; project
 instructions and action permissions may require approval.
 
-Ready authorizes work within the admitted scope; no universal plan-approval stage
-is required. Material ambiguity, scope expansion and ungranted actions require
+Ready authorizes work within the admitted scope, subject to task dependency and
+execution controls; no universal plan-approval stage is required. Material
+ambiguity, scope expansion and ungranted actions require
 operator input. In reviewable-PR projects, handback puts the task into a waiting
 state. Relevant CI failures and review feedback resume its owner. Merge remains
 human-owned; completion follows merge or explicit acceptance/closure. Through-merge
@@ -156,7 +157,7 @@ Ensemble does not add an independent project security sandbox. D4 covers operati
 These are tracked in the [ticket package](delivery.md#decisions-before-publication).
 Accepted high-level direction does not imply acceptance of every proposed default.
 
-Acceptance IDs A01–A27 in [the test plan](acceptance.md) are the traceable release
+Acceptance IDs A01–A30 in [the test plan](acceptance.md) are the traceable release
 criteria. Feature tickets include automated verification against an isolated BB
 instance. The implementation agent runs integration tests and the bounded live
 smoke; the operator reviews a finished flow and evidence rather than acting as the
@@ -226,6 +227,41 @@ The project lead sees one task list. Review assignments under a task need not
 become additional tracker issues. A task's source does not change its delegation
 or recovery mechanism.
 
+## Task dependencies
+
+The authority boundary is recorded in [ADR-1002](adr/1002-task-dependency-authority.md).
+
+A task may be blocked by another task or external issue independently of source
+membership and readiness. A Ready task with an unresolved dependency remains
+visible for triage, but Ensemble cannot start an owner or another execution turn
+for it. Clearing the last blocker automatically re-evaluates the task under
+current readiness, pause, permission and capacity controls. Dependency state
+and its source are visible in task detail and
+the task list; they are not folded into the Ready state.
+
+Ensemble owns dependencies whose dependent task is local. The operator may link
+that task to another local or imported task in the same Ensemble project. Local
+task completion (`Done`) resolves its blocker; cancellation does not. An obsolete
+local edge must be removed rather than bypassed. Reject self-dependencies and
+cycles when creating local edges.
+
+For an imported GitHub issue, native GitHub issue dependencies are authoritative.
+Ensemble observes them, including a blocking issue outside the selected source or
+Ensemble project, without importing that issue as a task or granting repository
+access. An open GitHub blocking issue holds work; closure or removal of its native
+edge releases that blocker. Ensemble does not add a separate local edge to an
+imported issue or provide a bypass while the GitHub edge remains. Change an
+obsolete native edge in GitHub, then reconcile its confirmed state. BB's direct
+manual Send-now override sits outside Ensemble-managed dispatch and must be
+disclosed as an execution-control limitation, not offered as a dependency bypass.
+
+If a dependency appears while work is active, the current turn may reach a safe
+stop; hold new Ensemble turns and delegation, retain ownership and results, and
+show the reason. A reopened blocker applies the same rule. If dependency or
+blocker state cannot be read completely, hold affected dispatch, keep the last
+confirmed view for explanation, and retry reconciliation. Neither stale clearance nor a lead's
+judgment can substitute for a confirmed unblocked state.
+
 ## Data ownership and external writes
 
 | Data | Authority |
@@ -235,6 +271,7 @@ or recovery mechanism.
 | Local task title, description, and work status | Ensemble. |
 | External task title, description, and provider status | External provider; Ensemble retains a local representation. |
 | Source-specific metadata, such as GitHub Project fields and membership | The corresponding external source; retain provenance. |
+| Task dependencies | Ensemble for local dependent tasks; GitHub native issue relationships for imported GitHub dependent tasks. |
 | Assignments, execution, handoffs, human requests, and action records | Ensemble. |
 
 External content changes go through the plugin and use confirmed remote outcomes
@@ -545,6 +582,9 @@ method. They should become integration tests as the corresponding behaviour exis
 | Sources in two projects discover the same external issue concurrently. | The cross-project conflict is visible and no competing execution owner starts; the operator selects placement, existing ownership is retained, and newly conflicted unowned work cannot dispatch. |
 | A GitHub Project contains an issue from an unlinked repository. | Discovery does not grant access; repository-changing execution cannot proceed without explicit project access. |
 | A GitHub Project contains a PR and a draft item. | Neither is imported as a task in the initial integration. |
+| A Ready local task depends on another task in its project. | The dependent remains Ready and visible but cannot run until the blocker is Done or its local edge is removed. Cancellation does not clear it. |
+| A Ready GitHub issue has an open native blocker outside its selected source. | The blocker is shown and prevents execution without importing it or granting access to its repository; confirmed closure or edge removal re-evaluates the task. |
+| An active task gains a blocker, or blocker status becomes unreadable. | The current turn may finish safely; new execution waits, with ownership and evidence retained, until complete confirmed state permits resumption. |
 | An issue leaves one of two sources in a project. | Its other membership remains; its task history and running assignments are not discarded. |
 | An external title or status is edited in the dashboard. | The write goes through the plugin and is confirmed remotely; a local-only edit is not presented as a successful provider update. |
 | One owner requests implementation and a review. | Both assignments and their results remain attached to the task; instructions decide the next work without a process graph. |
