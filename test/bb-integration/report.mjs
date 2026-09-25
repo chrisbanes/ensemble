@@ -963,7 +963,10 @@ export function buildIntegrationReport({
       sanitize(entry, replacements),
     ),
     t5Reports: (t5Reports ?? []).map((entry) => sanitize(entry, replacements)),
-    dependentExecutionBlocked: ["T06", "T08"],
+    dependentExecutionBlocked:
+      t5Gate("stop-writer-release")?.verdict === "failed-capability"
+        ? ["T02", "T06", "T08"]
+        : ["T06", "T08"],
   };
 }
 
@@ -1218,13 +1221,29 @@ export function assertIntegrationReport(report) {
   );
   assert.equal(stop?.providerStopRequests, 1);
   assert.equal(stop?.toolEffects, 0);
+  const stopScenario = keyed.get("t5-scenario:stop-writer-release");
+  assertStopWriterEvidence(
+    stopScenario.verdict,
+    stopScenario.observed.identities,
+    stopScenario.observed.observations,
+  );
+  assert.equal(
+    keyed.get("proof-gate:stop-writer-release").verdict,
+    stopScenario.verdict,
+    "Stop proof gate must preserve the T5 capability verdict",
+  );
   const startup = keyed.get("proof-gate:startup-queued-dispatch");
   assert.equal(
     startup.verdict,
     "failed-capability",
     "Known T4 startup capability failure must remain visible",
   );
-  assert.deepEqual(report.dependentExecutionBlocked, ["T06", "T08"]);
+  assert.deepEqual(
+    report.dependentExecutionBlocked,
+    stopScenario.verdict === "failed-capability"
+      ? ["T02", "T06", "T08"]
+      : ["T06", "T08"],
+  );
   assert.match(startup.evidenceLimit, /#665/u);
   assert.equal(
     keyed.get("proof-gate:message-acceptance-replay").verdict,
@@ -1233,7 +1252,6 @@ export function assertIntegrationReport(report) {
   );
   for (const id of [
     "composed-writer-admission",
-    "stop-writer-release",
     "initial-workspace-identity",
     "retry-ownership",
     "revision-application",
@@ -1245,6 +1263,7 @@ export function assertIntegrationReport(report) {
     );
   }
   for (const id of REQUIRED_T5_REPORTS) {
+    if (id === "stop-writer-release") continue;
     assert.equal(
       keyed.get(`t5-scenario:${id}`).verdict,
       "open",
@@ -1253,6 +1272,35 @@ export function assertIntegrationReport(report) {
   }
   assert.equal(report.outcome, "completed-with-capability-gaps");
   return true;
+}
+
+function assertStopWriterEvidence(verdict, identities, observed) {
+  assert.equal(identities?.delayedStopResponse?.ok, true);
+  assert.equal(observed?.delayedStatusBeforeStop, "pending");
+  assert.equal(observed?.delayedProviderTurnStartsBeforeRelease, 0);
+  assert.equal(observed?.delayedProviderToolEffectsBeforeRelease, 0);
+  assert.equal(observed?.delayedProviderTurnStartsAfterRelease, 0);
+  assert.equal(observed?.delayedProviderToolEffectsAfterRelease, 0);
+  if (verdict === "failed-capability") {
+    assert.equal(observed.delayedStatusAfterStop, "pending");
+    assert.equal(observed.delayedStopConfirmed, false);
+    assert.equal(observed.releaseAttempted, false);
+    assert.equal(observed.releaseEvidence, null);
+    assert(
+      observed.delayedQueueAfterStopBeforeRelease?.some(
+        (entry) =>
+          entry.id === identities.delayedQueuedMessageId &&
+          entry.waitingOn?.kind === "plugin",
+      ),
+      "The unconfirmed stop must retain the observed plugin-held queue row",
+    );
+  } else {
+    assert.equal(verdict, "open", "Stop product gate remains open");
+    assert(["idle", "error"].includes(observed.delayedStatusAfterStop));
+    assert.equal(observed.delayedStopConfirmed, true);
+    assert.equal(observed.releaseAttempted, true);
+    assert.notEqual(observed.releaseEvidence, null);
+  }
 }
 
 export function assertT5Reports(rows) {
@@ -1276,11 +1324,15 @@ export function assertT5Reports(rows) {
         (limit) => typeof limit === "string" && limit.length > 0,
       ),
     );
-    assert.equal(
-      row.verdict,
-      "open",
-      `T5 ${row.name} is fixture evidence; its product gate remains open`,
-    );
+    if (row.name === "stop-writer-release") {
+      assertStopWriterEvidence(row.verdict, row.identities, row.observed);
+    } else {
+      assert.equal(
+        row.verdict,
+        "open",
+        `T5 ${row.name} is fixture evidence; its product gate remains open`,
+      );
+    }
   }
   return true;
 }

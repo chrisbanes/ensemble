@@ -121,6 +121,18 @@ The probes do not justify a second scheduler. Do not treat a local pending row,
 an independent plugin wait, or instruction compliance as a dispatch interlock
 when the Ensemble hook is unavailable.
 
+## 2026-09-25 delayed-stop capability gap
+
+The isolated T5 fixture held a new thread's first message in a plugin dispatch
+wait. BB's public `threads.stop` returned `ok`, but the thread stayed `pending`
+through the bounded confirmation wait and the queued message remained held by the
+plugin. No provider turn or tool effect occurred before release. The fixture did
+not recheck the message because stop was not confirmed. The report records this
+as `failed-capability`, with T02/T06 writer-release work blocked by
+[#676](https://github.com/chrisbanes/ensemble/issues/676). This proves a
+status-confirmation gap for this delayed-start setup; it does not show what BB
+would do if the queued message were released after the unconfirmed stop.
+
 The GitHub releases page still lists BB desktop **0.43.4** as the latest stable
 release on 2026-09-24 ([BB releases](https://github.com/get-bb/bb/releases)). The
 installed 0.43.4 runtime is therefore the latest stable available for this test;
@@ -226,7 +238,7 @@ temporary evidence. They are not required to run the T01 harness.
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
 | Composed writer admission | **Open**: T5 observed another-plugin wait, public rejection, and later release; it has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Open**: T5 confirmed active and delayed-start stop observations; it does not establish Ensemble writer release or termination of arbitrary workspace processes. |
+| Stop and writer release | **Failed capability for the delayed-start setup**: active-turn stop was confirmed, but BB returned `ok` for the plugin-held pending thread without changing its status. The fixture withheld recheck; [#676](https://github.com/chrisbanes/ensemble/issues/676) blocks T02/T06 writer release. |
 | Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled to one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
@@ -237,8 +249,7 @@ failure. Issue [#665](https://github.com/chrisbanes/ensemble/issues/665) remains
 open and blocks dependent execution work until a public-API design or tested BB
 capability proves the accepted-queue guarantee. Do not label the startup gate
 passed from these narrower observations. No product implementation, installed
-Haze plugin reload, shared-instance configuration change, or remote mutation was
-performed.
+Haze plugin reload or shared-instance configuration change was performed.
 
 ## Integrated T1–T5 command and report
 
@@ -264,7 +275,7 @@ versions, source revisions or artifact identities, scenario, observed IDs and
 effects, verdict, and evidence limit. Required public API evidence and event names
 are validated before the report is accepted. The report ends in
 `completed-with-capability-gaps` when the harness ran successfully while #665
-remains failed/open; this does not unblock T06 or T08.
+and #676 remain failed capabilities; this does not unblock T02, T06 or T08.
 
 The host SDK version comes from BB's public `incompatible` install status for a
 disposable fixture requiring `bbPluginSdk >=0.5.24`. BB reports the running SDK

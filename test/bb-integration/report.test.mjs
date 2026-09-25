@@ -62,13 +62,39 @@ function sampleObserved(type, id) {
   }
   if (type === "t5-scenario") {
     return {
-      identities: { threadId: "thread-one" },
-      observations: { status: "open" },
+      identities:
+        id === "stop-writer-release"
+          ? {
+              delayedStopResponse: { ok: true },
+              delayedQueuedMessageId: "queued-stop",
+            }
+          : { threadId: "thread-one" },
+      observations:
+        id === "stop-writer-release"
+          ? stopWriterObserved()
+          : { status: "open" },
     };
   }
   return Object.keys(observed).length > 0
     ? observed
     : { threadId: "thread-test", effectCount: 1 };
+}
+
+function stopWriterObserved() {
+  return {
+    delayedStatusBeforeStop: "pending",
+    delayedStatusAfterStop: "idle",
+    delayedStopConfirmed: true,
+    releaseAttempted: true,
+    releaseEvidence: { status: "idle" },
+    delayedQueueAfterStopBeforeRelease: [
+      { id: "queued-stop", waitingOn: { kind: "plugin" } },
+    ],
+    delayedProviderTurnStartsBeforeRelease: 0,
+    delayedProviderToolEffectsBeforeRelease: 0,
+    delayedProviderTurnStartsAfterRelease: 0,
+    delayedProviderToolEffectsAfterRelease: 0,
+  };
 }
 
 function row(type, id, overrides = {}) {
@@ -309,13 +335,30 @@ test("T5 fixture rows stay open and cannot claim product gates passed", () => {
   const rows = REQUIRED_T5_REPORTS.map((name) => ({
     name,
     verdict: "open",
-    identities: { threadId: `thread-${name}` },
-    observed: { status: "observed" },
+    identities:
+      name === "stop-writer-release"
+        ? {
+            delayedStopResponse: { ok: true },
+            delayedQueuedMessageId: "queued-stop",
+          }
+        : { threadId: `thread-${name}` },
+    observed:
+      name === "stop-writer-release"
+        ? stopWriterObserved()
+        : { status: "observed" },
     limits: ["Fixture evidence does not implement the product gate."],
   }));
   assert.doesNotThrow(() => assertT5Reports(rows));
   rows[0].verdict = "pass";
   assert.throws(() => assertT5Reports(rows), /product gate remains open/u);
+  rows[0].verdict = "open";
+  rows[1].observed.delayedStopConfirmed = false;
+  assert.throws(() => assertT5Reports(rows), /false !== true/u);
+  rows[1].verdict = "failed-capability";
+  rows[1].observed.delayedStatusAfterStop = "pending";
+  rows[1].observed.releaseAttempted = false;
+  rows[1].observed.releaseEvidence = null;
+  assert.doesNotThrow(() => assertT5Reports(rows));
 
   const report = validReport();
   report.rows.find((entry) => entry.id === REQUIRED_T5_REPORTS[0]).verdict =

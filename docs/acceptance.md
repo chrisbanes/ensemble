@@ -160,7 +160,10 @@ pins measured after clean `npm ci` with Node 24.21.0 and npm 11.20.0.
 The raw T4 test intentionally exits nonzero for the known #665 startup violation;
 the aggregate accepts only its exact queue/provider/tool evidence and verified
 cleanup, records the gate as failed capability, and keeps dependent T06/T08
-blocked. Unrelated test failures, missing evidence/events, timeouts or leaks fail
+blocked. T5 also records a failed capability when BB acknowledges a stop for a
+plugin-held delayed thread but the thread remains pending; it withholds recheck
+and blocks T02/T06 writer-release work through [#676](https://github.com/chrisbanes/ensemble/issues/676). Unrelated test failures, missing
+evidence/events, timeouts or leaks fail
 the aggregate. This report does not stand in for the authenticated-provider smoke
 required for the later operational release gate.
 

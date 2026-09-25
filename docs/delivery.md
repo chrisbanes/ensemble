@@ -98,8 +98,11 @@ review, without treating startup as passed. Issue
 [#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the unresolved
 accepted-queue/startup contract and blocks T06/T08 execution work until a public
 API design or tested BB capability proves protected work remains held while
-Ensemble is unavailable. This does not yet establish that BB must change. Other
-harness and design work can continue.
+Ensemble is unavailable. The T5 delayed-stop probe also blocks T02/T06 writer
+release: BB acknowledged stop while the plugin-held thread remained pending, so
+the harness did not recheck it. [#676](https://github.com/chrisbanes/ensemble/issues/676)
+tracks that boundary. These findings do not yet establish that BB must
+change. Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 

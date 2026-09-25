@@ -297,7 +297,10 @@ async function runGate(name, run) {
   let report;
   try {
     report = await run(capture);
-    if (!report || !["pass", "fail", "open"].includes(report.verdict)) {
+    if (
+      !report ||
+      !["pass", "fail", "open", "failed-capability"].includes(report.verdict)
+    ) {
       throw new Error(`T5 case ${name} returned no valid gate verdict`);
     }
   } catch (error) {
@@ -689,16 +692,17 @@ gateTest(
     const effectsAfterRelease = (
       releaseEvidence?.trace ?? preReleaseTrace
     ).filter((entry) => entry.method === "t1/tool-result");
-    const policyViolation = !delayedStopConfirmed && releaseAttempted;
+    const unexpectedExecution =
+      delayedStartsBeforeRelease.length > 0 ||
+      effectsBeforeRelease.length > 0 ||
+      delayedStartsAfterRelease.length > 0 ||
+      effectsAfterRelease.length > effectsBeforeRelease.length;
     const report = {
-      verdict:
-        policyViolation ||
-        delayedStartsBeforeRelease.length > 0 ||
-        effectsBeforeRelease.length > 0 ||
-        delayedStartsAfterRelease.length > 0 ||
-        effectsAfterRelease.length > effectsBeforeRelease.length
-          ? "fail"
-          : "open",
+      verdict: unexpectedExecution
+        ? "fail"
+        : delayedStopConfirmed
+          ? "open"
+          : "failed-capability",
       identities: {
         projectId: project.id,
         activeThreadId: active.id,
@@ -754,7 +758,12 @@ gateTest(
         },
       },
       limits: [
-        "The fixture observes BB's scripted provider and a plugin-held delayed start only; it does not implement an Ensemble writer reservation or enumerate arbitrary surviving workspace processes. If BB's stop leaves the thread pending, the fixture withholds recheck and cannot establish release behavior after a confirmed stop.",
+        "The fixture observes BB's scripted provider and a plugin-held delayed start only; it does not implement an Ensemble writer reservation or enumerate arbitrary surviving workspace processes.",
+        ...(delayedStopConfirmed
+          ? []
+          : [
+              "BB returned ok for the delayed stop but left the thread pending, so the fixture withheld recheck and could not establish safe writer release.",
+            ]),
       ],
     };
     capture({
