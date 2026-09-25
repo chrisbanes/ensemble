@@ -72,6 +72,10 @@ async function providerTrace(instance) {
     .map((line) => JSON.parse(line));
 }
 
+function holdScheduledMessageForDay() {
+  return Date.now() + 24 * 60 * 60 * 1_000;
+}
+
 test("public execution settings, lifecycle, interactions, retry, and environment identity are observable", async () => {
   await withFixture(async (instance) => {
     const installed = await bbCli(
@@ -311,7 +315,7 @@ test("public execution settings, lifecycle, interactions, retry, and environment
     const queuedDispatch = await execution(instance, "send", {
       threadId: configured.id,
       mode: "auto",
-      sendAt: Date.now() + 60_000,
+      sendAt: holdScheduledMessageForDay(),
       input: [{ type: "text", text: queueText }],
     });
     assert.equal(queuedDispatch.delivery, "queued");
@@ -369,7 +373,7 @@ test("public execution settings, lifecycle, interactions, retry, and environment
     const cancelledDispatch = await execution(instance, "send", {
       threadId: configured.id,
       mode: "auto",
-      sendAt: Date.now() + 60_000,
+      sendAt: holdScheduledMessageForDay(),
       input: [{ type: "text", text: "T2 queued message cancellation marker" }],
     });
     assert.equal(cancelledDispatch.delivery, "queued");
@@ -404,7 +408,7 @@ test("public execution settings, lifecycle, interactions, retry, and environment
       ).some((entry) => entry.id === cancelledId),
     );
 
-    const failing = await execution(instance, "spawn-delayed-failure", {
+    const failing = await execution(instance, "spawn", {
       projectId: project.id,
       providerId: "ensemble-scripted",
       model: "fixture-model",
@@ -412,13 +416,38 @@ test("public execution settings, lifecycle, interactions, retry, and environment
       serviceTier: "default",
       permissionMode: "accept-edits",
       prompt: "T2 retry once marker",
-      sendAt: Date.now() + 10_000,
+      sendAt: holdScheduledMessageForDay(),
       environment: {
         type: "reuse",
         environmentId: configuredThread.environmentId,
       },
     });
+    const heldFailureQueue = await execution(instance, "queue-list", {
+      threadId: failing.id,
+    });
+    const heldFailureEntry = heldFailureQueue.find(
+      (entry) => entry.content[0]?.text === "T2 retry once marker",
+    );
+    assert(
+      heldFailureEntry,
+      "first failure turn must remain held before release",
+    );
+    assert.equal(heldFailureEntry.waitingOn.kind, "time");
+    assert.equal(
+      (await providerTrace(instance)).filter(
+        (entry) =>
+          entry.method === "turn/start" && entry.params.threadId === failing.id,
+      ).length,
+      0,
+      "the held failure turn must not reach the provider before it is armed",
+    );
     await execution(instance, "arm-retry-failure", { threadId: failing.id });
+    const releasedFailure = await execution(instance, "queue-send", {
+      threadId: failing.id,
+      queuedMessageId: heldFailureEntry.id,
+      mode: "auto",
+    });
+    assert.equal(releasedFailure.delivery, "sent");
     await waitFor(
       async () => {
         const thread = await execution(instance, "get", {

@@ -79,7 +79,6 @@ export function registerExecutionServer(
           z.object({
             operation: z.enum([
               "spawn",
-              "spawn-delayed-failure",
               "arm-retry-failure",
               "disarm-retry-failure",
               "get",
@@ -106,7 +105,6 @@ export function registerExecutionServer(
         const input = args as ExecutionArgs;
         switch (operation) {
           case "spawn":
-          case "spawn-delayed-failure":
             return bb.sdk.threads.spawn(
               input as unknown as Parameters<typeof bb.sdk.threads.spawn>[0],
             );
