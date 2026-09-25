@@ -33,6 +33,9 @@ const expected = {
     "sha512-+7ziBLidS4NaNCdt57SUDT+wYmmd5fmiQejUic/kb+YsYSCPyOOE9sebzMjNmQrsnNpDJqd4WHvV/8lfKfUDUg==",
   providerBridgeSha256:
     "049cf0e0a74ce848488e0a0558a5cd7eb30f252b7e5ebaf3f50ce9624832cf4b",
+  providerBridgeRevision: "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
+  providerBridgeUpstreamSha256:
+    "4af6205519d056007f179cec8e93b112e74a19fb9574c7ab489533e276c6dfe3",
 };
 const fixturePluginId = "ensemble-t1-fixture";
 const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
@@ -41,6 +44,11 @@ const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
       repositoryRoot,
       "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
     );
+const failureTraceName = `${path.basename(runManifestPath)}.failure-trace.txt`;
+const persistedFailureTracePath = path.join(
+  path.dirname(runManifestPath),
+  failureTraceName,
+);
 
 function sanitize(text, root) {
   let sanitized = text
@@ -84,20 +92,42 @@ async function readVersion(packagePath, expectedVersion, label) {
   return manifest.version;
 }
 
-async function writeFailureEvidence(instance, error) {
-  const root = instance.root;
+function failureManifestBaseline() {
+  return {
+    node: process.versions.node,
+    bb: null,
+    bbExpected: expected.bb,
+    bbTarballIntegrity: expected.bbIntegrity,
+    pluginSdk: null,
+    pluginSdkExpected: expected.sdk,
+    pluginSdkIntegrity: expected.sdkIntegrity,
+    playwright: null,
+    playwrightExpected: expected.playwright,
+    providerBridgeRevision: expected.providerBridgeRevision,
+    providerBridgeUpstreamSha256: expected.providerBridgeUpstreamSha256,
+    providerBridgeInstrumentedSha256: expected.providerBridgeSha256,
+    platform: `${process.platform}-${process.arch}`,
+    checks: {},
+  };
+}
+
+async function writeFailureEvidence(instance, error, root, fallbackManifest) {
   const trace = sanitize(
-    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n\n${instance.output()}`,
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n\n${instance?.output() ?? ""}`,
     root,
   );
+  const sourceManifest = instance?.runtimeManifest ?? fallbackManifest;
+  assert(sourceManifest, "Failure evidence requires a runtime manifest");
+  const manifest = {
+    ...sourceManifest,
+    outcome: "failed",
+    checks: sourceManifest.checks ?? {},
+    trace: failureTraceName,
+  };
   await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "failure-trace.txt"), trace);
-  const manifest = {
-    ...instance.runtimeManifest,
-    outcome: "failed",
-    checks: instance.runtimeManifest.checks ?? {},
-    trace: "failure-trace.txt",
-  };
+  await mkdir(path.dirname(persistedFailureTracePath), { recursive: true });
+  await writeFile(persistedFailureTracePath, trace);
   await writeFile(
     path.join(root, "run-manifest.json"),
     `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
@@ -171,18 +201,26 @@ async function portIsClosed(port) {
 }
 
 async function readProcessTable() {
-  const { stdout } = await exec("ps", ["-axo", "pid=,ppid=,command="], {
-    timeout: 5_000,
-    maxBuffer: 8 * 1024 * 1024,
-  });
+  const { stdout } = await exec(
+    "ps",
+    ["-ww", "-axo", "pid=,ppid=,lstart=,command="],
+    {
+      env: { ...process.env, LC_ALL: "C" },
+      timeout: 5_000,
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  );
   const processes = new Map();
   for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/u);
+    const match = line.match(
+      /^\s*(\d+)\s+(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/u,
+    );
     if (match) {
-      const [, rawPid, rawParentPid, command] = match;
+      const [, rawPid, rawParentPid, rawStartTime, command] = match;
       processes.set(Number(rawPid), {
         pid: Number(rawPid),
         parentPid: Number(rawParentPid),
+        startTime: rawStartTime.replace(/\s+/gu, " ").trim(),
         command,
       });
     }
@@ -235,9 +273,14 @@ async function readProviderProcessIds(instance) {
         [...log.matchAll(/^spawn:(\d+)$/gmu)].map(([, pid]) => Number(pid)),
       ),
     ];
-  } catch {
-    return [];
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
   }
+}
+
+function processIdentity(processInfo) {
+  return `${processInfo.startTime}\0${processInfo.command}`;
 }
 
 export async function captureOwnedProcesses(instance) {
@@ -261,12 +304,12 @@ export async function captureOwnedProcesses(instance) {
       if (processInfo) {
         const role = processRole(processInfo, instance, root);
         const previous = instance.ownedProcesses.get(pid);
-        const commands = new Set(previous?.commands ?? []);
-        commands.add(processInfo.command);
+        const identities = new Set(previous?.identities ?? []);
+        identities.add(processIdentity(processInfo));
         instance.ownedProcesses.set(pid, {
           pid,
           role: role === "bb-child" ? (previous?.role ?? role) : role,
-          commands,
+          identities,
         });
       }
     }
@@ -275,12 +318,12 @@ export async function captureOwnedProcesses(instance) {
   for (const pid of providerPids) {
     const processInfo = processes.get(pid);
     const previous = instance.ownedProcesses.get(pid);
-    const commands = new Set(previous?.commands ?? []);
-    if (processInfo) commands.add(processInfo.command);
+    const identities = new Set(previous?.identities ?? []);
+    if (processInfo) identities.add(processIdentity(processInfo));
     instance.ownedProcesses.set(pid, {
       pid,
       role: "scripted-provider",
-      commands,
+      identities,
     });
   }
 
@@ -308,16 +351,18 @@ async function liveOwnedProcesses(instance) {
   return [...instance.ownedProcesses.values()].filter((owned) => {
     const current = processes.get(owned.pid);
     if (!current) return false;
-    if (owned.commands.size === 0) return owned.role === "scripted-provider";
-    return owned.commands.has(current.command);
+    if (owned.identities.size === 0) return owned.role === "scripted-provider";
+    return owned.identities.has(processIdentity(current));
   });
 }
 
 async function terminateLiveOwnedProcesses(instance, signal) {
   const live = await liveOwnedProcesses(instance);
   for (const owned of live.reverse()) {
-    if (owned.commands.size === 0) continue;
+    if (owned.identities.size === 0) continue;
     try {
+      const current = (await readProcessTable()).get(owned.pid);
+      if (!current || !owned.identities.has(processIdentity(current))) continue;
       process.kill(owned.pid, signal);
     } catch (error) {
       if (error.code !== "ESRCH") throw error;
@@ -340,7 +385,7 @@ export async function waitFor(callback, label, timeoutMs = 45_000) {
   throw new Error(`Timed out waiting for ${label}`, { cause: lastError });
 }
 
-export async function startBb(root) {
+export async function startBb(root, previousManifest) {
   assert.equal(process.versions.node, expected.node, "Use Node 24.21.0");
   const bbPackage = path.join(repositoryRoot, "node_modules/bb-app");
   const sdkPackage = path.join(
@@ -473,7 +518,11 @@ export async function startBb(root) {
     platform: `${process.platform}-${process.arch}`,
     serverPort,
     daemonPort,
-    checks: {},
+    checks: { ...(previousManifest?.checks ?? {}) },
+    ownedProcesses: [...(previousManifest?.ownedProcesses ?? [])],
+    ...(previousManifest
+      ? { restartCount: (previousManifest.restartCount ?? 0) + 1 }
+      : {}),
   };
 
   const launcher = path.join(bbPackage, "dist/bb-app.js");
@@ -541,11 +590,12 @@ export async function startBb(root) {
     assert(processes.some((owned) => owned.role === "bb-server"));
     assert(processes.some((owned) => owned.role === "bb-host-daemon"));
   } catch (error) {
-    await stopBb(instance).catch((cleanupError) => {
-      output += `\nCleanup failure: ${String(cleanupError)}`;
-    });
-    await writeFailureEvidence(instance, error);
-    throw error;
+    const startError =
+      error instanceof Error
+        ? error
+        : new Error(String(error), { cause: error });
+    startError.t1Instance = instance;
+    throw startError;
   }
   return instance;
 }
@@ -759,18 +809,7 @@ export async function restartBb(instance) {
   const root = instance.root;
   const previousManifest = instance.runtimeManifest;
   await stopBb(instance);
-  const replacement = await startBb(root);
-  replacement.runtimeManifest.checks = { ...previousManifest.checks };
-  replacement.runtimeManifest.ownedProcesses = [
-    ...new Map(
-      [
-        ...(previousManifest.ownedProcesses ?? []),
-        ...(replacement.runtimeManifest.ownedProcesses ?? []),
-      ].map((owned) => [owned.pid, owned]),
-    ).values(),
-  ].sort((left, right) => left.pid - right.pid);
-  replacement.runtimeManifest.restartCount =
-    (previousManifest.restartCount ?? 0) + 1;
+  const replacement = await startBb(root, previousManifest);
   Object.assign(instance, replacement);
   return instance;
 }
@@ -820,49 +859,28 @@ export async function withFixture(callback) {
     passed = true;
     return result;
   } catch (error) {
-    if (instance) {
-      let cleanupError;
-      await stopBb(instance).catch((failure) => {
+    const failedInstance = error?.t1Instance ?? instance;
+    let cleanupError;
+    if (failedInstance) {
+      await stopBb(failedInstance).catch((failure) => {
         cleanupError = failure;
       });
-      await writeFailureEvidence(
-        instance,
-        cleanupError
-          ? new Error(
-              `${String(error)}\nCleanup failure: ${String(cleanupError)}`,
-              {
-                cause: error,
-              },
-            )
-          : error,
-      );
-    } else {
-      const manifest = {
-        node: process.versions.node,
-        bb: expected.bb,
-        pluginSdk: expected.sdk,
-        playwright: expected.playwright,
-        platform: `${process.platform}-${process.arch}`,
-        outcome: "failed-before-start",
-        checks: {},
-        trace: "failure-trace.txt",
-      };
-      await mkdir(root, { recursive: true });
-      await writeFile(
-        path.join(root, "failure-trace.txt"),
-        sanitize(
-          error instanceof Error
-            ? (error.stack ?? error.message)
-            : String(error),
-          root,
-        ),
-      );
-      await writeFile(
-        path.join(root, "run-manifest.json"),
-        `${JSON.stringify(manifest, null, 2)}\n`,
-      );
-      await persistRunManifest(manifest, root);
     }
+    const failure = cleanupError
+      ? new Error(
+          `${String(error)}\nCleanup failure: ${String(cleanupError)}`,
+          {
+            cause: error,
+          },
+        )
+      : error;
+    await writeFailureEvidence(
+      failedInstance,
+      failure,
+      root,
+      failureManifestBaseline(),
+    );
+    process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
     throw error;
   } finally {
     if (passed && instance) assert(hasExited(instance.processHandle));
