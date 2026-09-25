@@ -7,6 +7,7 @@ how work proceeds; Ensemble owns durable coordination.
 
 **Project**:
 A container for tasks, optional linked repositories, agent profiles, instructions, and permissions.
+Its identity belongs to Ensemble and is independent of the application hosting it.
 _Avoid_: Board or GitHub Project when referring to the Ensemble container
 
 **Task**:
@@ -36,7 +37,7 @@ The agent responsible for coordinating a task's work and bringing it to an outco
 _Avoid_: Project lead when referring to responsibility for one task
 
 **Agent profile**:
-A reusable, operator-defined configuration of instructions, provider, model, and available tools, selected for project leads and task assignments.
+A reusable, operator-defined identity and instructions, selected for project leads and task assignments. Its execution settings are bound to the selected host.
 _Avoid_: Bot identity or assignment when referring to reusable configuration
 
 **Assignment**:
@@ -46,3 +47,11 @@ _Avoid_: Step when referring to delegated work
 **Agent conversation**:
 The interaction history used by an agent to carry out work. An assignment can continue across replacement conversations.
 _Avoid_: Assignment when referring only to its conversation history
+
+**Execution host**:
+The system providing agent execution, conversations, and workspaces for an Ensemble installation. An installation uses one execution host at a time.
+_Avoid_: Provider when referring to the system hosting Ensemble's agent work
+
+**Host binding**:
+The association between an Ensemble project, profile, assignment, or task and its host-specific identity or execution settings.
+_Avoid_: Project identity when referring only to a host's project reference

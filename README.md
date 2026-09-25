@@ -1,8 +1,11 @@
 # Ensemble
 
-Ensemble is being built as a BB plugin for agents working on project-scoped tasks.
+Ensemble is being built around a host-independent core for agents working on
+project-scoped tasks, with BB as its first host and UI integration.
 Agent instructions determine the process. Ensemble owns tasks, assignments, and
-durable coordination; BB supplies conversations, agent execution, and workspaces.
+durable coordination; a host adapter supplies conversations, agent execution,
+and workspaces. The current prototype still runs as a BB plugin; core extraction
+is planned, not implemented.
 Taskboard informs the UI design; Ensemble is an independent implementation.
 
 ## Product model
@@ -49,7 +52,7 @@ Jira and Linear remain deferred.
 
 ## Development
 
-Use Node **24.21.0** (`.node-version`) and npm **11.19.1**:
+Use Node **24.21.0** (`.node-version`) and npm **12.1.0** (`package.json`):
 
 ```sh
 npm ci
@@ -66,7 +69,8 @@ handling, and the live experiment still required.
 
 ## Design documents
 
-- [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): accepted architecture.
+- [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): agent coordination architecture.
+- [ADR-1003](docs/adr/1003-host-independent-core.md): accepted host-independent core and portability boundary.
 - [Behavioural specification](docs/SPEC.md): target behaviour and the [first local-task journey](docs/SPEC.md#first-local-task-journey).
 - [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
 - [Acceptance plan](docs/acceptance.md): automated journeys and release gates.

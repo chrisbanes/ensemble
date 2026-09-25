@@ -20,8 +20,10 @@ loop or additional model evaluation campaign is required.
 
 ## Environments
 
-1. Fast tests: domain services with the actual migration schema in SQLite files;
-   no model calls. Close/reopen files for persistence boundaries.
+1. Standalone core tests: core services with the actual migration schema in
+   SQLite files and an explicit fake execution host; no BB SDK/runtime or model
+   calls. Close/reopen files for persistence boundaries. Check the dependency
+   graph as well as behavior so BB cannot leak into the core through imports.
 2. BB integration: pinned BB binary and SDK, actual plugin loader/SQLite driver,
    dedicated data directory and ports, temporary Git repositories, controlled
    clock where supported, and a scripted provider speaking BB's public bridge API.
@@ -41,6 +43,30 @@ release evidence. CI must fail on timeout, leaked owned processes, unacknowledge
 required events, or duplicate operation effects.
 
 ## Acceptance matrix
+
+### Portability extraction gate
+
+These checks cover the bounded prototype extraction, not completion of A01–A30.
+Run them before adding product features to the extracted core.
+
+| ID | Required observable result | Verification |
+| --- | --- | --- |
+| P01 | Core loads and runs without BB; direct and transitive BB/adapter imports are rejected | Standalone compiled-module journey plus dependency-boundary negative fixtures |
+| P02 | Ensemble project and assignment identity is independent of host project/conversation references | Distinct-ID fixture; persist/reopen SQLite; verify host bindings and reject conflicting binding reuse |
+| P03 | All entry points enforce the same prototype caller authority through core commands | Call core commands directly and through BB tool handlers; reject foreign/unbound callers and spoofed IDs |
+| P04 | Current creation, delegation, results and uncertain-launch behavior survives extraction | Existing real-SQLite tests plus standalone create/delegate/report/reopen journey; no duplicate launch after lost response |
+| P05 | Actual production BB adapter still registers and executes the prototype flow | Isolated BB loader and scripted-provider round trip against the production entry, without using the installed Haze prototype |
+
+BB-specific tests remain mandatory alongside core tests. Unsupported pause,
+startup or writer-termination guarantees cannot be made green by renaming an
+interface or disabling a required release feature. The current harness pins must
+be reconciled with package.json/package-lock.json before P05 evidence is claimed;
+previous SDK evidence does not validate a changed dependency. Profile binding
+revisions, capability-gated future operations and full product journeys remain
+with their feature tickets. Moving unfinished work between hosts is not a P01–P05
+acceptance criterion.
+
+### Operational product gate
 
 | ID | Given / when | Required observable result | Layer |
 | --- | --- | --- | --- |
