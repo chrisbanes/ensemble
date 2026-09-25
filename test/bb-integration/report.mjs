@@ -232,8 +232,16 @@ function rowMetadata(slice, ensembleHead, sourceDigest, hostSdkEvidence) {
       integrationSourceDigest: sourceDigest ?? null,
       providerBridge: manifest.providerBridgeRevision ?? null,
       installedBbSource: null,
-      installedBbIntegrity: manifest.bbTarballIntegrity ?? null,
-      pluginSdkIntegrity: manifest.pluginSdkIntegrity ?? null,
+    },
+    packageArtifacts: {
+      lockfileTarballIntegrity: {
+        bbApp: manifest.bbLockfileTarballIntegrity ?? null,
+        pluginSdk: manifest.pluginSdkLockfileTarballIntegrity ?? null,
+      },
+      installedTreeSha256: {
+        bbApp: manifest.bbInstalledTreeSha256 ?? null,
+        pluginSdk: manifest.pluginSdkInstalledTreeSha256 ?? null,
+      },
     },
   };
 }
@@ -908,7 +916,7 @@ export function buildIntegrationReport({
     slices.T4?.testOutcome === "expected-diagnostic";
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceRevision: ensembleHead ?? null,
     integrationSourceDigest: sourceDigest ?? null,
     outcome: suitePassed ? "completed-with-capability-gaps" : "failed-harness",
@@ -1038,7 +1046,7 @@ export function assertExpectedT4Failure({
 export function assertIntegrationReport(report) {
   assert.equal(
     report?.schemaVersion,
-    1,
+    2,
     "Unsupported integration report schema",
   );
   requireString(report.sourceRevision, "report.sourceRevision");
@@ -1084,13 +1092,25 @@ export function assertIntegrationReport(report) {
       `${entry.id}.sourceRevisions.providerBridge`,
     );
     requireString(
-      entry.sourceRevisions?.installedBbIntegrity,
-      `${entry.id}.sourceRevisions.installedBbIntegrity`,
+      entry.packageArtifacts?.lockfileTarballIntegrity?.bbApp,
+      `${entry.id}.packageArtifacts.lockfileTarballIntegrity.bbApp`,
     );
     requireString(
-      entry.sourceRevisions?.pluginSdkIntegrity,
-      `${entry.id}.sourceRevisions.pluginSdkIntegrity`,
+      entry.packageArtifacts?.lockfileTarballIntegrity?.pluginSdk,
+      `${entry.id}.packageArtifacts.lockfileTarballIntegrity.pluginSdk`,
     );
+    for (const name of ["bbApp", "pluginSdk"]) {
+      const digest = entry.packageArtifacts?.installedTreeSha256?.[name];
+      requireString(
+        digest,
+        `${entry.id}.packageArtifacts.installedTreeSha256.${name}`,
+      );
+      assert.match(
+        digest,
+        /^[a-f0-9]{64}$/u,
+        `${entry.id}.packageArtifacts.installedTreeSha256.${name} must be SHA-256 hex`,
+      );
+    }
     assert.equal(
       Object.hasOwn(entry.sourceRevisions ?? {}, "installedBbSource"),
       true,

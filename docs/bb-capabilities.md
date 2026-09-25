@@ -265,3 +265,11 @@ effects, verdict, and evidence limit. Required public API evidence and event nam
 are validated before the report is accepted. The report ends in
 `completed-with-capability-gaps` when the harness ran successfully while #665
 remains failed/open; this does not unblock T06 or T08.
+
+For `bb-app` and `@get-bb/plugin-sdk`, the report distinguishes lockfile tarball
+integrity from SHA-256 hashes of the installed package trees. The committed
+tree pins were measured after clean `npm ci` with Node 24.21.0/npm 11.19.1 on
+darwin-arm64; CI recomputes those package-scoped hashes on Ubuntu and fails if
+either installed tree differs. The tree hash sorts relative paths and includes
+entry type, path bytes, and file bytes; symlinks and unsupported entry types are
+rejected.

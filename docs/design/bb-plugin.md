@@ -468,8 +468,9 @@ SDK 0.5.24, Node 24.21.0, the actual plugin loader and SQLite driver, public RPC
 temporary Git environments, scripted provider turns and automated Chromium. It
 records tool-result round trips and persisted state across restart. This is
 capability evidence for a disposable fixture, not an implemented Ensemble product
-flow or authenticated-provider smoke. The suite pins package integrity and records
-the tested source revision and digest; it imports no BB private API.
+flow or authenticated-provider smoke. The suite checks lockfile tarball integrity
+separately from SHA-256 hashes of the installed BB and SDK package trees, and
+records the tested source revision and digest; it imports no BB private API.
 
 The T4 diagnostic deliberately fails because BB dispatched an accepted queue row
 after both hook owners failed initialization. The aggregate T1–T5 command accepts

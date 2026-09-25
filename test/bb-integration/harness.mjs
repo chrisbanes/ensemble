@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
+import { hashPackageTree } from "./package-tree.mjs";
 
 const exec = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -37,6 +38,27 @@ const expected = {
   providerBridgeUpstreamSha256:
     "4af6205519d056007f179cec8e93b112e74a19fb9574c7ab489533e276c6dfe3",
 };
+const packageTreePins = JSON.parse(
+  await readFile(
+    new URL("./package-tree-digests.json", import.meta.url),
+    "utf8",
+  ),
+);
+assert.equal(packageTreePins.schemaVersion, 1);
+assert.equal(packageTreePins.hashAlgorithm, "sha256");
+assert.equal(packageTreePins.measuredWith.node, expected.node);
+assert.equal(packageTreePins.measuredWith.npm, "11.19.1");
+assert.equal(packageTreePins.packages["bb-app"].version, expected.bb);
+assert.equal(
+  packageTreePins.packages["@get-bb/plugin-sdk"].version,
+  expected.sdk,
+);
+assert.match(packageTreePins.packages["bb-app"].treeSha256, /^[a-f0-9]{64}$/u);
+assert.match(
+  packageTreePins.packages["@get-bb/plugin-sdk"].treeSha256,
+  /^[a-f0-9]{64}$/u,
+);
+let observedPackageTreeDigests = { bbApp: null, pluginSdk: null };
 const fixturePluginId = "ensemble-t1-fixture";
 const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
   ? path.resolve(process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH)
@@ -97,10 +119,16 @@ function failureManifestBaseline() {
     node: process.versions.node,
     bb: null,
     bbExpected: expected.bb,
-    bbTarballIntegrity: expected.bbIntegrity,
+    bbLockfileTarballIntegrity: expected.bbIntegrity,
+    bbInstalledTreeSha256: observedPackageTreeDigests.bbApp,
+    bbInstalledTreeSha256Expected:
+      packageTreePins.packages["bb-app"].treeSha256,
     pluginSdk: null,
     pluginSdkExpected: expected.sdk,
-    pluginSdkIntegrity: expected.sdkIntegrity,
+    pluginSdkLockfileTarballIntegrity: expected.sdkIntegrity,
+    pluginSdkInstalledTreeSha256: observedPackageTreeDigests.pluginSdk,
+    pluginSdkInstalledTreeSha256Expected:
+      packageTreePins.packages["@get-bb/plugin-sdk"].treeSha256,
     playwright: null,
     playwrightExpected: expected.playwright,
     providerBridgeRevision: expected.providerBridgeRevision,
@@ -396,6 +424,27 @@ export async function startBb(root, previousManifest) {
     repositoryRoot,
     "node_modules/@get-bb/plugin-sdk",
   );
+  const actualPackageTreeDigests = {
+    bbApp: await hashPackageTree(bbPackage),
+    pluginSdk: await hashPackageTree(sdkPackage),
+  };
+  observedPackageTreeDigests = actualPackageTreeDigests;
+  if (previousManifest) {
+    Object.assign(previousManifest, {
+      bbInstalledTreeSha256: actualPackageTreeDigests.bbApp,
+      pluginSdkInstalledTreeSha256: actualPackageTreeDigests.pluginSdk,
+    });
+  }
+  assert.equal(
+    actualPackageTreeDigests.bbApp,
+    packageTreePins.packages["bb-app"].treeSha256,
+    "Installed BB package tree differs from the clean npm ci pin",
+  );
+  assert.equal(
+    actualPackageTreeDigests.pluginSdk,
+    packageTreePins.packages["@get-bb/plugin-sdk"].treeSha256,
+    "Installed plugin SDK package tree differs from the clean npm ci pin",
+  );
   await readVersion(path.join(bbPackage, "package.json"), expected.bb, "BB");
   await readVersion(
     path.join(sdkPackage, "package.json"),
@@ -517,10 +566,13 @@ export async function startBb(root, previousManifest) {
   const runtimeManifest = {
     node: process.versions.node,
     bb: expected.bb,
-    bbTarballIntegrity: lockfile.packages["node_modules/bb-app"].integrity,
+    bbLockfileTarballIntegrity:
+      lockfile.packages["node_modules/bb-app"].integrity,
+    bbInstalledTreeSha256: actualPackageTreeDigests.bbApp,
     pluginSdk: expected.sdk,
-    pluginSdkIntegrity:
+    pluginSdkLockfileTarballIntegrity:
       lockfile.packages["node_modules/@get-bb/plugin-sdk"].integrity,
+    pluginSdkInstalledTreeSha256: actualPackageTreeDigests.pluginSdk,
     playwright: expected.playwright,
     providerBridgeRevision: providerProvenance.revision,
     providerBridgeUpstreamSha256: providerProvenance.upstreamSourceSha256,

@@ -153,6 +153,10 @@ The credential-free T1–T5 live harness runs as `npm run test:bb-integration` a
 machine-readable report with one row per required public API, seven proof gates,
 and six T5 scenario records, including the tested revision, source digest,
 artifact/SDK/Node identities, observed IDs/effects, verdicts and evidence limits.
+For `bb-app` and `@get-bb/plugin-sdk`, it records lockfile tarball integrity
+separately from SHA-256 digests of the installed package trees. CI recomputes the
+tree digests from the package directories and compares them to the committed
+pins measured after clean `npm ci` with Node 24.21.0 and npm 11.19.1.
 The raw T4 test intentionally exits nonzero for the known #665 startup violation;
 the aggregate accepts only its exact queue/provider/tool evidence and verified
 cleanup, records the gate as failed capability, and keeps dependent T06/T08

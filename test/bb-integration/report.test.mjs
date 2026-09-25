@@ -85,8 +85,16 @@ function row(type, id, overrides = {}) {
       integrationSourceDigest: "digest-abc123",
       providerBridge: "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
       installedBbSource: null,
-      installedBbIntegrity: "sha512-bb-integrity",
-      pluginSdkIntegrity: "sha512-sdk-integrity",
+    },
+    packageArtifacts: {
+      lockfileTarballIntegrity: {
+        bbApp: "sha512-bb-integrity",
+        pluginSdk: "sha512-sdk-integrity",
+      },
+      installedTreeSha256: {
+        bbApp: "a".repeat(64),
+        pluginSdk: "b".repeat(64),
+      },
     },
     observed: sampleObserved(type, id),
     verdict: "passed",
@@ -110,7 +118,7 @@ function validReport() {
     });
   });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceRevision: "abc123",
     integrationSourceDigest: "digest-abc123",
     outcome: "completed-with-capability-gaps",
@@ -226,6 +234,32 @@ test("integration report rejects incomplete runtime and source identity", () => 
   assert.throws(
     () => assertIntegrationReport(report),
     /integrationSourceDigest/u,
+  );
+});
+
+test("integration report requires installed package trees separately from lockfile integrity", () => {
+  const report = validReport();
+  const row = report.rows[0];
+  assert.equal(
+    row.packageArtifacts.lockfileTarballIntegrity.bbApp,
+    "sha512-bb-integrity",
+  );
+  assert.equal(row.packageArtifacts.installedTreeSha256.bbApp, "a".repeat(64));
+
+  row.packageArtifacts.installedTreeSha256.bbApp = null;
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /installedTreeSha256.bbApp/u,
+  );
+
+  row.packageArtifacts.installedTreeSha256.bbApp = "not-a-digest";
+  assert.throws(() => assertIntegrationReport(report), /SHA-256 hex/u);
+
+  row.packageArtifacts.installedTreeSha256.bbApp = "a".repeat(64);
+  row.packageArtifacts.installedTreeSha256.pluginSdk = null;
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /installedTreeSha256.pluginSdk/u,
   );
 });
 

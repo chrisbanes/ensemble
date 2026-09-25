@@ -31,6 +31,12 @@ const sourceBridgeProvenance = JSON.parse(
     "utf8",
   ),
 );
+const packageTreePins = JSON.parse(
+  await readFile(
+    path.join(repositoryRoot, "test/bb-integration/package-tree-digests.json"),
+    "utf8",
+  ),
+);
 const lockfile = JSON.parse(
   await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"),
 );
@@ -230,14 +236,24 @@ function assertPinnedManifest(id, manifest) {
     `${id} Playwright version changed`,
   );
   assert.equal(
-    manifest.bbTarballIntegrity,
+    manifest.bbLockfileTarballIntegrity,
     lockfile.packages["node_modules/bb-app"].integrity,
     `${id} BB artifact integrity changed`,
   );
   assert.equal(
-    manifest.pluginSdkIntegrity,
+    manifest.pluginSdkLockfileTarballIntegrity,
     lockfile.packages["node_modules/@get-bb/plugin-sdk"].integrity,
     `${id} plugin SDK integrity changed`,
+  );
+  assert.equal(
+    manifest.bbInstalledTreeSha256,
+    packageTreePins.packages["bb-app"].treeSha256,
+    `${id} installed BB package tree changed`,
+  );
+  assert.equal(
+    manifest.pluginSdkInstalledTreeSha256,
+    packageTreePins.packages["@get-bb/plugin-sdk"].treeSha256,
+    `${id} installed plugin SDK package tree changed`,
   );
   assert.equal(
     manifest.providerBridgeRevision,
@@ -491,6 +507,8 @@ async function main() {
   const npmVersion =
     process.env.npm_config_user_agent?.match(/npm\/(\d+\.\d+\.\d+)/u)?.[1];
   assert.equal(npmVersion, "11.19.1", "Run through pinned npm@11.19.1");
+  assert.equal(packageTreePins.measuredWith.node, nodePin);
+  assert.equal(packageTreePins.measuredWith.npm, npmVersion);
   await rm(suiteRunDirectory, { recursive: true, force: true });
   await mkdir(t5ReportDirectory, { recursive: true });
   const sourceDigest = await integrationSourceDigest();
