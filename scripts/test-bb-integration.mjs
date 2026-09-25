@@ -599,7 +599,7 @@ async function main() {
         }
       }
       process.stderr.write(
-        `BB_INTEGRATION_FAIL ${scenario.id} ${String(error)}\n`,
+        `BB_INTEGRATION_FAIL ${scenario.id} ${String(error)}${result?.output ? `\n${result.output.slice(-8_000)}` : ""}\n`,
       );
       if (result?.timedOut) break;
     }
