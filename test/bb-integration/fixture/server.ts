@@ -1,7 +1,9 @@
 import type { BbPluginApi, StandardSchemaV1 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { registerExecutionServer } from "./execution-server.js";
 
 const providerId = "ensemble-scripted";
+const retryFailureThreadIds = new Set<string>();
 
 function rpcSchema<Schema extends z.ZodType>(
   schema: Schema,
@@ -67,8 +69,21 @@ function registerScriptedProvider(bb: BbPluginApi): void {
         },
       ],
     },
-    deriveProviderOptions: () => ({
-      scripted: { uniqueProviderThreadIds: true },
+    deriveProviderOptions: ({ threadId }) => ({
+      scripted: {
+        uniqueProviderThreadIds: true,
+        ...(retryFailureThreadIds.has(threadId)
+          ? {
+              failMethods: [
+                {
+                  method: "turn/start",
+                  message: "T2 scripted first-attempt failure",
+                  times: 1,
+                },
+              ],
+            }
+          : {}),
+      },
     }),
   });
 }
@@ -196,5 +211,9 @@ export default function t1Fixture(bb: BbPluginApi): void {
       thread: ({ threadId }) => bb.sdk.threads.get({ threadId }),
     },
   );
+  registerExecutionServer(bb, database, (threadId, armed = true) => {
+    if (armed) retryFailureThreadIds.add(threadId);
+    else retryFailureThreadIds.delete(threadId);
+  });
   registerScriptedProvider(bb);
 }

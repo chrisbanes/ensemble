@@ -168,6 +168,7 @@ async function stageFixture(root) {
   for (const name of [
     "UPSTREAM-LICENSE",
     "app.tsx",
+    "execution-server.ts",
     "host.ts",
     "package.json",
     "provider-bridge.provenance.json",
