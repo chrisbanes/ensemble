@@ -148,6 +148,18 @@ scenario IDs, failures/waivers, sanitized traces, and live-provider outcome. No
 check is marked passed because it has a test name or because an agent said done.
 Avoid blanket coverage percentages as a substitute for scenario evidence.
 
+The credential-free T1–T5 live harness runs as `npm run test:bb-integration` after
+`npm ci` and the pinned Playwright Chromium install. It writes a deterministic
+machine-readable report with one row per required public API, seven proof gates,
+and six T5 scenario records, including the tested revision, source digest,
+artifact/SDK/Node identities, observed IDs/effects, verdicts and evidence limits.
+The raw T4 test intentionally exits nonzero for the known #665 startup violation;
+the aggregate accepts only its exact queue/provider/tool evidence and verified
+cleanup, records the gate as failed capability, and keeps dependent T06/T08
+blocked. Unrelated test failures, missing evidence/events, timeouts or leaks fail
+the aggregate. This report does not stand in for the authenticated-provider smoke
+required for the later operational release gate.
+
 ## Gates
 
 - Design gate: consequential decisions and BB gaps resolved before dependent code.

@@ -289,17 +289,15 @@ test("public execution settings, lifecycle, interactions, retry, and environment
       return thread.status === "idle" ? thread : false;
     }, "question answered and provider resumed");
     assert.equal(resumed.status, "idle");
-    assert.match(
-      (await execution(instance, "output", { threadId: questionThread.id }))
-        .output ?? "",
-      /Question answered: staging/u,
-    );
+    const answeredOutput = await execution(instance, "output", {
+      threadId: questionThread.id,
+    });
+    assert.match(answeredOutput.output ?? "", /Question answered: staging/u);
+    const unresolvedInteractions = await execution(instance, "interactions", {
+      threadId: questionThread.id,
+    });
     assert.equal(
-      (
-        await execution(instance, "interactions", {
-          threadId: questionThread.id,
-        })
-      ).length,
+      unresolvedInteractions.length,
       0,
       "resolved question must no longer be pending",
     );
@@ -597,6 +595,15 @@ test("public execution settings, lifecycle, interactions, retry, and environment
     assert(interactions.some((event) => event.name === "interaction.pending"));
     instance.runtimeManifest.checks.executionLifecycle = allEvents;
     instance.runtimeManifest.checks.executionInteraction = interactions;
+    instance.runtimeManifest.checks.executionInteractionAnswer = {
+      threadId: questionThread.id,
+      interactionId: pending.id,
+      answerKind: answered.resolution.kind,
+      resumedStatus: resumed.status,
+      output: answeredOutput.output,
+      unresolvedInteractionCount: unresolvedInteractions.length,
+      pendingEventId: pendingEvent?.data.interaction.id,
+    };
     instance.runtimeManifest.checks.sharedEnvironmentAfterRestart = {
       environmentId: configuredThread.environmentId,
       environmentAfterRestart,

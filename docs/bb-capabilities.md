@@ -35,6 +35,15 @@ reported that BB cleared the wait because the holding plugin would not run. That
 diagnostic proves a completed tool effect in its own setup; it is not the full
 T01 harness.
 
+The integrated T4 follow-up records the stronger consequence for the accepted
+queue scenario: when both hook owners fail initialization, BB removes the wait,
+empties its public queue, and delivers the prompt to the scripted provider. The
+provider made one turn and the fixture tool counter advanced **3 → 4**. The raw
+T4 test deliberately exits nonzero on this observed safety violation. T6's
+runner recognizes only that exact marker after checking queue identity,
+provider/tool counts, failed plugin statuses, dependency fields and process
+cleanup; it records a **failed capability**, never a successful safety gate.
+
 **Consequence:** a plugin dispatch hook that stores an accepted send as a BB
 queue wait cannot implement the accepted startup-failure guarantee on this
 runtime. Do not mark T01, T06 or T08 ready based on the healthy-restart check.
@@ -156,10 +165,12 @@ launcher log; by default the harness removes its own data and fixtures. It never
 targets the default BB server or Haze. BB may run its normal provider catalog
 probes; the harness does not request an authenticated model turn.
 
-Exit code **2** means the required startup/queued-dispatch guarantee failed; it is
-not a successful gate. Exit code **1** means fixture/setup/assertion failure.
-Exit code **0** requires every mandatory gate in this harness to pass. The
-`check:bb` npm script is available for repeatable invocation with the two paths.
+The earlier T01-only command exits **2** when the required startup/queued-
+dispatch guarantee fails. The integrated T1–T5 command below preserves the known
+T4 violation as a failed capability while it runs all other scenarios. Only that
+exact T4 diagnostic is expected; fixture/setup/assertion failures, timeouts,
+leaks, missing reports/events and unexpected effects make the aggregate command
+fail.
 
 The earlier, narrow diagnostic remains available with the same variables:
 
@@ -184,7 +195,7 @@ Run `2026-09-24` on the runtime pair above, command exit **2**:
 | Human interaction | **Passed** | Provider raised a public native user question; the fixture resolved it through public interaction APIs and the thread returned idle. |
 | Dispatch hook and core queue composition | **Passed, bounded** | A later Ensemble `reject` overrode an earlier plugin `wait` without persisting a new row. A paused/stopped gate rejected `queue-if-active` before core busy-queueing. A fixture-controlled release barrier held the source turn active until a `thread-busy` row was accepted and the gate paused. That row then stayed queued with a failure reason and dispatched once after recheck on resume. |
 | Public queue creation as a hold | **Not supported** | `threads.queuedMessages.create` on an idle conversation created a `thread-busy` row and immediately scheduled its dispatch. It does not provide a durable operator-controlled hold. |
-| Lost send response | **Partial** | The harness dropped a successful `threads.send` response for both an immediately sent message and a BB-accepted, plugin-waited queue row. After restart, a unique marker found exactly one public timeline row or queue row; queue recovery preserved its public queue id. The harness did not resend and observed exactly one tool effect after release. Zero or multiple matches stay `uncertain`; the SDK exposes no caller-supplied operation id or in-flight lookup, so this is safe bounded recovery, not general idempotency or stale-generation invalidation. |
+| Lost send response | **Partial** | The harness dropped a successful `threads.send` response for both an immediately sent message and a BB-accepted, plugin-waited queue row. After restart, a unique marker found exactly one public timeline row or queue row; queue recovery preserved its public queue id. The harness did not resend and observed exactly one tool effect after release. Zero or multiple matches stay `uncertain`; the SDK exposes no caller-supplied operation id or in-flight lookup, so this is safe bounded recovery, not general idempotency or an atomic generation fence. T3 separately deleted one stale-generation row before provider effect. |
 | Startup with BB-accepted queued work | **Failed capability; harness passed** | When the external wait owner failed but the Ensemble gate loaded paused, its `reject` kept the orphaned accepted row queued with a failure reason and no tool effect; resume dispatched once. When both Ensemble and the wait owner failed, BB cleared the plugin wait, emptied its public queue, and delivered the accepted prompt to the separately loaded provider. Public thread status read `idle`; the provider observed `turn/start`, but this run did not establish a completed turn/tool effect. A guard-unavailable dispatch attempt still crosses the policy boundary. |
 
 The JSON emitted by the command is the run's capability matrix. Pass `--keep`
@@ -213,12 +224,12 @@ temporary evidence. They are not required to run the T01 harness.
 | Gate | Current disposition |
 | --- | --- |
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
-| Message acceptance and replay | **Partial**: lost responses for sent and queued rows recovered by a unique public marker after restart; queue recovery retained BB's queued-message id, and neither path blindly resent. Zero or multiple matches remain uncertain; no caller operation id, general idempotency or stale-generation invalidation was proved. |
-| Composed writer admission | **Open**: no proof yet that writer reservations compose with another plugin's wait without stranding ownership |
-| Stop and writer release | **Partial**: scripted stop/resume observed; arbitrary surviving writers and delayed starts unproven |
-| Initial workspace identity | **Partial**: reuse observed; uncertain provisioning and competing launches unproven |
-| Retry ownership | **Partial**: retry API observed; global two-retry allowance across mechanisms unproven |
-| Revision application | **Partial**: instruction contribution requires session reconstruction in this fixture; product apply flow unproven |
+| Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
+| Composed writer admission | **Open**: T5 observed another-plugin wait, public rejection, and later release; it has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
+| Stop and writer release | **Open**: T5 confirmed active and delayed-start stop observations; it does not establish Ensemble writer release or termination of arbitrary workspace processes. |
+| Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled to one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. |
+| Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
+| Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
 
 The harness/capability ticket can report this failed gate once the full command,
 matrix and dependency tracking are reviewed; the failure is not a harness setup
@@ -228,3 +239,29 @@ capability proves the accepted-queue guarantee. Do not label the startup gate
 passed from these narrower observations. No product implementation, installed
 Haze plugin reload, shared-instance configuration change, or remote mutation was
 performed.
+
+## Integrated T1–T5 command and report
+
+After installing the pinned toolchain and dependencies, run the same isolated
+suite used by CI:
+
+```sh
+npm install --global npm@11.19.1
+npm ci
+npx playwright install chromium
+npm run test:bb-integration
+```
+
+The command runs the T1 runtime, T2 execution, T3 lost-response, T4 dispatch and
+T5 recovery scenarios serially against disposable BB instances. It also runs
+report-contract tests. Its deterministic report binds each row to the tested Git
+revision and a SHA-256 digest of the integration source files, and is written to
+`node_modules/.cache/ensemble-bb-integration/suite-report.json`; six T5 scenario
+records are also retained under
+`node_modules/.cache/ensemble-bb-integration/suite-run/t5-gates/`. Every API,
+proof-gate and T5 scenario row carries tested BB/host-SDK/package-SDK/Node
+versions, source revisions or artifact identities, scenario, observed IDs and
+effects, verdict, and evidence limit. Required public API evidence and event names
+are validated before the report is accepted. The report ends in
+`completed-with-capability-gaps` when the harness ran successfully while #665
+remains failed/open; this does not unblock T06 or T08.
