@@ -168,9 +168,11 @@ async function stageFixture(root) {
   for (const name of [
     "UPSTREAM-LICENSE",
     "app.tsx",
+    "dispatch-server.ts",
     "execution-server.ts",
     "host.ts",
     "loss-server.ts",
+    "other-wait-server.ts",
     "package.json",
     "provider-bridge.provenance.json",
     "provider-bridge.ts",
@@ -466,6 +468,7 @@ export async function startBb(root, previousManifest) {
     if (
       name.startsWith("BB_") ||
       name.startsWith("SCRIPTED_ECHO_") ||
+      name.startsWith("T4_") ||
       name === "ENSEMBLE_T1_RUN_MANIFEST_PATH" ||
       /(?:API_KEY|(?:ACCESS|REFRESH)_TOKEN|PASSWORD|SECRET|CREDENTIAL)/iu.test(
         name,
@@ -495,6 +498,11 @@ export async function startBb(root, previousManifest) {
     BB_TELEMETRY: "false",
     SCRIPTED_ECHO_RECORD_PATH: path.join(root, "provider-record.jsonl"),
     SCRIPTED_ECHO_PROCESS_LOG_PATH: path.join(root, "provider-processes.log"),
+    T4_INTENTS_DB_PATH: path.join(root, "t4-dispatch-intents.sqlite"),
+    T4_BARRIER_PATH: path.join(root, "t4-send-release"),
+    T4_FAIL_GATE_PATH: path.join(root, "t4-fail-gate-startup"),
+    T4_FAIL_WAITER_PATH: path.join(root, "t4-fail-waiter-startup"),
+    T4_WAITER_ENABLED_PATH: path.join(root, "t4-waiter-enabled"),
   });
   const scriptedEnvironmentNames = Object.keys(env).filter((name) =>
     name.startsWith("SCRIPTED_ECHO_"),
@@ -820,7 +828,7 @@ export async function bbCli(instance, ...args) {
   return instance.bbCli(...args);
 }
 
-export async function rpc(instance, method, input = {}) {
+export async function pluginRpc(instance, pluginId, method, input = {}) {
   const inputPath = path.join(instance.root, `${method}-${randomUUID()}.json`);
   await writeFile(inputPath, JSON.stringify(input));
   const response = await bbCli(
@@ -828,12 +836,16 @@ export async function rpc(instance, method, input = {}) {
     "plugin",
     "rpc",
     "call",
-    fixturePluginId,
+    pluginId,
     method,
     "--input-file",
     inputPath,
   );
   return response.result ?? response;
+}
+
+export async function rpc(instance, method, input = {}) {
+  return pluginRpc(instance, fixturePluginId, method, input);
 }
 
 export async function withFixture(callback) {

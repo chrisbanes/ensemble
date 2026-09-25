@@ -90,6 +90,7 @@ export function registerExecutionServer(
               "queue-list",
               "queue-send",
               "queue-delete",
+              "stop",
               "interactions",
               "answer",
               "retry",
@@ -163,6 +164,10 @@ export function registerExecutionServer(
                 typeof bb.sdk.threads.queuedMessages.delete
               >[0],
             );
+          case "stop":
+            return bb.sdk.threads.stop({
+              threadId: String(input.threadId),
+            });
           case "interactions":
             return bb.sdk.threads.interactions.list({
               threadId: String(input.threadId),
