@@ -131,8 +131,9 @@ human requests from the design. Expose one validated command service to tools/RP
 Use expected versions for competing edits and durable command receipts for
 operation retries, including payload conflicts and pending-response replay. Keep
 provider statuses separate from task and execution state. Persist local task
-dependency edges separately from readiness and assignment waits, with versioned
-edits and cycle rejection.
+dependency edges separately from readiness and assignment waits. Use
+operator-only, versioned commands with idempotent receipts, control revisions
+and cycle rejection.
 
 Done when transaction rollback, file reopen, conflicting retry, concurrent owner
 claims, stale generation results and migration replay are tested using real
@@ -166,7 +167,8 @@ detail with assignments, results, source provenance and BB conversation links.
 Start with a list view; Kanban is optional after acceptance, not a release blocker.
 Display work status independently from execution and external state. Show
 blockers and their provenance; let operators add or remove local task edges
-within the project. Provide clear empty, loading, unavailable, conflict and
+within the project through distinct controls; scoped agent task edits cannot
+change edges. Provide clear empty, loading, unavailable, conflict and
 error states.
 
 Done when browser tests create/edit/reopen a task and inspect persisted records
@@ -216,8 +218,9 @@ overrides honestly. Failed work does not retry indefinitely.
 
 Done when two-project scripted tests show independent progress, bounded execution,
 no competing owner, blocked Ready tasks held until confirmed clearance, and
-retained wakeups across pause/restart. Changing reviewer
-count or order requires instructions only. No hard-coded planning/review stages.
+retained wakeups across pause/restart. Exercise a local blocker added while work
+is active or BB-queued. Changing reviewer count or order requires instructions
+only. No hard-coded planning/review stages.
 
 ## T09 — Add durable human questions and execution controls
 
@@ -239,7 +242,8 @@ confirms actual termination. Include unavailable-machine and canceled-request UI
 Automate the full UI-to-lead-to-owner-to-worker-to-result journey, including a
 review/revision chosen by instructions, human question, restart and duplicate
 command delivery. Exercise a local Ready task held by another local task until
-confirmed completion. Run one bounded real-provider smoke in a disposable repository;
+confirmed completion, plus a local edge added during active or queued work.
+Run one bounded real-provider smoke in a disposable repository;
 the implementation agent executes and inspects it. Produce a reviewable demo and
 scenario evidence report. Fix integration failures within this milestone.
 
@@ -265,7 +269,8 @@ issues.
 Done when deterministic provider fixtures prove pagination, partial errors,
 missing/duplicate observations, overlap and withdrawals, and a designated test
 repository/Project proves the same mapping live. UI shows synchronization state
-and conflicts. Exercise native blocker closure, removal, reopening and mid-work
+and conflicts. Exercise a failed or partial first dependency read for a newly
+discovered Ready issue, native blocker closure, removal, reopening and mid-work
 addition, plus an unreadable imported blocker of a local task, in the scripted
 adapter and designated live fixture. No live Haze queue is imported until
 explicit rollout.

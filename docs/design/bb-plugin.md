@@ -189,6 +189,7 @@ must be proved in T01/T02; the plugin does not claim to secure the BB host API.
 | Command | Caller | Effect and retry behaviour |
 | --- | --- | --- |
 | Create/edit task | Operator; scoped agent capability | Stable operation ID; retries return original result; edits require expected version |
+| Add/remove local task dependency | Operator only | Expected dependent-task version; validate scope and cycles; atomically change edge and control revision with a command receipt; matching retries replay, conflicts reject |
 | Claim task | Project lead | Atomic owner assignment; conflicting claim returns conflict; claiming alone does not reserve a writer |
 | Delegate | Current owner/authorized parent assignment | Child assignment plus launch intent; same operation ID and payload returns same assignment |
 | Report result | Bound current assignment conversation and work revision | Immutable result plus recipient delivery in one transaction; conflicting retry is rejected |
@@ -385,10 +386,15 @@ on partial failures; bounded recent-item caches are not complete discovery.
 
 Task dependencies are distinct from assignment waits and source selection.
 Ensemble owns edges from local dependent tasks to local or imported tasks in the
-same project. Create/remove them under task version checks, reject self-edges and
-cycles, and retain the relationship and outcome across restart. A local blocker
-clears only when its task is Done; cancellation leaves the dependent held until
-the operator changes the edge. No authored edge crosses Ensemble projects.
+same project. Only the operator may create or remove these edges, through the
+explicit dependency command. The generic task-edit command must not change them,
+even for an agent with scoped task-edit permission. Validate the dependent task's
+expected version, reject self-edges and cycles, and persist the edge change with
+its control revision and operation receipt in one transaction. Matching retries
+return the recorded result; stale versions or changed payloads conflict. Retain
+the relationship and outcome across restart. A local blocker clears only when
+its task is Done; cancellation leaves the dependent held until the operator
+changes the edge. No authored edge crosses Ensemble projects.
 
 For imported GitHub dependent issues, read native
 [`blocked_by` relationships](https://docs.github.com/en/rest/issues/issue-dependencies) and
@@ -399,9 +405,12 @@ for cross-repository issues; discovery never grants repository execution access.
 GitHub issue closure or native edge removal clears that blocker. Reopening or
 adding an open blocker re-applies the execution gate. Do not write a parallel
 Ensemble edge or provide an override for an imported issue. On inaccessible,
-partial or failed reads, keep the last confirmed view but hold dispatch until a
-complete refresh succeeds. Polling and manual refresh re-evaluate blocked Ready
-tasks, while local state changes trigger immediate re-evaluation.
+partial or failed reads, including the first dependency-list or blocker-state
+read for a newly discovered issue, leave dependency state unknown and hold
+dispatch. Never initialize an unfetched issue as unblocked. Keep any last
+confirmed view for explanation until a complete refresh succeeds. Polling and
+manual refresh re-evaluate blocked Ready tasks, while local state changes
+trigger immediate re-evaluation.
 
 Accepted overlap policy: show the conflict and require explicit operator placement.
 Retain an existing owner's work; a newly conflicted, unowned issue cannot dispatch.

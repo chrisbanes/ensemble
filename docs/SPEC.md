@@ -239,11 +239,12 @@ current readiness, pause, permission and capacity controls. Dependency state
 and its source are visible in task detail and
 the task list; they are not folded into the Ready state.
 
-Ensemble owns dependencies whose dependent task is local. The operator may link
-that task to another local or imported task in the same Ensemble project. Local
-task completion (`Done`) resolves its blocker; cancellation does not. An obsolete
-local edge must be removed rather than bypassed. Reject self-dependencies and
-cycles when creating local edges.
+Ensemble owns dependencies whose dependent task is local. Only the operator may
+add or remove an edge from that task to another local or imported task in the
+same Ensemble project. An agent's permission to edit task content does not grant
+dependency-edit authority. Local task completion (`Done`) resolves its blocker;
+cancellation does not. An obsolete local edge must be removed rather than
+bypassed. Reject self-dependencies and cycles when creating local edges.
 
 For an imported GitHub issue, native GitHub issue dependencies are authoritative.
 Ensemble observes them, including a blocking issue outside the selected source or
@@ -258,9 +259,10 @@ disclosed as an execution-control limitation, not offered as a dependency bypass
 If a dependency appears while work is active, the current turn may reach a safe
 stop; hold new Ensemble turns and delegation, retain ownership and results, and
 show the reason. A reopened blocker applies the same rule. If dependency or
-blocker state cannot be read completely, hold affected dispatch, keep the last
-confirmed view for explanation, and retry reconciliation. Neither stale clearance nor a lead's
-judgment can substitute for a confirmed unblocked state.
+blocker state cannot be read completely, including on the first observation,
+hold affected dispatch, keep any last confirmed view for explanation, and retry
+reconciliation. Neither stale clearance nor a lead's judgment can substitute
+for a confirmed unblocked state.
 
 ## Data ownership and external writes
 
