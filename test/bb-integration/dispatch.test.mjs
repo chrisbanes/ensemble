@@ -555,7 +555,8 @@ test("public dispatch handoff records bounded holds and an open startup capabili
     };
     record(instance, "startupWithoutBothGateOwners", startupGate);
     instance.runtimeManifest.dependentExecutionBlocked = ["T06", "T08"];
-    instance.runtimeManifest.t4CapabilityStatus = "failed-open";
+    instance.runtimeManifest.t4CapabilityStatus = "failed-capability";
+    instance.runtimeManifest.t4DependencyStatus = "open";
 
     assert.equal(
       unsafeProviderTurns.length,
@@ -563,9 +564,9 @@ test("public dispatch handoff records bounded holds and an open startup capabili
       "The unsafe accepted prompt must be visible exactly once in provider trace",
     );
     record(instance, "t4DispatchHarness", {
-      status: "passed",
-      startupCapability: "failed-open",
-      evidenceIsNotASafetyPass: true,
+      status: "failed-capability",
+      diagnosticCompleted: true,
+      rawTestOutcome: "fail",
       pinnedNode: process.versions.node,
       pinnedBb: instance.runtimeManifest.bb,
       pinnedPluginSdk: instance.runtimeManifest.pluginSdk,
@@ -573,5 +574,9 @@ test("public dispatch handoff records bounded holds and an open startup capabili
       providerToolCalls: unsafeToolCount,
       dependency: "#665",
     });
+
+    assert.fail(
+      `T4_CAPABILITY_FAILED: BB dispatched accepted queue ${unsafeQueueId} while both hook owners failed initialization; providerTurns=${unsafeProviderTurns.length}; toolCalls=${countBeforeUnsafeRestart}->${unsafeToolCount}; dependency=#665 (T06/T08 blocked)`,
+    );
   });
 });
