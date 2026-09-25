@@ -1,6 +1,7 @@
 import type { BbPluginApi, StandardSchemaV1 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { registerExecutionServer } from "./execution-server.js";
+import { registerLossServer } from "./loss-server.js";
 
 const providerId = "ensemble-scripted";
 const retryFailureThreadIds = new Set<string>();
@@ -215,5 +216,6 @@ export default function t1Fixture(bb: BbPluginApi): void {
     if (armed) retryFailureThreadIds.add(threadId);
     else retryFailureThreadIds.delete(threadId);
   });
+  registerLossServer(bb, database);
   registerScriptedProvider(bb);
 }

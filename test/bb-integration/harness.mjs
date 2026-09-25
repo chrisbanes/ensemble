@@ -170,6 +170,7 @@ async function stageFixture(root) {
     "app.tsx",
     "execution-server.ts",
     "host.ts",
+    "loss-server.ts",
     "package.json",
     "provider-bridge.provenance.json",
     "provider-bridge.ts",
