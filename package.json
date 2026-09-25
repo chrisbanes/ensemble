@@ -9,7 +9,7 @@
     "bb": ">=0.43.4",
     "bbPluginSdk": ">=0.5.9"
   },
-  "packageManager": "npm@11.20.0",
+  "packageManager": "npm@12.1.0",
   "bb": {
     "name": "Ensemble",
     "branding": {
