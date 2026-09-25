@@ -35,6 +35,12 @@ const expected = {
     "049cf0e0a74ce848488e0a0558a5cd7eb30f252b7e5ebaf3f50ce9624832cf4b",
 };
 const fixturePluginId = "ensemble-t1-fixture";
+const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
+  ? path.resolve(process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH)
+  : path.join(
+      repositoryRoot,
+      "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
+    );
 
 function sanitize(text, root) {
   let sanitized = text
@@ -84,19 +90,37 @@ async function writeFailureEvidence(instance, error) {
     `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n\n${instance.output()}`,
     root,
   );
+  await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "failure-trace.txt"), trace);
+  const manifest = {
+    ...instance.runtimeManifest,
+    outcome: "failed",
+    checks: instance.runtimeManifest.checks ?? {},
+    trace: "failure-trace.txt",
+  };
   await writeFile(
     path.join(root, "run-manifest.json"),
-    JSON.stringify(
-      {
-        ...instance.runtimeManifest,
-        outcome: "failed",
-        checks: instance.runtimeManifest.checks ?? {},
-        trace: "failure-trace.txt",
-      },
-      null,
-      2,
-    ),
+    `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
+  );
+  await persistRunManifest(manifest, root);
+}
+
+async function persistRunManifest(manifest, root) {
+  const relative = path.relative(root, runManifestPath);
+  const isInsideDisposableRoot =
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative));
+  assert.equal(
+    isInsideDisposableRoot,
+    false,
+    "The T1 run manifest path must be outside the disposable BB instance",
+  );
+  await mkdir(path.dirname(runManifestPath), { recursive: true });
+  await writeFile(
+    runManifestPath,
+    `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
   );
 }
 
@@ -144,6 +168,161 @@ async function portIsClosed(port) {
       resolve(error.code === "ECONNREFUSED");
     });
   });
+}
+
+async function readProcessTable() {
+  const { stdout } = await exec("ps", ["-axo", "pid=,ppid=,command="], {
+    timeout: 5_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const processes = new Map();
+  for (const line of stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/u);
+    if (match) {
+      const [, rawPid, rawParentPid, command] = match;
+      processes.set(Number(rawPid), {
+        pid: Number(rawPid),
+        parentPid: Number(rawParentPid),
+        command,
+      });
+    }
+  }
+  return processes;
+}
+
+function descendants(processes, rootPid) {
+  const found = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const processInfo of processes.values()) {
+      if (!found.has(processInfo.pid) && found.has(processInfo.parentPid)) {
+        found.add(processInfo.pid);
+        changed = true;
+      }
+    }
+  }
+  return found;
+}
+
+function processRole(processInfo, instance, root) {
+  if (processInfo.pid === root.pid) return root.role;
+  if (
+    processInfo.command.includes(
+      path.join(instance.bbPackage, "server/dist/index.js"),
+    )
+  ) {
+    return "bb-server";
+  }
+  if (
+    processInfo.command.includes(
+      path.join(instance.bbPackage, "host-daemon/dist/daemon-bundle.mjs"),
+    )
+  ) {
+    return "bb-host-daemon";
+  }
+  return root.role === "chromium" ? "chromium-child" : "bb-child";
+}
+
+async function readProviderProcessIds(instance) {
+  try {
+    const log = await readFile(
+      instance.env.SCRIPTED_ECHO_PROCESS_LOG_PATH,
+      "utf8",
+    );
+    return [
+      ...new Set(
+        [...log.matchAll(/^spawn:(\d+)$/gmu)].map(([, pid]) => Number(pid)),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+export async function captureOwnedProcesses(instance) {
+  let processes = await readProcessTable();
+  const providerPids = await readProviderProcessIds(instance);
+  if (
+    providerPids.some(
+      (pid) => !processes.has(pid) && !instance.ownedProcesses.has(pid),
+    )
+  ) {
+    processes = await readProcessTable();
+  }
+  const roots = [{ pid: instance.processHandle.pid, role: "bb-app" }];
+  for (const server of instance.browserServers) {
+    roots.push({ pid: server.process().pid, role: "chromium" });
+  }
+
+  for (const root of roots) {
+    for (const pid of descendants(processes, root.pid)) {
+      const processInfo = processes.get(pid);
+      if (processInfo) {
+        const role = processRole(processInfo, instance, root);
+        const previous = instance.ownedProcesses.get(pid);
+        const commands = new Set(previous?.commands ?? []);
+        commands.add(processInfo.command);
+        instance.ownedProcesses.set(pid, {
+          pid,
+          role: role === "bb-child" ? (previous?.role ?? role) : role,
+          commands,
+        });
+      }
+    }
+  }
+
+  for (const pid of providerPids) {
+    const processInfo = processes.get(pid);
+    const previous = instance.ownedProcesses.get(pid);
+    const commands = new Set(previous?.commands ?? []);
+    if (processInfo) commands.add(processInfo.command);
+    instance.ownedProcesses.set(pid, {
+      pid,
+      role: "scripted-provider",
+      commands,
+    });
+  }
+
+  const ownedByPid = new Map(
+    (instance.runtimeManifest.ownedProcesses ?? []).map(({ pid, role }) => [
+      pid,
+      { pid, role },
+    ]),
+  );
+  for (const { pid, role } of instance.ownedProcesses.values()) {
+    const previous = ownedByPid.get(pid);
+    ownedByPid.set(pid, {
+      pid,
+      role: role === "bb-child" ? (previous?.role ?? role) : role,
+    });
+  }
+  instance.runtimeManifest.ownedProcesses = [...ownedByPid.values()].sort(
+    (left, right) => left.pid - right.pid,
+  );
+  return instance.runtimeManifest.ownedProcesses;
+}
+
+async function liveOwnedProcesses(instance) {
+  const processes = await readProcessTable();
+  return [...instance.ownedProcesses.values()].filter((owned) => {
+    const current = processes.get(owned.pid);
+    if (!current) return false;
+    if (owned.commands.size === 0) return owned.role === "scripted-provider";
+    return owned.commands.has(current.command);
+  });
+}
+
+async function terminateLiveOwnedProcesses(instance, signal) {
+  const live = await liveOwnedProcesses(instance);
+  for (const owned of live.reverse()) {
+    if (owned.commands.size === 0) continue;
+    try {
+      process.kill(owned.pid, signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
 }
 
 export async function waitFor(callback, label, timeoutMs = 45_000) {
@@ -239,6 +418,8 @@ export async function startBb(root) {
   for (const name of Object.keys(env)) {
     if (
       name.startsWith("BB_") ||
+      name.startsWith("SCRIPTED_ECHO_") ||
+      name === "ENSEMBLE_T1_RUN_MANIFEST_PATH" ||
       /(?:API_KEY|(?:ACCESS|REFRESH)_TOKEN|PASSWORD|SECRET|CREDENTIAL)/iu.test(
         name,
       )
@@ -266,7 +447,18 @@ export async function startBb(root) {
     BB_SERVER_URL: `http://127.0.0.1:${serverPort}`,
     BB_TELEMETRY: "false",
     SCRIPTED_ECHO_RECORD_PATH: path.join(root, "provider-record.jsonl"),
+    SCRIPTED_ECHO_PROCESS_LOG_PATH: path.join(root, "provider-processes.log"),
   });
+  const scriptedEnvironmentNames = Object.keys(env).filter((name) =>
+    name.startsWith("SCRIPTED_ECHO_"),
+  );
+  assert.deepEqual(
+    scriptedEnvironmentNames.sort(),
+    ["SCRIPTED_ECHO_PROCESS_LOG_PATH", "SCRIPTED_ECHO_RECORD_PATH"].sort(),
+    "Only harness-owned scripted provider paths may reach BB",
+  );
+  assert.equal(path.dirname(env.SCRIPTED_ECHO_RECORD_PATH), root);
+  assert.equal(path.dirname(env.SCRIPTED_ECHO_PROCESS_LOG_PATH), root);
   const runtimeManifest = {
     node: process.versions.node,
     bb: expected.bb,
@@ -297,11 +489,13 @@ export async function startBb(root) {
 
   const instance = {
     root,
+    bbPackage,
     env,
     output: () => output,
     processHandle,
     browserServers: [],
     browsers: [],
+    ownedProcesses: new Map(),
     baseUrl: env.BB_SERVER_URL,
     runtimeManifest,
     ports: { serverPort, daemonPort },
@@ -342,6 +536,10 @@ export async function startBb(root) {
         return false;
       }
     }, "pinned BB host connection");
+    const processes = await captureOwnedProcesses(instance);
+    assert(processes.some((owned) => owned.role === "bb-app"));
+    assert(processes.some((owned) => owned.role === "bb-server"));
+    assert(processes.some((owned) => owned.role === "bb-host-daemon"));
   } catch (error) {
     await stopBb(instance).catch((cleanupError) => {
       output += `\nCleanup failure: ${String(cleanupError)}`;
@@ -353,66 +551,200 @@ export async function startBb(root) {
 }
 
 export async function stopBb(instance) {
-  for (const browser of instance.browsers.reverse()) {
-    await browser.close();
-  }
-  for (const server of instance.browserServers.reverse()) {
-    await server.close();
-    const child = server.process();
-    await waitFor(
-      () => hasExited(child),
-      "owned Chromium process shutdown",
-      5_000,
+  const failures = [];
+  let forcedCleanup =
+    instance.runtimeManifest.checks.ownedProcessCleanup?.forced ?? false;
+  try {
+    await captureOwnedProcesses(instance);
+  } catch (error) {
+    failures.push(
+      new Error("Could not snapshot owned processes", { cause: error }),
     );
   }
-  if (hasExited(instance.processHandle)) {
-    await waitFor(
-      async () =>
-        (await portIsClosed(instance.ports.serverPort)) &&
-        (await portIsClosed(instance.ports.daemonPort)),
-      "owned BB service ports to close",
-      5_000,
-    );
-    return;
+
+  for (const browser of instance.browsers.splice(0).reverse()) {
+    try {
+      await browser.close();
+    } catch (error) {
+      failures.push(
+        new Error("Could not close owned Chromium client", { cause: error }),
+      );
+    }
+  }
+  for (const server of instance.browserServers.splice(0).reverse()) {
+    try {
+      await server.close();
+      await waitFor(
+        () => hasExited(server.process()),
+        "owned Chromium process shutdown",
+        5_000,
+      );
+    } catch (error) {
+      failures.push(
+        new Error("Could not stop owned Chromium process", { cause: error }),
+      );
+    }
   }
 
   const cli = path.join(repositoryRoot, "node_modules/bb-app/dist/bb-app.js");
-  try {
-    await exec(process.execPath, [cli, "stop"], {
-      env: instance.env,
-      timeout: 20_000,
-    });
-  } catch (error) {
-    instance.processHandle.kill("SIGTERM");
-    await waitFor(
-      () => hasExited(instance.processHandle),
-      "BB launcher after SIGTERM",
-      5_000,
-    ).catch(() => {});
-    if (!hasExited(instance.processHandle)) {
-      instance.processHandle.kill("SIGKILL");
-      await waitFor(
-        () => hasExited(instance.processHandle),
-        "BB launcher after SIGKILL",
-        5_000,
-      );
+  if (!hasExited(instance.processHandle)) {
+    try {
+      await exec(process.execPath, [cli, "stop"], {
+        env: instance.env,
+        timeout: 20_000,
+      });
+    } catch (error) {
+      if (!hasExited(instance.processHandle)) {
+        forcedCleanup = true;
+        try {
+          instance.processHandle.kill("SIGTERM");
+          await waitFor(
+            () => hasExited(instance.processHandle),
+            "BB launcher after SIGTERM",
+            5_000,
+          );
+        } catch (signalError) {
+          failures.push(
+            new Error("BB launcher did not stop after SIGTERM", {
+              cause: signalError,
+            }),
+          );
+        }
+        if (!hasExited(instance.processHandle)) {
+          try {
+            instance.processHandle.kill("SIGKILL");
+            await waitFor(
+              () => hasExited(instance.processHandle),
+              "BB launcher after SIGKILL",
+              5_000,
+            );
+          } catch (killError) {
+            failures.push(
+              new Error("BB launcher did not stop after SIGKILL", {
+                cause: killError,
+              }),
+            );
+          }
+        }
+        failures.push(
+          new Error("BB required forced cleanup", { cause: error }),
+        );
+      }
     }
-    throw new Error("BB required forced cleanup", { cause: error });
   }
 
-  await waitFor(
-    () => hasExited(instance.processHandle),
-    "BB launcher shutdown",
-    10_000,
-  );
-  assert(hasExited(instance.processHandle), "Owned BB launcher did not exit");
-  await waitFor(
-    async () =>
-      (await portIsClosed(instance.ports.serverPort)) &&
-      (await portIsClosed(instance.ports.daemonPort)),
-    "owned BB service ports to close",
-    5_000,
-  );
+  if (!hasExited(instance.processHandle)) {
+    try {
+      instance.processHandle.kill("SIGTERM");
+      await waitFor(
+        () => hasExited(instance.processHandle),
+        "BB launcher shutdown",
+        5_000,
+      );
+    } catch (error) {
+      failures.push(new Error("BB launcher did not exit", { cause: error }));
+    }
+  }
+
+  const awaitOwnedExit = async (timeoutMs) => {
+    await waitFor(
+      async () => {
+        await captureOwnedProcesses(instance);
+        return (
+          hasExited(instance.processHandle) &&
+          (await liveOwnedProcesses(instance)).length === 0
+        );
+      },
+      "all owned BB, provider, and Chromium processes to exit",
+      timeoutMs,
+    );
+  };
+
+  try {
+    await awaitOwnedExit(7_000);
+  } catch (error) {
+    forcedCleanup = true;
+    failures.push(
+      new Error("Owned child processes remained after graceful shutdown", {
+        cause: error,
+      }),
+    );
+    for (const signal of ["SIGTERM", "SIGKILL"]) {
+      try {
+        await captureOwnedProcesses(instance);
+        await terminateLiveOwnedProcesses(instance, signal);
+        await awaitOwnedExit(signal === "SIGTERM" ? 3_000 : 5_000);
+        break;
+      } catch (terminationError) {
+        failures.push(
+          new Error(`Owned process cleanup failed after ${signal}`, {
+            cause: terminationError,
+          }),
+        );
+      }
+    }
+  }
+
+  let serverPortClosed = false;
+  let daemonPortClosed = false;
+  try {
+    await waitFor(
+      async () => {
+        serverPortClosed = await portIsClosed(instance.ports.serverPort);
+        daemonPortClosed = await portIsClosed(instance.ports.daemonPort);
+        return serverPortClosed && daemonPortClosed;
+      },
+      "owned BB service ports to close",
+      5_000,
+    );
+  } catch (error) {
+    failures.push(
+      new Error("Owned BB service ports remained open", { cause: error }),
+    );
+  }
+
+  let liveProcesses = [];
+  let processExitVerified = false;
+  try {
+    await captureOwnedProcesses(instance);
+    liveProcesses = await liveOwnedProcesses(instance);
+    assert.equal(
+      hasExited(instance.processHandle),
+      true,
+      "BB launcher did not exit",
+    );
+    assert.deepEqual(liveProcesses, [], "Owned process PIDs remained live");
+    processExitVerified = true;
+  } catch (error) {
+    failures.push(
+      new Error("Owned process exit verification failed", { cause: error }),
+    );
+  }
+
+  const previousCleanup =
+    instance.runtimeManifest.checks.ownedProcessCleanup ?? {};
+  const pids = [
+    ...new Set([
+      ...(previousCleanup.pids ?? []),
+      ...(instance.runtimeManifest.ownedProcesses ?? []).map(({ pid }) => pid),
+    ]),
+  ].sort((left, right) => left - right);
+  instance.runtimeManifest.checks.ownedProcessCleanup = {
+    pids,
+    allExited:
+      previousCleanup.allExited !== false &&
+      processExitVerified &&
+      hasExited(instance.processHandle) &&
+      liveProcesses.length === 0,
+    serverPortClosed:
+      previousCleanup.serverPortClosed !== false && serverPortClosed,
+    daemonPortClosed:
+      previousCleanup.daemonPortClosed !== false && daemonPortClosed,
+    forced: previousCleanup.forced === true || forcedCleanup,
+  };
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "T1 owned-process cleanup failed");
+  }
 }
 
 export async function launchChromium(instance) {
@@ -429,6 +761,14 @@ export async function restartBb(instance) {
   await stopBb(instance);
   const replacement = await startBb(root);
   replacement.runtimeManifest.checks = { ...previousManifest.checks };
+  replacement.runtimeManifest.ownedProcesses = [
+    ...new Map(
+      [
+        ...(previousManifest.ownedProcesses ?? []),
+        ...(replacement.runtimeManifest.ownedProcesses ?? []),
+      ].map((owned) => [owned.pid, owned]),
+    ).values(),
+  ].sort((left, right) => left.pid - right.pid);
   replacement.runtimeManifest.restartCount =
     (previousManifest.restartCount ?? 0) + 1;
   Object.assign(instance, replacement);
@@ -465,13 +805,19 @@ export async function withFixture(callback) {
     instance.fixtureDirectory = fixtureDirectory;
     const result = await callback(instance);
     await stopBb(instance);
-    passed = true;
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 100,
+    });
     instance.runtimeManifest.outcome = "passed";
-    instance.runtimeManifest.checks.ownedProcessCleanup = "passed";
+    await persistRunManifest(instance.runtimeManifest, root);
+    process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
     process.stdout.write(
       `T1_RUN_MANIFEST ${JSON.stringify(instance.runtimeManifest)}\n`,
     );
-    await rm(root, { recursive: true, force: true });
+    passed = true;
     return result;
   } catch (error) {
     if (instance) {
@@ -491,6 +837,17 @@ export async function withFixture(callback) {
           : error,
       );
     } else {
+      const manifest = {
+        node: process.versions.node,
+        bb: expected.bb,
+        pluginSdk: expected.sdk,
+        playwright: expected.playwright,
+        platform: `${process.platform}-${process.arch}`,
+        outcome: "failed-before-start",
+        checks: {},
+        trace: "failure-trace.txt",
+      };
+      await mkdir(root, { recursive: true });
       await writeFile(
         path.join(root, "failure-trace.txt"),
         sanitize(
@@ -502,21 +859,9 @@ export async function withFixture(callback) {
       );
       await writeFile(
         path.join(root, "run-manifest.json"),
-        JSON.stringify(
-          {
-            node: process.versions.node,
-            bb: expected.bb,
-            pluginSdk: expected.sdk,
-            playwright: expected.playwright,
-            platform: `${process.platform}-${process.arch}`,
-            outcome: "failed-before-start",
-            checks: {},
-            trace: "failure-trace.txt",
-          },
-          null,
-          2,
-        ),
+        `${JSON.stringify(manifest, null, 2)}\n`,
       );
+      await persistRunManifest(manifest, root);
     }
     throw error;
   } finally {

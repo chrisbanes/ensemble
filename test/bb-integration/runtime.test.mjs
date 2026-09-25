@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import {
   bbCli,
+  captureOwnedProcesses,
   launchChromium,
   restartBb,
   rpc,
@@ -144,9 +145,11 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    const toolResult = providerRequests.find(
+    const toolResults = providerRequests.filter(
       (entry) => entry.method === "t1/tool-result",
     );
+    assert.equal(toolResults.length, 1);
+    const [toolResult] = toolResults;
     assert(
       toolResult,
       "The scripted provider did not record the tool response",
@@ -161,6 +164,15 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
       ),
       "The scripted provider did not receive the returned SQLite counter value",
     );
+    const ownedProcesses = await captureOwnedProcesses(instance);
+    const ownedProcessRoles = [
+      ...new Set(ownedProcesses.map((owned) => owned.role)),
+    ].sort();
+    assert(ownedProcessRoles.includes("bb-server"));
+    assert(ownedProcessRoles.includes("bb-host-daemon"));
+    assert(ownedProcessRoles.includes("scripted-provider"));
+    assert(ownedProcessRoles.includes("chromium"));
+    record(instance, "ownedProcessRoles", ownedProcessRoles);
     record(instance, "scriptedToolResult", {
       providerId: completed.thread.providerId,
       environmentId: completed.thread.environmentId,
