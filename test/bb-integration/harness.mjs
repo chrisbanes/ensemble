@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { devNull, homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -427,6 +427,35 @@ export async function waitFor(callback, label, timeoutMs = 45_000) {
   throw new Error(`Timed out waiting for ${label}`, { cause: lastError });
 }
 
+export async function fixtureGit(instance, args) {
+  const gitRoot = path.join(instance.root, "fixture-git");
+  const hooks = path.join(gitRoot, "hooks");
+  const templates = path.join(gitRoot, "templates");
+  await Promise.all(
+    [hooks, templates].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
+  );
+  const env = Object.fromEntries(
+    Object.entries(instance.env).filter(([name]) => !name.startsWith("GIT_")),
+  );
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = devNull;
+  return exec(
+    "git",
+    [
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      `core.hooksPath=${hooks}`,
+      "-c",
+      `init.templateDir=${templates}`,
+      ...args,
+    ],
+    { env },
+  );
+}
+
 export async function startBb(root, previousManifest) {
   assert.equal(process.versions.node, expected.node, "Use Node 24.21.0");
   const bbPackage = path.join(repositoryRoot, "node_modules/bb-app");
@@ -526,6 +555,7 @@ export async function startBb(root, previousManifest) {
   for (const name of Object.keys(env)) {
     if (
       name.startsWith("BB_") ||
+      name.startsWith("GIT_") ||
       name.startsWith("SCRIPTED_ECHO_") ||
       name.startsWith("T4_") ||
       name === "ENSEMBLE_T1_RUN_MANIFEST_PATH" ||
@@ -549,6 +579,8 @@ export async function startBb(root, previousManifest) {
     USERPROFILE: isolatedHome,
     XDG_CONFIG_HOME: isolatedConfig,
     XDG_DATA_HOME: isolatedData,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: devNull,
     BB_DATA_DIR: path.join(root, "data"),
     BB_SERVER_BIND_HOST: "127.0.0.1",
     BB_SERVER_PORT: String(serverPort),

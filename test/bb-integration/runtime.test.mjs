@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { appendFile, readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { promisify } from "node:util";
 import {
   bbCli,
   captureOwnedProcesses,
+  fixtureGit,
   launchChromium,
   restartBb,
   rpc,
@@ -14,7 +13,6 @@ import {
   withFixture,
 } from "./harness.mjs";
 
-const exec = promisify(execFile);
 const fixturePluginId = "ensemble-t1-fixture";
 
 function record(instance, name, detail = "passed") {
@@ -76,8 +74,8 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
       path.join(projectRoot, "README.md"),
       "T1 disposable project\n",
     );
-    await exec("git", ["init", "-b", "main", projectRoot]);
-    await exec("git", [
+    await fixtureGit(instance, ["init", "-b", "main", projectRoot]);
+    await fixtureGit(instance, [
       "-C",
       projectRoot,
       "-c",
@@ -87,7 +85,7 @@ test("the isolated BB fixture renders, runs a tool, and persists across reloads"
       "add",
       "README.md",
     ]);
-    await exec("git", [
+    await fixtureGit(instance, [
       "-C",
       projectRoot,
       "-c",

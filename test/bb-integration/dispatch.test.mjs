@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
   copyFile,
@@ -10,10 +9,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import {
   bbCli,
+  fixtureGit,
   pluginRpc,
   restartBb,
   rpc,
@@ -21,7 +20,6 @@ import {
   withFixture,
 } from "./harness.mjs";
 
-const exec = promisify(execFile);
 const fixturePluginId = "ensemble-t1-fixture";
 const gatePluginId = "t4-dispatch-gate";
 const waitPluginId = "t4-other-wait";
@@ -78,8 +76,8 @@ async function createProject(instance) {
   const projectRoot = path.join(instance.root, "t4-git-project");
   await mkdir(projectRoot);
   await writeFile(path.join(projectRoot, "README.md"), "T4 fixture\n");
-  await exec("git", ["init", "-b", "main", projectRoot]);
-  await exec("git", [
+  await fixtureGit(instance, ["init", "-b", "main", projectRoot]);
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",
@@ -89,7 +87,7 @@ async function createProject(instance) {
     "add",
     "README.md",
   ]);
-  await exec("git", [
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",

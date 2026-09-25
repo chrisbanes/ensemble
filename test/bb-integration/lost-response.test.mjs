@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { bbCli, restartBb, rpc, waitFor, withFixture } from "./harness.mjs";
+import {
+  bbCli,
+  fixtureGit,
+  restartBb,
+  rpc,
+  waitFor,
+  withFixture,
+} from "./harness.mjs";
 
-const exec = promisify(execFile);
 const fixturePluginId = "ensemble-t1-fixture";
 
 async function createProject(instance) {
@@ -17,8 +21,8 @@ async function createProject(instance) {
   const projectRoot = path.join(instance.root, "t3-git-project");
   await mkdir(projectRoot);
   await writeFile(path.join(projectRoot, "README.md"), "T3 fixture\n");
-  await exec("git", ["init", "-b", "main", projectRoot]);
-  await exec("git", [
+  await fixtureGit(instance, ["init", "-b", "main", projectRoot]);
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",
@@ -28,7 +32,7 @@ async function createProject(instance) {
     "add",
     "README.md",
   ]);
-  await exec("git", [
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",

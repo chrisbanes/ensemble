@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import {
   access,
   appendFile,
@@ -12,11 +11,16 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test as nodeTest } from "node:test";
-import { bbCli, restartBb, rpc, waitFor, withFixture } from "./harness.mjs";
+import {
+  bbCli,
+  fixtureGit,
+  restartBb,
+  rpc,
+  waitFor,
+  withFixture,
+} from "./harness.mjs";
 
-const exec = promisify(execFile);
 const fixturePluginId = "ensemble-t1-fixture";
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const gateReportsDirectory = process.env.ENSEMBLE_T5_GATE_REPORT_DIRECTORY
@@ -36,8 +40,8 @@ async function createProject(instance, label) {
   const projectRoot = path.join(instance.root, `${label}-git-project`);
   await mkdir(projectRoot);
   await writeFile(path.join(projectRoot, "README.md"), `${label} fixture\n`);
-  await exec("git", ["init", "-b", "main", projectRoot]);
-  await exec("git", [
+  await fixtureGit(instance, ["init", "-b", "main", projectRoot]);
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",
@@ -47,7 +51,7 @@ async function createProject(instance, label) {
     "add",
     "README.md",
   ]);
-  await exec("git", [
+  await fixtureGit(instance, [
     "-C",
     projectRoot,
     "-c",
