@@ -630,6 +630,7 @@ async function main() {
   report.toolchain = { node: process.versions.node, npm: npmVersion };
   if (failures.length > 0) {
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],
@@ -642,6 +643,7 @@ async function main() {
   } catch (error) {
     failures.push({ scenario: "report validation", message: String(error) });
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],
@@ -654,6 +656,7 @@ async function main() {
   } catch (error) {
     failures.push({ scenario: "report readback", message: String(error) });
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],

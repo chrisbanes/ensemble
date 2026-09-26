@@ -353,12 +353,31 @@ function t5Map(rows) {
   return new Map((rows ?? []).map((report) => [report.name, report]));
 }
 
-function hasValidatedOpenStopEvidence(reports) {
+function hasVerifiedCleanup(cleanup) {
+  return (
+    cleanup?.allExited === true &&
+    cleanup.serverPortClosed === true &&
+    cleanup.daemonPortClosed === true &&
+    cleanup.forced === false
+  );
+}
+
+function hasPassedVerifiedT5Slice(slice) {
+  return (
+    slice?.exitCode === 0 &&
+    slice.expectedExitCode === 0 &&
+    slice.timedOut === false &&
+    slice.testOutcome === "passed" &&
+    slice.manifest?.outcome === "passed" &&
+    hasVerifiedCleanup(slice.manifest.checks?.ownedProcessCleanup)
+  );
+}
+
+function hasValidT5Reports(reports) {
   try {
     assertT5Reports(reports);
-    return t5Map(reports).get("stop-writer-release")?.verdict === "open";
+    return true;
   } catch {
-    // Validation reports the failure later; construction keeps dependents blocked.
     return false;
   }
 }
@@ -384,6 +403,9 @@ export function buildIntegrationReport({
   const t3Checks = lost?.manifest?.checks ?? {};
   const t4Checks = dispatch?.manifest?.checks ?? {};
   const t5Gate = (name) => t5.get(name);
+  const t5ReportsValid = hasValidT5Reports(t5Reports);
+  const stopEvidenceValidatedOpen =
+    t5ReportsValid && t5Gate("stop-writer-release")?.verdict === "open";
   const stopEvidence = t5Gate("stop-writer-release")?.observed;
   const staleEffectBaseline =
     t3Checks.lostResponse?.queuedSendRecovered?.providerToolEffectCount;
@@ -940,7 +962,9 @@ export function buildIntegrationReport({
     ["T1", "T2", "T3", "T5"].every(
       (id) => slices[id]?.testOutcome === "passed",
     ) &&
-    slices.T4?.testOutcome === "expected-diagnostic";
+    slices.T4?.testOutcome === "expected-diagnostic" &&
+    hasPassedVerifiedT5Slice(recovery) &&
+    t5ReportsValid;
 
   return {
     schemaVersion: 2,
@@ -959,10 +983,9 @@ export function buildIntegrationReport({
             timedOut: slice.timedOut,
             testOutcome: slice.testOutcome,
             manifestAvailable: Boolean(slice.manifest),
+            manifestOutcome: slice.manifest?.outcome ?? null,
             cleanupVerified: Boolean(
-              slice.manifest?.checks?.ownedProcessCleanup?.allExited &&
-                slice.manifest.checks.ownedProcessCleanup.serverPortClosed &&
-                slice.manifest.checks.ownedProcessCleanup.daemonPortClosed,
+              hasVerifiedCleanup(slice.manifest?.checks?.ownedProcessCleanup),
             ),
           },
         ]),
@@ -973,9 +996,10 @@ export function buildIntegrationReport({
       sanitize(entry, replacements),
     ),
     t5Reports: (t5Reports ?? []).map((entry) => sanitize(entry, replacements)),
-    dependentExecutionBlocked: hasValidatedOpenStopEvidence(t5Reports)
-      ? ["T06", "T08"]
-      : ["T02", "T06", "T08"],
+    dependentExecutionBlocked:
+      suitePassed && stopEvidenceValidatedOpen
+        ? ["T06", "T08"]
+        : ["T02", "T06", "T08"],
   };
 }
 
@@ -1100,6 +1124,30 @@ export function assertIntegrationReport(report) {
   );
   assert.equal(report.toolchain?.node, "24.21.0", "report Node.js pin changed");
   assert.equal(report.toolchain?.npm, "12.1.0", "report npm pin changed");
+  const t5Slice = report.slices?.T5;
+  assert.equal(t5Slice?.exitCode, 0, "T5 slice must exit successfully");
+  assert.equal(
+    t5Slice?.expectedExitCode,
+    0,
+    "T5 slice expected exit code must be successful",
+  );
+  assert.equal(t5Slice?.timedOut, false, "T5 slice must not time out");
+  assert.equal(t5Slice?.testOutcome, "passed", "T5 slice must pass");
+  assert.equal(
+    t5Slice?.manifestAvailable,
+    true,
+    "T5 slice must have a verified manifest",
+  );
+  assert.equal(
+    t5Slice?.manifestOutcome,
+    "passed",
+    "T5 slice manifest must pass",
+  );
+  assert.equal(
+    t5Slice?.cleanupVerified,
+    true,
+    "T5 slice cleanup must be verified",
+  );
   assert(Array.isArray(report.rows), "report.rows must be an array");
   const keyed = new Map();
   for (const entry of report.rows) {
@@ -1231,11 +1279,17 @@ export function assertIntegrationReport(report) {
   assert.equal(stop?.providerStopRequests, 1);
   assert.equal(stop?.toolEffects, 0);
   const stopScenario = keyed.get("t5-scenario:stop-writer-release");
-  const stopEvidenceAllowsT02Unblock = assertStopWriterEvidence(
-    stopScenario.verdict,
-    stopScenario.observed.identities,
-    stopScenario.observed.observations,
-  );
+  const stopEvidenceAllowsT02Unblock =
+    report.outcome === "completed-with-capability-gaps" &&
+    t5Slice?.testOutcome === "passed" &&
+    t5Slice.manifestAvailable === true &&
+    t5Slice.manifestOutcome === "passed" &&
+    t5Slice.cleanupVerified === true &&
+    assertStopWriterEvidence(
+      stopScenario.verdict,
+      stopScenario.observed.identities,
+      stopScenario.observed.observations,
+    );
   assert.equal(
     keyed.get("proof-gate:stop-writer-release").verdict,
     stopScenario.verdict,

@@ -147,6 +147,38 @@ function validT5Reports() {
   }));
 }
 
+function slice(id, testOutcome) {
+  const t4Diagnostic = id === "T4";
+  return {
+    id,
+    exitCode: t4Diagnostic ? 1 : testOutcome === "passed" ? 0 : 1,
+    expectedExitCode: t4Diagnostic ? 1 : 0,
+    timedOut: false,
+    testOutcome,
+    manifest: {
+      outcome: t4Diagnostic ? "failed" : testOutcome,
+      checks: {
+        ownedProcessCleanup: {
+          allExited: true,
+          serverPortClosed: true,
+          daemonPortClosed: true,
+          forced: false,
+        },
+      },
+    },
+  };
+}
+
+function validSlices() {
+  return {
+    T1: slice("T1", "passed"),
+    T2: slice("T2", "passed"),
+    T3: slice("T3", "passed"),
+    T4: slice("T4", "expected-diagnostic"),
+    T5: slice("T5", "passed"),
+  };
+}
+
 function stopWriterFailureReport() {
   const report = validReport();
   const scenario = report.rows.find(
@@ -227,6 +259,17 @@ function validReport() {
     integrationSourceDigest: "digest-abc123",
     outcome: "completed-with-capability-gaps",
     toolchain: { node: "24.21.0", npm: "12.1.0" },
+    slices: {
+      T5: {
+        exitCode: 0,
+        expectedExitCode: 0,
+        timedOut: false,
+        testOutcome: "passed",
+        manifestAvailable: true,
+        manifestOutcome: "passed",
+        cleanupVerified: true,
+      },
+    },
     rows: [
       ...apiRows,
       ...REQUIRED_PROOF_GATES.map((id) =>
@@ -314,6 +357,36 @@ test("integration report requires one complete row per API and proof gate", () =
     (entry) => entry.id !== "startup-queued-dispatch",
   );
   assert.throws(() => assertIntegrationReport(missingGate), /proof-gate/u);
+});
+
+test("integration report requires a passed, verified T5 slice", () => {
+  const missingSlice = validReport();
+  delete missingSlice.slices.T5;
+  missingSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(missingSlice),
+    /T5 slice must exit successfully/u,
+  );
+
+  const failedSlice = validReport();
+  failedSlice.slices.T5.exitCode = 1;
+  failedSlice.slices.T5.testOutcome = "failed";
+  failedSlice.slices.T5.manifestOutcome = "failed";
+  failedSlice.outcome = "failed-harness";
+  failedSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(failedSlice),
+    /T5 slice must exit successfully/u,
+  );
+
+  const unverifiedSlice = validReport();
+  unverifiedSlice.slices.T5.manifestAvailable = false;
+  unverifiedSlice.slices.T5.cleanupVerified = false;
+  unverifiedSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(unverifiedSlice),
+    /T5 slice must have a verified manifest/u,
+  );
 });
 
 test("combined stop and retry row requires confirmed stop evidence", () => {
@@ -434,9 +507,10 @@ test("T5 keeps the writer held when cancellation is unconfirmed", () => {
 test("report blocks T02 unless stop evidence validates as open", () => {
   const validOpen = validT5Reports();
   const openReport = buildIntegrationReport({
-    slices: {},
+    slices: validSlices(),
     t5Reports: validOpen,
   });
+  assert.equal(openReport.outcome, "completed-with-capability-gaps");
   assert.deepEqual(openReport.dependentExecutionBlocked, ["T06", "T08"]);
   assert.equal(
     openReport.rows.filter((entry) => entry.type === "t5-scenario").length,
@@ -474,7 +548,15 @@ test("report blocks T02 unless stop evidence validates as open", () => {
     ["inconclusive", inconclusive],
     ["invalid open", invalidOpen],
   ]) {
-    const report = buildIntegrationReport({ slices: {}, t5Reports });
+    const report = buildIntegrationReport({
+      slices: validSlices(),
+      t5Reports,
+    });
+    assert.equal(
+      report.outcome,
+      label === "failed" ? "completed-with-capability-gaps" : "failed-harness",
+      label,
+    );
     assert.deepEqual(report.dependentExecutionBlocked, blocked, label);
   }
 
@@ -488,6 +570,34 @@ test("report blocks T02 unless stop evidence validates as open", () => {
     () => assertT5Reports(invalidOpen),
     /unconfirmed cancellation must remain a failed capability/u,
   );
+});
+
+test("T02 stays blocked when the T5 slice is missing, failed, or unverified", () => {
+  const t5Reports = validT5Reports();
+  const missingSlice = validSlices();
+  delete missingSlice.T5;
+
+  const failedSlice = validSlices();
+  failedSlice.T5.testOutcome = "failed";
+  failedSlice.T5.exitCode = 1;
+  failedSlice.T5.manifest.outcome = "failed";
+
+  const unverifiedSlice = validSlices();
+  delete unverifiedSlice.T5.manifest;
+
+  for (const [label, slices] of [
+    ["missing", missingSlice],
+    ["failed", failedSlice],
+    ["unverified", unverifiedSlice],
+  ]) {
+    const report = buildIntegrationReport({ slices, t5Reports });
+    assert.equal(report.outcome, "failed-harness", `${label} T5 outcome`);
+    assert.deepEqual(
+      report.dependentExecutionBlocked,
+      ["T02", "T06", "T08"],
+      `${label} T5 dependencies`,
+    );
+  }
 });
 
 test("integration report validates stop evidence before allowing T02 to unblock", () => {
