@@ -1,7 +1,10 @@
 import type { Assignment, Store } from "./store.js";
 
 export interface WorkerHost {
-  spawn(assignment: Assignment): Promise<string>;
+  spawn(
+    assignment: Assignment,
+    coordinatorConversationId: string,
+  ): Promise<string>;
   find(assignment: Assignment): Promise<string[]>;
 }
 
@@ -12,12 +15,18 @@ export class Coordinator {
     private readonly hostKey: string,
   ) {}
 
-  async launch(id: string): Promise<Assignment> {
+  async launch(
+    id: string,
+    coordinatorConversationId: string,
+  ): Promise<Assignment> {
     if (!this.store.beginLaunch(id)) return this.store.get(id);
     const assignment = this.store.get(id);
     // Persist intent before crossing the host API boundary. Any throw leaves an
     // uncertain launch that may only be reconciled, never automatically retried.
-    const conversationId = await this.host.spawn(assignment);
+    const conversationId = await this.host.spawn(
+      assignment,
+      coordinatorConversationId,
+    );
     this.store.attachConversation(id, this.hostKey, conversationId);
     return this.store.get(id);
   }

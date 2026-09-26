@@ -32,10 +32,11 @@ function fixture(
   let spawnCount = 0;
   const conversationIds = new Map<string, string>();
   const host: WorkerHost = {
-    async spawn(assignment) {
+    async spawn(assignment, coordinatorConversationId) {
       spawnCount++;
       const conversationId = await (options.spawn ?? (async () => "worker"))(
         assignment,
+        coordinatorConversationId,
       );
       conversationIds.set(assignment.id, conversationId);
       return conversationId;

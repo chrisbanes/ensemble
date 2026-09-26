@@ -71,7 +71,10 @@ export class EnsembleService {
       );
       await this.options.validateLaunch(assignment);
     }
-    return this.coordinator.launch(assignment.id);
+    return this.coordinator.launch(
+      assignment.id,
+      caller.externalConversationId,
+    );
   }
 
   async report(context: unknown, input: unknown): Promise<Assignment> {

@@ -46,7 +46,7 @@ test("local task, worker result, and identity survive a database reopen", async 
       },
       f.hostKey,
     );
-    await c.launch("assignment");
+    await c.launch("assignment", "lead");
     f.store.complete(
       "assignment",
       f.projectId,
@@ -83,12 +83,12 @@ test("lost spawn response is reconciled after restart without a second worker", 
     f.store.createTask("task", f.projectId, "Investigate");
     f.store.assign("assignment", "task", f.projectId, "Find the cause");
     await assert.rejects(
-      new Coordinator(f.store, host, f.hostKey).launch("assignment"),
+      new Coordinator(f.store, host, f.hostKey).launch("assignment", "lead"),
     );
     const reopened = f.reopen();
     const restarted = new Coordinator(reopened, host, f.hostKey);
     await restarted.reconcile();
-    await restarted.launch("assignment");
+    await restarted.launch("assignment", "lead");
     assert.equal(spawns, 1);
     assert.equal(
       reopened.getConversationBinding("assignment")?.externalConversationId,
@@ -113,7 +113,7 @@ test("an ambiguous launch with no match is held; duplicate matches require inter
     };
     const c = new Coordinator(f.store, host, f.hostKey);
     await c.reconcile();
-    assert.equal((await c.launch("assignment")).state, "launching");
+    assert.equal((await c.launch("assignment", "lead")).state, "launching");
     host.find = async () => ["one", "two"];
     await assert.rejects(c.reconcile(), /Multiple host conversations/);
   } finally {
@@ -142,7 +142,10 @@ test("concurrent delegation launches once; foreign threads cannot report", async
       },
       f.hostKey,
     );
-    await Promise.all([c.launch("assignment"), c.launch("assignment")]);
+    await Promise.all([
+      c.launch("assignment", "lead"),
+      c.launch("assignment", "lead"),
+    ]);
     assert.equal(spawns, 1);
     assert.throws(
       () =>
