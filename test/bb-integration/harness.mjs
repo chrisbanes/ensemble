@@ -66,12 +66,6 @@ const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
       repositoryRoot,
       "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
     );
-const failureTraceName = `${path.basename(runManifestPath)}.failure-trace.txt`;
-const persistedFailureTracePath = path.join(
-  path.dirname(runManifestPath),
-  failureTraceName,
-);
-
 function sanitize(text, root) {
   let sanitized = text
     .replaceAll(root, "<isolated-root>")
@@ -139,7 +133,18 @@ function failureManifestBaseline() {
   };
 }
 
-async function writeFailureEvidence(instance, error, root, fallbackManifest) {
+async function writeFailureEvidence(
+  instance,
+  error,
+  root,
+  fallbackManifest,
+  manifestPath,
+) {
+  const failureTraceName = `${path.basename(manifestPath)}.failure-trace.txt`;
+  const persistedFailureTracePath = path.join(
+    path.dirname(manifestPath),
+    failureTraceName,
+  );
   const trace = sanitize(
     `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n\n${instance?.output() ?? ""}`,
     root,
@@ -160,12 +165,16 @@ async function writeFailureEvidence(instance, error, root, fallbackManifest) {
     path.join(root, "run-manifest.json"),
     `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
   );
-  await persistRunManifest(manifest, root);
+  await persistRunManifest(manifest, root, manifestPath);
   return manifest;
 }
 
-async function persistRunManifest(manifest, root) {
-  const relative = path.relative(root, runManifestPath);
+async function persistRunManifest(
+  manifest,
+  root,
+  manifestPath = runManifestPath,
+) {
+  const relative = path.relative(root, manifestPath);
   const isInsideDisposableRoot =
     relative === "" ||
     (relative !== ".." &&
@@ -176,9 +185,9 @@ async function persistRunManifest(manifest, root) {
     false,
     "The T1 run manifest path must be outside the disposable BB instance",
   );
-  await mkdir(path.dirname(runManifestPath), { recursive: true });
+  await mkdir(path.dirname(manifestPath), { recursive: true });
   await writeFile(
-    runManifestPath,
+    manifestPath,
     `${sanitize(JSON.stringify(manifest, null, 2), root)}\n`,
   );
 }
@@ -580,6 +589,8 @@ export async function startBb(root, previousManifest) {
       name.startsWith("SCRIPTED_ECHO_") ||
       name.startsWith("T4_") ||
       name === "ENSEMBLE_T1_RUN_MANIFEST_PATH" ||
+      name === "ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH" ||
+      name === "ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH" ||
       /(?:API_KEY|(?:ACCESS|REFRESH)_TOKEN|PASSWORD|SECRET|CREDENTIAL)/iu.test(
         name,
       )
@@ -964,7 +975,11 @@ export async function rpc(instance, method, input = {}) {
   return pluginRpc(instance, fixturePluginId, method, input);
 }
 
-export async function withFixture(callback) {
+export async function withFixture(
+  callback,
+  { manifestFile = runManifestPath } = {},
+) {
+  const manifestPath = path.resolve(manifestFile);
   const root = await mkdtemp(path.join(tmpdir(), "ensemble-bb-t1-"));
   let instance;
   let passed = false;
@@ -982,8 +997,8 @@ export async function withFixture(callback) {
     });
     instance.runtimeManifest.checks.disposableRootCleanup = { removed: true };
     instance.runtimeManifest.outcome = "passed";
-    await persistRunManifest(instance.runtimeManifest, root);
-    process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
+    await persistRunManifest(instance.runtimeManifest, root, manifestPath);
+    process.stdout.write(`T1_RUN_MANIFEST_PATH ${manifestPath}\n`);
     process.stdout.write(
       `T1_RUN_MANIFEST ${JSON.stringify(instance.runtimeManifest)}\n`,
     );
@@ -1010,6 +1025,7 @@ export async function withFixture(callback) {
       failure,
       root,
       failureManifestBaseline(),
+      manifestPath,
     );
     await rm(root, {
       recursive: true,
@@ -1018,8 +1034,8 @@ export async function withFixture(callback) {
       retryDelay: 100,
     });
     failureManifest.checks.disposableRootCleanup = { removed: true };
-    await persistRunManifest(failureManifest, root);
-    process.stdout.write(`T1_RUN_MANIFEST_PATH ${runManifestPath}\n`);
+    await persistRunManifest(failureManifest, root, manifestPath);
+    process.stdout.write(`T1_RUN_MANIFEST_PATH ${manifestPath}\n`);
     throw failure;
   } finally {
     if (passed && instance) assert(hasExited(instance.processHandle));

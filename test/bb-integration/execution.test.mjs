@@ -80,8 +80,21 @@ function holdScheduledMessageForDay() {
   return Date.now() + 24 * 60 * 60 * 1_000;
 }
 
+function withT2ExecutionFixture(callback) {
+  return withFixture(callback, {
+    manifestFile: process.env.ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH,
+  });
+}
+
+function withT2PermissionEnvironmentFixture(callback) {
+  return withFixture(callback, {
+    manifestFile:
+      process.env.ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH,
+  });
+}
+
 test("public execution settings, lifecycle, interactions, retry, and environment identity are observable", async () => {
-  await withFixture(async (instance) => {
+  await withT2ExecutionFixture(async (instance) => {
     const installed = await bbCli(
       instance,
       "plugin",
@@ -617,7 +630,7 @@ test("public execution settings, lifecycle, interactions, retry, and environment
 });
 
 test("provider permission modes and managed environment inputs reach scripted turns", async () => {
-  await withFixture(async (instance) => {
+  await withT2PermissionEnvironmentFixture(async (instance) => {
     const installed = await bbCli(
       instance,
       "plugin",

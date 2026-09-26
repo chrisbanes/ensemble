@@ -377,6 +377,146 @@ function hasPermissionEnvironmentEvidence(matrix) {
   }
 }
 
+const T2_EXECUTION_CHECKS = [
+  "executionSpawn",
+  "executionUnsupportedChoice",
+  "executionRetry",
+  "executionLifecycle",
+  "executionInteraction",
+  "sharedEnvironmentAfterRestart",
+];
+const T2_PERMISSION_CHECKS = [
+  "permissionModeAdvertisementProbe",
+  "permissionEnvironmentMatrix",
+];
+const T2_SHARED_CHECKS = ["ownedProcessCleanup", "disposableRootCleanup"];
+
+export function combineT2FixtureManifests(
+  executionManifest,
+  permissionEnvironmentManifest,
+) {
+  for (const [name, manifest] of [
+    ["execution", executionManifest],
+    ["permissionEnvironment", permissionEnvironmentManifest],
+  ]) {
+    assert(
+      manifest !== null && typeof manifest === "object",
+      `T2 ${name} fixture manifest is missing`,
+    );
+    assert.equal(manifest.outcome, "passed", `T2 ${name} fixture did not pass`);
+    requireObject(manifest.checks, `T2 ${name} fixture checks`);
+    const checks = manifest.checks;
+    requireObject(
+      checks.ownedProcessCleanup,
+      `T2 ${name} owned-process cleanup`,
+    );
+    const cleanup = checks.ownedProcessCleanup;
+    assert.equal(cleanup.allExited, true, `T2 ${name} leaked an owned process`);
+    assert.equal(
+      cleanup.serverPortClosed,
+      true,
+      `T2 ${name} server port stayed open`,
+    );
+    assert.equal(
+      cleanup.daemonPortClosed,
+      true,
+      `T2 ${name} daemon port stayed open`,
+    );
+    assert.equal(cleanup.forced, false, `T2 ${name} needed forced cleanup`);
+    assert.equal(
+      checks.disposableRootCleanup?.removed,
+      true,
+      `T2 ${name} disposable fixture root was not removed`,
+    );
+  }
+
+  const executionChecks = executionManifest.checks;
+  const permissionChecks = permissionEnvironmentManifest.checks;
+  for (const name of T2_EXECUTION_CHECKS) {
+    assert(
+      Object.hasOwn(executionChecks, name),
+      `T2 execution fixture is missing ${name}`,
+    );
+  }
+  for (const name of T2_PERMISSION_CHECKS) {
+    assert(
+      Object.hasOwn(permissionChecks, name),
+      `T2 permissionEnvironment fixture is missing ${name}`,
+    );
+  }
+  assertPermissionEnvironmentMatrix(
+    permissionChecks.permissionEnvironmentMatrix,
+  );
+
+  const executionSpecificChecks = Object.fromEntries(
+    Object.entries(executionChecks).filter(
+      ([name]) => !T2_SHARED_CHECKS.includes(name),
+    ),
+  );
+  const permissionSpecificChecks = Object.fromEntries(
+    Object.entries(permissionChecks).filter(
+      ([name]) => !T2_SHARED_CHECKS.includes(name),
+    ),
+  );
+  const overlappingChecks = Object.keys(executionSpecificChecks).filter(
+    (name) => Object.hasOwn(permissionSpecificChecks, name),
+  );
+  assert.deepEqual(
+    overlappingChecks,
+    [],
+    "T2 fixture evidence checks must be disjoint before combining",
+  );
+
+  const executionCleanup = executionChecks.ownedProcessCleanup;
+  const permissionCleanup = permissionChecks.ownedProcessCleanup;
+  const executionRootCleanup = executionChecks.disposableRootCleanup;
+  const permissionRootCleanup = permissionChecks.disposableRootCleanup;
+  return {
+    ...executionManifest,
+    checks: {
+      ...executionSpecificChecks,
+      ...permissionSpecificChecks,
+      ownedProcessCleanup: {
+        pids: [
+          ...new Set([
+            ...(executionCleanup.pids ?? []),
+            ...(permissionCleanup.pids ?? []),
+          ]),
+        ].sort((left, right) => left - right),
+        allExited: executionCleanup.allExited && permissionCleanup.allExited,
+        serverPortClosed:
+          executionCleanup.serverPortClosed &&
+          permissionCleanup.serverPortClosed,
+        daemonPortClosed:
+          executionCleanup.daemonPortClosed &&
+          permissionCleanup.daemonPortClosed,
+        forced: executionCleanup.forced || permissionCleanup.forced,
+        fixtureRuns: [
+          { name: "execution", ...executionCleanup },
+          { name: "permissionEnvironment", ...permissionCleanup },
+        ],
+      },
+      disposableRootCleanup: {
+        removed: executionRootCleanup.removed && permissionRootCleanup.removed,
+        fixtureRoots: {
+          execution: executionRootCleanup.removed,
+          permissionEnvironment: permissionRootCleanup.removed,
+        },
+      },
+    },
+    fixtureManifestEvidence: {
+      execution: {
+        outcome: executionManifest.outcome,
+        checkNames: Object.keys(executionChecks).sort(),
+      },
+      permissionEnvironment: {
+        outcome: permissionEnvironmentManifest.outcome,
+        checkNames: Object.keys(permissionChecks).sort(),
+      },
+    },
+  };
+}
+
 function proposedEnsembleContract() {
   return {
     evidenceScope: "proposed-Ensemble-contract",
@@ -1854,10 +1994,27 @@ function assertInitialWorkspaceEvidence(identities, observed) {
   const joined = observed.joinedAttempt;
   assert.equal(joined.operationId, identities.taskOperationId);
   assert.equal(joined.taskId, identities.taskId);
-  assert.equal(joined.ownerAttemptId, attempts[0]);
-  assert.equal(joined.attemptId, attempts[1]);
+  const ownerAttemptId = joined.ownerAttemptId;
+  const joinedAttemptId = joined.attemptId;
+  assert(
+    attempts.includes(ownerAttemptId),
+    "joinedAttempt.ownerAttemptId must name a competing attempt",
+  );
+  assert(
+    attempts.includes(joinedAttemptId),
+    "joinedAttempt.attemptId must name a competing attempt",
+  );
+  assert.notEqual(
+    ownerAttemptId,
+    joinedAttemptId,
+    "joinedAttempt owner and joined attempt must be distinct",
+  );
   assert.equal(joined.disposition, "joined");
-  assert.equal(joined.spawnCalls, 1);
+  assert.equal(
+    joined.spawnCalls,
+    1,
+    "joinedAttempt.spawnCalls must remain one",
+  );
   for (const label of [
     "acceptedReconciliationBeforeRestart",
     "reconciliation",
@@ -1867,7 +2024,11 @@ function assertInitialWorkspaceEvidence(identities, observed) {
     assert.equal(result.operationId, identities.taskOperationId);
     assert.equal(result.taskId, identities.taskId);
     assert.equal(result.projectId, identities.projectId);
-    assert.equal(result.ownerAttemptId, attempts[0]);
+    assert.equal(
+      result.ownerAttemptId,
+      ownerAttemptId,
+      `${label} ownerAttemptId must match the accepted joined-attempt observation`,
+    );
     assert.equal(result.spawnCalls, 1);
     assert.equal(result.chosenThreadId, identities.chosenTaskThreadId);
     assert.equal(
@@ -1880,16 +2041,43 @@ function assertInitialWorkspaceEvidence(identities, observed) {
       result.matches[0]?.environmentId,
       identities.chosenTaskEnvironmentId,
     );
-    assert.deepEqual(
-      result.attempts?.map((attempt) => [
+    assert.equal(
+      result.attempts?.length,
+      attempts.length,
+      `${label} must report each competing attempt once`,
+    );
+    const dispositions = new Map(
+      result.attempts.map((attempt) => [
         attempt.attemptId,
         attempt.disposition,
       ]),
-      [
-        [attempts[0], "owner"],
-        [attempts[1], "joined"],
-      ],
+    );
+    assert.equal(
+      dispositions.size,
+      attempts.length,
+      `${label} must report unique competing attempts`,
+    );
+    assert.deepEqual(
+      [...dispositions.keys()].sort(),
+      [...attempts].sort(),
+      `${label} must reconcile the same two attempts`,
+    );
+    assert.equal(
+      [...dispositions.values()].filter(
+        (disposition) => disposition === "owner",
+      ).length,
+      1,
       `${label} must show one owner and one joined attempt`,
+    );
+    assert.equal(
+      dispositions.get(ownerAttemptId),
+      "owner",
+      `${label} must preserve the observed owner disposition`,
+    );
+    assert.equal(
+      dispositions.get(joinedAttemptId),
+      "joined",
+      `${label} must preserve the observed joined disposition`,
     );
   }
   const missing = observed.missingEnvironment;

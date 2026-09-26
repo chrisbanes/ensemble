@@ -12,6 +12,7 @@ import {
   assertIntegrationReport,
   assertT5Reports,
   buildIntegrationReport,
+  combineT2FixtureManifests,
   readIntegrationReport,
   serializeIntegrationReport,
   writeIntegrationReport,
@@ -179,6 +180,39 @@ function permissionEnvironmentMatrix() {
       environmentId,
     })),
   };
+}
+
+function t2FixtureManifest(checks) {
+  return {
+    outcome: "passed",
+    checks: {
+      ...checks,
+      ownedProcessCleanup: {
+        pids: [100, 101],
+        allExited: true,
+        serverPortClosed: true,
+        daemonPortClosed: true,
+        forced: false,
+      },
+      disposableRootCleanup: { removed: true },
+    },
+  };
+}
+
+function t2FixtureManifests() {
+  const execution = t2FixtureManifest({
+    executionSpawn: { threadId: "execution-thread" },
+    executionUnsupportedChoice: { threadId: "unsupported-thread" },
+    executionRetry: { threadId: "retry-thread" },
+    executionLifecycle: [{ name: "thread.created" }],
+    executionInteraction: { threadId: "interaction-thread" },
+    sharedEnvironmentAfterRestart: { environmentId: "shared-environment" },
+  });
+  const permissionEnvironment = t2FixtureManifest({
+    permissionModeAdvertisementProbe: { providerId: "ensemble-scripted" },
+    permissionEnvironmentMatrix: permissionEnvironmentMatrix(),
+  });
+  return { execution, permissionEnvironment };
 }
 
 function writerAdmissionIdentities() {
@@ -896,6 +930,43 @@ test("thread spawn report uses the permission matrix when execution spawn is abs
   assert.equal(spawnRow.verdict, "passed");
 });
 
+test("T2 combines the two validated fixture manifests and keeps their checks", () => {
+  const { execution, permissionEnvironment } = t2FixtureManifests();
+
+  const combined = combineT2FixtureManifests(execution, permissionEnvironment);
+
+  assert.deepEqual(
+    combined.checks.executionSpawn,
+    execution.checks.executionSpawn,
+  );
+  assert.deepEqual(
+    combined.checks.permissionEnvironmentMatrix,
+    permissionEnvironment.checks.permissionEnvironmentMatrix,
+  );
+  assert.equal(combined.checks.ownedProcessCleanup.allExited, true);
+  assert.deepEqual(
+    combined.checks.ownedProcessCleanup.fixtureRuns.map((run) => run.name),
+    ["execution", "permissionEnvironment"],
+  );
+  assert.deepEqual(combined.checks.disposableRootCleanup.fixtureRoots, {
+    execution: true,
+    permissionEnvironment: true,
+  });
+});
+
+test("T2 aggregation rejects either missing fixture manifest", () => {
+  const { execution, permissionEnvironment } = t2FixtureManifests();
+
+  assert.throws(
+    () => combineT2FixtureManifests(undefined, permissionEnvironment),
+    /T2 execution fixture manifest is missing/u,
+  );
+  assert.throws(
+    () => combineT2FixtureManifests(execution, undefined),
+    /T2 permissionEnvironment fixture manifest is missing/u,
+  );
+});
+
 test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
   const report = validReport();
   const row = report.rows[0];
@@ -939,6 +1010,64 @@ test("workspace intent report rejects competing owners, duplicate matches and mi
   assert.throws(
     () => assertT5Reports(hiddenStart),
     /must not start a provider/u,
+  );
+});
+
+test("workspace reconciliation follows the observed owner in either input order", () => {
+  for (const ownerIndex of [0, 1]) {
+    const reports = validT5Reports();
+    const row = reports.find(
+      (entry) => entry.name === "initial-workspace-identity",
+    );
+    if (ownerIndex === 1) row.identities.competingAttemptIds.reverse();
+    const ownerAttemptId = row.identities.competingAttemptIds[ownerIndex];
+    const joinedAttemptId = row.identities.competingAttemptIds[1 - ownerIndex];
+    const observed = row.observed;
+    observed.joinedAttempt.ownerAttemptId = ownerAttemptId;
+    observed.joinedAttempt.attemptId = joinedAttemptId;
+    for (const label of [
+      "acceptedReconciliationBeforeRestart",
+      "reconciliation",
+    ]) {
+      const reconciliation = observed[label];
+      reconciliation.ownerAttemptId = ownerAttemptId;
+      reconciliation.attempts = row.identities.competingAttemptIds.map(
+        (attemptId) => ({
+          attemptId,
+          disposition: attemptId === ownerAttemptId ? "owner" : "joined",
+        }),
+      );
+      if (ownerIndex === 1) reconciliation.attempts.reverse();
+    }
+    assert.doesNotThrow(() => assertT5Reports(reports));
+  }
+});
+
+test("workspace reconciliation rejects inconsistent owner and spawn observations", () => {
+  const inconsistentOwner = validT5Reports();
+  const row = inconsistentOwner.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  row.observed.reconciliation.ownerAttemptId = "unobserved-owner";
+  assert.throws(() => assertT5Reports(inconsistentOwner), /ownerAttemptId/u);
+
+  const duplicateAttempt = validT5Reports();
+  const reconciliation = duplicateAttempt.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation;
+  reconciliation.attempts[1].attemptId = reconciliation.attempts[0].attemptId;
+  assert.throws(
+    () => assertT5Reports(duplicateAttempt),
+    /unique competing attempts/u,
+  );
+
+  const duplicateSpawn = validT5Reports();
+  duplicateSpawn.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.joinedAttempt.spawnCalls = 2;
+  assert.throws(
+    () => assertT5Reports(duplicateSpawn),
+    /joinedAttempt.spawnCalls/u,
   );
 });
 
