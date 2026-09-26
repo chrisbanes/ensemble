@@ -554,8 +554,9 @@ async function main() {
         assertTapSummary(
           scenario.id,
           result.output,
-          scenario.id === "T5" ? 6 : 1,
-          scenario.id === "T5" ? 6 : 1,
+          // T5 has six gate scenarios and one trace-timing regression.
+          scenario.id === "T5" ? 7 : 1,
+          scenario.id === "T5" ? 7 : 1,
           0,
         );
         assert.equal(
