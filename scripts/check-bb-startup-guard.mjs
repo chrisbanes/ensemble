@@ -27,7 +27,7 @@ const version = JSON.parse(
 ).version;
 assert.equal(
   version,
-  "0.43.4",
+  "0.44.0",
   "Review the probe before testing a different BB version",
 );
 const sourceRevision = (
