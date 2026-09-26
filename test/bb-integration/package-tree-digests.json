@@ -4,7 +4,7 @@
   "recordEncoding": "Sorted UTF-8 relative paths; each record contains a kind byte, uint64 path length, path bytes, uint64 content length, and content bytes. Directories have empty content.",
   "measuredWith": {
     "node": "24.21.0",
-    "npm": "11.20.0",
+    "npm": "12.1.0",
     "platform": "darwin-arm64"
   },
   "packages": {
@@ -13,8 +13,8 @@
       "treeSha256": "8b7837f26a75726c912fd1dfd12cd9ada9fbd6111da59ca7ca778117c48f0874"
     },
     "@get-bb/plugin-sdk": {
-      "version": "0.5.24",
-      "treeSha256": "7df14755b0ba77a2e4cddf41b29922cd7b0f0d9a1d1ae87b2caf1e73073a3fe1"
+      "version": "0.5.27",
+      "treeSha256": "86a2843c03719ed2eb36cd14583336e97ac4e6379a03084b22ba9e295e2e74bb"
     }
   }
 }

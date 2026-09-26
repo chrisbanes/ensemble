@@ -128,7 +128,7 @@ async function manifest(dir, name, extra = {}) {
       name: `bb-plugin-${name}`,
       version: "0.0.1",
       type: "module",
-      dependencies: { "@get-bb/plugin-sdk": "0.5.24", zod: "4.3.6" },
+      dependencies: { "@get-bb/plugin-sdk": "0.5.27", zod: "4.6.5" },
       engines: { bb: ">=0.43.4", bbPluginSdk: ">=0.5.9" },
       bb: {
         name,

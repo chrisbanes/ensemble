@@ -1,7 +1,8 @@
 # Ensemble behavioural specification
 
 **Status: draft for review.** [ADR-1001](adr/1001-agent-coordination-architecture.md)
-records the accepted architecture, including the project and task-source model.
+records the agent coordination model; [ADR-1003](adr/1003-host-independent-core.md)
+updates host ownership, identities, profiles, and portability.
 This document elaborates its observable behaviour. Accepted product, GitHub and
 operational decisions are recorded in the ADR and [decision register](delivery.md#decisions-before-publication);
 remaining technical contracts and release evidence still require review. A bounded local-task prototype exists; see [prototype scope](bb-prototype.md).
@@ -37,7 +38,7 @@ new runtime feature, process graph, or result schema.
 | Part | Operator sees | Responsibility |
 | --- | --- | --- |
 | Projects and tasks | Project task list, task detail, results and attention inbox | Keep work, accountable ownership and decisions together |
-| Agent profiles | Reusable instructions and provider/model settings in configuration | Configure project leads and assignment conversations |
+| Agent profiles | Reusable identity/instructions and host-specific execution settings in configuration | Configure project leads and assignment conversations |
 | Optional GitHub sync | Sources, readiness, last successful sync and confirmed updates | Connect external work to the same task model |
 
 Profiles are reusable configuration. Conversations belong to project leadership
@@ -165,8 +166,9 @@ integration harness.
 
 ## Projects, tasks, and sources
 
-An Ensemble project uses a BB project identity and is distinct from a GitHub Project.
-BB provides repository and workspace configuration; Ensemble adds
+An Ensemble project owns its identity and is distinct from both a bound BB
+project and a GitHub Project. The BB adapter provides repository and workspace
+configuration; Ensemble owns
 profiles, instructions, permissions, cleanup policy, and tasks regardless of where tasks
 originate. A project may have no linked repository and no external sources. Linking
 a repository provides context; it does not automatically enable issue discovery
@@ -268,7 +270,8 @@ for a confirmed unblocked state.
 
 | Data | Authority |
 | --- | --- |
-| Project identities, repository links, conversations, and workspaces | BB. |
+| Ensemble project identities and host bindings | Ensemble. |
+| Host project references, repository links, conversations, and workspaces | Execution host, initially BB. |
 | Ensemble profiles, coordination instructions, and project policy | Ensemble; effective access must also be enforced by the execution environment. |
 | Local task title, description, and work status | Ensemble. |
 | External task title, description, and provider status | External provider; Ensemble retains a local representation. |
@@ -293,8 +296,25 @@ local tasks into external systems is outside the initial source scope.
 
 ## BB hosting boundary
 
-BB provides conversations, providers, workspaces, transcripts, and plugin hosting.
-Ensemble stores tasks, source memberships, assignments, results, and pending work.
+Ensemble owns project and task identities, profiles, policy, source memberships,
+assignments, results, and pending work in a host-independent core. BB is the
+initial execution host and UI integration. Its adapter provides conversations,
+providers, workspaces, transcripts, and plugin hosting, mapping host references
+to Ensemble identities. BB project selection creates or selects a binding; it
+does not make the BB project ID the Ensemble project ID.
+
+Keep SQLite and one execution host per installation. Profiles retain portable
+identity and instructions; execution settings are versioned host bindings
+validated by the adapter. Replacement hosts require those settings to be
+remapped. Moving hosts preserves durable work records and product behavior;
+conversation/workspace transfer is not required, and safe resumption of
+unfinished assignments remains explicitly deferred.
+
+Gate operations whose required host guarantees are unavailable. Unsupported
+mandatory release behavior still blocks that release; disabling it is not
+acceptance. Core tests without BB and real BB integration tests establish
+different evidence. The core is not an independent agent sandbox.
+
 Each assignment normally executes in one BB thread, reused for follow-ups; its
 identity survives replacement conversations. Threads and worktrees have separate
 lifecycles. Taskboard informs the UI design but is not a runtime dependency.
@@ -335,7 +355,8 @@ require it. Display execution permissions separately from Ensemble action policy
 
 Profiles are shared across Ensemble projects; each project selects its allowed
 profiles and supplies project-specific context through project instructions.
-Profiles supply reusable instructions, model settings, and available tools. An
+Profiles supply reusable identity and instructions. Their versioned host bindings
+supply adapter-validated model settings and execution tools, within project policy. An
 assignment chooses an available profile but cannot expand its access beyond the
 project's grants. Agents can create assignments; creating or changing profiles is
 an operator action.
@@ -610,7 +631,7 @@ behaviour is implemented. They do not reopen the accepted architecture.
 | --- | --- | --- |
 | Instruction and permission changes | Determines which context resumed work uses and how access is revoked. | Keep existing assignment revisions until explicit apply; specify revision propagation and recheck permissions at action time. Revocation of Ensemble actions is checked at execution; stopping agent access uses BB/provider controls. |
 | Execution and workspace isolation | Determines how enforced access and concurrent repository work are achieved. | Use BB/provider controls and one task worktree with one writer; prove workspace reuse, cleanup and termination behaviour. |
-| Persistence and integration contracts | Determines crash recovery, identity, and uncertain-write reconciliation. | SQLite is selected; settle schemas, transactions, and GitHub identity and field handling before extracting a plugin interface. |
+| Persistence and integration contracts | Determines crash recovery, identity, and uncertain-write reconciliation. | SQLite and core/host ownership are selected in ADR-1003. Settle product schemas and transactions with T03; GitHub identity/field handling gates T11/T12 source interfaces, not the bounded prototype core extraction. |
 | Limits and operational controls | Determines predictable cost, queue fairness, and stopping behaviour. | Activation, pause/stop, BB concurrency and bounded retries are accepted; retain-until-archive is the cleanup default and inactivity is flagged for attention; detailed retry classification, activity signals and thresholds still need technical design. |
 
 ## How this document becomes implementation

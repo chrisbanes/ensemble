@@ -32,6 +32,45 @@ Acceptance: [release gates](acceptance.md#gates), not a collection of merged PRs
 
 ## Delivery focus
 
+### Host-independent foundation
+
+[ADR-1003](adr/1003-host-independent-core.md) changes the implementation boundary,
+not the product's coordination behavior. The bounded prototype is now split
+into core and BB adapter modules, with [P01–P05](acceptance.md#portability-extraction-gate)
+proved by standalone and isolated real-BB tests on 25 September 2026. It retains
+one assignment per task and the existing tool flow; it does not implement the
+remaining MVP. The installed Haze prototype is unchanged. The schema transition
+is transactional and tested against legacy records.
+
+Apply the following ownership to the existing briefs when implementation resumes:
+
+| Tickets | Core responsibility | BB integration responsibility |
+| --- | --- | --- |
+| T01/T02 | Standalone host-contract fixtures and policy invariants | Real BB compatibility, execution access, capacity and workspace lifecycle evidence |
+| T03 | Ensemble identities, SQLite schema/migrations, durable commands and bindings | Supply the database connection and authenticated host context |
+| T04/T05 | Portable profile identity/instructions, project policy, task commands | Versioned execution settings, catalog validation, BB configuration and UI |
+| T06–T09 | Launch/delivery intent, eligibility, authorization, recovery and human-request state | Host execution, observation, stop, wakeups, and interface delivery |
+| T11/T12 | External identity, source membership, admission and write policy | GitHub transport/authentication; BB credential and repository lookup behind the integration |
+
+Core development and standalone checks need no running BB. Dependent execution
+features still require their BB capability proofs, and T10 still requires the
+complete real-host journey. The existing dependency map below governs those
+product tickets; it does not force pure extraction tests to wait for unrelated
+execution capabilities. No new feature passes a gate merely by being portable.
+
+The manifest, CI and integration harness now agree on SDK package 0.5.27 and npm
+12.1.0. The [25 September qualification](bb-capabilities.md#current-toolchain-qualification--25-september-2026)
+passed the existing aggregate with its exact expected diagnostic envelope;
+startup and writer-termination failures remain explicit. The extraction is
+complete, while their dependent product features remain gated.
+
+These local briefs have been revised; linked GitHub issues have not been updated
+by this design session. Reconcile their scope before using them as implementation
+authority. A second host, service deployment, multi-host operation and active-work
+migration are outside this foundation.
+
+### Operational product
+
 Build the [first local-task journey](SPEC.md#first-local-task-journey) across
 T04–T10, supported by T01–T03. Profiles are reusable configuration; do not add bot
 identities, personal bot state or a bot management ticket. T11–T12 add GitHub sync

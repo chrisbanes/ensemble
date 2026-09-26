@@ -3,5 +3,5 @@
   "revision": "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
   "source": "tests/scripted-echo-provider/src/provider-bridge.ts",
   "upstreamSourceSha256": "4af6205519d056007f179cec8e93b112e74a19fb9574c7ab489533e276c6dfe3",
-  "instrumentation": "Records the public tool-call response for the T1 result assertion."
+  "instrumentation": "Records the public tool-call response and decodes bounded test-only tool_args through a local helper. The harness reverses these exact edits to verify the original upstream source hash."
 }

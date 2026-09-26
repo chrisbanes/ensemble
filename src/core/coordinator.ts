@@ -1,7 +1,10 @@
 import type { Assignment, Store } from "./store.js";
 
 export interface WorkerHost {
-  spawn(assignment: Assignment): Promise<string>;
+  spawn(
+    assignment: Assignment,
+    coordinatorConversationId: string,
+  ): Promise<string>;
   find(assignment: Assignment): Promise<string[]>;
 }
 
@@ -9,14 +12,22 @@ export class Coordinator {
   constructor(
     private readonly store: Store,
     private readonly host: WorkerHost,
+    private readonly hostKey: string,
   ) {}
 
-  async launch(id: string): Promise<Assignment> {
+  async launch(
+    id: string,
+    coordinatorConversationId: string,
+  ): Promise<Assignment> {
     if (!this.store.beginLaunch(id)) return this.store.get(id);
-    // Persist intent before crossing the BB API boundary. Any throw leaves an
+    const assignment = this.store.get(id);
+    // Persist intent before crossing the host API boundary. Any throw leaves an
     // uncertain launch that may only be reconciled, never automatically retried.
-    const threadId = await this.host.spawn(this.store.get(id));
-    this.store.attach(id, threadId);
+    const conversationId = await this.host.spawn(
+      assignment,
+      coordinatorConversationId,
+    );
+    this.store.attachConversation(id, this.hostKey, conversationId);
     return this.store.get(id);
   }
 
@@ -29,12 +40,13 @@ export class Coordinator {
         ambiguous.push(assignment.id);
         continue;
       }
-      if (matches[0]) this.store.attach(assignment.id, matches[0]);
+      if (matches[0])
+        this.store.attachConversation(assignment.id, this.hostKey, matches[0]);
       // Zero matches isn't proof that an earlier request cannot still finish.
     }
     if (ambiguous.length)
       throw new Error(
-        `Multiple BB threads for assignments ${ambiguous.join(", ")}; operator resolution required`,
+        `Multiple host conversations for assignments ${ambiguous.join(", ")}; operator resolution required`,
       );
   }
 }

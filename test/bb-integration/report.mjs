@@ -1052,7 +1052,7 @@ export function assertExpectedT4Failure({
   assert.equal(compatibility?.status, "passed");
   assert.equal(compatibility?.incompatibleFixture?.status, "incompatible");
   const hostSdkMatch = compatibility.incompatibleFixture.statusDetail?.match(
-    /^requires bb plugin SDK >=0\.5\.24, running SDK is (\d+\.\d+\.\d+)$/u,
+    /^requires bb plugin SDK >=0\.5\.27, running SDK is (\d+\.\d+\.\d+)$/u,
   );
   assert(hostSdkMatch, "BB host SDK version evidence is missing");
   assert.equal(compatibility.bbHostPluginSdk, hostSdkMatch[1]);
@@ -1090,7 +1090,7 @@ export function assertIntegrationReport(report) {
     "report.integrationSourceDigest",
   );
   assert.equal(report.toolchain?.node, "24.21.0", "report Node.js pin changed");
-  assert.equal(report.toolchain?.npm, "11.20.0", "report npm pin changed");
+  assert.equal(report.toolchain?.npm, "12.1.0", "report npm pin changed");
   assert(Array.isArray(report.rows), "report.rows must be an array");
   const keyed = new Map();
   for (const entry of report.rows) {

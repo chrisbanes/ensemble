@@ -4,6 +4,10 @@ status: accepted
 
 # Build Ensemble around agent coordination
 
+The host ownership and identity choices below are partially superseded by
+[ADR-1003](1003-host-independent-core.md). BB remains the initial host of a
+host-independent Ensemble core; the other product policies remain in force.
+
 Ensemble is a BB plugin where agents organise work through instructions
 and runtime tools. Agents decide how to plan, implement, review, and revise work;
 Ensemble owns durable coordination and its recovery; BB provides agent execution. This

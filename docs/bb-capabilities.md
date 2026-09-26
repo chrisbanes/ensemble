@@ -1,5 +1,23 @@
 # BB capability evidence
 
+## Current toolchain qualification — 25 September 2026
+
+The isolated `npm run test:bb-integration` aggregate completed on Node 24.21.0,
+npm 12.1.0, BB 0.43.4 (host SDK 0.5.9), and plugin SDK package 0.5.27 on macOS
+arm64. Installed package hashes were measured after pinned installation and
+checked against the lockfile's artifact identities. T1, T2, T3 and T5 passed;
+T4 reproduced only its exact expected diagnostic. The report retained 17 API
+rows, seven proof gates and six T5 rows with outcome
+`completed-with-capability-gaps`.
+
+`startup-queued-dispatch` and `stop-writer-release` remain failed gates; dependent
+T02/T06/T08 work stays blocked. This qualifies the refreshed harness for the
+bounded core extraction. It does not establish an operational coordinator or
+clear those product gates. The older standalone diagnostic scripts below have
+updated dependency pins but were not rerun for this qualification.
+
+## Original evidence — 24 September 2026
+
 Date: 2026-09-24. Live harness runtime: installed **BB 0.43.4** with host SDK
 **0.5.9**, plugin SDK package **0.5.24**, Node **24.21.0**, macOS arm64. The
 harness verifies SHA-256 digests of the installed BB runtime tree and plugin SDK

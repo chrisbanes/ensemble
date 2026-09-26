@@ -26,14 +26,14 @@ const expected = {
   bb: "0.43.4",
   bbIntegrity:
     "sha512-+Al7eFihHN9350ao8LTVyoPbY4bbiRg8j2ZQNTlNjRLSaYpyTUR87aph6KqkqJR3sskMtPpxhLOaiFqqYO5LBQ==",
-  sdk: "0.5.24",
+  sdk: "0.5.27",
   sdkIntegrity:
-    "sha512-NHF2PZosuP0FNO5OZwb3T2TdQEJ7Nyycv1Ytl1AVgIfZT8g5+sz9kFynZp6yLpmx2NJXq7oCivC4B+4WQXFLqQ==",
+    "sha512-hlBaw0n1dePfGmtnR5VQUMPmDWZKMKKS28KoJ9UFJ2lX8stB27X4E10th8DJiVg+XGKNUzFVqFLNd1EOqK3bAA==",
   playwright: "1.63.0",
   playwrightIntegrity:
     "sha512-+7ziBLidS4NaNCdt57SUDT+wYmmd5fmiQejUic/kb+YsYSCPyOOE9sebzMjNmQrsnNpDJqd4WHvV/8lfKfUDUg==",
   providerBridgeSha256:
-    "049cf0e0a74ce848488e0a0558a5cd7eb30f252b7e5ebaf3f50ce9624832cf4b",
+    "51fb0cc763b6ee9e0722a8b7f3091f56b65f6d3e6d7e35fc41b9cc5d536ef990",
   providerBridgeRevision: "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
   providerBridgeUpstreamSha256:
     "4af6205519d056007f179cec8e93b112e74a19fb9574c7ab489533e276c6dfe3",
@@ -47,7 +47,7 @@ const packageTreePins = JSON.parse(
 assert.equal(packageTreePins.schemaVersion, 1);
 assert.equal(packageTreePins.hashAlgorithm, "sha256");
 assert.equal(packageTreePins.measuredWith.node, expected.node);
-assert.equal(packageTreePins.measuredWith.npm, "11.20.0");
+assert.equal(packageTreePins.measuredWith.npm, "12.1.0");
 assert.equal(packageTreePins.packages["bb-app"].version, expected.bb);
 assert.equal(
   packageTreePins.packages["@get-bb/plugin-sdk"].version,
@@ -205,6 +205,7 @@ async function stageFixture(root) {
     "package.json",
     "provider-bridge.provenance.json",
     "provider-bridge.ts",
+    "tool-arguments.ts",
     "server.ts",
   ]) {
     await copyFile(
@@ -552,10 +553,20 @@ export async function startBb(root, previousManifest) {
   }
 `;
   assert.equal(providerBridgeSource.split(recorder).length - 1, 1);
+  const argumentImport =
+    'import { parseToolArguments } from "./tool-arguments.js";\n';
+  const argumentCall = "arguments: parseToolArguments(promptText(args.input)),";
+  assert.equal(providerBridgeSource.split(argumentImport).length - 1, 1);
+  assert.equal(providerBridgeSource.split(argumentCall).length - 1, 1);
   assert.equal(
-    sha256(providerBridgeSource.replace(recorder, "")),
+    sha256(
+      providerBridgeSource
+        .replace(recorder, "")
+        .replace(argumentImport, "")
+        .replace(argumentCall, "arguments: {},"),
+    ),
     providerProvenance.upstreamSourceSha256,
-    "Scripted bridge does not match the pinned upstream source plus test recorder",
+    "Scripted bridge does not match pinned upstream plus test recorder and arguments",
   );
 
   const serverPort = await freePort();

@@ -2,9 +2,9 @@
 
 ## Decision and scope
 
-Build Ensemble as an independent BB plugin. Use Taskboard's project-scoped board,
+Run Ensemble’s host-independent core inside a BB plugin. Use Taskboard's project-scoped board,
 task details, and conversation context as design references. There is no Taskboard
-dependency or fork. The product architecture is recorded in ADR-1001.
+dependency or fork. The product architecture is recorded in ADR-1001 and the host boundary in ADR-1003.
 
 This experiment tests the smallest storage/execution boundary: create a local task,
 delegate one worker, persist its result, and recover the assignment after a restart.
@@ -16,14 +16,16 @@ panel are later slices. The prototype allows only one assignment per task.
 
 | Ensemble | BB |
 | --- | --- |
-| Task identity, title, project reference | Project and repository configuration |
-| Assignment brief, state, thread association, result | Conversation, provider process, transcript |
+| Task and project identity, title, host bindings | Host project and repository configuration |
+| Assignment brief, instruction snapshot, state, result | Conversation, provider process, transcript |
 | Reconciliation of launch intent | Workspace provisioning and execution lifecycle |
 | Future source memberships and handoffs | Plugin settings, database handle, and UI host |
 
-The plugin uses BB's own SQLite handle. Automated tests use Node's SQLite driver
-against temporary files. This checks SQL persistence and coordination logic but
-does not replace a test against BB's better-sqlite3 handle and plugin loader.
+The core owns its schema and receives a SQLite connection. The BB adapter supplies
+BB’s SQLite handle; standalone tests use Node’s SQLite driver against temporary
+files. `src/server.ts` is the manifest entry and re-exports the BB adapter.
+`EnsembleService` owns caller authorization and commands; `Coordinator` owns
+launch/reconciliation through the small `WorkerHost` spawn/find contract.
 
 ## Prototype tools
 
@@ -51,7 +53,10 @@ Workers use BB's project-default environment and `accept-edits` permission mode.
 These settings do not provide Ensemble's planned project-level security boundary.
 Use a disposable project. The plugin has no workspace cleanup or publication code.
 The operator controls the coordinator ID and worker configuration; agent tools
-cannot change them. Configuration changes during active work are not yet managed.
+cannot change them. Changing the selected project or coordinator immediately revokes the previous
+coordinator’s management access. An already assigned worker may still report its
+result. Assignments retain their captured instructions; versioned execution
+profiles and explicit instruction updates remain future work.
 
 ## Recovery
 
@@ -75,7 +80,23 @@ Results remain readable after restart. Automatic delivery to a sleeping owner is
 not implemented: that requires a durable delivery record and proven BB message
 idempotency. For this experiment the operator asks the coordinator to read results.
 
-## Validation and next live experiment
+## Schema and portability
+
+New projects have Ensemble UUIDs distinct from BB project IDs. Task and assignment
+records use those IDs; separate project and conversation bindings retain host
+references. The four BB tools keep their existing JSON shape, including BB
+`projectId` and `threadId` fields.
+
+On initialization, a transactional schema migration retains original task and
+assignment IDs, states, results, and BB references. Legacy project IDs are retained
+as historical Ensemble IDs with explicit host bindings; newly created projects
+receive independent IDs. Historical instructions that were never stored stay
+null; uncertain launches remain uncertain and cannot automatically spawn again.
+The schema version and host installation identity survive restart. Opening a newer
+schema or selecting another host kind fails. This is a one-host installation,
+not a facility for moving unfinished work between hosts.
+
+## Validation
 
 `npm run check` covers type compatibility with the pinned published SDK and:
 
@@ -87,7 +108,31 @@ idempotency. For this experiment the operator asks the coordinator to read resul
 6. Plugin tool registration, input validation, actor checks, and reload reconciliation
    through a fake public BB API.
 
-These are automated tests with a fake BB execution host.
+These include automated tests with a fake execution host. Additional core tests
+cover caller policy, distinct IDs, conflicting bindings, instruction snapshots,
+preflight failures, migration rollback and legacy uncertain-launch recovery.
+A dependency test rejects direct/transitive BB or adapter imports, including
+exports and literal dynamic imports. A subprocess runs copied compiled core
+modules with only Zod installed, exercises restart/recovery, and verifies BB
+cannot resolve.
+
+`npm run test:bb-integration` exercises the pinned real BB host and fixture API.
+`npm run test:bb-prototype` installs the production adapter into an isolated BB
+instance and exercises its four tools with a scripted provider, durable results,
+foreign-report rejection, restart, and replay without another worker. These
+suites use disposable data and repositories and leave the installed Haze
+prototype untouched. They do not provide authenticated-provider release evidence.
+The startup queue and delayed writer-release capability gaps remain recorded in
+[BB capabilities](bb-capabilities.md).
+
+### Extraction evidence — 25 September 2026
+
+The standalone core tests, T1–T5 aggregate, and production adapter smoke passed
+on Node 24.21.0, npm 12.1.0, BB 0.43.4 and SDK package 0.5.27 on macOS arm64.
+The production smoke verified the actual BB plugin loader and SQLite driver,
+one completed assignment, foreign-report rejection, stable core and host IDs
+after restart, and replay without another conversation. Cleanup confirmed all
+owned processes exited, both ports closed, and the disposable root was removed.
 
 ### Live installation evidence — 24 September 2026
 

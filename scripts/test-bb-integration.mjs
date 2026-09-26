@@ -19,7 +19,7 @@ import { terminateOwnedProcessGroup } from "../test/bb-integration/owned-process
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const nodePin = "24.21.0";
 const bbPin = "0.43.4";
-const pluginSdkPin = "0.5.24";
+const pluginSdkPin = "0.5.27";
 const playwrightPin = "1.63.0";
 const hostSdkPin = "0.5.9";
 const sourceBridgeProvenance = JSON.parse(
@@ -503,10 +503,10 @@ async function main() {
   const packageJson = JSON.parse(
     await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
   );
-  assert.equal(packageJson.packageManager, "npm@11.20.0", "npm pin changed");
+  assert.equal(packageJson.packageManager, "npm@12.1.0", "npm pin changed");
   const npmVersion =
     process.env.npm_config_user_agent?.match(/npm\/(\d+\.\d+\.\d+)/u)?.[1];
-  assert.equal(npmVersion, "11.20.0", "Run through pinned npm@11.20.0");
+  assert.equal(npmVersion, "12.1.0", "Run through pinned npm@12.1.0");
   assert.equal(packageTreePins.measuredWith.node, nodePin);
   assert.equal(packageTreePins.measuredWith.npm, npmVersion);
   await rm(suiteRunDirectory, { recursive: true, force: true });

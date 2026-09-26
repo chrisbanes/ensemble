@@ -44,7 +44,7 @@ async function installFixturePlugin(
       private: true,
       type: "module",
       engines: { node: ">=24 <25", bb: ">=0.43.4", bbPluginSdk: minimumSdk },
-      dependencies: { "@get-bb/plugin-sdk": "0.5.24", zod: "4.3.6" },
+      dependencies: { "@get-bb/plugin-sdk": "0.5.27", zod: "4.6.5" },
       bb: {
         name: packageName,
         description: "Disposable T4 integration fixture",
@@ -175,11 +175,11 @@ test("public dispatch handoff records bounded holds and an open startup capabili
       instance,
       "t4-sdk-floor-probe",
       "other-wait-server.ts",
-      ">=0.5.24",
+      ">=0.5.27",
     );
     assert.equal(incompatible.status, "incompatible");
     const hostSdkMatch = incompatible.statusDetail?.match(
-      /^requires bb plugin SDK >=0\.5\.24, running SDK is (\d+\.\d+\.\d+)$/u,
+      /^requires bb plugin SDK >=0\.5\.27, running SDK is (\d+\.\d+\.\d+)$/u,
     );
     assert(hostSdkMatch, "BB did not report its running plugin SDK version");
     assert.equal(hostSdkMatch[1], "0.5.9");

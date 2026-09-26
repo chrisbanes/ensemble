@@ -31,13 +31,13 @@ assert(
 const EXPECTED_BB_VERSION = "0.43.4";
 const EXPECTED_SCRIPTED_PROVIDER_REVISION =
   "fdd3de3b19b97e6cd1ef7300cbb54711431249d3";
-const EXPECTED_PLUGIN_SDK_PACKAGE_VERSION = "0.5.24";
+const EXPECTED_PLUGIN_SDK_PACKAGE_VERSION = "0.5.27";
 const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.9";
 const EXPECTED_NODE_VERSION = "24.21.0";
 const EXPECTED_BB_RUNTIME_SHA256 =
   "950d603f24546984352d533a54946c2d900abcaef01b9516105d602494d3df34";
 const EXPECTED_PLUGIN_SDK_SHA256 =
-  "03c336f1fa462e1288f4aaebfbd413512dc65782a402eff590aa84a280288bdf";
+  "93ad00c51b6bee74527f38c9ead1c51c55d19af5887c21cdb86fc3fd4cb3d836";
 const PLUGIN_ID = "ensemble-t01-integration";
 const GUARD_ID = "ensemble-t01-startup-guard";
 const RUNTIME_ID = "ensemble-t01-scripted-runtime";
@@ -278,7 +278,7 @@ async function writeManifest(directory, name, extra = {}) {
       type: "module",
       dependencies: {
         "@get-bb/plugin-sdk": EXPECTED_PLUGIN_SDK_PACKAGE_VERSION,
-        zod: "4.3.6",
+        zod: "4.6.5",
       },
       engines: {
         bb: `>=${EXPECTED_BB_VERSION}`,

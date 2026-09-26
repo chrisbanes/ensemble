@@ -1,4 +1,9 @@
-# BB plugin technical design
+# Core and BB integration technical design
+
+Host ownership follows [ADR-1003](../adr/1003-host-independent-core.md).
+BB-specific protocols below describe the first adapter, not dependencies of
+the core. The bounded prototype has been extracted into `src/core` and
+`src/adapters/bb`; the broader contracts below remain target design.
 
 Status: proposal for review. ADR-1001 records the accepted product direction;
 this document proposes implementation contracts. No additional implementation is
@@ -25,18 +30,34 @@ they introduce no additional workflow stages or bot entities.
 
 ## 1. Architecture and ownership
 
-One BB plugin with a server entry and a UI entry, using the published plugin SDK.
-Ordinary modules inside one package; no independent daemon, workflow language,
-message broker, runtime-provider framework, or Taskboard dependency.
+Use ordinary TypeScript modules in this repository: a core with no BB imports,
+and a BB adapter with plugin server and eventual UI entries using the public SDK.
+The adapter depends on the core; the core never imports the adapter. No separate
+package publication, daemon, workflow language, message broker, or general
+runtime-provider framework is required.
 
 | Module | Owns | Uses |
 | --- | --- | --- |
-| Project configuration | BB project reference, instructions, profile revisions, dispatch settings | BB project/provider/environment catalogs |
-| Tasks | Local content, external references and source membership, accountable owner | Plugin SQLite |
+| Project configuration | Ensemble project identity, instructions, profile revisions, dispatch settings | Host bindings validated by the adapter |
+| Tasks | Local content, external references and source membership, accountable owner | Core-owned SQLite schema |
 | Coordination | Assignments, requests, results, continuations, writer reservations | Tasks, execution adapter |
-| Execution adapter | Translation to BB threads/environments and observed lifecycle | Public BB SDK only |
+| Execution adapter | Translation of core execution requests and caller context to/from BB; host binding validation | Public BB SDK only |
 | Sources | Discovery, normalized observations, confirmed provider writes | GitHub adapter initially |
-| Operator interface | Project/task views, settings, questions, execution controls | Typed plugin RPC and invalidation events |
+| Operator interface | Project/task views, settings, questions, execution controls | Core application commands through BB RPC and invalidation events |
+
+Keep Ensemble authorization, eligibility, durable intents, and recovery decisions
+in core application services shared by agent tools and UI commands. Adapters
+authenticate caller context and resolve it through trusted persisted bindings;
+they do not grant policy authority from tool arguments or mutable host metadata.
+BB supplies process lifetime, events, wakeups and execution capacity; the core
+decides which durable work is eligible. No competing process scheduler is added.
+
+Define host contracts around observable guarantees, including uncertain effects,
+not a copy of the SDK. Add methods only for concrete feature needs. The bounded
+extraction retains spawn and lookup; continuation, stop, workspace and capacity
+contracts arrive with their owning feature tickets. Missing capabilities gate
+affected operations and remain visible. A mandatory missing capability blocks
+release even if the rest of the adapter functions.
 
 BB owns provider processes, transcripts, workspaces and provider interactions.
 Ensemble stores references and observations, not a competing process scheduler.
@@ -45,22 +66,29 @@ A recorded result does not establish task completion or external publication.
 
 ## 2. Persistent records and invariants
 
-Use BB's plugin-owned SQLite database with ordered migrations. The prototype
-schema is disposable; export any wanted experimental records before replacement.
-No silent migration or reset of the installed Haze prototype.
+Ensemble owns SQLite schemas and ordered migrations. Initially BB supplies the
+connection; the same core opens through an injected SQLite connection in the
+standalone harness without loading BB. Do not introduce a multi-database layer.
+The extraction uses a versioned, transactional migration of the original
+prototype tables, preserving task and assignment identities, results, and host
+references. Unknown historical instructions remain null. Future product schema
+changes need their own migration decisions. No reset or update of the installed
+Haze prototype is part of the extraction.
 
 | Record | Minimum fields and constraints |
 | --- | --- |
-| Project configuration | BB project ID, enabled/paused, instruction revision, allowed profile IDs, cleanup mode, policy revision |
-| Profile revision | Stable profile ID, immutable revision, provider/model/reasoning/tier, instructions, allowed capability set, environment strategy |
+| Project configuration | Ensemble project ID, enabled/paused, instruction revision, allowed profile IDs, cleanup mode, policy revision |
+| Project host binding | Ensemble project ID, host kind/installation identity and opaque host project reference; no implicit repository access |
+| Profile revision | Stable profile ID, immutable revision, instructions, allowed capability set |
+| Profile execution binding | Profile revision, host identity, immutable adapter-validated provider/model/reasoning/tier, permission and environment settings |
 | Task | ID, project ID, title/body, work status, readiness provenance, control revision, holds, version, current owner assignment; local or external origin |
 | External item | Provider instance and stable item ID, canonical task ID, authoritative content/version; unique across the installation |
 | Source membership | Source configuration ID, external item ID, current membership and observed time; unique pair |
 | Task dependency | Dependent task ID, blocker task ID or external issue reference, owning authority, confirmed blocker state and observation time; unique dependent/blocker/authority |
 | Assignment | ID, task ID, parent assignment or project-lead reference, requested outcome, profile revision, instruction/policy snapshot, lifecycle/version, work revision, dependencies and holds |
-| Conversation binding | Assignment or project lead, generation, BB thread ID, observed status; at most one current generation |
-| Workspace binding | Task/assignment, BB environment ID, repository scope, writer reservation and retention reason |
-| Launch intent | Assignment/generation, selected execution settings, stable operation ID, pending/uncertain/confirmed outcome, BB reference |
+| Conversation binding | Assignment or project lead, generation, host identity and opaque conversation reference, observed status; at most one current generation |
+| Workspace binding | Task/assignment, host identity and opaque workspace reference, repository scope, writer reservation and retention reason |
+| Launch intent | Assignment/generation, selected execution binding revision, stable operation ID, pending/uncertain/confirmed outcome, opaque host reference |
 | Result | Assignment/work revision/generation, operation ID, summary, artifact references, outcome; immutable accepted result per work revision |
 | Delivery | Recipient assignment, event ID, payload reference, sequence, processing acknowledgement, recorded disposition and caused-operation references; unique recipient/event; transport attempt/BB message identity recorded separately |
 | Human request | Request ID, assignment, question or approval, action/material digest, state, response and responder |
@@ -74,8 +102,8 @@ reject stale versions instead of last-write-wins coordination updates.
 
 Profiles are shared installation-level configuration selected by each project;
 project instructions provide project-specific context. Assignments are durable work, and threads are
-conversations. Concurrent assignments can use the same profile. Store an immutable
-profile snapshot per launch, so changing a profile cannot silently reinterpret
+conversations. Concurrent assignments can use the same profile. Store immutable
+profile and execution-binding snapshots per launch, so changing either cannot silently reinterpret
 historical work. New assignments use current revisions; existing assignments
 retain theirs across follow-ups and replacement conversations until the operator
 explicitly applies an update for their next turn. Recheck current permissions.
@@ -179,8 +207,9 @@ No lifecycle transition prescribes a reviewer count or development sequence.
 
 ## 4. Commands and authorization
 
-Use one application service for UI RPC and agent tools. Tools derive caller thread,
-project, and assignment from host context and trusted persisted bindings. Never
+Use one core application service for UI RPC and agent tools. The BB adapter
+derives caller context from BB and resolves project/conversation host references
+through trusted persisted bindings; the core checks the caller's authorization. Never
 accept caller-supplied roles or mutable BB thread metadata as authorization.
 Operator actions use the BB operator surface; agents cannot create profiles or
 expand policy. Whether BB offers a trustworthy distinction at every entry point
@@ -445,6 +474,11 @@ BB repository mappings. Verify the public RPCs actually cover each needed
 operation; do not assume all Project operations are exposed. Missing scopes or
 login block affected integration actions and appear in setup. No second token
 store or credential material in task instructions.
+
+This authentication and repository lookup code belongs to the BB/GitHub
+integration. Core source identity, admission and write policy cannot call BB
+RPC or depend on its credential store. No alternative authentication system is
+required for the first host.
 
 Plugin UI toasts and public navigation can surface attention items in-app.
 BB's inspected notification history is client-memory state, not durable delivery;

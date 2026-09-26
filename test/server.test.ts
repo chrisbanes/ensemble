@@ -146,3 +146,90 @@ test("plugin tools enforce actor scope and reconnect after a lost BB response", 
     db.close();
   }
 });
+
+for (const changedSetting of ["project", "coordinatorThread"] as const) {
+  test(`${changedSetting} changed after authorization prevents a BB spawn`, async () => {
+    const db = new DatabaseSync(":memory:");
+    const tools = new Map<
+      string,
+      {
+        execute(
+          input: unknown,
+          context: PluginAgentToolContext,
+        ): Promise<string>;
+      }
+    >();
+    let reads = 0;
+    let spawns = 0;
+    const config = {
+      project: "original-project",
+      coordinatorThread: "lead",
+      provider: "provider",
+      model: "model",
+      instructions: "Investigate only",
+    };
+    const bb = {
+      pluginId: "ensemble",
+      storage: { database: () => db },
+      settings: {
+        define: () => ({
+          get: async () => {
+            reads++;
+            // Create and delegate authorization plus preflight use the original
+            // selection. The operator changes it before the final host call.
+            return {
+              ...config,
+              [changedSetting]:
+                reads >= 4 ? "replacement" : config[changedSetting],
+            };
+          },
+        }),
+      },
+      agents: {
+        registerTool: (tool: {
+          name: string;
+          execute(
+            input: unknown,
+            context: PluginAgentToolContext,
+          ): Promise<string>;
+        }) => tools.set(tool.name, tool),
+        configure: () => {},
+      },
+      background: { service: () => {} },
+      sdk: {
+        threads: {
+          async spawn() {
+            spawns++;
+            return { id: "unexpected-worker" };
+          },
+        },
+      },
+    };
+    const context = {
+      projectId: "original-project",
+      threadId: "lead",
+      signal: new AbortController().signal,
+    };
+    const taskId = "10000000-0000-4000-8000-000000000010";
+    try {
+      plugin(bb as unknown as BbPluginApi);
+      await tools
+        .get("ensemble_create_task")!
+        .execute({ id: taskId, title: "Race" }, context);
+      await assert.rejects(
+        tools.get("ensemble_delegate")!.execute(
+          {
+            id: "10000000-0000-4000-8000-000000000011",
+            taskId,
+            brief: "Do not launch after revocation",
+          },
+          context,
+        ),
+        /configured (project|coordinator)/,
+      );
+      assert.equal(spawns, 0);
+    } finally {
+      db.close();
+    }
+  });
+}

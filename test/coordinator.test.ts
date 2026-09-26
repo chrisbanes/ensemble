@@ -4,19 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { Coordinator, type WorkerHost } from "../src/coordinator.js";
-import { Store } from "../src/store.js";
+import { Coordinator, type WorkerHost } from "../src/core/coordinator.js";
+import { Store } from "../src/core/store.js";
 
 function fixture() {
   const path = mkdtempSync(join(tmpdir(), "ensemble-"));
   const filename = join(path, "test.db");
   let db = new DatabaseSync(filename);
+  const store = new Store(db);
+  const hostKey = store.ensureHost("fake");
+  const projectId = store.bindProject(hostKey, "project", "lead").projectId;
+  store.setProjectInstructions(projectId, "Default worker instructions");
   return {
-    store: new Store(db),
+    store,
+    hostKey,
+    projectId,
     reopen() {
       db.close();
       db = new DatabaseSync(filename);
-      return new Store(db);
+      const reopened = new Store(db);
+      reopened.ensureHost("fake");
+      return reopened;
     },
     close() {
       db.close();
@@ -28,20 +36,30 @@ function fixture() {
 test("local task, worker result, and identity survive a database reopen", async () => {
   const f = fixture();
   try {
-    f.store.createTask("task", "project", "Investigate");
-    f.store.assign("assignment", "task", "project", "Find the cause");
-    const c = new Coordinator(f.store, {
-      spawn: async () => "worker",
-      find: async () => [],
-    });
-    await c.launch("assignment");
-    f.store.complete("assignment", "project", "worker", "Found the cause");
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
+    const c = new Coordinator(
+      f.store,
+      {
+        spawn: async () => "worker",
+        find: async () => [],
+      },
+      f.hostKey,
+    );
+    await c.launch("assignment", "lead");
+    f.store.complete(
+      "assignment",
+      f.projectId,
+      f.hostKey,
+      "worker",
+      "Found the cause",
+    );
     const reopened = f.reopen();
     assert.equal(reopened.get("assignment").result, "Found the cause");
     assert.equal(reopened.get("assignment").state, "completed");
-    assert.deepEqual(reopened.createTask("task", "project", "Investigate"), {
+    assert.deepEqual(reopened.createTask("task", f.projectId, "Investigate"), {
       id: "task",
-      projectId: "project",
+      projectId: f.projectId,
       title: "Investigate",
     });
   } finally {
@@ -62,15 +80,20 @@ test("lost spawn response is reconciled after restart without a second worker", 
     },
   };
   try {
-    f.store.createTask("task", "project", "Investigate");
-    f.store.assign("assignment", "task", "project", "Find the cause");
-    await assert.rejects(new Coordinator(f.store, host).launch("assignment"));
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
+    await assert.rejects(
+      new Coordinator(f.store, host, f.hostKey).launch("assignment", "lead"),
+    );
     const reopened = f.reopen();
-    const restarted = new Coordinator(reopened, host);
+    const restarted = new Coordinator(reopened, host, f.hostKey);
     await restarted.reconcile();
-    await restarted.launch("assignment");
+    await restarted.launch("assignment", "lead");
     assert.equal(spawns, 1);
-    assert.equal(reopened.get("assignment").threadId, "existing-worker");
+    assert.equal(
+      reopened.getConversationBinding("assignment")?.externalConversationId,
+      "existing-worker",
+    );
   } finally {
     f.close();
   }
@@ -79,8 +102,8 @@ test("lost spawn response is reconciled after restart without a second worker", 
 test("an ambiguous launch with no match is held; duplicate matches require intervention", async () => {
   const f = fixture();
   try {
-    f.store.createTask("task", "project", "Investigate");
-    f.store.assign("assignment", "task", "project", "Find the cause");
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
     f.store.beginLaunch("assignment");
     const host = {
       spawn: async () => {
@@ -88,11 +111,11 @@ test("an ambiguous launch with no match is held; duplicate matches require inter
       },
       find: async () => [] as string[],
     };
-    const c = new Coordinator(f.store, host);
+    const c = new Coordinator(f.store, host, f.hostKey);
     await c.reconcile();
-    assert.equal((await c.launch("assignment")).state, "launching");
+    assert.equal((await c.launch("assignment", "lead")).state, "launching");
     host.find = async () => ["one", "two"];
-    await assert.rejects(c.reconcile(), /Multiple BB threads/);
+    await assert.rejects(c.reconcile(), /Multiple host conversations/);
   } finally {
     f.close();
   }
@@ -102,32 +125,54 @@ test("concurrent delegation launches once; foreign threads cannot report", async
   const f = fixture();
   let spawns = 0;
   try {
-    f.store.createTask("task", "project", "Investigate");
+    f.store.createTask("task", f.projectId, "Investigate");
     assert.throws(
       () => f.store.assign("wrong", "task", "other", "Find cause"),
       /another project/,
     );
-    f.store.assign("assignment", "task", "project", "Find cause");
-    const c = new Coordinator(f.store, {
-      spawn: async () => {
-        spawns++;
-        return "worker";
+    f.store.assign("assignment", "task", f.projectId, "Find cause");
+    const c = new Coordinator(
+      f.store,
+      {
+        spawn: async () => {
+          spawns++;
+          return "worker";
+        },
+        find: async () => [],
       },
-      find: async () => [],
-    });
-    await Promise.all([c.launch("assignment"), c.launch("assignment")]);
+      f.hostKey,
+    );
+    await Promise.all([
+      c.launch("assignment", "lead"),
+      c.launch("assignment", "lead"),
+    ]);
     assert.equal(spawns, 1);
     assert.throws(
-      () => f.store.complete("assignment", "project", "other-worker", "done"),
+      () =>
+        f.store.complete(
+          "assignment",
+          f.projectId,
+          f.hostKey,
+          "other-worker",
+          "done",
+        ),
       /Only the assigned/,
     );
-    f.store.complete("assignment", "project", "worker", "done");
+    f.store.complete("assignment", f.projectId, f.hostKey, "worker", "done");
     assert.equal(
-      f.store.complete("assignment", "project", "worker", "done").result,
+      f.store.complete("assignment", f.projectId, f.hostKey, "worker", "done")
+        .result,
       "done",
     );
     assert.throws(
-      () => f.store.complete("assignment", "project", "worker", "changed"),
+      () =>
+        f.store.complete(
+          "assignment",
+          f.projectId,
+          f.hostKey,
+          "worker",
+          "changed",
+        ),
       /different result/,
     );
   } finally {
@@ -139,24 +184,37 @@ test("ambiguous launches do not prevent later assignments from reconciling", asy
   const f = fixture();
   try {
     for (const id of ["a-ambiguous", "b-recoverable"]) {
-      f.store.createTask(id, "project", id);
-      f.store.assign(id, id, "project", "Investigate");
+      f.store.createTask(id, f.projectId, id);
+      f.store.assign(id, id, f.projectId, "Investigate");
       f.store.beginLaunch(id);
     }
-    const coordinator = new Coordinator(f.store, {
-      spawn: async () => {
-        throw new Error("must not spawn");
+    const coordinator = new Coordinator(
+      f.store,
+      {
+        spawn: async () => {
+          throw new Error("must not spawn");
+        },
+        find: async (assignment) =>
+          assignment.id === "a-ambiguous"
+            ? ["duplicate-one", "duplicate-two"]
+            : ["worker"],
       },
-      find: async (assignment) =>
-        assignment.id === "a-ambiguous"
-          ? ["duplicate-one", "duplicate-two"]
-          : ["worker"],
-    });
+      f.hostKey,
+    );
     await assert.rejects(coordinator.reconcile(), /a-ambiguous/);
     assert.equal(f.store.get("a-ambiguous").state, "launching");
-    assert.equal(f.store.get("b-recoverable").threadId, "worker");
     assert.equal(
-      f.store.complete("b-recoverable", "project", "worker", "done").state,
+      f.store.getConversationBinding("b-recoverable")?.externalConversationId,
+      "worker",
+    );
+    assert.equal(
+      f.store.complete(
+        "b-recoverable",
+        f.projectId,
+        f.hostKey,
+        "worker",
+        "done",
+      ).state,
       "completed",
     );
   } finally {

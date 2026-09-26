@@ -15,8 +15,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - run: npm install --global npm@11.20.0
+      - run: npm install --global npm@12.1.0
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run check
       - run: npm run test:bb-integration
+      - run: npm run test:bb-prototype
