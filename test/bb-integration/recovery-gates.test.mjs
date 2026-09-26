@@ -1906,7 +1906,8 @@ gateTest(
             },
           }
         : {
-            error: finalRetirementObservation?.environmentLookupError ??
+            error:
+              finalRetirementObservation?.environmentLookupError ??
               "No post-delete environment observation was collected",
           };
     const markerExistsAfterLastDelete =

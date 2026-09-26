@@ -169,10 +169,7 @@ async function runScenario(scenario, manifestFile) {
   let timeoutCleanupError;
   let timeoutHandle;
   const timeoutResult = new Promise((resolve) => {
-    timeoutHandle = setTimeout(
-      () => resolve({ timedOut: true }),
-      timeoutMs,
-    );
+    timeoutHandle = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
   });
   try {
     const first = await Promise.race([
@@ -549,9 +546,7 @@ async function main() {
           result.timedOut,
           false,
           `${scenario.id} timed out after ${scenarioTimeoutMs(scenario.id)} ms${
-            result.timeoutCleanupError
-              ? `; ${result.timeoutCleanupError}`
-              : ""
+            result.timeoutCleanupError ? `; ${result.timeoutCleanupError}` : ""
           }`,
         );
         assert.equal(
