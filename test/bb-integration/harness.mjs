@@ -66,6 +66,11 @@ const runManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
       repositoryRoot,
       "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
     );
+
+export function resolveFixtureManifestPath(override) {
+  return override ? path.resolve(override) : runManifestPath;
+}
+
 function sanitize(text, root) {
   let sanitized = text
     .replaceAll(root, "<isolated-root>")

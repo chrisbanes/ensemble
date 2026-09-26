@@ -7,6 +7,7 @@ import {
   fixtureGit,
   restartBb,
   rpc,
+  resolveFixtureManifestPath,
   waitFor,
   withFixture,
 } from "./harness.mjs";
@@ -82,14 +83,17 @@ function holdScheduledMessageForDay() {
 
 function withT2ExecutionFixture(callback) {
   return withFixture(callback, {
-    manifestFile: process.env.ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH,
+    manifestFile: resolveFixtureManifestPath(
+      process.env.ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH,
+    ),
   });
 }
 
 function withT2PermissionEnvironmentFixture(callback) {
   return withFixture(callback, {
-    manifestFile:
+    manifestFile: resolveFixtureManifestPath(
       process.env.ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH,
+    ),
   });
 }
 

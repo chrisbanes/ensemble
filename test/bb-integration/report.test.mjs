@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { resolveFixtureManifestPath } from "./harness.mjs";
 import {
   REQUIRED_API_ROWS,
   REQUIRED_API_EVIDENCE,
@@ -17,6 +19,14 @@ import {
   serializeIntegrationReport,
   writeIntegrationReport,
 } from "./report.mjs";
+
+const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const defaultFixtureManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
+  ? path.resolve(process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH)
+  : path.join(
+      repositoryRoot,
+      "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
+    );
 
 function evidenceValue(fieldPath) {
   const field = fieldPath.split(".").at(-1);
@@ -967,6 +977,19 @@ test("T2 aggregation rejects either missing fixture manifest", () => {
   );
 });
 
+test("T2 fixture manifest path keeps the fixture default without an override", () => {
+  assert.equal(
+    resolveFixtureManifestPath(undefined),
+    defaultFixtureManifestPath,
+  );
+  assert.equal(resolveFixtureManifestPath(""), defaultFixtureManifestPath);
+});
+
+test("T2 fixture manifest path honors an explicit environment override", () => {
+  const override = path.join(repositoryRoot, "direct-t2-run-manifest.json");
+  assert.equal(resolveFixtureManifestPath(override), override);
+});
+
 test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
   const report = validReport();
   const row = report.rows[0];
@@ -1101,6 +1124,69 @@ test("A17 requires dirty-file observations and a finite retirement window", () =
     () => assertT5Reports(missingDirtyFile),
     /markerExistsAfterFinalArchive/u,
   );
+});
+
+test("A17 accepts retirement confirmed by a missing environment response", () => {
+  const reports = validT5Reports();
+  const observed = reports.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const finalSample = observed.retirementObservations.at(-1);
+  Object.assign(finalSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: "HTTP 404: Environment not found",
+    environmentConfirmedMissing: true,
+    environmentRetired: true,
+  });
+  observed.environmentAfterLastDelete = finalSample.environmentLookupError;
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 accepts a null environment ID only with confirmed missing retirement", () => {
+  const unconfirmedMissing = validT5Reports();
+  const unconfirmedObserved = unconfirmedMissing.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const unconfirmedSample = unconfirmedObserved.retirementObservations.at(-1);
+  Object.assign(unconfirmedSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: "temporary lookup failure",
+    environmentConfirmedMissing: false,
+    environmentRetired: false,
+    retirementObserved: false,
+  });
+  unconfirmedObserved.retirementObserved = false;
+  unconfirmedObserved.environmentAfterLastDelete =
+    unconfirmedSample.environmentLookupError;
+  assert.throws(() => assertT5Reports(unconfirmedMissing), /missing/u);
+
+  const nonMissingFailure = validT5Reports();
+  const failedObserved = nonMissingFailure.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const failedSample = failedObserved.retirementObservations.at(-1);
+  Object.assign(failedSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: "HTTP 500: temporary server error",
+    environmentConfirmedMissing: true,
+    environmentRetired: true,
+  });
+  failedObserved.environmentAfterLastDelete =
+    failedSample.environmentLookupError;
+  assert.throws(
+    () => assertT5Reports(nonMissingFailure),
+    /confirmed missing response/u,
+  );
+
+  const wrongReturnedId = validT5Reports();
+  wrongReturnedId
+    .find((entry) => entry.name === "a17-shared-worktree-retention")
+    .observed.retirementObservations.at(-1).environmentId = "other-environment";
+  assert.throws(() => assertT5Reports(wrongReturnedId), /environment-a17/u);
 });
 
 test("cleanup policy table stays proposed and fails closed for unknown evidence", () => {

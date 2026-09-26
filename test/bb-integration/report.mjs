@@ -2182,7 +2182,30 @@ function assertA17RetentionEvidence(identities, observed) {
       sample.elapsedMs > previousElapsed,
       "A17 sample times must increase",
     );
-    assert.equal(sample.environmentId, identities.environmentId);
+    if (sample.environmentId === null) {
+      assert.equal(
+        sample.environmentConfirmedMissing,
+        true,
+        "A17 null environment ID requires confirmed missing evidence",
+      );
+      assert.equal(
+        sample.environmentRetired,
+        true,
+        "A17 missing environment must be confirmed retired",
+      );
+      assert.equal(
+        typeof sample.environmentLookupError,
+        "string",
+        "A17 missing environment requires its lookup error",
+      );
+      assert.match(
+        sample.environmentLookupError,
+        /(?:404|not found|does not exist|no such environment)/iu,
+        "A17 missing environment requires a confirmed missing response",
+      );
+    } else {
+      assert.equal(sample.environmentId, identities.environmentId);
+    }
     assert.equal(typeof sample.workspaceExists, "boolean");
     assert.equal(typeof sample.markerExists, "boolean");
     assert.equal(typeof sample.environmentRetired, "boolean");
@@ -2202,17 +2225,27 @@ function assertA17RetentionEvidence(identities, observed) {
     last.retirementObserved === true,
     "A17 retirement summary must agree with the final bounded sample",
   );
-  assert.equal(
-    observed.environmentAfterLastDelete?.id,
-    identities.environmentId,
-  );
+  if (last.environmentId === null) {
+    assert.equal(
+      observed.environmentAfterLastDelete,
+      last.environmentLookupError,
+      "A17 missing environment summary must match its final lookup error",
+    );
+  } else {
+    assert.equal(
+      observed.environmentAfterLastDelete?.id,
+      identities.environmentId,
+    );
+  }
   assert.equal(typeof observed.markerExistsAfterLastDelete, "boolean");
   assert.equal(typeof observed.workspaceExistsAfterLastDelete, "boolean");
   if (observed.retirementObserved) {
     assert.equal(last.environmentRetired, true);
     assert.equal(last.workspaceExists, false);
     assert.equal(last.markerExists, false);
-    assert.equal(observed.environmentAfterLastDelete.status, "destroyed");
+    if (last.environmentId !== null) {
+      assert.equal(observed.environmentAfterLastDelete.status, "destroyed");
+    }
     assert.equal(observed.markerExistsAfterLastDelete, false);
     assert.equal(observed.workspaceExistsAfterLastDelete, false);
   }
