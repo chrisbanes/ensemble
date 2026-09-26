@@ -213,22 +213,27 @@ pins measured after clean `npm ci` with Node 24.21.0 and npm 12.1.0.
 The raw T4 test intentionally exits nonzero for the known #665 startup violation;
 the aggregate accepts only its exact queue/provider/tool evidence and verified
 cleanup, records the gate as failed capability, and keeps dependent T06/T08
-blocked. The focused pre-correction T5 run measured 2,442 ms after recheck with
-2,150 ms stable no-start; a distinct earlier integrated pre-correction run
-measured 2,361 ms with 2,066 ms stable no-start. The later trace-timing finding
-means neither measurement is current no-start acceptance evidence.
+blocked.
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` is the current acceptance evidence.
-On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
+Historical reports and timings are not current acceptance evidence. The earlier
+integrated report at `33bd3062531bd2ab717d4ea8d4a29752c6388058` recorded 2,378 ms
+after recheck and 2,087 ms stable no-start. Historical pre-correction runs
+measured 2,442 ms / 2,150 ms in a focused T5 run and 2,361 ms / 2,066 ms in an
+integrated run; the later trace-timing finding invalidated their no-start
+measurements.
+
+The measured final-head integrated report at `1b70716c67aec82835c363776cb79f8625b0a605`,
+SHA-256 `b969890429abf1d7892002be43d2dd05bd7fd46b8fe2edd0376b5ff6f7540f38`, is
+the current integrated acceptance evidence. Its `sourceRevision` matches that
+head. On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
 checks passed: `npm run check`, `npm run test:bb-integration`, and
 `npm run test:bb-prototype`.
-The report has six T5 gate rows; the corrected stop observation records stop
-acknowledgement while pending, exact-ID cancellation with a matching
-`message.cancelled` event for the recorded thread/message IDs, queue absence
-before and after recheck, 2,378 ms after recheck with 2,087 ms stable no-start,
-and zero provider starts/effects. T4 produced its expected diagnostic, and every
-T1–T5 manifest confirms clean isolation cleanup.
+The report has six T5 gate rows; its stop observation records stop acknowledgement
+while pending, exact-ID cancellation with a matching `message.cancelled` event
+for the recorded thread/message IDs, and queue absence before and after recheck.
+It observed 2,416 ms after recheck with 2,125 ms stable no-start, and zero
+provider starts/effects. T4 produced its expected diagnostic, and every T1–T5
+manifest confirms clean isolation cleanup.
 The corrected evidence supports removing only the #676-specific T02 block;
 T06/T08 remain blocked by #665 and other gates.
 

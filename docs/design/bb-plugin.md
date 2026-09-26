@@ -575,11 +575,14 @@ restart reads, and synthetic unavailable-environment rejection. T5 records
 composed wait, stop, initial workspace, retry, revision and A17 observations;
 fixture-only evidence does not implement Ensemble ownership or cleanup policy.
 
-The latest focused T2 stop record confirms exact-ID cancellation with a matching
-event and queue absence before and after recheck. It observed a 2,727 ms
+The separate focused T2 stop record confirms exact-ID cancellation with a
+matching event and queue absence before and after recheck. It observed a 2,727 ms
 post-release window, including 2,378 ms stable no-start, with zero starts and
-effects. `stop-writer-release` remains open: this covers one scripted held
-message, not arbitrary process termination or complete Ensemble writer
+effects. The final-head integrated report at `1b70716` separately measured
+2,416 ms after recheck and 2,125 ms stable no-start; see the acceptance record
+for its report hash and source revision. These measurements come from different
+runs. `stop-writer-release` remains open: the observations cover one scripted
+held message, not arbitrary process termination or complete Ensemble writer
 exclusion. Unconfirmed cancellation remains `failed-capability`; startup or
 event-capture failure is inconclusive.
 
