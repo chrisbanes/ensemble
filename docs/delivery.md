@@ -144,17 +144,18 @@ stable no-start; the distinct pre-correction integrated run recorded 2,361 ms
 with 2,066 ms stable no-start. The trace-timing race found afterward means
 neither measurement is current no-start acceptance evidence.
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` is the current acceptance evidence.
-On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
-checks passed: `npm run check`, `npm run test:bb-integration`, and
-`npm run test:bb-prototype`.
-The report contains six T5 gate rows. Its corrected stop observation records
-stop acknowledgement while pending, exact-ID cancellation with the matching
-`message.cancelled` event and queue absence before and after recheck. The
-post-recheck window was 2,378 ms, including 2,087 ms of stable no-start, with
-zero provider starts and tool effects. T4 produced its expected diagnostic, and
-every T1–T5 manifest confirms clean isolation cleanup.
+The reports at `33bd3062531bd2ab717d4ea8d4a29752c6388058` and
+`1b70716c67aec82835c363776cb79f8625b0a605` are historical client SDK 0.5.29
+evidence and do not qualify the #683 delivery base. Current acceptance is the
+integrated report for runtime head `88b438439868d42c03950c0d2db87436b036ad9a`,
+SHA-256 `a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8`.
+Its `sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0,
+BB 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
+`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`.
+The report outcome is `completed-with-capability-gaps`; its stop observation measured
+2,388 ms after recheck and 2,091 ms stable no-start. All six T5 rows remain open.
+T4 retains the expected #665 accepted-queue failure as `failed-capability`, and
+T06/T08 remain blocked.
 
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain

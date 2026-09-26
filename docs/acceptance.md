@@ -215,35 +215,52 @@ the aggregate accepts only its exact queue/provider/tool evidence and verified
 cleanup, records the gate as failed capability, and keeps dependent T06/T08
 blocked.
 
-Historical reports and timings are not current acceptance evidence. The earlier
-integrated report at `33bd3062531bd2ab717d4ea8d4a29752c6388058` recorded 2,378 ms
-after recheck and 2,087 ms stable no-start. Historical pre-correction runs
-measured 2,442 ms / 2,150 ms in a focused T5 run and 2,361 ms / 2,066 ms in an
-integrated run; the later trace-timing finding invalidated their no-start
-measurements.
+Reports captured before the #683 delivery-base update are historical for this
+candidate and do not qualify its client SDK package 0.5.30. This includes the
+integrated report at `1b70716c67aec82835c363776cb79f8625b0a605`, SHA-256
+`b969890429abf1d7892002be43d2dd05bd7fd46b8fe2edd0376b5ff6f7540f38`, which
+recorded 2,416 ms after recheck and 2,125 ms stable no-start. The earlier
+integrated report at `33bd3062531bd2ab717d4ea8d4a29752c6388058` recorded
+2,378 ms / 2,087 ms. Historical pre-correction runs measured 2,442 ms / 2,150 ms
+in focused T5 and 2,361 ms / 2,066 ms in an integrated run; the trace-timing
+finding invalidated their no-start measurements.
 
-The measured final-head integrated report at `1b70716c67aec82835c363776cb79f8625b0a605`,
-SHA-256 `b969890429abf1d7892002be43d2dd05bd7fd46b8fe2edd0376b5ff6f7540f38`, is
-the current integrated acceptance evidence. Its `sourceRevision` matches that
-head. On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
-checks passed: `npm run check`, `npm run test:bb-integration`, and
-`npm run test:bb-prototype`.
-The report has six T5 gate rows; its stop observation records stop acknowledgement
-while pending, exact-ID cancellation with a matching `message.cancelled` event
-for the recorded thread/message IDs, and queue absence before and after recheck.
-It observed 2,416 ms after recheck with 2,125 ms stable no-start, and zero
-provider starts/effects. T4 produced its expected diagnostic, and every T1–T5
-manifest confirms clean isolation cleanup.
-The corrected evidence supports removing only the #676-specific T02 block;
-T06/T08 remain blocked by #665 and other gates.
+The current measured integrated report is bound to runtime head
+`88b438439868d42c03950c0d2db87436b036ad9a`, SHA-256
+`a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8`; its
+`sourceRevision` matches that runtime head. On Node 24.21.0/npm 12.1.0, BB
+0.44.0, host plugin SDK 0.5.29, and client package `@get-bb/plugin-sdk` 0.5.30,
+`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
+passed. The report outcome is `completed-with-capability-gaps`.
 
-`stop-writer-release` remains open. The result covers one scripted held first
-message, not arbitrary process termination or complete Ensemble writer
-exclusion. If cancellation is unconfirmed, the row remains `failed-capability`
-and recheck/release are withheld; fixture startup or event-capture failures are
-inconclusive. Unrelated test failures, missing evidence/events, timeouts or
-leaks fail the aggregate. This report does not stand in for the
-authenticated-provider smoke required for the later operational release gate.
+The distinct T2 execution manifest SHA-256 is
+`fbc164a582ede0331659d9cf35c3c8d8e9615fa3d353479146f85ed9e7cc7124`; the
+permission/environment manifest SHA-256 is
+`953f6477fe9402fa261863f9b228d1901fbcba6832d5cb707f9c6e35ce61b08a`. Both
+passed with client SDK package 0.5.30. All six T1–T5 fixture manifests, counting
+the two separate T2 manifests, record exited owned processes, closed server and
+daemon ports, no forced cleanup, and removal of their disposable roots. T4's
+raw test preserves the expected #665 failure diagnostic; its aggregate row is
+`failed-capability`, and T06/T08 remain blocked.
+
+The report contains six T5 scenario rows, all `open`. The stop observation
+records stop acknowledgement while the delayed thread remained `pending`,
+exact-ID cancellation with a matching `message.cancelled` event, and an empty
+queue before release. It measured 2,388 ms after recheck with 2,091 ms stable
+no-start and zero provider starts/effects. The A17 observation retained the
+dirty marker and shared worktree while another thread was live; after final
+archive/delete BB removed them and reported the environment `destroyed` at
+306,059 ms. These are fixture observations only: `stop-writer-release` and A17
+remain open, as do the other T5 gates. They do not prove arbitrary process
+termination, complete writer exclusion, or Ensemble cleanup policy. The report
+does not stand in for the authenticated-provider smoke required for the later
+operational release gate.
+
+The new evidence supports removing only the #676-specific T02 block; T06/T08
+remain blocked by #665 and other gates. If cancellation is unconfirmed, the stop
+row remains `failed-capability` and recheck/release are withheld; fixture startup
+or event-capture failures are inconclusive. Unrelated test failures, missing
+evidence/events, timeouts or leaks fail the aggregate.
 
 ## Gates
 
