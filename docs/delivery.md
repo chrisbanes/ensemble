@@ -58,10 +58,10 @@ complete real-host journey. The existing dependency map below governs those
 product tickets; it does not force pure extraction tests to wait for unrelated
 execution capabilities. No new feature passes a gate merely by being portable.
 
-The current manifest, CI and integration harness pin SDK package 0.5.29 and npm
+The current manifest, CI and integration harness pin SDK package 0.5.30 and npm
 12.1.0. The [25 September qualification](bb-capabilities.md#current-toolchain-qualification--25-september-2026)
 used SDK package 0.5.27. Its aggregate passed with the exact expected diagnostic
-envelope, but that result does not qualify SDK 0.5.29. Startup and
+envelope, but that result does not qualify SDK 0.5.30. Startup and
 writer-termination failures remain explicit. The extraction is
 complete, while their dependent product features remain gated.
 

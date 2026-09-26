@@ -58,7 +58,7 @@ async function installFixturePlugin(
       private: true,
       type: "module",
       engines: { node: ">=24 <25", bb: ">=0.43.4", bbPluginSdk: minimumSdk },
-      dependencies: { "@get-bb/plugin-sdk": "0.5.29", zod: "4.6.5" },
+      dependencies: { "@get-bb/plugin-sdk": "0.5.30", zod: "4.6.5" },
       bb: {
         name: packageName,
         description: "Disposable T4 integration fixture",
