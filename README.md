@@ -30,7 +30,7 @@ a series of user-operated integration tests.
 
 ## Current status
 
-This branch contains a bounded TypeScript prototype using SDK package 0.5.27
+This branch contains a bounded TypeScript prototype using SDK package 0.5.29
 and declaring BB host SDK 0.5.9 compatibility:
 
 - Local task creation in one configured BB project.
