@@ -270,7 +270,8 @@ for a confirmed unblocked state.
 
 | Data | Authority |
 | --- | --- |
-| Project identities, repository links, conversations, and workspaces | BB. |
+| Ensemble project identities and host bindings | Ensemble. |
+| Host project references, repository links, conversations, and workspaces | Execution host, initially BB. |
 | Ensemble profiles, coordination instructions, and project policy | Ensemble; effective access must also be enforced by the execution environment. |
 | Local task title, description, and work status | Ensemble. |
 | External task title, description, and provider status | External provider; Ensemble retains a local representation. |

@@ -4,6 +4,7 @@ import type { WorkerHost } from "../../core/coordinator.js";
 
 type Settings = {
   get(): Promise<{
+    project: string | undefined;
     provider: string;
     model: string;
   }>;
@@ -27,6 +28,10 @@ export function createBbWorkerHost(dependencies: {
       if (!config.provider || !config.model)
         throw new Error("Configure the worker provider and model first");
       const projectId = externalProjectId(assignment);
+      if (config.project !== projectId)
+        throw new Error(
+          "Assignment no longer belongs to the configured project",
+        );
       const thread = await threads.spawn({
         projectId,
         providerId: config.provider,
