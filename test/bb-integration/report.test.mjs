@@ -49,6 +49,9 @@ function evidenceValue(fieldPath) {
 }
 
 function sampleObserved(type, id) {
+  if (type === "public-api" && id === "permission-environment-forwarding") {
+    return { permissionEnvironmentMatrix: permissionEnvironmentMatrix() };
+  }
   const observed = {};
   const evidencePaths =
     type === "public-api" ? (REQUIRED_API_EVIDENCE[id] ?? []) : [];
@@ -71,16 +74,291 @@ function sampleObserved(type, id) {
               delayedQueuedMessageId: "queued-stop",
               delayedDeleteResponse: { ok: true },
             }
-          : { threadId: "thread-one" },
+          : id === "composed-writer-admission"
+            ? writerAdmissionIdentities()
+            : id === "initial-workspace-identity"
+              ? initialWorkspaceIdentities()
+              : id === "a17-shared-worktree-retention"
+                ? a17Identities()
+                : { threadId: "thread-one" },
       observations:
         id === "stop-writer-release"
           ? stopWriterObserved()
-          : { status: "open" },
+          : id === "composed-writer-admission"
+            ? writerAdmissionObserved()
+            : id === "initial-workspace-identity"
+              ? initialWorkspaceObserved()
+              : id === "a17-shared-worktree-retention"
+                ? a17Observed()
+                : { status: "open" },
     };
   }
   return Object.keys(observed).length > 0
     ? observed
     : { threadId: "thread-test", effectCount: 1 };
+}
+
+function permissionEnvironmentMatrix() {
+  const modes = ["accept-edits", "auto", "full"];
+  const projectId = "project-permission";
+  const environmentId = "environment-permission";
+  const environment = {
+    id: environmentId,
+    projectId,
+    hostId: "host-permission",
+    path: "/fixture/worktree",
+    status: "ready",
+  };
+  const requestedHostWorkspace = {
+    type: "host",
+    hostId: "host-permission",
+    workspace: {
+      type: "managed-worktree",
+      baseBranch: { kind: "default" },
+    },
+  };
+  const modeRequests = modes.map((permissionMode, index) => {
+    const threadId = `thread-${permissionMode}`;
+    const prompt = `T1 permission environment ${permissionMode}`;
+    return {
+      permissionMode,
+      prompt,
+      thread: { id: threadId, projectId, environmentId, status: "idle" },
+      requestedEnvironment:
+        index === 0 ? requestedHostWorkspace : { type: "reuse", environmentId },
+      environment,
+      providerTrace: [
+        {
+          method: "turn/start",
+          params: {
+            threadId,
+            input: [{ text: prompt }],
+            options: {
+              model: "fixture-model",
+              reasoningLevel: "medium",
+              serviceTier: "default",
+              permissionMode,
+              envVars: {
+                BB_PROJECT_ID: projectId,
+                BB_ENVIRONMENT_ID: environmentId,
+              },
+            },
+          },
+        },
+      ],
+    };
+  });
+  return {
+    providerId: "ensemble-scripted",
+    advertisedModes: modes,
+    requestedModes: modes,
+    projectId,
+    hostId: "host-permission",
+    requestedHostWorkspace,
+    environmentId,
+    environment,
+    modeRequests,
+    limits: {
+      providerRequestForwardingOnly: true,
+      shellContainment: "not tested",
+      ambientCredentialIsolation: "not tested",
+      directBbApiBypass: "not tested",
+    },
+    unavailableEnvironment: {
+      environmentId: "missing-environment",
+      rejectedAtSpawn: true,
+      threadId: null,
+      status: "rejected-at-spawn",
+      error: "HTTP 404: Environment not found",
+      providerTrace: [],
+    },
+    environmentAfterRestart: environment,
+    threadsAfterRestart: modeRequests.map(({ permissionMode, thread }) => ({
+      permissionMode,
+      threadId: thread.id,
+      environmentId,
+    })),
+  };
+}
+
+function writerAdmissionIdentities() {
+  return {
+    projectId: "project-wait",
+    threadId: "thread-wait",
+    guardPluginId: "second-plugin",
+    queuedMessageId: "queued-wait",
+    environmentId: "environment-wait",
+  };
+}
+
+function writerAdmissionObserved() {
+  return {
+    waitingOn: {
+      kind: "plugin",
+      pluginId: "second-plugin",
+      reason: "T5 second-plugin wait",
+    },
+    preReleaseProviderEffects: 0,
+    postReleaseToolEffects: 1,
+    initialEnvironmentId: null,
+  };
+}
+
+function initialWorkspaceIdentities() {
+  return {
+    projectId: "project-workspace",
+    taskId: "task-workspace",
+    taskOperationId: "operation-workspace",
+    competingAttemptIds: ["attempt-owner", "attempt-joiner"],
+    rawConcurrentSpawnThreadIds: ["raw-thread-a", "raw-thread-b"],
+    rawEnvironmentIds: ["raw-environment-a", "raw-environment-b"],
+    chosenTaskThreadId: "chosen-thread",
+    chosenTaskEnvironmentId: "chosen-environment",
+    missingEnvironmentId: "missing-task-environment",
+  };
+}
+
+function initialWorkspaceObserved() {
+  const identities = initialWorkspaceIdentities();
+  const chosen = {
+    threadId: identities.chosenTaskThreadId,
+    environmentId: identities.chosenTaskEnvironmentId,
+    status: "idle",
+    environmentStatus: "ready",
+  };
+  const reconciliation = {
+    operationId: identities.taskOperationId,
+    taskId: identities.taskId,
+    projectId: identities.projectId,
+    state: "confirmed",
+    ownerAttemptId: identities.competingAttemptIds[0],
+    spawnCalls: 1,
+    chosenThreadId: identities.chosenTaskThreadId,
+    matches: [chosen],
+    attempts: [
+      { attemptId: identities.competingAttemptIds[0], disposition: "owner" },
+      { attemptId: identities.competingAttemptIds[1], disposition: "joined" },
+    ],
+    publicLookup: "threads.list + getPluginMetadata + threads.get",
+  };
+  return {
+    rawConcurrentSpawnCount: 2,
+    rawDistinctEnvironmentCount: 2,
+    rawTaskThreadEnvironmentIds: [chosen],
+    rawHookObservations: identities.rawConcurrentSpawnThreadIds.map(
+      (threadId) => ({
+        taskId: identities.taskId,
+        threadId,
+        environmentId: null,
+        threadStatus: "pending",
+        attempt: "start-turn",
+        queuedMessageIds: [],
+      }),
+    ),
+    duplicateRawTaskEnvironments: [],
+    rawProviderToolEffects: 2,
+    joinedAttempt: {
+      operationId: identities.taskOperationId,
+      taskId: identities.taskId,
+      attemptId: identities.competingAttemptIds[1],
+      disposition: "joined",
+      state: "provisioning",
+      ownerAttemptId: identities.competingAttemptIds[0],
+      spawnCalls: 1,
+      chosenThreadId: null,
+      replayed: false,
+    },
+    acceptedReconciliationBeforeRestart: reconciliation,
+    reconciliation,
+    taskHookObservations: [
+      {
+        taskId: identities.taskId,
+        threadId: identities.chosenTaskThreadId,
+        environmentId: null,
+        threadStatus: "pending",
+        attempt: "start-turn",
+        queuedMessageIds: [],
+      },
+    ],
+    totalProviderToolEffects: 3,
+    missingEnvironment: {
+      environmentId: identities.missingEnvironmentId,
+      rejectedAtSpawn: true,
+      threadId: null,
+      status: "rejected-at-spawn",
+      spawnError: "HTTP 404: Environment not found",
+      threadEvents: [],
+      providerTrace: [],
+    },
+  };
+}
+
+function a17Identities() {
+  return {
+    projectId: "project-a17",
+    threadIds: ["thread-a17-first", "thread-a17-second"],
+    environmentId: "environment-a17",
+    workspacePath: "/fixture/dirty-worktree",
+  };
+}
+
+function a17Observed() {
+  const { threadIds, environmentId } = a17Identities();
+  return {
+    statusesBeforeCleanup: ["idle", "idle"],
+    firstThreadArchive: {
+      archiveResponse: { ok: true, archivedThreadIds: [threadIds[0]] },
+      thread: { id: threadIds[0], environmentId },
+    },
+    firstThreadArchived: true,
+    environmentAfterArchive: { id: environmentId, status: "ready" },
+    markerRetainedAfterArchive: true,
+    environmentRetainedAfterArchive: true,
+    firstThreadDelete: { ok: true },
+    sharedEnvironmentAfterFirstDelete: { id: environmentId, status: "ready" },
+    markerRetainedAfterDelete: true,
+    sharedRetentionAfterArchiveAndDelete: true,
+    remainingLiveThread: { id: threadIds[1], environmentId, status: "idle" },
+    finalThreadArchive: {
+      archiveResponse: { ok: true, archivedThreadIds: [threadIds[1]] },
+      thread: { id: threadIds[1], environmentId },
+    },
+    finalThreadArchived: true,
+    environmentAfterFinalArchive: { id: environmentId, status: "ready" },
+    markerExistsAfterFinalArchive: true,
+    workspaceExistsAfterFinalArchive: true,
+    markerRetainedWhileShared: true,
+    secondThreadDelete: { ok: true },
+    environmentAfterLastDelete: { id: environmentId, status: "destroyed" },
+    markerExistsAfterLastDelete: false,
+    workspaceExistsAfterLastDelete: false,
+    retirementWindowMs: 420_000,
+    retirementSampleIntervalMs: 15_000,
+    retirementObservationCount: 2,
+    retirementObservationWindowMs: 15_000,
+    retirementObserved: true,
+    retirementObservations: [
+      {
+        elapsedMs: 0,
+        environmentId,
+        environmentStatus: "ready",
+        environmentRetired: false,
+        workspaceExists: true,
+        markerExists: true,
+        retirementObserved: false,
+      },
+      {
+        elapsedMs: 15_000,
+        environmentId,
+        environmentStatus: "destroyed",
+        environmentRetired: true,
+        workspaceExists: false,
+        markerExists: false,
+        retirementObserved: true,
+      },
+    ],
+    providerToolEffects: 2,
+  };
 }
 
 function stopWriterObserved() {
@@ -138,11 +416,23 @@ function validT5Reports() {
             delayedQueuedMessageId: "queued-stop",
             delayedDeleteResponse: { ok: true },
           }
-        : { threadId: `thread-${name}` },
+        : name === "composed-writer-admission"
+          ? writerAdmissionIdentities()
+          : name === "initial-workspace-identity"
+            ? initialWorkspaceIdentities()
+            : name === "a17-shared-worktree-retention"
+              ? a17Identities()
+              : { threadId: `thread-${name}` },
     observed:
       name === "stop-writer-release"
         ? stopWriterObserved()
-        : { status: "observed" },
+        : name === "composed-writer-admission"
+          ? writerAdmissionObserved()
+          : name === "initial-workspace-identity"
+            ? initialWorkspaceObserved()
+            : name === "a17-shared-worktree-retention"
+              ? a17Observed()
+              : { status: "observed" },
     limits: ["Fixture evidence does not implement the product gate."],
   }));
 }
@@ -199,6 +489,12 @@ function stopWriterFailureReport() {
     (entry) =>
       entry.type === "proof-gate" && entry.id === "stop-writer-release",
   ).verdict = "failed-capability";
+  const t5Stop = report.t5Reports.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  t5Stop.verdict = scenario.verdict;
+  t5Stop.identities = scenario.observed.identities;
+  t5Stop.observed = scenario.observed.observations;
   report.dependentExecutionBlocked = ["T02", "T06", "T08"];
   return report;
 }
@@ -209,6 +505,7 @@ function row(type, id, overrides = {}) {
     id,
     ...(type === "public-api" ? { publicApi: id } : {}),
     scenario: `scenario for ${id}`,
+    evidenceScope: "BB fixture observation",
     runtime: {
       bb: "0.44.0",
       hostSdk: "0.5.29",
@@ -221,6 +518,12 @@ function row(type, id, overrides = {}) {
       integrationSourceDigest: "digest-abc123",
       providerBridge: "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
       installedBbSource: null,
+      providerBridgeSha256: "c".repeat(64),
+      fixtureSourceSha256: {
+        scriptedProvider: "d".repeat(64),
+        executionRpc: "e".repeat(64),
+        recoveryRpc: "f".repeat(64),
+      },
     },
     packageArtifacts: {
       lockfileTarballIntegrity: {
@@ -251,6 +554,7 @@ function validReport() {
       ...(eventContract === undefined
         ? {}
         : { requiredEvents: eventContract, observedEvents: eventContract }),
+      ...(id === "shared-worktree-retention" ? { verdict: "open" } : {}),
     });
   });
   return {
@@ -290,6 +594,64 @@ function validReport() {
         row("t5-scenario", id, { verdict: "open" }),
       ),
     ],
+    t5Reports: validT5Reports(),
+    proposedEnsembleContract: {
+      evidenceScope: "proposed-Ensemble-contract",
+      actionAuthorization: "dependent-future-acceptance",
+      userInterface: "dependent-future-acceptance",
+      permissionBoundary:
+        "BB/provider request forwarding only; shell, ambient credentials and direct BB API bypass are not tested.",
+      cleanupDecisionTable: [
+        {
+          mode: "default",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "retain-until-operator-archive",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "archive",
+        },
+        {
+          mode: "automatic",
+          delivery: "unknown",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "unknown",
+          effects: "resolved",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "unknown",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "any",
+          delivery: "any",
+          preservedWork: "any",
+          effects: "any",
+          workspace: "missing-or-unknown",
+          decision: "hold-cleanup-and-dispatch",
+        },
+      ],
+    },
     dependentExecutionBlocked: ["T06", "T08"],
   };
 }
@@ -475,6 +837,159 @@ test("integration report rejects duplicate API rows and empty evidence", () => {
   assert.throws(
     () => assertIntegrationReport(report),
     /no observed identities/u,
+  );
+});
+
+test("permission forwarding report requires every mode, matching IDs and no hidden start", () => {
+  assert.doesNotThrow(() => assertIntegrationReport(validReport()));
+
+  const missingMode = validReport();
+  missingMode.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.modeRequests[1].permissionMode =
+    "full";
+  assert.throws(
+    () => assertIntegrationReport(missingMode),
+    /auto request is missing/u,
+  );
+
+  const missingId = validReport();
+  delete missingId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.modeRequests[0].thread.id;
+  assert.throws(() => assertIntegrationReport(missingId), /thread ID/u);
+
+  const hiddenStart = validReport();
+  hiddenStart.rows
+    .find((entry) => entry.id === "permission-environment-forwarding")
+    .observed.permissionEnvironmentMatrix.unavailableEnvironment.providerTrace.push(
+      { method: "turn/start", params: { threadId: "unexpected-thread" } },
+    );
+  assert.throws(
+    () => assertIntegrationReport(hiddenStart),
+    /zero provider starts/u,
+  );
+});
+
+test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
+  const report = validReport();
+  const row = report.rows[0];
+  assert.match(row.sourceRevisions.providerBridgeSha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(Object.keys(row.sourceRevisions.fixtureSourceSha256), [
+    "scriptedProvider",
+    "executionRpc",
+    "recoveryRpc",
+  ]);
+  row.sourceRevisions.fixtureSourceSha256.recoveryRpc = null;
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /fixtureSourceSha256.recoveryRpc/u,
+  );
+});
+
+test("workspace intent report rejects competing owners, duplicate matches and missing environment starts", () => {
+  const duplicateOwner = validT5Reports();
+  duplicateOwner.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation.attempts[1].disposition = "owner";
+  assert.throws(
+    () => assertT5Reports(duplicateOwner),
+    /one owner and one joined/u,
+  );
+
+  const duplicateMatch = validT5Reports();
+  const reconciliation = duplicateMatch.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation;
+  reconciliation.matches.push({ ...reconciliation.matches[0] });
+  assert.throws(
+    () => assertT5Reports(duplicateMatch),
+    /duplicate workspace matches/u,
+  );
+
+  const hiddenStart = validT5Reports();
+  hiddenStart
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.missingEnvironment.providerTrace.push({ method: "turn/start" });
+  assert.throws(
+    () => assertT5Reports(hiddenStart),
+    /must not start a provider/u,
+  );
+});
+
+test("A17 requires dirty-file observations and a finite retirement window", () => {
+  const missingWindow = validT5Reports();
+  delete missingWindow.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.retirementWindowMs;
+  assert.throws(() => assertT5Reports(missingWindow), /finite window/u);
+
+  const unboundedWindow = validT5Reports();
+  unboundedWindow.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.retirementWindowMs = 7 * 60 * 1000 + 1;
+  assert.throws(() => assertT5Reports(unboundedWindow), /finite window/u);
+
+  const missingDirtyFile = validT5Reports();
+  missingDirtyFile.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.markerExistsAfterFinalArchive = undefined;
+  assert.throws(
+    () => assertT5Reports(missingDirtyFile),
+    /markerExistsAfterFinalArchive/u,
+  );
+});
+
+test("cleanup policy table stays proposed and fails closed for unknown evidence", () => {
+  const report = validReport();
+  assert.doesNotThrow(() => assertIntegrationReport(report));
+  const unknownDelivery =
+    report.proposedEnsembleContract.cleanupDecisionTable.find(
+      (entry) => entry.delivery === "unknown",
+    );
+  unknownDelivery.decision = "archive";
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /cleanup decision table/u,
+  );
+});
+
+test("unproved writer, stop, A17 and accepted-queue guarantees cannot pass", () => {
+  const writer = validReport();
+  writer.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "composed-writer-admission",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(writer),
+    /must preserve the T5 capability verdict/u,
+  );
+
+  const stop = validReport();
+  stop.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(stop),
+    /Stop proof gate.*remains open/u,
+  );
+
+  const a17 = validReport();
+  a17.rows.find(
+    (entry) =>
+      entry.type === "public-api" && entry.id === "shared-worktree-retention",
+  ).verdict = "passed";
+  assert.throws(() => assertIntegrationReport(a17), /A17 remains/u);
+
+  const startup = validReport();
+  startup.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "startup-queued-dispatch",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(startup),
+    /Known T4 startup capability failure/u,
   );
 });
 

@@ -225,27 +225,43 @@ confirm cancellation, the fixture keeps its wait and the report remains
 `failed-capability`; T02/T06/T08 stay blocked. Fixture startup or event-capture
 failures remain inconclusive, not BB capability failures.
 
-## Current acceptance: final corrected integrated T1–T5 report — 26 September 2026
+## T1–T3 permission, workspace and report evidence — 26 September 2026
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` ran on Node 24.21.0/npm 12.1.0,
-BB 0.44.0 and host/plugin SDK 0.5.29. `npm run check`,
-`npm run test:bb-integration`, and `npm run test:bb-prototype` passed. T1–T3
-and T5 passed, T4 produced its expected diagnostic, and the report validated
-six T5 gate rows.
+T3's report contract gives explicit rows to the permission/environment matrix
+and six named T5 observations. Every row labels its scope as a BB fixture
+observation and carries the tested source revision, integration-source digest,
+provider-bridge hash, three fixture-source SHA-256 values, lockfile artifact
+integrities and installed package-tree hashes. A separate proposed Ensemble
+contract records cleanup decisions; the report does not count that policy as a
+BB observation or a passing product gate.
 
-The corrected T5 stop row records stop acknowledgement while the thread was
-pending, exact-ID cancellation with a matching `message.cancelled` event, and
-queue absence before and after recheck. It observed 2,378 ms after recheck,
-including 2,087 ms stable no-start, with zero provider starts and tool effects.
-Every T1–T5 manifest confirms owned processes exited, both ports closed, no
-forced cleanup, and the disposable root removed. This is the current bounded
-no-start evidence; it supersedes both pre-correction measurements above.
+The T1 permission matrix requests `accept-edits`, `auto` and `full` from the
+scripted provider. Its report checks one matching `turn/start` trace per mode,
+the requested project/model/environment inputs, reuse of one managed worktree,
+and the environment/thread IDs after restart. A synthetic unavailable
+environment is rejected with no provider trace. This demonstrates request
+forwarding and public rejection only; it does not prove provider enforcement,
+shell containment, ambient-credential isolation or restrictions on direct BB
+API access.
 
-The report supports removing only the #676-specific T02 block.
-`stop-writer-release` remains **open**; T06/T08 remain blocked by
-#665 and other gates. This proves neither arbitrary workspace-process
-termination nor complete Ensemble writer exclusion.
+T2's test-local SQLite intent joined two competing provisioning attempts and,
+after a dropped accepted response and restart, reconciled one task thread and
+environment. Two raw parallel BB spawns still created two distinct environments;
+the fixture does not implement production task/workspace binding. Its
+unavailable-environment case uses a synthetic ID and therefore does not model an
+environment reclaimed by BB. The second-plugin scenario records zero provider
+effects while queued on that plugin and one tool effect after release, without
+an Ensemble writer reservation.
+
+The A17 fixture wrote a dirty marker into a managed worktree. Archiving and
+deleting the first thread left the marker and shared environment while the
+second thread remained live. After the final archive and deletion, the sampled
+environment became `destroyed` and both marker and worktree were absent within
+the seven-minute bound. This direct BB fixture observation keeps A17 open: it
+does not implement the proposed delivery/preservation policy or prove that
+automatic cleanup is safe for general workspaces. The stop/writer gate also
+remains open. #665 remains a separate failed startup capability and continues
+to block T06/T08.
 
 At the time of the 2026-09-24 qualification, the GitHub releases page listed BB
 desktop **0.43.4** as the latest stable release ([BB releases](https://github.com/get-bb/bb/releases)).
@@ -353,9 +369,9 @@ temporary evidence. They are not required to run the T01 harness.
 | --- | --- |
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
-| Composed writer admission | **Open**: T5 observed another-plugin wait, public rejection, and later release; it has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Open**: the final corrected integrated report records that stop returned `ok` while one scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current window is 2,378 ms after recheck with 2,087 ms stable no-start and zero starts/effects. This covers one scripted first message, not arbitrary workspace termination or complete Ensemble writer exclusion. The report supports removing only the #676-specific T02 block; T06/T08 remain blocked by #665 and other gates. |
-| Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled to one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. |
+| Composed writer admission | **Open**: T5 observed a second-plugin wait, zero provider effects before release and one tool effect after release. It has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
+| Stop and writer release | **Open**: stop returned `ok` while the scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The latest focused T2 record observed a 2,727 ms post-release window, 2,378 ms stable no-start and zero starts/effects. This covers one scripted held message, not arbitrary workspace termination or complete Ensemble writer exclusion. |
+| Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. A synthetic missing environment was rejected before any provider trace. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
 
@@ -388,15 +404,17 @@ records are also retained under
 `node_modules/.cache/ensemble-bb-integration/suite-run/t5-gates/`. Every API,
 proof-gate and T5 scenario row carries tested BB/host-SDK/package-SDK/Node
 versions, source revisions or artifact identities, scenario, observed IDs and
-effects, verdict, and evidence limit. Required public API evidence and event names
-are validated before the report is accepted. The report ends in
+effects, verdict, and evidence limit. Its 18 public API rows include explicit
+provider-bridge and fixture-source SHA-256 values alongside package artifacts.
+Required public API evidence and event names are validated before the report is
+accepted. The report ends in
 `completed-with-capability-gaps` when the harness ran successfully with
 unresolved capability gaps. When exact-ID cancellation and the bounded
-post-recheck observation are confirmed, the corrected T5
-`stop-writer-release` row stays `open` and the report supports removing only
-the #676-specific T02 block; T06/T08 remain blocked by
-#665 and other gates. If cancellation is unconfirmed, the row remains
-`failed-capability` with no recheck or release, and T02/T06/T08 stay blocked.
+post-recheck observation are confirmed, the T5 `stop-writer-release` row and
+proof gate stay `open`; they do not establish complete Ensemble writer release.
+The separate #665 accepted-queue startup failure continues to block T06/T08. If
+cancellation is unconfirmed, the stop row remains `failed-capability` with no
+recheck or release, and T02/T06/T08 stay blocked.
 
 The host SDK version comes from BB's public `incompatible` install status for a
 disposable fixture requiring `bbPluginSdk >=0.6.0`. The T4 probe reports host
@@ -407,6 +425,5 @@ integrity from SHA-256 hashes of the installed package trees. The committed
 tree pins for BB 0.44.0 and SDK package 0.5.30 were measured after clean `npm ci`
 with Node 24.21.0/npm 12.1.0 on darwin-arm64; CI recomputes those package-scoped
 hashes on Ubuntu and fails if either installed tree differs. The tree hash sorts
-relative paths and includes
-entry type, path bytes, and file bytes; symlinks and unsupported entry types are
-rejected.
+relative paths and includes entry type, path bytes, and file bytes; symlinks and
+unsupported entry types are rejected.

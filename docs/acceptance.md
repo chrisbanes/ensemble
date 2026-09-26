@@ -110,6 +110,22 @@ acceptance criterion.
 | A29 | Ready imported issue has native GitHub blocker outside selection or project | Full native dependency read holds Ensemble dispatch while blocker is open; no task import or repository access is inferred; closure or edge removal releases it, and reopening re-applies the gate | Adapter + BB + UI |
 | A30 | Initial or later native dependency read or an imported blocker of a local task is incomplete, or a blocker appears during active work | Unknown state holds dispatch even before the first successful read and after a previously clear read; current turn may finish, but queued/new turns and delegation wait; ownership/results persist across restart; complete confirmed refresh resumes only when other controls permit | Adapter fault injection + BB |
 
+### Bounded BB fixture observations for T1–T3
+
+These records inform the proposed adapter and product contracts. They are BB
+fixture observations, not completion of the operational product scenarios.
+
+| Evidence | Observed result | Acceptance disposition |
+| --- | --- | --- |
+| Permission and environment forwarding | The scripted provider received one exact `turn/start` per advertised mode (`accept-edits`, `auto`, `full`); one managed environment was reused and its thread/environment IDs remained readable after restart. A synthetic unavailable environment was rejected with no provider trace. | Supports the BB/provider-forwarding part of A25. It does not test denial of an Ensemble action, provider enforcement, shell containment, ambient credentials or direct BB API access. A13 and the authorization part of A25 remain open. |
+| Initial workspace and second-plugin wait | A test-local SQLite intent joined two competing attempts and reconciled one task thread/environment after restart. Two raw parallel BB spawns created distinct environments. A separate wait fixture observed zero provider effects before another plugin released its wait and one tool effect after release. | Does not prove production task-to-workspace binding, one-writer admission, reservation safety or A16. The unavailable environment ID was synthetic and does not test a workspace reclaimed by BB. |
+| Dirty shared worktree | A17 archived and deleted one of two fixture threads while the dirty marker and shared environment remained. After the final thread was archived and deleted, BB reported the environment destroyed and the marker/worktree absent within a seven-minute bounded sample. | A17 remains open. The observation does not implement delivery confirmation, preservation checks or either cleanup mode. Unknown delivery, preservation, effects or workspace must hold cleanup; a missing or unknown workspace also holds dispatch. |
+| Stop and accepted queue | A focused stop fixture observed an acknowledged stop while the thread remained pending, then exact-ID cancellation and no provider start/effect during its bounded recheck. T4 still reproduces the accepted-queue startup failure tracked by #665. | A15 and the stop/writer-release gate remain open. #665 remains a failed capability and blocks T06/T08. |
+
+The proposed cleanup decision table and its default-retain/automatic-archive
+conditions are in [the BB plugin design](design/bb-plugin.md#6-workspaces-scheduling-and-access).
+No fixture observation marks A13, A15, A16, A17 or A25 fully passed.
+
 ## State and recovery boundary cases
 
 These extend existing scenario IDs; they are required evidence for the proposed
@@ -185,9 +201,11 @@ Avoid blanket coverage percentages as a substitute for scenario evidence.
 
 The credential-free T1–T5 live harness runs as `npm run test:bb-integration` after
 `npm ci` and the pinned Playwright Chromium install. It writes a deterministic
-machine-readable report with one row per required public API, seven proof gates,
-and six T5 scenario records, including the tested revision, source digest,
-artifact/SDK/Node identities, observed IDs/effects, verdicts and evidence limits.
+machine-readable report with 18 public API rows, seven proof gates, and six T5
+scenario records, including the tested revision, source digest, artifact/SDK/Node
+identities, observed IDs/effects, verdicts and evidence limits. Rows distinguish
+BB fixture observations from the proposed Ensemble contract and include
+provider-bridge and fixture-source hashes.
 For `bb-app` and `@get-bb/plugin-sdk`, it records lockfile tarball integrity
 separately from SHA-256 digests of the installed package trees. CI recomputes the
 tree digests from the package directories and compares them to the committed

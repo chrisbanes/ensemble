@@ -1,6 +1,26 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const fixtureDirectory = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixture",
+);
+const FIXTURE_SOURCE_SHA256 = Object.fromEntries(
+  Object.entries({
+    scriptedProvider: "server.ts",
+    executionRpc: "execution-server.ts",
+    recoveryRpc: "recovery-server.ts",
+  }).map(([name, file]) => [
+    name,
+    createHash("sha256")
+      .update(readFileSync(path.join(fixtureDirectory, file)))
+      .digest("hex"),
+  ]),
+);
 
 export const REQUIRED_API_ROWS = [
   "plugin-install-settings-reload",
@@ -20,6 +40,7 @@ export const REQUIRED_API_ROWS = [
   "accepted-queue-startup-failure",
   "instruction-revision-application",
   "shared-worktree-retention",
+  "permission-environment-forwarding",
 ];
 
 export const REQUIRED_PROOF_GATES = [
@@ -53,6 +74,7 @@ export const REQUIRED_API_EVIDENCE = {
     "providerRequest.params.options.serviceTier",
     "providerRequest.params.options.permissionMode",
   ],
+  "permission-environment-forwarding": ["permissionEnvironmentMatrix"],
   "provider-tool-result-round-trip": [
     "returnedText",
     "effectCount",
@@ -216,6 +238,205 @@ export function sanitizeIntegrationData(value, replacements = []) {
   return sanitize(value, replacements);
 }
 
+const PERMISSION_MODES = ["accept-edits", "auto", "full"];
+
+function assertPermissionEnvironmentMatrix(matrix) {
+  requireObject(matrix, "permissionEnvironmentMatrix");
+  assert.equal(matrix.providerId, "ensemble-scripted");
+  assert.deepEqual(
+    [...(matrix.advertisedModes ?? [])].sort(),
+    [...PERMISSION_MODES].sort(),
+    "provider must advertise each requested permission mode exactly once",
+  );
+  assert.deepEqual(
+    matrix.requestedModes,
+    PERMISSION_MODES,
+    "requested permission modes must cover the declared matrix",
+  );
+  requireString(matrix.projectId, "permission matrix project ID");
+  requireString(matrix.hostId, "permission matrix host ID");
+  requireString(matrix.environmentId, "permission matrix environment ID");
+  requireObject(matrix.requestedHostWorkspace, "requested host workspace");
+  assert.equal(matrix.requestedHostWorkspace.type, "host");
+  assert.equal(matrix.requestedHostWorkspace.hostId, matrix.hostId);
+  assert.equal(
+    matrix.requestedHostWorkspace.workspace?.type,
+    "managed-worktree",
+  );
+  assert.deepEqual(matrix.requestedHostWorkspace.workspace?.baseBranch, {
+    kind: "default",
+  });
+  requireObject(matrix.environment, "permission matrix environment");
+  assert.equal(matrix.environment.id, matrix.environmentId);
+  assert.equal(matrix.environment.projectId, matrix.projectId);
+  assert.equal(matrix.environment.hostId, matrix.hostId);
+  requireString(matrix.environment.path, "permission matrix environment path");
+  assert.equal(matrix.modeRequests?.length, PERMISSION_MODES.length);
+  const threadIds = [];
+  for (const [index, mode] of PERMISSION_MODES.entries()) {
+    const request = matrix.modeRequests[index];
+    assert.equal(request?.permissionMode, mode, `${mode} request is missing`);
+    requireString(request.prompt, `${mode} prompt`);
+    requireObject(
+      request.requestedEnvironment,
+      `${mode} requested environment`,
+    );
+    assert.equal(
+      request.requestedEnvironment.type,
+      index === 0 ? "host" : "reuse",
+      `${mode} requested environment type changed`,
+    );
+    if (index === 0) {
+      assert.deepEqual(
+        request.requestedEnvironment,
+        matrix.requestedHostWorkspace,
+        "accept-edits must use the requested host workspace inputs",
+      );
+    } else {
+      assert.equal(
+        request.requestedEnvironment.environmentId,
+        matrix.environmentId,
+      );
+    }
+    requireObject(request.thread, `${mode} thread`);
+    requireString(request.thread.id, `${mode} thread ID`);
+    threadIds.push(request.thread.id);
+    assert.equal(request.thread.projectId, matrix.projectId);
+    assert.equal(request.thread.environmentId, matrix.environmentId);
+    assert.equal(request.thread.status, "idle");
+    assert.equal(request.environment?.id, matrix.environmentId);
+    assert.equal(request.environment?.path, matrix.environment.path);
+    assert.equal(
+      request.providerTrace?.length,
+      1,
+      `${mode} must have one provider trace`,
+    );
+    const trace = request.providerTrace[0];
+    assert.equal(trace.method, "turn/start");
+    assert.equal(trace.params?.threadId, request.thread.id);
+    assert.equal(trace.params?.input?.[0]?.text, request.prompt);
+    assert.equal(trace.params?.options?.model, "fixture-model");
+    assert.equal(trace.params?.options?.reasoningLevel, "medium");
+    assert.equal(trace.params?.options?.serviceTier, "default");
+    assert.equal(trace.params?.options?.permissionMode, mode);
+    assert.equal(
+      trace.params?.options?.envVars?.BB_PROJECT_ID,
+      matrix.projectId,
+    );
+    assert.equal(
+      trace.params?.options?.envVars?.BB_ENVIRONMENT_ID,
+      matrix.environmentId,
+    );
+  }
+  assert.equal(new Set(threadIds).size, PERMISSION_MODES.length);
+  assert.equal(matrix.environmentAfterRestart?.id, matrix.environmentId);
+  assert.equal(
+    matrix.environmentAfterRestart?.path,
+    matrix.environment.path,
+    "environment path must survive the restart read",
+  );
+  assert.equal(matrix.threadsAfterRestart?.length, PERMISSION_MODES.length);
+  for (const [index, mode] of PERMISSION_MODES.entries()) {
+    const afterRestart = matrix.threadsAfterRestart[index];
+    assert.equal(afterRestart?.permissionMode, mode);
+    assert.equal(afterRestart?.threadId, threadIds[index]);
+    assert.equal(afterRestart?.environmentId, matrix.environmentId);
+  }
+  const unavailable = matrix.unavailableEnvironment;
+  requireObject(unavailable, "unavailable environment evidence");
+  requireString(unavailable.environmentId, "unavailable environment ID");
+  assert.notEqual(unavailable.environmentId, matrix.environmentId);
+  assert(
+    unavailable.rejectedAtSpawn === true || unavailable.status === "error",
+    "unavailable environment must be rejected at spawn or end in error",
+  );
+  if (unavailable.rejectedAtSpawn) assert.equal(unavailable.threadId, null);
+  else requireString(unavailable.threadId, "unavailable environment thread ID");
+  assert(
+    hasEvidenceValue(unavailable.error),
+    "unavailable environment rejection needs an error",
+  );
+  assert.deepEqual(
+    unavailable.providerTrace,
+    [],
+    "unavailable environment must have zero provider starts",
+  );
+  assert.equal(matrix.limits?.providerRequestForwardingOnly, true);
+  assert.equal(matrix.limits?.shellContainment, "not tested");
+  assert.equal(matrix.limits?.ambientCredentialIsolation, "not tested");
+  assert.equal(matrix.limits?.directBbApiBypass, "not tested");
+  return true;
+}
+
+function hasPermissionEnvironmentEvidence(matrix) {
+  try {
+    assertPermissionEnvironmentMatrix(matrix);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function proposedEnsembleContract() {
+  return {
+    evidenceScope: "proposed-Ensemble-contract",
+    actionAuthorization: "dependent-future-acceptance",
+    userInterface: "dependent-future-acceptance",
+    permissionBoundary:
+      "BB/provider request forwarding only; shell, ambient credentials and direct BB API bypass are not tested.",
+    cleanupDecisionTable: [
+      {
+        mode: "default",
+        delivery: "confirmed",
+        preservedWork: "preserved",
+        effects: "resolved",
+        workspace: "present",
+        decision: "retain-until-operator-archive",
+      },
+      {
+        mode: "automatic",
+        delivery: "confirmed",
+        preservedWork: "preserved",
+        effects: "resolved",
+        workspace: "present",
+        decision: "archive",
+      },
+      {
+        mode: "automatic",
+        delivery: "unknown",
+        preservedWork: "preserved",
+        effects: "resolved",
+        workspace: "present",
+        decision: "hold-cleanup",
+      },
+      {
+        mode: "automatic",
+        delivery: "confirmed",
+        preservedWork: "unknown",
+        effects: "resolved",
+        workspace: "present",
+        decision: "hold-cleanup",
+      },
+      {
+        mode: "automatic",
+        delivery: "confirmed",
+        preservedWork: "preserved",
+        effects: "unknown",
+        workspace: "present",
+        decision: "hold-cleanup",
+      },
+      {
+        mode: "any",
+        delivery: "any",
+        preservedWork: "any",
+        effects: "any",
+        workspace: "missing-or-unknown",
+        decision: "hold-cleanup-and-dispatch",
+      },
+    ],
+  };
+}
+
 function rowMetadata(slice, ensembleHead, sourceDigest, hostSdkEvidence) {
   const manifest = slice?.manifest ?? {};
   const hostSdk =
@@ -235,6 +456,8 @@ function rowMetadata(slice, ensembleHead, sourceDigest, hostSdkEvidence) {
       ensembleHead: ensembleHead ?? null,
       integrationSourceDigest: sourceDigest ?? null,
       providerBridge: manifest.providerBridgeRevision ?? null,
+      providerBridgeSha256: manifest.providerBridgeInstrumentedSha256 ?? null,
+      fixtureSourceSha256: FIXTURE_SOURCE_SHA256,
       installedBbSource: null,
     },
     packageArtifacts: {
@@ -284,6 +507,7 @@ function checkedApiRow({
     id,
     publicApi: api,
     scenario,
+    evidenceScope: "BB fixture observation",
     ...metadata,
     observed: observed ?? { evidenceMissing: true },
     verdict: missing ? "failed" : verdict,
@@ -340,6 +564,7 @@ function gateRow({
     type: "proof-gate",
     id,
     scenario,
+    evidenceScope: "BB fixture observation",
     ...rowMetadata(slice, ensembleHead, sourceDigest, hostSdkEvidence),
     observed: observed ?? { evidenceMissing: true },
     verdict: missing ? "failed" : verdict,
@@ -842,6 +1067,23 @@ export function buildIntegrationReport({
       evidencePresent: Boolean(t5Gate("a17-shared-worktree-retention")),
       ...metadataContext,
     }),
+    checkedApiRow({
+      id: REQUIRED_API_ROWS[17],
+      api: "threads.spawn permission modes and environment reuse",
+      scenario:
+        "T2 records the three advertised permission modes, exact provider request traces, restart identity and unavailable-environment rejection.",
+      slice: execution,
+      observed: {
+        permissionEnvironmentMatrix:
+          t2Checks.permissionEnvironmentMatrix ?? null,
+      },
+      evidenceLimit:
+        "This is BB/provider request forwarding evidence only. It does not prove provider enforcement, shell containment, ambient credential isolation or direct BB API restrictions.",
+      evidencePresent: hasPermissionEnvironmentEvidence(
+        t2Checks.permissionEnvironmentMatrix,
+      ),
+      ...metadataContext,
+    }),
   ];
 
   const gateDefs = [
@@ -946,6 +1188,7 @@ export function buildIntegrationReport({
     type: "t5-scenario",
     id: entry.name,
     scenario: `T5 scenario ${entry.name}`,
+    evidenceScope: "BB fixture observation",
     ...rowMetadata(recovery, ensembleHead, sourceDigest, hostSdkEvidence),
     observed: t5Observed(entry) ?? { evidenceMissing: true },
     verdict: entry.verdict ?? "failed",
@@ -996,6 +1239,7 @@ export function buildIntegrationReport({
       sanitize(entry, replacements),
     ),
     t5Reports: (t5Reports ?? []).map((entry) => sanitize(entry, replacements)),
+    proposedEnsembleContract: proposedEnsembleContract(),
     dependentExecutionBlocked:
       suitePassed && stopEvidenceValidatedOpen
         ? ["T06", "T08"]
@@ -1124,6 +1368,12 @@ export function assertIntegrationReport(report) {
   );
   assert.equal(report.toolchain?.node, "24.21.0", "report Node.js pin changed");
   assert.equal(report.toolchain?.npm, "12.1.0", "report npm pin changed");
+  assert.deepEqual(
+    report.proposedEnsembleContract,
+    proposedEnsembleContract(),
+    "proposed Ensemble policy and cleanup decision table changed",
+  );
+  assertT5Reports(report.t5Reports);
   const t5Slice = report.slices?.T5;
   assert.equal(t5Slice?.exitCode, 0, "T5 slice must exit successfully");
   assert.equal(
@@ -1156,6 +1406,11 @@ export function assertIntegrationReport(report) {
     assert(!keyed.has(key), `duplicate report row ${key}`);
     keyed.set(key, entry);
     requireString(entry.scenario, `${entry.id}.scenario`);
+    assert.equal(
+      entry.evidenceScope,
+      "BB fixture observation",
+      `${entry.id}.evidenceScope must distinguish BB evidence from policy`,
+    );
     requireString(entry.runtime?.bb, `${entry.id}.runtime.bb`);
     requireString(entry.runtime?.hostSdk, `${entry.id}.runtime.hostSdk`);
     requireString(entry.runtime?.pluginSdk, `${entry.id}.runtime.pluginSdk`);
@@ -1183,6 +1438,28 @@ export function assertIntegrationReport(report) {
       entry.sourceRevisions?.providerBridge,
       `${entry.id}.sourceRevisions.providerBridge`,
     );
+    const providerBridgeSha256 = entry.sourceRevisions?.providerBridgeSha256;
+    requireString(
+      providerBridgeSha256,
+      `${entry.id}.sourceRevisions.providerBridgeSha256`,
+    );
+    assert.match(
+      providerBridgeSha256,
+      /^[a-f0-9]{64}$/u,
+      `${entry.id}.sourceRevisions.providerBridgeSha256 must be SHA-256 hex`,
+    );
+    for (const name of ["scriptedProvider", "executionRpc", "recoveryRpc"]) {
+      const digest = entry.sourceRevisions?.fixtureSourceSha256?.[name];
+      requireString(
+        digest,
+        `${entry.id}.sourceRevisions.fixtureSourceSha256.${name}`,
+      );
+      assert.match(
+        digest,
+        /^[a-f0-9]{64}$/u,
+        `${entry.id}.sourceRevisions.fixtureSourceSha256.${name} must be SHA-256 hex`,
+      );
+    }
     requireString(
       entry.packageArtifacts?.lockfileTarballIntegrity?.bbApp,
       `${entry.id}.packageArtifacts.lockfileTarballIntegrity.bbApp`,
@@ -1217,6 +1494,11 @@ export function assertIntegrationReport(report) {
         assert(
           hasEvidenceValue(evidenceAtPath(entry.observed, fieldPath)),
           `${entry.id}.observed.${fieldPath} is missing required scenario evidence`,
+        );
+      }
+      if (entry.id === "permission-environment-forwarding") {
+        assertPermissionEnvironmentMatrix(
+          entry.observed.permissionEnvironmentMatrix,
         );
       }
     }
@@ -1270,6 +1552,23 @@ export function assertIntegrationReport(report) {
       .map((entry) => entry.id);
     assert.deepEqual(found, required, `unexpected or reordered ${type} rows`);
   }
+  assertT5Reports(
+    REQUIRED_T5_REPORTS.map((id) => {
+      const row = keyed.get(`t5-scenario:${id}`);
+      return {
+        name: id,
+        verdict: row.verdict,
+        identities: row.observed?.identities,
+        observed: row.observed?.observations,
+        limits: [row.evidenceLimit],
+      };
+    }),
+  );
+  assert.equal(
+    keyed.get("public-api:shared-worktree-retention").verdict,
+    "open",
+    "A17 remains a BB observation and cannot close the cleanup policy gate",
+  );
   const stop = keyed.get("public-api:thread-stop-and-retry")?.observed?.stop;
   assert.equal(stop?.response?.ok, true, "stop response must be confirmed");
   assert(
@@ -1293,8 +1592,21 @@ export function assertIntegrationReport(report) {
   assert.equal(
     keyed.get("proof-gate:stop-writer-release").verdict,
     stopScenario.verdict,
-    "Stop proof gate must preserve the T5 capability verdict",
+    "Stop proof gate must preserve the T5 capability verdict and remains open",
   );
+  for (const id of [
+    "composed-writer-admission",
+    "initial-workspace-identity",
+    "retry-ownership",
+    "revision-application",
+  ]) {
+    const scenario = keyed.get(`t5-scenario:${id}`);
+    assert.equal(
+      keyed.get(`proof-gate:${id}`).verdict,
+      scenario.verdict,
+      `${id} proof gate must preserve the T5 capability verdict; product gate remains open`,
+    );
+  }
   const startup = keyed.get("proof-gate:startup-queued-dispatch");
   assert.equal(
     startup.verdict,
@@ -1461,6 +1773,247 @@ function assertStopWriterEvidence(verdict, identities, observed) {
   return true;
 }
 
+function assertComposedWriterEvidence(identities, observed) {
+  for (const [field, label] of [
+    ["projectId", "composed-writer project ID"],
+    ["threadId", "composed-writer thread ID"],
+    ["guardPluginId", "second-plugin ID"],
+    ["queuedMessageId", "second-plugin queued message ID"],
+    ["environmentId", "composed-writer environment ID"],
+  ]) {
+    requireString(identities?.[field], label);
+  }
+  assert.equal(observed?.waitingOn?.kind, "plugin");
+  assert.equal(observed.waitingOn.pluginId, identities.guardPluginId);
+  requireString(observed.waitingOn.reason, "second-plugin wait reason");
+  assert.equal(observed.preReleaseProviderEffects, 0);
+  assert.equal(observed.postReleaseToolEffects, 1);
+  assert.equal(observed.initialEnvironmentId, null);
+}
+
+function assertInitialWorkspaceEvidence(identities, observed) {
+  for (const [field, label] of [
+    ["projectId", "workspace project ID"],
+    ["taskId", "task identity"],
+    ["taskOperationId", "task operation ID"],
+    ["chosenTaskThreadId", "chosen task thread ID"],
+    ["chosenTaskEnvironmentId", "chosen task environment ID"],
+    ["missingEnvironmentId", "missing environment ID"],
+  ]) {
+    requireString(identities?.[field], label);
+  }
+  for (const field of [
+    "competingAttemptIds",
+    "rawConcurrentSpawnThreadIds",
+    "rawEnvironmentIds",
+  ]) {
+    assert.equal(
+      identities?.[field]?.length,
+      2,
+      `${field} must contain two IDs`,
+    );
+    assert(
+      identities[field].every((value) => typeof value === "string" && value),
+      `${field} must contain nonempty IDs`,
+    );
+    assert.equal(
+      new Set(identities[field]).size,
+      2,
+      `${field} contains duplicate IDs`,
+    );
+  }
+  assert.equal(observed?.rawConcurrentSpawnCount, 2);
+  assert.equal(observed.rawDistinctEnvironmentCount, 2);
+  assert.deepEqual(
+    observed.rawHookObservations?.map((observation) => observation.threadId),
+    identities.rawConcurrentSpawnThreadIds,
+    "raw concurrent spawn observations must preserve both thread IDs",
+  );
+  assert.equal(observed.rawTaskThreadEnvironmentIds?.length, 1);
+  const chosen = observed.rawTaskThreadEnvironmentIds[0];
+  assert.equal(chosen.threadId, identities.chosenTaskThreadId);
+  assert.equal(chosen.environmentId, identities.chosenTaskEnvironmentId);
+  assert.deepEqual(observed.duplicateRawTaskEnvironments, []);
+  const attempts = identities.competingAttemptIds;
+  const joined = observed.joinedAttempt;
+  assert.equal(joined.operationId, identities.taskOperationId);
+  assert.equal(joined.taskId, identities.taskId);
+  assert.equal(joined.ownerAttemptId, attempts[0]);
+  assert.equal(joined.attemptId, attempts[1]);
+  assert.equal(joined.disposition, "joined");
+  assert.equal(joined.spawnCalls, 1);
+  for (const label of [
+    "acceptedReconciliationBeforeRestart",
+    "reconciliation",
+  ]) {
+    const result = observed[label];
+    assert.equal(result?.state, "confirmed", `${label} must be confirmed`);
+    assert.equal(result.operationId, identities.taskOperationId);
+    assert.equal(result.taskId, identities.taskId);
+    assert.equal(result.projectId, identities.projectId);
+    assert.equal(result.ownerAttemptId, attempts[0]);
+    assert.equal(result.spawnCalls, 1);
+    assert.equal(result.chosenThreadId, identities.chosenTaskThreadId);
+    assert.equal(
+      result.matches?.length,
+      1,
+      `${label} has duplicate workspace matches`,
+    );
+    assert.equal(result.matches[0]?.threadId, identities.chosenTaskThreadId);
+    assert.equal(
+      result.matches[0]?.environmentId,
+      identities.chosenTaskEnvironmentId,
+    );
+    assert.deepEqual(
+      result.attempts?.map((attempt) => [
+        attempt.attemptId,
+        attempt.disposition,
+      ]),
+      [
+        [attempts[0], "owner"],
+        [attempts[1], "joined"],
+      ],
+      `${label} must show one owner and one joined attempt`,
+    );
+  }
+  const missing = observed.missingEnvironment;
+  assert.equal(missing?.environmentId, identities.missingEnvironmentId);
+  assert.equal(missing?.rejectedAtSpawn, true);
+  assert.equal(missing.threadId, null);
+  requireString(missing.spawnError, "missing environment rejection");
+  assert.deepEqual(
+    missing.providerTrace,
+    [],
+    "missing environment must not start a provider",
+  );
+}
+
+function assertA17RetentionEvidence(identities, observed) {
+  requireString(identities?.projectId, "A17 project ID");
+  requireString(identities?.environmentId, "A17 environment ID");
+  requireString(identities?.workspacePath, "A17 workspace path");
+  assert.equal(identities.threadIds?.length, 2);
+  assert(identities.threadIds.every((id) => typeof id === "string" && id));
+  assert.equal(new Set(identities.threadIds).size, 2);
+  assert.deepEqual(observed?.statusesBeforeCleanup, ["idle", "idle"]);
+  const [firstThreadId, secondThreadId] = identities.threadIds;
+  assert.equal(observed.firstThreadArchived, true);
+  assert.equal(observed.firstThreadArchive?.archiveResponse?.ok, true);
+  assert.deepEqual(
+    observed.firstThreadArchive.archiveResponse.archivedThreadIds,
+    [firstThreadId],
+  );
+  assert.equal(observed.firstThreadArchive.thread?.id, firstThreadId);
+  assert.equal(
+    observed.firstThreadArchive.thread?.environmentId,
+    identities.environmentId,
+  );
+  assert.equal(observed.environmentAfterArchive?.id, identities.environmentId);
+  assert.equal(observed.markerRetainedAfterArchive, true);
+  assert.equal(observed.environmentRetainedAfterArchive, true);
+  assert.equal(observed.firstThreadDelete?.ok, true);
+  assert.equal(
+    observed.sharedEnvironmentAfterFirstDelete?.id,
+    identities.environmentId,
+  );
+  assert.equal(observed.markerRetainedAfterDelete, true);
+  assert.equal(observed.sharedRetentionAfterArchiveAndDelete, true);
+  assert.equal(observed.remainingLiveThread?.id, secondThreadId);
+  assert.equal(
+    observed.remainingLiveThread?.environmentId,
+    identities.environmentId,
+  );
+  assert.equal(observed.finalThreadArchived, true);
+  assert.equal(observed.finalThreadArchive?.archiveResponse?.ok, true);
+  assert.deepEqual(
+    observed.finalThreadArchive.archiveResponse.archivedThreadIds,
+    [secondThreadId],
+  );
+  assert.equal(observed.finalThreadArchive.thread?.id, secondThreadId);
+  assert.equal(
+    observed.finalThreadArchive.thread?.environmentId,
+    identities.environmentId,
+  );
+  assert.equal(
+    observed.environmentAfterFinalArchive?.id,
+    identities.environmentId,
+  );
+  assert.equal(
+    observed.markerExistsAfterFinalArchive,
+    true,
+    "A17 markerExistsAfterFinalArchive must be observed before cleanup",
+  );
+  assert.equal(observed.workspaceExistsAfterFinalArchive, true);
+  assert.equal(observed.markerRetainedWhileShared, true);
+  assert.equal(observed.secondThreadDelete?.ok, true);
+
+  assert(
+    Number.isFinite(observed.retirementWindowMs) &&
+      observed.retirementWindowMs > 0 &&
+      observed.retirementWindowMs <= 7 * 60 * 1000,
+    "A17 retirement observation must use a finite window no longer than seven minutes",
+  );
+  assert(
+    Number.isFinite(observed.retirementSampleIntervalMs) &&
+      observed.retirementSampleIntervalMs > 0 &&
+      observed.retirementSampleIntervalMs <= 20_000,
+    "A17 dirty-worktree samples must have a bounded interval",
+  );
+  assert(
+    Number.isFinite(observed.retirementObservationWindowMs) &&
+      observed.retirementObservationWindowMs >= 0 &&
+      observed.retirementObservationWindowMs <= observed.retirementWindowMs,
+    "A17 observed window must fit inside its bounded retirement window",
+  );
+  assert(Array.isArray(observed.retirementObservations));
+  assert(observed.retirementObservations.length >= 2);
+  assert.equal(
+    observed.retirementObservationCount,
+    observed.retirementObservations.length,
+  );
+  let previousElapsed = -1;
+  for (const sample of observed.retirementObservations) {
+    assert(Number.isFinite(sample.elapsedMs) && sample.elapsedMs >= 0);
+    assert(
+      sample.elapsedMs > previousElapsed,
+      "A17 sample times must increase",
+    );
+    assert.equal(sample.environmentId, identities.environmentId);
+    assert.equal(typeof sample.workspaceExists, "boolean");
+    assert.equal(typeof sample.markerExists, "boolean");
+    assert.equal(typeof sample.environmentRetired, "boolean");
+    if (previousElapsed >= 0) {
+      assert(
+        sample.elapsedMs - previousElapsed <=
+          observed.retirementSampleIntervalMs + 5_000,
+        "A17 sample gap exceeds its bounded interval",
+      );
+    }
+    previousElapsed = sample.elapsedMs;
+  }
+  assert.equal(previousElapsed, observed.retirementObservationWindowMs);
+  const last = observed.retirementObservations.at(-1);
+  assert.equal(
+    observed.retirementObserved,
+    last.retirementObserved === true,
+    "A17 retirement summary must agree with the final bounded sample",
+  );
+  assert.equal(
+    observed.environmentAfterLastDelete?.id,
+    identities.environmentId,
+  );
+  assert.equal(typeof observed.markerExistsAfterLastDelete, "boolean");
+  assert.equal(typeof observed.workspaceExistsAfterLastDelete, "boolean");
+  if (observed.retirementObserved) {
+    assert.equal(last.environmentRetired, true);
+    assert.equal(last.workspaceExists, false);
+    assert.equal(last.markerExists, false);
+    assert.equal(observed.environmentAfterLastDelete.status, "destroyed");
+    assert.equal(observed.markerExistsAfterLastDelete, false);
+    assert.equal(observed.workspaceExistsAfterLastDelete, false);
+  }
+}
+
 export function assertT5Reports(rows) {
   assert(Array.isArray(rows), "T5 report rows must be an array");
   const names = rows.map((row) => row?.name);
@@ -1490,6 +2043,13 @@ export function assertT5Reports(rows) {
         "open",
         `T5 ${row.name} is fixture evidence; its product gate remains open`,
       );
+    }
+    if (row.name === "composed-writer-admission") {
+      assertComposedWriterEvidence(row.identities, row.observed);
+    } else if (row.name === "initial-workspace-identity") {
+      assertInitialWorkspaceEvidence(row.identities, row.observed);
+    } else if (row.name === "a17-shared-worktree-retention") {
+      assertA17RetentionEvidence(row.identities, row.observed);
     }
   }
   return true;

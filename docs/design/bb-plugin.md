@@ -347,22 +347,52 @@ runtime evidence before implementation.
 
 ## 6. Workspaces, scheduling, and access
 
-Accepted: one task worktree for repository-changing work in a single-repository
-project, shared across its assignments. Only one writer holds it at a time.
-A multi-repository task would require a worktree for each participating repository;
-this does not imply a separate writing worktree per agent. Parallel read-only reviews use an immutable commit in
-separate workspaces where needed; changing the reviewed commit invalidates any
-approval tied to it. The first release serializes writing assignments in the task worktree.
+Proposed Ensemble contract: one task worktree for repository-changing work in a
+single-repository project, shared across its assignments. Only one writer holds
+it at a time. A multi-repository task would require a worktree for each
+participating repository; this does not imply a separate writing worktree per
+agent. Parallel read-only reviews use an immutable commit in separate workspaces
+where needed; changing the reviewed commit invalidates any approval tied to it.
+The first release serializes writing assignments in the task worktree.
 
-Use BB's existing workspace cleanup, configurable per project: retain task
-conversations until operator archival, or archive after confirmed delivery and
-checking work is preserved. Default to retain-until-archive.
-BB supports environment reuse across assignment threads. Its stock worktree
-provider retires an environment after its last live thread leaves (normally five
-minutes); removal can discard dirty files. Ensemble-initiated archival must check
-preserved work and unresolved effects; direct BB archival follows BB's lifecycle.
-No per-environment retention override was found in the inspected public SDK.
-T01/T02 must verify this contract against the pinned runtime.
+Use BB's existing workspace cleanup, configurable per project. The proposed
+default retains task conversations until operator archival. Optional automatic
+archival is eligible only after confirmed delivery, preserved work and resolved
+effects. Missing or unknown workspace identity holds both cleanup and dispatch.
+Ensemble-initiated archival checks preservation and unresolved effects; direct
+BB archival follows BB's own lifecycle. No per-environment retention override
+was found in the inspected public SDK.
+
+| Proposed cleanup mode | Required evidence | Ensemble decision |
+| --- | --- | --- |
+| Default | Workspace is present | Retain until operator archival |
+| Automatic | Delivery confirmed, work preserved, effects resolved, workspace present | Eligible for archival |
+| Automatic | Delivery, preservation or effects are unknown | Retain and hold cleanup |
+| Any | Workspace is missing or unknown | Hold cleanup and dispatch |
+
+The T1/T2/T5 fixtures provide bounded BB observations for this design. The
+permission matrix forwarded `accept-edits`, `auto` and `full` into one scripted
+provider request per mode, reused one managed environment, and read the same
+thread/environment identities after restart. A synthetic unavailable
+environment was rejected without a provider trace. This does not demonstrate
+provider enforcement, shell containment, ambient-credential isolation or direct
+BB API restrictions.
+
+For workspace setup, two raw parallel BB spawns produced distinct environments.
+A separate test-local SQLite intent joined two attempts and reconciled one
+chosen task thread/environment after a dropped accepted response and restart;
+that fixture arbitration is not product workspace binding. The missing ID in
+that case is synthetic and does not represent BB reclaiming an existing
+environment. The second-plugin wait produced no provider effects before release
+and one tool effect after release, with no Ensemble writer reservation.
+
+The A17 dirty-marker fixture kept the marker and shared environment after the
+first thread was archived and deleted while another live thread retained it.
+After the second thread's archive and delete, BB retired the environment and
+removed the marker and worktree within a bounded seven-minute observation. This
+single direct BB lifecycle observation leaves A17 open; it does not prove that
+either proposed cleanup mode is safe for general task work. The product must
+preserve this distinction in its report and UI.
 
 Honor BB's Concurrency limit plugin for execution admission. Do not introduce an
 Ensemble global default or per-project execution cap in the first release. Use
@@ -394,10 +424,12 @@ Accepted access model: one trusted operator on a private BB installation.
 Ensemble enforces authorization for its own commands and integration actions.
 Agent execution uses BB/provider permissions and environment controls. The UI
 must distinguish these controls from project action policy and disclose shell,
-ambient credential, and direct BB API access limitations. T02 verifies this
-mapping and workspace lifecycle; it does not implement a new sandbox. Revocation
-of Ensemble actions is immediate at command admission; stopping agent access
-relies on BB/provider termination and observed confirmation.
+ambient credential, and direct BB API access limitations. T1 records provider
+request forwarding for the three tested permission modes; it does not prove
+provider enforcement or an independent sandbox, and it does not test rejection
+of an unauthorized Ensemble action. Revocation of Ensemble actions is immediate
+at command admission; stopping agent access relies on BB/provider termination
+and observed confirmation.
 
 ## 7. GitHub sources and provider writes
 
@@ -537,23 +569,28 @@ recheck with 2,150 ms stable no-start, while a distinct earlier integrated run
 recorded 2,361 ms with 2,066 ms stable no-start. The trace-timing race means
 neither is current acceptance proof.
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` passed `npm run check`,
-`npm run test:bb-integration`, and `npm run test:bb-prototype` on Node
-24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29. It validates six T5
-gate rows; T4 produced its expected diagnostic. The corrected stop row confirms
-exact-ID cancellation with a matching event and queue absence before and after
-recheck, then records 2,378 ms after recheck with 2,087 ms stable no-start and
-zero starts/effects. T1–T5 isolation cleanup is clean.
+T1/T2 records are now integrated into the capability report. Its permission row
+checks the three provider request modes, project/environment identities,
+restart reads, and synthetic unavailable-environment rejection. T5 records
+composed wait, stop, initial workspace, retry, revision and A17 observations;
+fixture-only evidence does not implement Ensemble ownership or cleanup policy.
 
-`stop-writer-release` remains open. The corrected evidence supports removing
-only the #676-specific T02 block; T06/T08 remain blocked
-by #665 and other gates. The evidence covers one scripted first message, not
-arbitrary process termination or complete Ensemble writer exclusion.
-Unconfirmed cancellation remains `failed-capability`; startup or event-capture
-failure is inconclusive. The accepted guarantees remain unchanged.
+The latest focused T2 stop record confirms exact-ID cancellation with a matching
+event and queue absence before and after recheck. It observed a 2,727 ms
+post-release window, including 2,378 ms stable no-start, with zero starts and
+effects. `stop-writer-release` remains open: this covers one scripted held
+message, not arbitrary process termination or complete Ensemble writer
+exclusion. Unconfirmed cancellation remains `failed-capability`; startup or
+event-capture failure is inconclusive.
 
-Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
+The A17 record observed the dirty marker and shared worktree remain while the
+second live thread existed. After final archive and deletion, BB removed the
+marker and worktree and reported the environment `destroyed` within the
+seven-minute sampling bound. A17 remains open because direct BB lifecycle
+observations do not prove delivery, preservation or automatic-cleanup policy.
+The accepted product guarantees remain unchanged.
+
+Inspected SDK 0.5.29 declarations expose `threads.stop`, turn-specific
 `threads.retry`, queued-message APIs, and the `message.dispatch` hook with
 `recheck`. The stop contract explicitly requires status confirmation; dispatch
 hooks cover queue drains and retries, with an explicit Send-now bypass. These
@@ -564,8 +601,8 @@ are source-level contracts, not integration test results.
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: the final corrected integrated report records that `threads.stop` returned `ok` while one scripted thread stayed pending; exact-ID deletion, matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current 2,378 ms window includes 2,087 ms stable no-start and zero starts/effects. This does not prove arbitrary process termination or complete Ensemble writer exclusion | Supports removing only the #676-specific T02 block; T06/T08 remain blocked by #665 and other gates |
-| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent chose one thread/environment after restart; two raw parallel BB spawns created separate environments | T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and fresh queue reads were observed. A focused run measured 2,727 ms after release with 2,378 ms stable no-start and zero starts/effects. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
+| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent joined two attempts and chose one thread/environment after restart; two raw parallel BB spawns created separate environments. A synthetic missing environment was rejected without a provider trace | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |
 
