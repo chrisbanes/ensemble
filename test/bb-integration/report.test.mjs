@@ -65,8 +65,10 @@ function sampleObserved(type, id) {
       identities:
         id === "stop-writer-release"
           ? {
+              delayedThreadId: "thread-delayed",
               delayedStopResponse: { ok: true },
               delayedQueuedMessageId: "queued-stop",
+              delayedDeleteResponse: { ok: true },
             }
           : { threadId: "thread-one" },
       observations:
@@ -83,18 +85,87 @@ function sampleObserved(type, id) {
 function stopWriterObserved() {
   return {
     delayedStatusBeforeStop: "pending",
-    delayedStatusAfterStop: "idle",
-    delayedStopConfirmed: true,
-    releaseAttempted: true,
-    releaseEvidence: { status: "idle" },
-    delayedQueueAfterStopBeforeRelease: [
-      { id: "queued-stop", waitingOn: { kind: "plugin" } },
-    ],
+    delayedStatusAfterStop: "pending",
+    delayedStopConfirmed: false,
+    delayedCancellationConfirmed: true,
+    delayedCancellationEvent: {
+      name: "message.cancelled",
+      threadId: "thread-delayed",
+      messageId: "queued-stop",
+    },
+    delayedQueueAfterStopBeforeRelease: [],
     delayedProviderTurnStartsBeforeRelease: 0,
     delayedProviderToolEffectsBeforeRelease: 0,
+    releaseAttempted: true,
+    releaseAttemptedAfterCancellationConfirmation: true,
+    releaseEvidence: {
+      threadId: "thread-delayed",
+      status: "pending",
+      queue: [],
+      observationWindowMs: 2_000,
+      stableNoStartMs: 2_000,
+      stableNoStartWindowMs: 2_000,
+    },
     delayedProviderTurnStartsAfterRelease: 0,
     delayedProviderToolEffectsAfterRelease: 0,
   };
+}
+
+function failedStopWriterObserved() {
+  return {
+    ...stopWriterObserved(),
+    delayedCancellationConfirmed: false,
+    delayedCancellationEvent: null,
+    delayedQueueAfterStopBeforeRelease: [
+      { id: "queued-stop", waitingOn: { kind: "plugin" } },
+    ],
+    releaseAttempted: false,
+    releaseAttemptedAfterCancellationConfirmation: false,
+    releaseEvidence: null,
+  };
+}
+
+function validT5Reports() {
+  return REQUIRED_T5_REPORTS.map((name) => ({
+    name,
+    verdict: "open",
+    identities:
+      name === "stop-writer-release"
+        ? {
+            delayedThreadId: "thread-delayed",
+            delayedStopResponse: { ok: true },
+            delayedQueuedMessageId: "queued-stop",
+            delayedDeleteResponse: { ok: true },
+          }
+        : { threadId: `thread-${name}` },
+    observed:
+      name === "stop-writer-release"
+        ? stopWriterObserved()
+        : { status: "observed" },
+    limits: ["Fixture evidence does not implement the product gate."],
+  }));
+}
+
+function stopWriterFailureReport() {
+  const report = validReport();
+  const scenario = report.rows.find(
+    (entry) => entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  );
+  scenario.verdict = "failed-capability";
+  scenario.observed = {
+    identities: {
+      delayedThreadId: "thread-delayed",
+      delayedStopResponse: { ok: true },
+      delayedQueuedMessageId: "queued-stop",
+      delayedDeleteResponse: { ok: false },
+    },
+    observations: failedStopWriterObserved(),
+  };
+  report.rows.find(
+    (entry) => entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "failed-capability";
+  report.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  return report;
 }
 
 function row(type, id, overrides = {}) {
@@ -331,39 +402,118 @@ test("integration report rejects duplicate API rows and empty evidence", () => {
   );
 });
 
-test("T5 fixture rows stay open and cannot claim product gates passed", () => {
-  const rows = REQUIRED_T5_REPORTS.map((name) => ({
-    name,
-    verdict: "open",
-    identities:
-      name === "stop-writer-release"
-        ? {
-            delayedStopResponse: { ok: true },
-            delayedQueuedMessageId: "queued-stop",
-          }
-        : { threadId: `thread-${name}` },
-    observed:
-      name === "stop-writer-release"
-        ? stopWriterObserved()
-        : { status: "observed" },
-    limits: ["Fixture evidence does not implement the product gate."],
-  }));
+test("T5 confirms exact cancellation before release and keeps the product gate open", () => {
+  const rows = validT5Reports();
   assert.doesNotThrow(() => assertT5Reports(rows));
   rows[0].verdict = "pass";
   assert.throws(() => assertT5Reports(rows), /product gate remains open/u);
-  rows[0].verdict = "open";
-  rows[1].observed.delayedStopConfirmed = false;
-  assert.throws(() => assertT5Reports(rows), /false !== true/u);
-  rows[1].verdict = "failed-capability";
-  rows[1].observed.delayedStatusAfterStop = "pending";
-  rows[1].observed.releaseAttempted = false;
-  rows[1].observed.releaseEvidence = null;
-  assert.doesNotThrow(() => assertT5Reports(rows));
 
   const report = validReport();
+  assert.deepEqual(report.dependentExecutionBlocked, ["T06", "T08"]);
+  assert.doesNotThrow(() => assertIntegrationReport(report));
   report.rows.find((entry) => entry.id === REQUIRED_T5_REPORTS[0]).verdict =
     "passed";
   assert.throws(() => assertIntegrationReport(report), /remains open/u);
+});
+
+test("T5 keeps the writer held when cancellation is unconfirmed", () => {
+  const rows = validT5Reports();
+  rows[1].verdict = "failed-capability";
+  rows[1].identities.delayedDeleteResponse = { ok: false };
+  rows[1].observed = failedStopWriterObserved();
+  assert.doesNotThrow(() => assertT5Reports(rows));
+
+  const report = stopWriterFailureReport();
+  assert.deepEqual(report.dependentExecutionBlocked, ["T02", "T06", "T08"]);
+  assert.doesNotThrow(() => assertIntegrationReport(report));
+});
+
+test("T5 rejects unconfirmed or incomplete cancellation evidence before release", () => {
+  const cases = [
+    [
+      "missing cancellation event",
+      (observed) => {
+        observed.delayedCancellationEvent = null;
+      },
+      /cancellation event/u,
+    ],
+    [
+      "cancellation event for another message",
+      (observed) => {
+        observed.delayedCancellationEvent.messageId = "another-message";
+      },
+      /cancellation event/u,
+    ],
+    [
+      "cancellation event for another thread",
+      (observed) => {
+        observed.delayedCancellationEvent.threadId = "another-thread";
+      },
+      /cancellation event/u,
+    ],
+    [
+      "retained queue row",
+      (observed) => {
+        observed.delayedQueueAfterStopBeforeRelease = [
+          { id: "queued-stop", waitingOn: { kind: "plugin" } },
+        ];
+      },
+      /queue row/u,
+    ],
+    [
+      "release before cancellation confirmation",
+      (observed) => {
+        observed.releaseAttemptedAfterCancellationConfirmation = false;
+      },
+      /before confirmed cancellation/u,
+    ],
+    [
+      "missing post-release observation window",
+      (observed) => {
+        delete observed.releaseEvidence.observationWindowMs;
+      },
+      /observation window/u,
+    ],
+    [
+      "retained queue row after release",
+      (observed) => {
+        observed.releaseEvidence.queue = [
+          { id: "queued-stop", waitingOn: { kind: "plugin" } },
+        ];
+      },
+      /queue row/u,
+    ],
+    [
+      "provider turn after release",
+      (observed) => {
+        observed.delayedProviderTurnStartsAfterRelease = 1;
+      },
+      /provider turn started after release/u,
+    ],
+    [
+      "tool effect after release",
+      (observed) => {
+        observed.delayedProviderToolEffectsAfterRelease = 1;
+      },
+      /tool effect after release/u,
+    ],
+  ];
+
+  for (const [label, mutate, message] of cases) {
+    const rows = validT5Reports();
+    mutate(rows[1].observed);
+    assert.throws(() => assertT5Reports(rows), message, label);
+  }
+
+  const releasedUnconfirmed = validT5Reports();
+  releasedUnconfirmed[1].verdict = "failed-capability";
+  releasedUnconfirmed[1].identities.delayedDeleteResponse = { ok: false };
+  releasedUnconfirmed[1].observed = failedStopWriterObserved();
+  releasedUnconfirmed[1].observed.releaseAttempted = true;
+  assert.throws(
+    () => assertT5Reports(releasedUnconfirmed),
+    /cannot release when cancellation is unconfirmed/u,
+  );
 });
 
 test("integration report detects missing events and unexpected duplicate effects", () => {

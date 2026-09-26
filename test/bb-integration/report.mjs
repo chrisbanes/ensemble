@@ -1275,16 +1275,42 @@ export function assertIntegrationReport(report) {
 }
 
 function assertStopWriterEvidence(verdict, identities, observed) {
-  assert.equal(identities?.delayedStopResponse?.ok, true);
+  assert.equal(
+    identities?.delayedStopResponse?.ok,
+    true,
+    "delayed stop response must be recorded and acknowledged",
+  );
+  requireString(identities?.delayedThreadId, "delayed thread ID");
+  requireString(
+    identities?.delayedQueuedMessageId,
+    "delayed queued message ID",
+  );
+  requireObject(
+    identities?.delayedDeleteResponse,
+    "delayed queue delete response",
+  );
   assert.equal(observed?.delayedStatusBeforeStop, "pending");
+  assert.equal(typeof observed?.delayedStopConfirmed, "boolean");
   assert.equal(observed?.delayedProviderTurnStartsBeforeRelease, 0);
   assert.equal(observed?.delayedProviderToolEffectsBeforeRelease, 0);
-  assert.equal(observed?.delayedProviderTurnStartsAfterRelease, 0);
-  assert.equal(observed?.delayedProviderToolEffectsAfterRelease, 0);
-  if (verdict === "failed-capability") {
-    assert.equal(observed.delayedStatusAfterStop, "pending");
-    assert.equal(observed.delayedStopConfirmed, false);
-    assert.equal(observed.releaseAttempted, false);
+  requireString(observed?.delayedStatusAfterStop, "delayed status after stop");
+  assert(Array.isArray(observed?.delayedQueueAfterStopBeforeRelease));
+
+  if (observed.delayedCancellationConfirmed === false) {
+    assert.equal(
+      verdict,
+      "failed-capability",
+      "unconfirmed cancellation must remain a failed capability",
+    );
+    assert.equal(
+      observed.releaseAttempted,
+      false,
+      "cannot release when cancellation is unconfirmed",
+    );
+    assert.equal(
+      observed.releaseAttemptedAfterCancellationConfirmation,
+      false,
+    );
     assert.equal(observed.releaseEvidence, null);
     assert(
       observed.delayedQueueAfterStopBeforeRelease?.some(
@@ -1294,13 +1320,86 @@ function assertStopWriterEvidence(verdict, identities, observed) {
       ),
       "The unconfirmed stop must retain the observed plugin-held queue row",
     );
-  } else {
-    assert.equal(verdict, "open", "Stop product gate remains open");
-    assert(["idle", "error"].includes(observed.delayedStatusAfterStop));
-    assert.equal(observed.delayedStopConfirmed, true);
-    assert.equal(observed.releaseAttempted, true);
-    assert.notEqual(observed.releaseEvidence, null);
+    return;
   }
+
+  assert.equal(observed.delayedCancellationConfirmed, true);
+  assert.equal(verdict, "open", "Stop product gate remains open");
+  assert.equal(
+    identities.delayedDeleteResponse.ok,
+    true,
+    "exact queued message deletion must be acknowledged",
+  );
+  const event = observed.delayedCancellationEvent;
+  assert(
+    event !== null && typeof event === "object" && !Array.isArray(event),
+    "matching message.cancelled cancellation event must be observed",
+  );
+  assert.equal(
+    event.name,
+    "message.cancelled",
+    "cancellation event must be message.cancelled",
+  );
+  assert.equal(
+    event.threadId,
+    identities.delayedThreadId,
+    "cancellation event must match the delayed thread ID",
+  );
+  assert.equal(
+    event.messageId,
+    identities.delayedQueuedMessageId,
+    "cancellation event must match the delayed queued message ID",
+  );
+  assert(
+    observed.delayedQueueAfterStopBeforeRelease.every(
+      (entry) => entry?.id !== identities.delayedQueuedMessageId,
+    ),
+    "cancelled queue row must be absent before release",
+  );
+  assert.equal(observed.releaseAttempted, true);
+  assert.equal(
+    observed.releaseAttemptedAfterCancellationConfirmation,
+    true,
+    "release was attempted before confirmed cancellation",
+  );
+
+  const release = observed.releaseEvidence;
+  assert(
+    release !== null && typeof release === "object" && !Array.isArray(release),
+    "bounded post-release observation window must be recorded",
+  );
+  assert.equal(release.threadId, identities.delayedThreadId);
+  requireString(release.status, "post-release delayed thread status");
+  assert(
+    Number.isFinite(release.observationWindowMs) &&
+      release.observationWindowMs >= 2_000 &&
+      release.observationWindowMs <= 5_000,
+    "post-release observation window must be between 2000 and 5000 ms",
+  );
+  assert.equal(release.stableNoStartWindowMs, 2_000);
+  assert(
+    Number.isFinite(release.stableNoStartMs) &&
+      release.stableNoStartMs >= release.stableNoStartWindowMs &&
+      release.stableNoStartMs <= release.observationWindowMs,
+    "post-release observation must include a stable two-second no-start window",
+  );
+  assert(Array.isArray(release.queue));
+  assert(
+    release.queue.every(
+      (entry) => entry?.id !== identities.delayedQueuedMessageId,
+    ),
+    "cancelled queue row must remain absent after release",
+  );
+  assert.equal(
+    observed.delayedProviderTurnStartsAfterRelease,
+    0,
+    "provider turn started after release",
+  );
+  assert.equal(
+    observed.delayedProviderToolEffectsAfterRelease,
+    0,
+    "provider tool effect after release",
+  );
 }
 
 export function assertT5Reports(rows) {
