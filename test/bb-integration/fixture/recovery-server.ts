@@ -35,7 +35,9 @@ type RecoveryArgs = {
     | "delete"
     | "environment"
     | "environment-by-id"
+    | "message-events"
     | "observations"
+    | "queue-delete"
     | "set-instructions"
     | "set-task-wait"
     | "stop"
@@ -52,6 +54,7 @@ type RecoveryArgs = {
   serviceTier?: string | undefined;
   taskId?: string | undefined;
   threadId?: string | undefined;
+  queuedMessageId?: string | undefined;
 };
 
 type ObservationRow = {
@@ -85,6 +88,13 @@ export default function recoveryFixture(bb: BbPluginApi): void {
       input_text TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS t5_message_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS t5_workspace_operations (
       operation_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL UNIQUE,
@@ -117,6 +127,25 @@ export default function recoveryFixture(bb: BbPluginApi): void {
     )?.value ?? fallback;
 
   bb.agents.contributeInstructions(() => setting("instructions", ""));
+
+  for (const name of ["message.queued", "message.cancelled"] as const) {
+    bb.events.on(name, (payload: unknown) => {
+      const event = payload as {
+        entry?: { id?: string; threadId?: string };
+      };
+      if (!event.entry?.id || !event.entry.threadId) return;
+      database
+        .prepare(
+          "INSERT INTO t5_message_events (name, thread_id, message_id, payload) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          name,
+          event.entry.threadId,
+          event.entry.id,
+          JSON.stringify(payload),
+        );
+    });
+  }
 
   bb.experimental_hooks.on("message.dispatch", (context) => {
     const marker = /(?:^|\s)T5_TASK=([a-z0-9_-]+)(?:\s|$)/u.exec(
@@ -159,7 +188,9 @@ export default function recoveryFixture(bb: BbPluginApi): void {
               "delete",
               "environment",
               "environment-by-id",
+              "message-events",
               "observations",
+              "queue-delete",
               "set-instructions",
               "set-task-wait",
               "stop",
@@ -182,6 +213,7 @@ export default function recoveryFixture(bb: BbPluginApi): void {
             serviceTier: z.string().optional(),
             taskId: z.string().optional(),
             threadId: z.string().optional(),
+            queuedMessageId: z.string().optional(),
           }),
         ),
         output: anyOutput,
@@ -190,6 +222,43 @@ export default function recoveryFixture(bb: BbPluginApi): void {
     {
       "recovery.run": async (args: RecoveryArgs) => {
         switch (args.operation) {
+          case "message-events": {
+            if (args.threadId === undefined) {
+              throw new Error("message-events requires threadId");
+            }
+            const rows = database
+              .prepare(
+                "SELECT name, thread_id AS threadId, message_id AS messageId, payload FROM t5_message_events WHERE thread_id = ? ORDER BY id",
+              )
+              .all(args.threadId) as {
+              name: string;
+              threadId: string;
+              messageId: string;
+              payload: string;
+            }[];
+            return rows.map(({ payload, ...row }) => ({
+              ...row,
+              data: JSON.parse(payload),
+            }));
+          }
+          case "queue-delete": {
+            if (
+              args.threadId === undefined ||
+              args.queuedMessageId === undefined
+            ) {
+              throw new Error(
+                "queue-delete requires threadId and queuedMessageId",
+              );
+            }
+            try {
+              return await bb.sdk.threads.queuedMessages.delete({
+                threadId: args.threadId,
+                queuedMessageId: args.queuedMessageId,
+              });
+            } catch (error) {
+              return { ok: false, error: String(error) };
+            }
+          }
           case "observations": {
             const rows =
               args.taskId === undefined
