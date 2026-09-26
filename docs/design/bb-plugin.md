@@ -531,17 +531,27 @@ generation interlock. T4 reproduced the startup safety violation and keeps #665
 open. T5 exercised wait composition, stop observations, competing intent attempts,
 retry across restart, instruction contribution and shared-worktree retention.
 Other T5 gates remain open because fixture tests do not implement the corresponding
-Ensemble ownership, apply or cleanup policy. In the focused delayed-first-message
-run, `threads.stop` returned `ok` while the plugin-held thread remained pending;
-the fixture then deleted the exact queued-message ID, observed the matching
-`message.cancelled` event, and confirmed the row absent before and after recheck.
-The 2,442 ms post-recheck window included 2,150 ms with no provider start and zero
-starts/effects. `stop-writer-release` remains open: this is bounded evidence for
-one scripted first message, not arbitrary process termination or complete
-Ensemble writer exclusion. The #676-specific T02 block is removed; T06/T08 remain
-blocked by #665 and other gates. Unconfirmed cancellation remains
-`failed-capability`; startup or event-capture failure is inconclusive. The
-accepted guarantees remain unchanged.
+Ensemble ownership, apply or cleanup policy. Two pre-correction no-start
+measurements are retained as history: the focused run recorded 2,442 ms after
+recheck with 2,150 ms stable no-start, while a distinct earlier integrated run
+recorded 2,361 ms with 2,066 ms stable no-start. The trace-timing race means
+neither is current acceptance proof.
+
+The final corrected integrated report at
+`33bd3062531bd2ab717d4ea8d4a29752c6388058` passed `npm run check`,
+`npm run test:bb-integration`, and `npm run test:bb-prototype` on Node
+24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29. It validates six T5
+gate rows; T4 produced its expected diagnostic. The corrected stop row confirms
+exact-ID cancellation with a matching event and queue absence before and after
+recheck, then records 2,378 ms after recheck with 2,087 ms stable no-start and
+zero starts/effects. T1–T5 isolation cleanup is clean.
+
+`stop-writer-release` remains open. The corrected report supports removing only
+the #676-specific T02 block after focused repair review; T06/T08 remain blocked
+by #665 and other gates. The evidence covers one scripted first message, not
+arbitrary process termination or complete Ensemble writer exclusion.
+Unconfirmed cancellation remains `failed-capability`; startup or event-capture
+failure is inconclusive. The accepted guarantees remain unchanged.
 
 Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
 `threads.retry`, queued-message APIs, and the `message.dispatch` hook with
@@ -554,7 +564,7 @@ are source-level contracts, not integration test results.
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while one scripted thread stayed pending; exact-ID deletion, matching cancellation event and fresh queue reads confirmed the held first message cancelled before and after recheck. The 2,442 ms observation included 2,150 ms without a provider start and zero starts/effects. This does not prove arbitrary process termination or complete Ensemble writer exclusion | #676-specific T02 block removed; T06/T08 remain blocked by #665 and other gates |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: the final corrected integrated report records that `threads.stop` returned `ok` while one scripted thread stayed pending; exact-ID deletion, matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current 2,378 ms window includes 2,087 ms stable no-start and zero starts/effects. This does not prove arbitrary process termination or complete Ensemble writer exclusion | Supports removing only the #676-specific T02 block after focused repair review; T06/T08 remain blocked by #665 and other gates |
 | Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent chose one thread/environment after restart; two raw parallel BB spawns created separate environments | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |
