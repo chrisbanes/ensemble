@@ -211,8 +211,8 @@ acknowledgement while pending, exact-ID cancellation with a matching
 before and after recheck, 2,378 ms after recheck with 2,087 ms stable no-start,
 and zero provider starts/effects. T4 produced its expected diagnostic, and every
 T1–T5 manifest confirms clean isolation cleanup.
-This supports removing only the #676-specific T02 block, pending focused repair
-review; T06/T08 remain blocked by #665 and other gates.
+The corrected evidence supports removing only the #676-specific T02 block;
+T06/T08 remain blocked by #665 and other gates.
 
 `stop-writer-release` remains open. The result covers one scripted held first
 message, not arbitrary process termination or complete Ensemble writer

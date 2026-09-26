@@ -156,9 +156,9 @@ post-recheck window was 2,378 ms, including 2,087 ms of stable no-start, with
 zero provider starts and tool effects. T4 produced its expected diagnostic, and
 every T1–T5 manifest confirms clean isolation cleanup.
 
-This supports removing only the T02 block specific to
-[#676](https://github.com/chrisbanes/ensemble/issues/676), pending the focused
-repair review; T06/T08 remain blocked by #665 and other gates.
+The corrected evidence supports removing only the T02 block specific to
+[#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
+blocked by #665 and other gates.
 `stop-writer-release` remains open. This evidence covers one scripted held first
 message, not termination of arbitrary workspace processes or complete Ensemble
 writer exclusion. These findings do not yet establish that BB must change.

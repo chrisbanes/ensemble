@@ -242,8 +242,8 @@ Every T1–T5 manifest confirms owned processes exited, both ports closed, no
 forced cleanup, and the disposable root removed. This is the current bounded
 no-start evidence; it supersedes both pre-correction measurements above.
 
-The report supports removing only the #676-specific T02 block, pending focused
-repair review. `stop-writer-release` remains **open**; T06/T08 remain blocked by
+The report supports removing only the #676-specific T02 block.
+`stop-writer-release` remains **open**; T06/T08 remain blocked by
 #665 and other gates. This proves neither arbitrary workspace-process
 termination nor complete Ensemble writer exclusion.
 
@@ -354,7 +354,7 @@ temporary evidence. They are not required to run the T01 harness.
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
 | Composed writer admission | **Open**: T5 observed another-plugin wait, public rejection, and later release; it has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Open**: the final corrected integrated report records that stop returned `ok` while one scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current window is 2,378 ms after recheck with 2,087 ms stable no-start and zero starts/effects. This covers one scripted first message, not arbitrary workspace termination or complete Ensemble writer exclusion. The report supports removing only the #676-specific T02 block pending focused repair review; T06/T08 remain blocked by #665 and other gates. |
+| Stop and writer release | **Open**: the final corrected integrated report records that stop returned `ok` while one scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current window is 2,378 ms after recheck with 2,087 ms stable no-start and zero starts/effects. This covers one scripted first message, not arbitrary workspace termination or complete Ensemble writer exclusion. The report supports removing only the #676-specific T02 block; T06/T08 remain blocked by #665 and other gates. |
 | Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled to one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
@@ -393,8 +393,8 @@ are validated before the report is accepted. The report ends in
 `completed-with-capability-gaps` when the harness ran successfully with
 unresolved capability gaps. When exact-ID cancellation and the bounded
 post-recheck observation are confirmed, the corrected T5
-`stop-writer-release` row stays `open` and supports removing only the
-#676-specific T02 block after focused repair review; T06/T08 remain blocked by
+`stop-writer-release` row stays `open` and the report supports removing only
+the #676-specific T02 block; T06/T08 remain blocked by
 #665 and other gates. If cancellation is unconfirmed, the row remains
 `failed-capability` with no recheck or release, and T02/T06/T08 stay blocked.
 
