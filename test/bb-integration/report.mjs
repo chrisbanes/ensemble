@@ -625,6 +625,20 @@ export function buildIntegrationReport({
   const metadataContext = { ensembleHead, sourceDigest, hostSdkEvidence };
   const t1Checks = runtime?.manifest?.checks ?? {};
   const t2Checks = execution?.manifest?.checks ?? {};
+  const permissionSpawn =
+    t2Checks.permissionEnvironmentMatrix?.modeRequests?.find(
+      (request) => request.permissionMode === "accept-edits",
+    );
+  const initialSpawnThreadId =
+    t2Checks.executionSpawn?.threadId ?? permissionSpawn?.thread?.id ?? null;
+  const initialSpawnEnvironmentId =
+    t2Checks.executionSpawn?.environmentId ??
+    permissionSpawn?.environment?.id ??
+    null;
+  const initialSpawnProviderRequest =
+    t2Checks.executionSpawn?.providerTrace?.[0] ??
+    permissionSpawn?.providerTrace?.[0] ??
+    null;
   const t3Checks = lost?.manifest?.checks ?? {};
   const t4Checks = dispatch?.manifest?.checks ?? {};
   const t5Gate = (name) => t5.get(name);
@@ -697,27 +711,27 @@ export function buildIntegrationReport({
       id: REQUIRED_API_ROWS[3],
       api: "threads.spawn with provider, model, reasoning, tier, permission, prompt and environment",
       scenario:
-        "T2 reads the requested execution settings back from the provider request and BB thread.",
+        "T2 records requested execution settings from a provider request and BB thread.",
       slice: execution,
       observed: {
-        threadId: t2Checks.executionSpawn?.threadId ?? null,
-        environmentId: t2Checks.executionSpawn?.environmentId ?? null,
-        providerRequest: t2Checks.executionSpawn?.providerTrace?.[0] ?? null,
+        threadId: initialSpawnThreadId,
+        environmentId: initialSpawnEnvironmentId,
+        providerRequest: initialSpawnProviderRequest,
         executionMetadata: t2Checks.executionSpawn?.metadata ?? null,
       },
       evidenceLimit:
         "One credential-free scripted provider and the requested fixture environment path were exercised.",
       evidencePresent:
-        typeof t2Checks.executionSpawn?.threadId === "string" &&
-        typeof t2Checks.executionSpawn?.environmentId === "string" &&
-        t2Checks.executionSpawn?.providerTrace?.[0]?.params?.options?.model ===
+        typeof initialSpawnThreadId === "string" &&
+        typeof initialSpawnEnvironmentId === "string" &&
+        initialSpawnProviderRequest?.params?.options?.model ===
           "fixture-model" &&
-        t2Checks.executionSpawn?.providerTrace?.[0]?.params?.options
-          ?.reasoningLevel === "medium" &&
-        t2Checks.executionSpawn?.providerTrace?.[0]?.params?.options
-          ?.serviceTier === "default" &&
-        t2Checks.executionSpawn?.providerTrace?.[0]?.params?.options
-          ?.permissionMode === "accept-edits",
+        initialSpawnProviderRequest?.params?.options?.reasoningLevel ===
+          "medium" &&
+        initialSpawnProviderRequest?.params?.options?.serviceTier ===
+          "default" &&
+        initialSpawnProviderRequest?.params?.options?.permissionMode ===
+          "accept-edits",
       ...metadataContext,
     }),
     checkedApiRow({
@@ -1825,8 +1839,10 @@ function assertInitialWorkspaceEvidence(identities, observed) {
   assert.equal(observed?.rawConcurrentSpawnCount, 2);
   assert.equal(observed.rawDistinctEnvironmentCount, 2);
   assert.deepEqual(
-    observed.rawHookObservations?.map((observation) => observation.threadId),
-    identities.rawConcurrentSpawnThreadIds,
+    observed.rawHookObservations
+      ?.map((observation) => observation.threadId)
+      .sort(),
+    [...identities.rawConcurrentSpawnThreadIds].sort(),
     "raw concurrent spawn observations must preserve both thread IDs",
   );
   assert.equal(observed.rawTaskThreadEnvironmentIds?.length, 1);

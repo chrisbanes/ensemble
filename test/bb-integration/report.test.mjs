@@ -871,6 +871,31 @@ test("permission forwarding report requires every mode, matching IDs and no hidd
   );
 });
 
+test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
+  const slices = validSlices();
+  const matrix = permissionEnvironmentMatrix();
+  slices.T2.manifest.checks.permissionEnvironmentMatrix = matrix;
+
+  const report = buildIntegrationReport({
+    ensembleHead: "abc123",
+    sourceDigest: "digest-abc123",
+    slices,
+    t5Reports: validT5Reports(),
+  });
+  const spawnRow = report.rows.find(
+    (entry) => entry.id === "thread-spawn-execution-options",
+  );
+  const acceptedEdits = matrix.modeRequests[0];
+
+  assert.equal(spawnRow.observed.threadId, acceptedEdits.thread.id);
+  assert.equal(spawnRow.observed.environmentId, acceptedEdits.environment.id);
+  assert.deepEqual(
+    spawnRow.observed.providerRequest,
+    acceptedEdits.providerTrace[0],
+  );
+  assert.equal(spawnRow.verdict, "passed");
+});
+
 test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
   const report = validReport();
   const row = report.rows[0];
@@ -915,6 +940,15 @@ test("workspace intent report rejects competing owners, duplicate matches and mi
     () => assertT5Reports(hiddenStart),
     /must not start a provider/u,
   );
+});
+
+test("workspace report accepts either order for concurrent hook observations", () => {
+  const reports = validT5Reports();
+  reports
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.rawHookObservations.reverse();
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
 });
 
 test("A17 requires dirty-file observations and a finite retirement window", () => {
