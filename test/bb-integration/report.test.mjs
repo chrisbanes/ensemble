@@ -106,7 +106,7 @@ function row(type, id, overrides = {}) {
     runtime: {
       bb: "0.43.4",
       hostSdk: "0.5.9",
-      pluginSdk: "0.5.24",
+      pluginSdk: "0.5.27",
       node: "24.21.0",
       playwright: "1.63.0",
     },
@@ -152,7 +152,7 @@ function validReport() {
     sourceRevision: "abc123",
     integrationSourceDigest: "digest-abc123",
     outcome: "completed-with-capability-gaps",
-    toolchain: { node: "24.21.0", npm: "11.20.0" },
+    toolchain: { node: "24.21.0", npm: "12.1.0" },
     rows: [
       ...apiRows,
       ...REQUIRED_PROOF_GATES.map((id) =>
@@ -195,7 +195,7 @@ function validT4Evidence() {
           incompatibleFixture: {
             status: "incompatible",
             statusDetail:
-              "requires bb plugin SDK >=0.5.24, running SDK is 0.5.9",
+              "requires bb plugin SDK >=0.5.27, running SDK is 0.5.9",
           },
           compatibleFixtureResponded: true,
         },
@@ -410,7 +410,7 @@ test("known T4 failure is accepted only with exact diagnostic, state, and cleanu
 
   const inventedHostSdk = validT4Evidence();
   inventedHostSdk.manifest.checks.t4PluginSdkCompatibility.bbHostPluginSdk =
-    "0.5.24";
+    "0.5.27";
   assert.throws(() => assertExpectedT4Failure(inventedHostSdk));
 
   const missingDiagnostic = validT4Evidence();

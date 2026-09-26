@@ -163,8 +163,8 @@ async function installWaitGuard(instance) {
         private: true,
         type: "module",
         dependencies: {
-          "@get-bb/plugin-sdk": "0.5.24",
-          zod: "4.3.6",
+          "@get-bb/plugin-sdk": "0.5.27",
+          zod: "4.6.5",
         },
         bb: {
           name: "T5 Wait Guard",

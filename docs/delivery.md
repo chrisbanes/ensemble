@@ -35,11 +35,12 @@ Acceptance: [release gates](acceptance.md#gates), not a collection of merged PRs
 ### Host-independent foundation
 
 [ADR-1003](adr/1003-host-independent-core.md) changes the implementation boundary,
-not the product's coordination behavior. First extract the bounded prototype
-into core and BB adapter modules and prove [P01–P05](acceptance.md#portability-extraction-gate).
-Keep one assignment per task and the current prototype tool flow during this
-extraction; it does not implement the remaining MVP. Preserve the installed Haze
-prototype. Any schema transition must be explicit and tested, never a live reset.
+not the product's coordination behavior. The bounded prototype is now split
+into core and BB adapter modules, with [P01–P05](acceptance.md#portability-extraction-gate)
+proved by standalone and isolated real-BB tests on 25 September 2026. It retains
+one assignment per task and the existing tool flow; it does not implement the
+remaining MVP. The installed Haze prototype is unchanged. The schema transition
+is transactional and tested against legacy records.
 
 Apply the following ownership to the existing briefs when implementation resumes:
 
@@ -57,11 +58,11 @@ complete real-host journey. The existing dependency map below governs those
 product tickets; it does not force pure extraction tests to wait for unrelated
 execution capabilities. No new feature passes a gate merely by being portable.
 
-The repository manifest currently pins SDK 0.5.27 and npm 12.1.0, whereas the
-integration harness expects SDK 0.5.24 and npm 11.20.0. CI also installs npm
-11.20.0. Refresh and verify those validation pins before claiming current BB
-adapter compatibility. Preserve the explicit failed startup capability and
-writer-termination gate during that work.
+The manifest, CI and integration harness now agree on SDK package 0.5.27 and npm
+12.1.0. The [25 September qualification](bb-capabilities.md#current-toolchain-qualification--25-september-2026)
+passed the existing aggregate with its exact expected diagnostic envelope;
+startup and writer-termination failures remain explicit. The extraction is
+complete, while their dependent product features remain gated.
 
 These local briefs have been revised; linked GitHub issues have not been updated
 by this design session. Reconcile their scope before using them as implementation

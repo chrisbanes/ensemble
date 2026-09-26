@@ -33,6 +33,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { appendFileSync } from "node:fs";
 import { z } from "zod";
+import { parseToolArguments } from "./tool-arguments.js";
 
 const scriptedMethodSchema = z.enum([
   "initialize",
@@ -654,7 +655,7 @@ function beginTurn(args: {
       turnId: plan.toolTurnResolved ? providerTurnId : null,
       callId: `call-${session.turnCount}`,
       tool: plan.toolName,
-      arguments: {},
+      arguments: parseToolArguments(promptText(args.input)),
       providerNativeIds: true,
     });
     pendingReplies.set(requestId, {

@@ -2,7 +2,8 @@
 
 Host ownership follows [ADR-1003](../adr/1003-host-independent-core.md).
 BB-specific protocols below describe the first adapter, not dependencies of
-the core. This remains target design; the prototype has not been extracted.
+the core. The bounded prototype has been extracted into `src/core` and
+`src/adapters/bb`; the broader contracts below remain target design.
 
 Status: proposal for review. ADR-1001 records the accepted product direction;
 this document proposes implementation contracts. No additional implementation is
@@ -68,9 +69,11 @@ A recorded result does not establish task completion or external publication.
 Ensemble owns SQLite schemas and ordered migrations. Initially BB supplies the
 connection; the same core opens through an injected SQLite connection in the
 standalone harness without loading BB. Do not introduce a multi-database layer.
-The prototype
-schema is disposable; export any wanted experimental records before replacement.
-No silent migration or reset of the installed Haze prototype.
+The extraction uses a versioned, transactional migration of the original
+prototype tables, preserving task and assignment identities, results, and host
+references. Unknown historical instructions remain null. Future product schema
+changes need their own migration decisions. No reset or update of the installed
+Haze prototype is part of the extraction.
 
 | Record | Minimum fields and constraints |
 | --- | --- |
