@@ -24,6 +24,20 @@ const fixturePluginId = "ensemble-t1-fixture";
 const gatePluginId = "t4-dispatch-gate";
 const waitPluginId = "t4-other-wait";
 
+async function waitForPluginStatuses(instance, expectedStatuses, label) {
+  return waitFor(async () => {
+    const plugins = (await bbCli(instance, "plugin", "list")).plugins;
+    const statuses = new Map(
+      plugins.map((plugin) => [plugin.id, plugin.status]),
+    );
+    return Object.entries(expectedStatuses).every(
+      ([pluginId, status]) => statuses.get(pluginId) === status,
+    )
+      ? plugins
+      : false;
+  }, label);
+}
+
 async function installFixturePlugin(
   instance,
   packageName,
@@ -333,8 +347,11 @@ test("public dispatch handoff records bounded holds and an open startup capabili
     await dispatch(instance, "set-mode", { mode: "paused" });
     await writeFile(instance.env.T4_FAIL_WAITER_PATH, "fail on restart\n");
     await restartBb(instance);
-    const firstRestartPlugins = (await bbCli(instance, "plugin", "list"))
-      .plugins;
+    const firstRestartPlugins = await waitForPluginStatuses(
+      instance,
+      { [waitPluginId]: "error", [gatePluginId]: "running" },
+      "failed waiter and running dispatch gate after restart",
+    );
     assert.equal(
       firstRestartPlugins.find((plugin) => plugin.id === waitPluginId)?.status,
       "error",
@@ -426,7 +443,11 @@ test("public dispatch handoff records bounded holds and an open startup capabili
 
     await rm(instance.env.T4_FAIL_WAITER_PATH, { force: true });
     await restartBb(instance);
-    const restoredPlugins = (await bbCli(instance, "plugin", "list")).plugins;
+    const restoredPlugins = await waitForPluginStatuses(
+      instance,
+      { [waitPluginId]: "running", [gatePluginId]: "running" },
+      "both T4 hook owners running after restore restart",
+    );
     assert.equal(
       restoredPlugins.find((plugin) => plugin.id === waitPluginId)?.status,
       "running",
@@ -470,8 +491,11 @@ test("public dispatch handoff records bounded holds and an open startup capabili
     await writeFile(instance.env.T4_FAIL_GATE_PATH, "fail on restart\n");
     await restartBb(instance);
 
-    const unavailablePlugins = (await bbCli(instance, "plugin", "list"))
-      .plugins;
+    const unavailablePlugins = await waitForPluginStatuses(
+      instance,
+      { [waitPluginId]: "error", [gatePluginId]: "error" },
+      "both T4 hook owners to reach error after restart",
+    );
     const unavailableWaiter = unavailablePlugins.find(
       (plugin) => plugin.id === waitPluginId,
     );
