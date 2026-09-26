@@ -325,7 +325,7 @@ After installing the pinned toolchain and dependencies, run the same isolated
 suite used by CI:
 
 ```sh
-npm install --global npm@11.20.0
+npm install --global npm@12.1.0
 npm ci
 npx playwright install chromium
 npm run test:bb-integration
