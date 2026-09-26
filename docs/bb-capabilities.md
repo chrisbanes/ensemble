@@ -23,7 +23,7 @@ startup-queue failure, and T5 passed its evidence and cleanup checks. The
 restart and replay checks. These results validate the dependency upgrade and
 bounded prototype against BB 0.44; they do not close either capability gate.
 
-## Combined BB 0.44 and plugin SDK 0.5.29 validation — 26 September 2026
+## Combined BB 0.44 and plugin SDK 0.5.29 validation before the exact-ID probe — 26 September 2026
 
 After plugin SDK 0.5.29 merged, the combined BB 0.44.0 and plugin SDK 0.5.29
 packages were clean-installed on Node 24.21.0 with npm 12.1.0 on macOS arm64;
@@ -199,6 +199,29 @@ as `failed-capability`, with T02/T06 writer-release work blocked by
 status-confirmation gap for this delayed-start setup; it does not show what BB
 would do if the queued message were released after the unconfirmed stop.
 
+## 2026-09-26 exact-ID delayed-first-message cancellation
+
+The focused T5 run used Node 24.21.0, npm 12.1.0, BB 0.44.0, and host/plugin
+SDK 0.5.29. It held the first message of a new thread in the fixture's plugin
+wait. `threads.stop` returned `ok` while the thread remained `pending`. The
+fixture then deleted that exact queued-message ID. The delete returned `ok`,
+the `message.cancelled` event matched the recorded thread and message IDs, and
+fresh queue reads confirmed that row was absent before and after recheck.
+
+After recheck, the fixture observed the same thread for 2,442 ms, including
+2,150 ms with no provider start. It recorded zero provider starts and zero tool
+effects. The cleanup manifest reported all owned processes exited, both ports
+closed, no forced cleanup, and the disposable root removed. The report keeps
+`stop-writer-release` **open**: this confirms cancellation of one scripted
+provider's held first message, not termination of arbitrary workspace
+processes or complete Ensemble writer exclusion. It removes only the T02 block
+specific to #676; T06/T08 remain blocked by #665 and other gates.
+
+If stop/delete acknowledgement, the matching event, or queue readback does not
+confirm cancellation, the fixture keeps its wait and the report remains
+`failed-capability`; T02/T06/T08 stay blocked. Fixture startup or event-capture
+failures remain inconclusive, not BB capability failures.
+
 At the time of the 2026-09-24 qualification, the GitHub releases page listed BB
 desktop **0.43.4** as the latest stable release ([BB releases](https://github.com/get-bb/bb/releases)).
 The installed 0.43.4 runtime was therefore the latest stable available for that
@@ -306,7 +329,7 @@ temporary evidence. They are not required to run the T01 harness.
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
 | Composed writer admission | **Open**: T5 observed another-plugin wait, public rejection, and later release; it has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Failed capability for the delayed-start setup**: active-turn stop was confirmed, but BB returned `ok` for the plugin-held pending thread without changing its status. The fixture withheld recheck; [#676](https://github.com/chrisbanes/ensemble/issues/676) blocks T02/T06 writer release. |
+| Stop and writer release | **Open**: active-turn stop was confirmed. For the plugin-held first message, stop returned `ok` while the thread stayed `pending`; exact-ID deletion, a matching cancellation event, and fresh queue reads confirmed cancellation before and after recheck. The 2,442 ms post-recheck window included 2,150 ms without a provider start and recorded zero starts/effects. This covers one scripted first message, not arbitrary workspace termination or complete Ensemble writer exclusion. The #676-specific T02 block is removed; T06/T08 remain blocked by other gates. |
 | Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled to one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
@@ -342,8 +365,12 @@ proof-gate and T5 scenario row carries tested BB/host-SDK/package-SDK/Node
 versions, source revisions or artifact identities, scenario, observed IDs and
 effects, verdict, and evidence limit. Required public API evidence and event names
 are validated before the report is accepted. The report ends in
-`completed-with-capability-gaps` when the harness ran successfully while #665
-and #676 remain failed capabilities; this does not unblock T02, T06 or T08.
+`completed-with-capability-gaps` when the harness ran successfully with
+unresolved capability gaps. When exact-ID cancellation and the bounded
+post-recheck observation are confirmed, the T5 `stop-writer-release` row stays
+`open` and the #676-specific T02 block is removed; T06/T08 remain blocked by
+#665 and other gates. If cancellation is unconfirmed, the row remains
+`failed-capability` with no recheck or release, and T02/T06/T08 stay blocked.
 
 The host SDK version comes from BB's public `incompatible` install status for a
 disposable fixture requiring `bbPluginSdk >=0.5.24`. BB reports the running SDK
