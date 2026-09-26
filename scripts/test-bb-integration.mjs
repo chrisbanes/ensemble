@@ -554,12 +554,13 @@ async function main() {
           0,
           `${scenario.id} test child failed\n${result.output}`,
         );
+        const expectedTestCount =
+          scenario.id === "T5" ? 7 : scenario.id === "T2" ? 2 : 1;
         assertTapSummary(
           scenario.id,
           result.output,
-          // T5 has six gate scenarios and one trace-timing regression.
-          scenario.id === "T5" ? 7 : 1,
-          scenario.id === "T5" ? 7 : 1,
+          expectedTestCount,
+          expectedTestCount,
           0,
         );
         assert.equal(
