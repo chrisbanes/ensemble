@@ -1171,6 +1171,28 @@ gateTest(
       reconciled.attempts.find((attempt) => attempt.disposition === "owner")
         .attemptId,
     );
+    const observedTaskMatches = [
+      ...publicReconciliationAttempts.flatMap((attempt) => attempt.matches),
+      ...reconciled.matches,
+    ];
+    const taskThreadsById = new Map(
+      observedTaskMatches.map((candidate) => [
+        candidate.threadId,
+        candidate.environmentId,
+      ]),
+    );
+    const rawTaskThreadEnvironmentIds = [...taskThreadsById].map(
+      ([threadId, environmentId]) => ({ threadId, environmentId }),
+    );
+    const duplicateRawTaskEnvironments =
+      rawTaskThreadEnvironmentIds.length > 1
+        ? rawTaskThreadEnvironmentIds.slice(1)
+        : [];
+    assert.equal(
+      rawTaskThreadEnvironmentIds.length,
+      1,
+      "Competing first provisioning attempts must reconcile to one raw BB thread/environment",
+    );
     const taskObservations = await pluginRpc(
       instance,
       fixturePluginId,
@@ -1183,17 +1205,91 @@ gateTest(
       (entry) => entry.method === "t1/tool-result",
     );
     assert.equal(allToolEffects.length, 3);
+
+    const missingEnvironmentId = `t2-missing-environment-${randomUUID()}`;
+    const missingEnvironmentPrompt = `T5_TASK=${taskId}-missing call_tool:capability_ping`;
+    let missingEnvironmentSpawn;
+    let missingEnvironmentSpawnError;
+    try {
+      missingEnvironmentSpawn = await spawnThread(
+        instance,
+        project,
+        machine,
+        missingEnvironmentPrompt,
+        { type: "reuse", environmentId: missingEnvironmentId },
+      );
+    } catch (error) {
+      missingEnvironmentSpawnError = String(error);
+    }
+    let missingEnvironmentThread;
+    if (missingEnvironmentSpawn !== undefined) {
+      missingEnvironmentThread = await waitFor(
+        async () => {
+          const thread = await execution(instance, "get", {
+            threadId: missingEnvironmentSpawn.id,
+          });
+          return thread.status === "idle" || thread.status === "error"
+            ? thread
+            : false;
+        },
+        "missing environment thread rejection",
+        20_000,
+      );
+    }
+    const missingEnvironmentEvents =
+      missingEnvironmentThread?.status === "error"
+        ? await execution(instance, "events", {
+            threadId: missingEnvironmentThread.id,
+          })
+        : [];
+    const missingEnvironmentTrace = (await providerTrace(instance)).filter(
+      (entry) =>
+        entry.method === "turn/start" &&
+        (entry.params.threadId === missingEnvironmentSpawn?.id ||
+          entry.params.input?.some(
+            (item) => item.text === missingEnvironmentPrompt,
+          )),
+    );
+    assert(
+      missingEnvironmentSpawnError !== undefined ||
+        missingEnvironmentThread?.status === "error",
+      "A missing/reclaimed environment must not report a completed thread",
+    );
+    assert.notEqual(
+      missingEnvironmentThread?.status,
+      "idle",
+      "A missing/reclaimed environment must not report false completion",
+    );
+    assert.equal(
+      missingEnvironmentTrace.length,
+      0,
+      "A missing/reclaimed environment must not start a provider turn",
+    );
+    const missingEnvironmentEvidence = {
+      environmentId: missingEnvironmentId,
+      prompt: missingEnvironmentPrompt,
+      rejectedAtSpawn: missingEnvironmentSpawnError !== undefined,
+      threadId: missingEnvironmentSpawn?.id ?? null,
+      status: missingEnvironmentThread?.status ?? "rejected-at-spawn",
+      spawnError: missingEnvironmentSpawnError ?? null,
+      threadEvents: missingEnvironmentEvents,
+      providerTrace: missingEnvironmentTrace,
+    };
     capture({
       stage: "restart recovery chose one public thread and environment",
       identities: {
         chosenTaskThreadId: chosen.threadId,
         chosenTaskEnvironmentId: chosen.environmentId,
+        missingEnvironmentId,
       },
       observed: {
         acceptedReconciliationBeforeRestart: acceptedMatch,
         reconciliation: reconciled,
+        rawTaskThreadEnvironmentIds,
+        duplicateRawTaskEnvironments,
         taskHookObservations: taskObservations,
         totalProviderToolEffects: allToolEffects.length,
+        missingEnvironment: missingEnvironmentEvidence,
       },
     });
 
@@ -1208,10 +1304,13 @@ gateTest(
         competingAttemptIds,
         chosenTaskThreadId: chosen.threadId,
         chosenTaskEnvironmentId: chosen.environmentId,
+        missingEnvironmentId,
       },
       observed: {
         rawConcurrentSpawnCount: 2,
         rawDistinctEnvironmentCount,
+        rawTaskThreadEnvironmentIds,
+        duplicateRawTaskEnvironments,
         rawProviderToolEffects: rawEffects.length,
         rawHookObservations: rawObservations,
         droppedAttemptError: String(droppedAttempt.reason),
@@ -1220,9 +1319,11 @@ gateTest(
         reconciliation: reconciled,
         taskHookObservations: taskObservations,
         totalProviderToolEffects: allToolEffects.length,
+        missingEnvironment: missingEnvironmentEvidence,
       },
       limits: [
         "Two separate raw BB spawns created two environments and do not establish one-task identity. A test-local SQLite operation arbitrated two competing attempts, simulated a dropped accepted response, then public BB thread/metadata reads reconciled exactly one task thread and environment after restart; this does not establish the production Ensemble task-to-environment binding or its concurrency policy.",
+        "The missing environment uses a synthetic unavailable BB environment ID; it verifies the public rejection/no-provider-start path but does not observe an environment reclaimed by BB retirement.",
       ],
     };
   },
@@ -1685,22 +1786,135 @@ gateTest(
       threadId: second.id,
     }).catch((error) => ({ error: String(error) }));
 
+    const lastArchive = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      { operation: "archive", threadId: second.id },
+    ).catch((error) => ({ error: String(error) }));
+    const environmentAfterLastArchive = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      { operation: "environment-by-id", environmentId },
+    ).catch((error) => ({ error: String(error) }));
+    const markerExistsAfterLastArchive = await fileExists(markerPath);
+    const workspaceExistsAfterLastArchive = await fileExists(workspacePath);
+    const finalThreadArchived =
+      lastArchive.archiveResponse?.ok === true &&
+      lastArchive.archiveResponse.archivedThreadIds?.includes(second.id) &&
+      lastArchive.thread?.id === second.id &&
+      typeof lastArchive.thread.archivedAt === "number";
+    const finalThreadAfterArchive = await execution(instance, "get", {
+      threadId: second.id,
+    }).catch((error) => ({ error: String(error) }));
+
     const lastDeletion = await pluginRpc(
       instance,
       fixturePluginId,
       "recovery.run",
       { operation: "delete", threadId: second.id },
     ).catch((error) => ({ error: String(error) }));
-    const environmentAfterLastDelete = await pluginRpc(
-      instance,
-      fixturePluginId,
-      "recovery.run",
-      { operation: "environment-by-id", environmentId },
-    ).catch((error) => ({ error: String(error) }));
-    const markerExistsAfterLastDelete = await fileExists(markerPath);
+    capture({
+      stage: "final thread archive and delete responses observed",
+      identities: { finalThreadId: second.id, environmentId },
+      observed: {
+        finalThreadArchive: lastArchive,
+        finalThreadArchived,
+        finalThreadAfterArchive,
+        finalThreadDelete: lastDeletion,
+        environmentAfterFinalArchive:
+          environmentAfterLastArchive.environment ??
+          environmentAfterLastArchive.error,
+        markerExistsAfterFinalArchive: markerExistsAfterLastArchive,
+        workspaceExistsAfterFinalArchive: workspaceExistsAfterLastArchive,
+      },
+    });
+    assert.equal(
+      lastArchive.archiveResponse?.ok,
+      true,
+      JSON.stringify(lastArchive),
+    );
+    assert.equal(finalThreadArchived, true, JSON.stringify(lastArchive));
+    assert.equal(lastDeletion.ok, true, JSON.stringify(lastDeletion));
+    const retirementWindowMs = 7 * 60_000;
+    const retirementSampleIntervalMs = 15_000;
+    const retirementStartedAt = Date.now();
+    const retirementDeadline = retirementStartedAt + retirementWindowMs;
+    const retirementObservations = [];
+    let retirementObserved = false;
+    while (Date.now() <= retirementDeadline) {
+      const sampledAt = Date.now();
+      const [environmentResult, markerExists, workspaceExists] =
+        await Promise.all([
+          pluginRpc(instance, fixturePluginId, "recovery.run", {
+            operation: "environment-by-id",
+            environmentId,
+          }).catch((error) => ({ error: String(error) })),
+          fileExists(markerPath),
+          fileExists(workspacePath),
+        ]);
+      const environment = environmentResult.environment ?? null;
+      const environmentLookupError = environmentResult.error ?? null;
+      const environmentConfirmedMissing =
+        typeof environmentLookupError === "string" &&
+        /(?:404|not found|does not exist|no such environment)/iu.test(
+          environmentLookupError,
+        );
+      const environmentRetired =
+        environmentConfirmedMissing || environment?.status === "destroyed";
+      const observation = {
+        elapsedMs: sampledAt - retirementStartedAt,
+        sampledAt: new Date(sampledAt).toISOString(),
+        environmentId: environment?.id ?? null,
+        environmentStatus: environment?.status ?? null,
+        environmentLookupError,
+        environmentConfirmedMissing,
+        environmentRetired,
+        workspaceExists,
+        markerExists,
+        retirementObserved:
+          environmentRetired && !workspaceExists && !markerExists,
+      };
+      retirementObservations.push(observation);
+      capture({
+        stage: "bounded post-delete dirty-worktree retirement observations",
+        observed: {
+          retirementWindowMs,
+          retirementSampleIntervalMs,
+          retirementObservationCount: retirementObservations.length,
+          retirementObservations: [...retirementObservations],
+        },
+      });
+      if (observation.retirementObserved) {
+        retirementObserved = true;
+        break;
+      }
+      const remainingMs = retirementDeadline - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(retirementSampleIntervalMs, remainingMs)),
+      );
+    }
+    const finalRetirementObservation = retirementObservations.at(-1);
+    const environmentAfterLastDelete =
+      finalRetirementObservation?.environmentId === environmentId
+        ? {
+            environment: {
+              id: finalRetirementObservation.environmentId,
+              status: finalRetirementObservation.environmentStatus,
+            },
+          }
+        : {
+            error: finalRetirementObservation?.environmentLookupError ??
+              "No post-delete environment observation was collected",
+          };
+    const markerExistsAfterLastDelete =
+      finalRetirementObservation?.markerExists ?? null;
     const retentionPassed =
       firstThreadArchived &&
       firstDeletion.ok === true &&
+      finalThreadArchived &&
       lastDeletion.ok === true &&
       environmentRetainedAfterArchive &&
       environmentSharedAfterArchiveAndDelete &&
@@ -1730,18 +1944,35 @@ gateTest(
         sharedRetentionAfterArchiveAndDelete:
           environmentSharedAfterArchiveAndDelete,
         remainingLiveThread,
+        finalThreadArchive: lastArchive,
+        finalThreadArchived,
+        environmentAfterFinalArchive:
+          environmentAfterLastArchive.environment ??
+          environmentAfterLastArchive.error,
+        markerExistsAfterFinalArchive: markerExistsAfterLastArchive,
+        workspaceExistsAfterFinalArchive: workspaceExistsAfterLastArchive,
+        finalThreadAfterArchive,
         markerRetainedWhileShared: markerRetained,
         secondThreadDelete: lastDeletion,
         environmentAfterLastDelete:
           environmentAfterLastDelete.environment ??
           environmentAfterLastDelete.error,
         markerExistsAfterLastDelete,
+        workspaceExistsAfterLastDelete:
+          finalRetirementObservation?.workspaceExists ?? null,
+        retirementWindowMs,
+        retirementSampleIntervalMs,
+        retirementObservationCount: retirementObservations.length,
+        retirementObservationWindowMs:
+          finalRetirementObservation?.elapsedMs ?? 0,
+        retirementObserved,
+        retirementObservations,
         providerToolEffects: (await providerTrace(instance)).filter(
           (entry) => entry.method === "t1/tool-result",
         ).length,
       },
       limits: [
-        "Direct BB archive and delete were exercised for this fixture provider; this does not establish Ensemble cleanup modes, preservation checks, or delivery confirmation.",
+        "Direct BB archive and delete were exercised for this fixture provider. Dirty marker, worktree path, and environment state were sampled every 15 seconds for up to seven minutes after final deletion. This records BB lifecycle behavior only; it does not establish Ensemble cleanup modes, preservation checks, or delivery confirmation, so the policy gate remains open.",
       ],
     };
     assert.equal(firstDeletion.ok, true, JSON.stringify(firstDeletion));
@@ -1754,8 +1985,13 @@ gateTest(
       observed: {
         retentionPassed,
         remainingLiveThread,
+        finalThreadArchived,
         secondThreadDelete: lastDeletion,
         markerExistsAfterLastDelete,
+        retirementObserved,
+        retirementObservationCount: retirementObservations.length,
+        retirementObservationWindowMs:
+          finalRetirementObservation?.elapsedMs ?? 0,
       },
     });
     return finalReport;

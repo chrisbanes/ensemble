@@ -49,7 +49,10 @@ const suiteRunDirectory = path.join(
   "node_modules/.cache/ensemble-bb-integration/suite-run",
 );
 const t5ReportDirectory = path.join(suiteRunDirectory, "t5-gates");
-const scenarioTimeoutMs = 300_000;
+// T5 includes a bounded seven-minute post-delete worktree observation.
+function scenarioTimeoutMs(scenarioId) {
+  return scenarioId === "T5" ? 900_000 : 300_000;
+}
 const maxOutputBytes = 16 * 1024 * 1024;
 
 const scenarios = [
@@ -126,6 +129,7 @@ async function integrationSourceDigest() {
 }
 
 async function runScenario(scenario, manifestFile) {
+  const timeoutMs = scenarioTimeoutMs(scenario.id);
   const command = `${process.execPath} --test --test-reporter=tap ${scenario.file}`;
   const child = spawn(
     process.execPath,
@@ -167,7 +171,7 @@ async function runScenario(scenario, manifestFile) {
   const timeoutResult = new Promise((resolve) => {
     timeoutHandle = setTimeout(
       () => resolve({ timedOut: true }),
-      scenarioTimeoutMs,
+      timeoutMs,
     );
   });
   try {
@@ -544,7 +548,11 @@ async function main() {
         assert.equal(
           result.timedOut,
           false,
-          `${scenario.id} timed out after ${scenarioTimeoutMs} ms${result.timeoutCleanupError ? `; ${result.timeoutCleanupError}` : ""}`,
+          `${scenario.id} timed out after ${scenarioTimeoutMs(scenario.id)} ms${
+            result.timeoutCleanupError
+              ? `; ${result.timeoutCleanupError}`
+              : ""
+          }`,
         );
         assert.equal(
           result.exitCode,
