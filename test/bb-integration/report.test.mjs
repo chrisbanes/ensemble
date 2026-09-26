@@ -212,7 +212,7 @@ function row(type, id, overrides = {}) {
     runtime: {
       bb: "0.44.0",
       hostSdk: "0.5.29",
-      pluginSdk: "0.5.29",
+      pluginSdk: "0.5.30",
       node: "24.21.0",
       playwright: "1.63.0",
     },

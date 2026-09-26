@@ -263,11 +263,11 @@ node scripts/check-bb-integration.mjs "$BB_APP_PACKAGE" "$BB_SOURCE_CHECKOUT"
 ```
 
 The current script checks installed BB package **0.44.0**, plugin SDK package
-**0.5.29**, Node **24.21.0**, and macOS arm64. It hashes sorted relative file
+**0.5.30**, Node **24.21.0**, and macOS arm64. It hashes sorted relative file
 paths and bytes within the installed `bb-app` package directory (SHA-256
 `f58ed532baf60277abf0e1df0311fde45247aecfaf9ea9723ce47d21215d4f5b`) and the
 plugin SDK package directory (SHA-256
-`66206c2e050b14524dbb9f00984b6b5f8fa26af7182fc507c68f073ee5d1d554`). These are
+`5825988db5b1059cb74192a1cd0a05fdff0ff5fc529728369252d9e5d9581351`). These are
 installed package-tree hashes; the separate BB tarball integrity check is in
 the integration harness. The fixture requires host SDK compatibility at least
 **0.5.29**. These pins identify the tested package files, not their upstream
@@ -373,7 +373,7 @@ After installing the pinned toolchain and dependencies, run the same isolated
 suite used by CI:
 
 ```sh
-npm install --global npm@11.20.0
+npm install --global npm@12.1.0
 npm ci
 npx playwright install chromium
 npm run test:bb-integration
@@ -399,13 +399,14 @@ the #676-specific T02 block; T06/T08 remain blocked by
 `failed-capability` with no recheck or release, and T02/T06/T08 stay blocked.
 
 The host SDK version comes from BB's public `incompatible` install status for a
-disposable fixture requiring `bbPluginSdk >=0.5.24`. BB reports the running SDK
-as 0.5.9; a separate `>=0.5.9` fixture loads and answers `dispatch.run`.
+disposable fixture requiring `bbPluginSdk >=0.6.0`. The T4 probe reports host
+SDK **0.5.29**; a separate compatible fixture loads and answers `dispatch.run`.
 
 For `bb-app` and `@get-bb/plugin-sdk`, the report distinguishes lockfile tarball
 integrity from SHA-256 hashes of the installed package trees. The committed
-tree pins were measured after clean `npm ci` with Node 24.21.0/npm 11.20.0 on
-darwin-arm64; CI recomputes those package-scoped hashes on Ubuntu and fails if
-either installed tree differs. The tree hash sorts relative paths and includes
+tree pins for BB 0.44.0 and SDK package 0.5.30 were measured after clean `npm ci`
+with Node 24.21.0/npm 12.1.0 on darwin-arm64; CI recomputes those package-scoped
+hashes on Ubuntu and fails if either installed tree differs. The tree hash sorts
+relative paths and includes
 entry type, path bytes, and file bytes; symlinks and unsupported entry types are
 rejected.

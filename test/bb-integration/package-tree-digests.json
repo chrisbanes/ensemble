@@ -13,8 +13,8 @@
       "treeSha256": "5c7f4a86d1ad626d5da990330e9130860d9c2b56c63b4bf4504a17ada543fa65"
     },
     "@get-bb/plugin-sdk": {
-      "version": "0.5.29",
-      "treeSha256": "854c443eca8374ff389e8aab88cf13d37981efc5fe54880cf127006f23b370ab"
+      "version": "0.5.30",
+      "treeSha256": "47bde57c01c6ea0b991df77f263f601905c4ad1ea644e2dc5395e8f1f340a2d0"
     }
   }
 }
