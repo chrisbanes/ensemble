@@ -240,6 +240,39 @@ async function providerTrace(instance) {
     .map((line) => JSON.parse(line));
 }
 
+async function readReleaseObservation(readState, readTrace, now = Date.now) {
+  const [queue, thread, observations] = await readState();
+  // The trace must be sampled after the slower BB reads, before accepting a
+  // no-start interval that elapsed while those reads were in flight.
+  const traceReadStartedAt = now();
+  const trace = await readTrace();
+  return { queue, thread, observations, trace, traceReadStartedAt };
+}
+
+nodeTest(
+  "T5 release observation sees a provider start during slow state reads",
+  async () => {
+    let finishStateRead;
+    const stateRead = new Promise((resolve) => {
+      finishStateRead = resolve;
+    });
+    const providerEntries = [];
+    const observation = readReleaseObservation(
+      () => stateRead,
+      async () => [...providerEntries],
+      () => 2_500,
+    );
+    providerEntries.push({
+      method: "turn/start",
+      params: { threadId: "held" },
+    });
+    finishStateRead([[], { status: "pending" }, []]);
+    const sample = await observation;
+    assert.equal(sample.traceReadStartedAt, 2_500);
+    assert.equal(sample.trace[0].params.threadId, "held");
+  },
+);
+
 async function waitForQueue(instance, threadId, label) {
   return waitFor(async () => {
     const queue = await execution(instance, "queue-list", { threadId });
@@ -740,15 +773,24 @@ gateTest(
       let stableState = null;
       let stableSince = releaseObservedAt;
       while (Date.now() - releaseObservedAt < releaseWindowMs) {
-        const [trace, queue, current, observations] = await Promise.all([
-          providerTrace(instance),
-          execution(instance, "queue-list", { threadId: delayed.id }),
-          execution(instance, "get", { threadId: delayed.id }),
-          pluginRpc(instance, fixturePluginId, "recovery.run", {
-            operation: "observations",
-            taskId: "delayed-stop",
-          }),
-        ]);
+        const {
+          trace,
+          queue,
+          thread: current,
+          observations,
+          traceReadStartedAt,
+        } = await readReleaseObservation(
+          () =>
+            Promise.all([
+              execution(instance, "queue-list", { threadId: delayed.id }),
+              execution(instance, "get", { threadId: delayed.id }),
+              pluginRpc(instance, fixturePluginId, "recovery.run", {
+                operation: "observations",
+                taskId: "delayed-stop",
+              }),
+            ]),
+          () => providerTrace(instance),
+        );
         const turnStarts = trace.filter(
           (entry) =>
             entry.method === "turn/start" &&
@@ -761,7 +803,7 @@ gateTest(
         });
         if (state !== stableState) {
           stableState = state;
-          stableSince = Date.now();
+          stableSince = traceReadStartedAt;
         }
         releaseEvidence = {
           trace,
@@ -769,9 +811,9 @@ gateTest(
           thread: current,
           observations,
           turnStarts,
-          stableNoStartMs: Date.now() - stableSince,
+          stableNoStartMs: traceReadStartedAt - stableSince,
           stableNoStartWindowMs,
-          observationWindowMs: Date.now() - releaseObservedAt,
+          observationWindowMs: traceReadStartedAt - releaseObservedAt,
         };
         if (
           turnStarts.length > 0 ||
