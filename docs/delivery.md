@@ -138,11 +138,20 @@ review, without treating startup as passed. Issue
 [#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the unresolved
 accepted-queue/startup contract and blocks T06/T08 execution work until a public
 API design or tested BB capability proves protected work remains held while
-Ensemble is unavailable. The T5 delayed-stop probe also blocks T02/T06 writer
-release: BB acknowledged stop while the plugin-held thread remained pending, so
-the harness did not recheck it. [#676](https://github.com/chrisbanes/ensemble/issues/676)
-tracks that boundary. These findings do not yet establish that BB must
-change. Other harness and design work can continue.
+Ensemble is unavailable. The focused T5 run on BB 0.44.0 and host/plugin SDK
+0.5.29 confirmed bounded cancellation of one plugin-held first message:
+`threads.stop` returned `ok` while the thread remained `pending`; deleting that
+exact queued-message ID returned `ok`, and the `message.cancelled` event matched
+the recorded thread and message IDs. Fresh queue reads showed the row absent
+before and after recheck. The same thread was observed for 2,361 ms after
+recheck, including 2,066 ms of stable no-start. The run recorded zero provider
+starts and zero tool effects. This removes only the T02 block specific to
+[#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
+blocked by #665 and other gates.
+`stop-writer-release` remains open: this evidence covers one scripted held first
+message, not termination of arbitrary workspace processes or complete Ensemble
+writer exclusion. These findings do not yet establish that BB must change.
+Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
