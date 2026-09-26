@@ -615,3 +615,303 @@ test("public execution settings, lifecycle, interactions, retry, and environment
     };
   });
 });
+
+test("provider permission modes and managed environment inputs reach scripted turns", async () => {
+  await withFixture(async (instance) => {
+    const installed = await bbCli(
+      instance,
+      "plugin",
+      "install",
+      `path:${instance.fixtureDirectory}`,
+      "--yes",
+    );
+    assert.equal(installed.plugin.id, fixturePluginId);
+    const { project, machine } = await createProject(instance);
+    const permissionModes = ["accept-edits", "auto", "full"];
+    const providers = await bbCli(
+      instance,
+      "provider",
+      "list",
+      "--host",
+      machine.id,
+    );
+    const provider = providers.find(
+      (candidate) => candidate.id === "ensemble-scripted",
+    );
+    assert(
+      provider,
+      "The scripted provider is not registered on the fixture host",
+    );
+    const advertisedModes = provider.capabilities.permissionModes;
+    const requestedHostWorkspace = {
+      type: "host",
+      hostId: machine.id,
+      workspace: {
+        type: "managed-worktree",
+        baseBranch: { kind: "default" },
+      },
+    };
+
+    const firstPrompt = "T1 permission environment accept-edits";
+    const firstSpawn = await execution(instance, "spawn", {
+      projectId: project.id,
+      providerId: "ensemble-scripted",
+      model: "fixture-model",
+      reasoningLevel: "medium",
+      serviceTier: "default",
+      permissionMode: "accept-edits",
+      prompt: firstPrompt,
+      environment: requestedHostWorkspace,
+    });
+    const firstThread = await waitFor(async () => {
+      const thread = await execution(instance, "get", {
+        threadId: firstSpawn.id,
+      });
+      return thread.status === "idle" ? thread : false;
+    }, "accept-edits provider turn completion");
+    assert.equal(firstThread.projectId, project.id);
+    assert.equal(typeof firstThread.environmentId, "string");
+    const firstEnvironment = await execution(instance, "environment", {
+      environmentId: firstThread.environmentId,
+    });
+    assert.equal(firstEnvironment.id, firstThread.environmentId);
+    assert.equal(firstEnvironment.projectId, project.id);
+    assert.equal(firstEnvironment.hostId, machine.id);
+    assert.equal(firstEnvironment.workspaceProvisionType, "managed-worktree");
+    assert.equal(firstEnvironment.isWorktree, true);
+    assert.equal(typeof firstEnvironment.path, "string");
+    const relativeEnvironmentPath = path.relative(
+      instance.root,
+      firstEnvironment.path,
+    );
+    assert(
+      !path.isAbsolute(relativeEnvironmentPath) &&
+        relativeEnvironmentPath !== ".." &&
+        !relativeEnvironmentPath.startsWith(`..${path.sep}`),
+      "The managed worktree must stay inside the disposable fixture root",
+    );
+    assert.equal(
+      firstEnvironment.environmentProviderSelection?.machine?.hostId,
+      machine.id,
+    );
+    assert.equal(
+      firstEnvironment.environmentProviderSelection?.machine?.type,
+      "existing",
+    );
+    assert.deepEqual(firstEnvironment.environmentProviderSelection?.inputs, {
+      branch: { kind: "default" },
+    });
+
+    const firstTrace = (await providerTrace(instance)).filter(
+      (entry) =>
+        entry.method === "turn/start" &&
+        entry.params.threadId === firstThread.id,
+    );
+    assert.equal(firstTrace.length, 1);
+    instance.runtimeManifest.checks.permissionModeAdvertisementProbe = {
+      providerId: provider.id,
+      advertisedModes,
+      expectedModes: permissionModes,
+      threadId: firstThread.id,
+      environmentId: firstEnvironment.id,
+      providerTrace: firstTrace,
+    };
+    assert.deepEqual(
+      [...advertisedModes].sort(),
+      [...permissionModes].sort(),
+      "The scripted provider must advertise every SDK permission mode under test",
+    );
+
+    const modeRequests = [];
+    assert.equal(firstTrace[0].params.input[0].text, firstPrompt);
+    assert.equal(firstTrace[0].params.options.model, "fixture-model");
+    assert.equal(firstTrace[0].params.options.permissionMode, "accept-edits");
+    assert.equal(
+      firstTrace[0].params.options.envVars.BB_PROJECT_ID,
+      project.id,
+    );
+    assert.equal(
+      firstTrace[0].params.options.envVars.BB_ENVIRONMENT_ID,
+      firstEnvironment.id,
+    );
+    modeRequests.push({
+      permissionMode: "accept-edits",
+      prompt: firstPrompt,
+      thread: firstThread,
+      requestedEnvironment: requestedHostWorkspace,
+      environment: firstEnvironment,
+      providerTrace: firstTrace,
+    });
+
+    for (const permissionMode of permissionModes.slice(1)) {
+      const prompt = `T1 permission environment ${permissionMode}`;
+      const spawned = await execution(instance, "spawn", {
+        projectId: project.id,
+        providerId: "ensemble-scripted",
+        model: "fixture-model",
+        reasoningLevel: "medium",
+        serviceTier: "default",
+        permissionMode,
+        prompt,
+        environment: {
+          type: "reuse",
+          environmentId: firstThread.environmentId,
+        },
+      });
+      const thread = await waitFor(async () => {
+        const current = await execution(instance, "get", {
+          threadId: spawned.id,
+        });
+        return current.status === "idle" ? current : false;
+      }, `${permissionMode} provider turn completion`);
+      assert.equal(thread.projectId, project.id);
+      assert.equal(thread.environmentId, firstThread.environmentId);
+      const environment = await execution(instance, "environment", {
+        environmentId: thread.environmentId,
+      });
+      assert.equal(environment.id, firstEnvironment.id);
+      assert.equal(environment.path, firstEnvironment.path);
+      assert.equal(environment.hostId, machine.id);
+      const trace = (await providerTrace(instance)).filter(
+        (entry) =>
+          entry.method === "turn/start" && entry.params.threadId === thread.id,
+      );
+      assert.equal(trace.length, 1);
+      assert.equal(trace[0].params.input[0].text, prompt);
+      assert.equal(trace[0].params.options.model, "fixture-model");
+      assert.equal(trace[0].params.options.permissionMode, permissionMode);
+      assert.equal(trace[0].params.options.envVars.BB_PROJECT_ID, project.id);
+      assert.equal(
+        trace[0].params.options.envVars.BB_ENVIRONMENT_ID,
+        environment.id,
+      );
+      modeRequests.push({
+        permissionMode,
+        prompt,
+        thread,
+        requestedEnvironment: {
+          type: "reuse",
+          environmentId: firstThread.environmentId,
+        },
+        environment,
+        providerTrace: trace,
+      });
+    }
+
+    const matrixEvidence = {
+      providerId: provider.id,
+      advertisedModes,
+      requestedModes: modeRequests.map((request) => request.permissionMode),
+      projectId: project.id,
+      hostId: machine.id,
+      requestedHostWorkspace,
+      environmentId: firstThread.environmentId,
+      environment: firstEnvironment,
+      modeRequests,
+      limits: {
+        providerRequestForwardingOnly: true,
+        shellContainment: "not tested",
+        ambientCredentialIsolation: "not tested",
+        directBbApiBypass: "not tested",
+      },
+    };
+    instance.runtimeManifest.checks.permissionEnvironmentMatrix =
+      matrixEvidence;
+
+    const missingEnvironmentId = "t1-unavailable-environment";
+    const missingEnvironmentPrompt = "T1 unavailable environment rejection";
+    let missingEnvironmentSpawn;
+    let missingEnvironmentError;
+    try {
+      missingEnvironmentSpawn = await execution(instance, "spawn", {
+        projectId: project.id,
+        providerId: "ensemble-scripted",
+        model: "fixture-model",
+        reasoningLevel: "medium",
+        serviceTier: "default",
+        permissionMode: "accept-edits",
+        prompt: missingEnvironmentPrompt,
+        environment: {
+          type: "reuse",
+          environmentId: missingEnvironmentId,
+        },
+      });
+    } catch (error) {
+      missingEnvironmentError = String(error);
+    }
+    let missingEnvironmentThread;
+    if (missingEnvironmentSpawn !== undefined) {
+      missingEnvironmentThread = await waitFor(
+        async () => {
+          const thread = await execution(instance, "get", {
+            threadId: missingEnvironmentSpawn.id,
+          });
+          return thread.status === "idle" || thread.status === "error"
+            ? thread
+            : false;
+        },
+        "unavailable environment public rejection",
+        20_000,
+      );
+    }
+    const missingEnvironmentEvents =
+      missingEnvironmentThread?.status === "error"
+        ? await execution(instance, "events", {
+            threadId: missingEnvironmentThread.id,
+          })
+        : [];
+    const missingEnvironmentFailure = missingEnvironmentEvents.find(
+      (event) => event.name === "thread.failed",
+    );
+    const missingEnvironmentTrace = (await providerTrace(instance)).filter(
+      (entry) =>
+        entry.method === "turn/start" &&
+        (entry.params.threadId === missingEnvironmentSpawn?.id ||
+          entry.params.input?.some(
+            (item) => item.text === missingEnvironmentPrompt,
+          )),
+    );
+    matrixEvidence.unavailableEnvironment = {
+      environmentId: missingEnvironmentId,
+      prompt: missingEnvironmentPrompt,
+      rejectedAtSpawn: missingEnvironmentError !== undefined,
+      threadId: missingEnvironmentSpawn?.id ?? null,
+      status: missingEnvironmentThread?.status ?? "rejected-at-spawn",
+      error: missingEnvironmentError ?? missingEnvironmentFailure?.data.error,
+      providerTrace: missingEnvironmentTrace,
+    };
+    assert(
+      missingEnvironmentError !== undefined ||
+        missingEnvironmentThread?.status === "error",
+      "BB must publicly reject an unavailable environment",
+    );
+    assert.equal(
+      missingEnvironmentTrace.length,
+      0,
+      "An unavailable environment must not start a provider turn",
+    );
+
+    await restartBb(instance);
+    const environmentAfterRestart = await execution(instance, "environment", {
+      environmentId: firstThread.environmentId,
+    });
+    assert.equal(environmentAfterRestart.id, firstEnvironment.id);
+    assert.equal(environmentAfterRestart.path, firstEnvironment.path);
+    const threadsAfterRestart = [];
+    for (const request of modeRequests) {
+      const thread = await execution(instance, "get", {
+        threadId: request.thread.id,
+      });
+      assert.equal(thread.status, "idle");
+      assert.equal(thread.projectId, project.id);
+      assert.equal(thread.environmentId, firstThread.environmentId);
+      threadsAfterRestart.push({
+        permissionMode: request.permissionMode,
+        threadId: thread.id,
+        environmentId: thread.environmentId,
+      });
+    }
+    matrixEvidence.environmentAfterRestart = environmentAfterRestart;
+    matrixEvidence.threadsAfterRestart = threadsAfterRestart;
+  });
+});

@@ -49,7 +49,7 @@ function registerScriptedProvider(bb: BbPluginApi): void {
       supportsManualCompaction: false,
       supportsThreadArchive: false,
       supportsThreadRename: false,
-      permissionModes: ["accept-edits"],
+      permissionModes: ["accept-edits", "auto", "full"],
       reasoningLevels: ["medium"],
     },
     composerActions: [],
