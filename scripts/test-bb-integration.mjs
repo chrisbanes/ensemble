@@ -19,7 +19,7 @@ import { terminateOwnedProcessGroup } from "../test/bb-integration/owned-process
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const nodePin = "24.21.0";
 const bbPin = "0.43.4";
-const pluginSdkPin = "0.5.27";
+const pluginSdkPin = "0.5.29";
 const playwrightPin = "1.63.0";
 const hostSdkPin = "0.5.9";
 const sourceBridgeProvenance = JSON.parse(

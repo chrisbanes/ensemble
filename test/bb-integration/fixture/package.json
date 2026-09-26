@@ -19,7 +19,7 @@
     "host": "./host.ts"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "0.5.27",
+    "@get-bb/plugin-sdk": "0.5.29",
     "zod": "4.6.5"
   }
 }

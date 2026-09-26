@@ -26,9 +26,9 @@ const expected = {
   bb: "0.43.4",
   bbIntegrity:
     "sha512-+Al7eFihHN9350ao8LTVyoPbY4bbiRg8j2ZQNTlNjRLSaYpyTUR87aph6KqkqJR3sskMtPpxhLOaiFqqYO5LBQ==",
-  sdk: "0.5.27",
+  sdk: "0.5.29",
   sdkIntegrity:
-    "sha512-hlBaw0n1dePfGmtnR5VQUMPmDWZKMKKS28KoJ9UFJ2lX8stB27X4E10th8DJiVg+XGKNUzFVqFLNd1EOqK3bAA==",
+    "sha512-eRIUeZUu3Q4gESo10ajF58yd32+6QdKRGJMPz2/WjxK7DAGNfY5kO2ZAKP+pWS7Bo1l92GrlcO29C15CCvg1aA==",
   playwright: "1.63.0",
   playwrightIntegrity:
     "sha512-+7ziBLidS4NaNCdt57SUDT+wYmmd5fmiQejUic/kb+YsYSCPyOOE9sebzMjNmQrsnNpDJqd4WHvV/8lfKfUDUg==",
