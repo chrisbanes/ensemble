@@ -149,7 +149,8 @@ function validT5Reports() {
 function stopWriterFailureReport() {
   const report = validReport();
   const scenario = report.rows.find(
-    (entry) => entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
   );
   scenario.verdict = "failed-capability";
   scenario.observed = {
@@ -162,7 +163,8 @@ function stopWriterFailureReport() {
     observations: failedStopWriterObserved(),
   };
   report.rows.find(
-    (entry) => entry.type === "proof-gate" && entry.id === "stop-writer-release",
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
   ).verdict = "failed-capability";
   report.dependentExecutionBlocked = ["T02", "T06", "T08"];
   return report;

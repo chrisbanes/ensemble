@@ -1307,10 +1307,7 @@ function assertStopWriterEvidence(verdict, identities, observed) {
       false,
       "cannot release when cancellation is unconfirmed",
     );
-    assert.equal(
-      observed.releaseAttemptedAfterCancellationConfirmation,
-      false,
-    );
+    assert.equal(observed.releaseAttemptedAfterCancellationConfirmation, false);
     assert.equal(observed.releaseEvidence, null);
     assert(
       observed.delayedQueueAfterStopBeforeRelease?.some(
