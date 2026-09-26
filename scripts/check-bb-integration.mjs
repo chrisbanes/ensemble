@@ -28,14 +28,14 @@ assert(
   "Usage: node scripts/check-bb-integration.mjs <bb-app package> <pinned provider-source checkout> [--keep]",
 );
 
-const EXPECTED_BB_VERSION = "0.43.4";
+const EXPECTED_BB_VERSION = "0.44.0";
 const EXPECTED_SCRIPTED_PROVIDER_REVISION =
   "fdd3de3b19b97e6cd1ef7300cbb54711431249d3";
 const EXPECTED_PLUGIN_SDK_PACKAGE_VERSION = "0.5.29";
-const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.9";
+const EXPECTED_HOST_PLUGIN_SDK_VERSION = "0.5.29";
 const EXPECTED_NODE_VERSION = "24.21.0";
 const EXPECTED_BB_RUNTIME_SHA256 =
-  "950d603f24546984352d533a54946c2d900abcaef01b9516105d602494d3df34";
+  "f58ed532baf60277abf0e1df0311fde45247aecfaf9ea9723ce47d21215d4f5b";
 const EXPECTED_PLUGIN_SDK_SHA256 =
   "66206c2e050b14524dbb9f00984b6b5f8fa26af7182fc507c68f073ee5d1d554";
 const PLUGIN_ID = "ensemble-t01-integration";
@@ -80,7 +80,7 @@ const installedBbVersion = JSON.parse(
   await readFile(path.join(bbPackage, "package.json"), "utf8"),
 ).version;
 assert.equal(installedBbVersion, EXPECTED_BB_VERSION);
-const bbRuntimeSha256 = await hashTree(path.dirname(bbPackage));
+const bbRuntimeSha256 = await hashTree(bbPackage);
 assert.equal(
   bbRuntimeSha256,
   EXPECTED_BB_RUNTIME_SHA256,

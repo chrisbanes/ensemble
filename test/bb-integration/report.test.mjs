@@ -104,9 +104,9 @@ function row(type, id, overrides = {}) {
     ...(type === "public-api" ? { publicApi: id } : {}),
     scenario: `scenario for ${id}`,
     runtime: {
-      bb: "0.43.4",
-      hostSdk: "0.5.9",
-      pluginSdk: "0.5.27",
+      bb: "0.44.0",
+      hostSdk: "0.5.29",
+      pluginSdk: "0.5.29",
       node: "24.21.0",
       playwright: "1.63.0",
     },
@@ -191,11 +191,11 @@ function validT4Evidence() {
       checks: {
         t4PluginSdkCompatibility: {
           status: "passed",
-          bbHostPluginSdk: "0.5.9",
+          bbHostPluginSdk: "0.5.29",
           incompatibleFixture: {
             status: "incompatible",
             statusDetail:
-              "requires bb plugin SDK >=0.5.27, running SDK is 0.5.9",
+              "requires bb plugin SDK >=0.6.0, running SDK is 0.5.29",
           },
           compatibleFixtureResponded: true,
         },
@@ -276,7 +276,7 @@ test("integration report rejects incomplete runtime and source identity", () => 
   report.rows[0].runtime.hostSdk = null;
   assert.throws(() => assertIntegrationReport(report), /hostSdk/u);
 
-  report.rows[0].runtime.hostSdk = "0.5.9";
+  report.rows[0].runtime.hostSdk = "0.5.29";
   report.rows[0].sourceRevisions.providerBridge = null;
   assert.throws(() => assertIntegrationReport(report), /providerBridge/u);
 

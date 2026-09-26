@@ -23,9 +23,9 @@ const exec = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const expected = {
   node: "24.21.0",
-  bb: "0.43.4",
+  bb: "0.44.0",
   bbIntegrity:
-    "sha512-+Al7eFihHN9350ao8LTVyoPbY4bbiRg8j2ZQNTlNjRLSaYpyTUR87aph6KqkqJR3sskMtPpxhLOaiFqqYO5LBQ==",
+    "sha512-++yBrXnvHyfTasH3gFa/SUmOANoUq58RNyxTcgkVYgolEES1JqzHByCnvCgEqmb9eThwveFeihXm58Ut5bJ0Zg==",
   sdk: "0.5.29",
   sdkIntegrity:
     "sha512-eRIUeZUu3Q4gESo10ajF58yd32+6QdKRGJMPz2/WjxK7DAGNfY5kO2ZAKP+pWS7Bo1l92GrlcO29C15CCvg1aA==",

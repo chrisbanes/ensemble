@@ -1,6 +1,54 @@
 # BB capability evidence
 
-## Current toolchain qualification — 25 September 2026
+## BB 0.44 observation before the SDK package update — 26 September 2026
+
+Before the plugin SDK package update to 0.5.29, the pinned BB 0.44.0 package was
+exercised on Node 24.21.0, npm 12.1.0, and plugin SDK package 0.5.27 on macOS
+arm64. The installed BB package-tree SHA-256 was
+`5c7f4a86d1ad626d5da990330e9130860d9c2b56c63b4bf4504a17ada543fa65`; separately,
+the lockfile tarball integrity was
+`sha512-++yBrXnvHyfTasH3gFa/SUmOANoUq58RNyxTcgkVYgolEES1JqzHByCnvCgEqmb9eThwveFeihXm58Ut5bJ0Zg==`.
+Both artifact identities were checked by the integration harness. A public
+incompatibility probe reported host plugin SDK **0.5.29**; the BB 0.43.4
+baseline's public probe reported **0.5.9**. The T4 probe therefore uses
+`>=0.6.0` to elicit the exact public incompatibility diagnostic on 0.44.0. This
+updates the harness threshold, not T4's safety assertion.
+
+`npm run test:bb-integration` completed with outcome
+`completed-with-capability-gaps`: T1–T3 passed, T4 reproduced its exact expected
+startup-queue failure, and T5 passed its evidence and cleanup checks. The
+`startup-queued-dispatch` (#665) and `stop-writer-release` (#676) gates remain
+`failed-capability`, so dependent T02/T06/T08 work remains blocked. Separately,
+`npm run test:bb-prototype` passed its production-entry create, delegate, report,
+restart and replay checks. These results validate the dependency upgrade and
+bounded prototype against BB 0.44; they do not close either capability gate.
+
+## Combined BB 0.44 and plugin SDK 0.5.29 validation — 26 September 2026
+
+After plugin SDK 0.5.29 merged, the combined BB 0.44.0 and plugin SDK 0.5.29
+packages were clean-installed on Node 24.21.0 with npm 12.1.0 on macOS arm64;
+the T4 public probe reported host plugin SDK 0.5.29.
+The installed package-tree SHA-256 values were
+`5c7f4a86d1ad626d5da990330e9130860d9c2b56c63b4bf4504a17ada543fa65` for BB and
+`854c443eca8374ff389e8aab88cf13d37981efc5fe54880cf127006f23b370ab` for the
+SDK. Separately, the lockfile tarball integrities were
+`sha512-++yBrXnvHyfTasH3gFa/SUmOANoUq58RNyxTcgkVYgolEES1JqzHByCnvCgEqmb9eThwveFeihXm58Ut5bJ0Zg==`
+for BB and
+`sha512-eRIUeZUu3Q4gESo10ajF58yd32+6QdKRGJMPz2/WjxK7DAGNfY5kO2ZAKP+pWS7Bo1l92GrlcO29C15CCvg1aA==`
+for the SDK; the harness verifies these separately from the installed-tree
+hashes.
+
+`npm run check` passed, including 22 unit tests. The full
+`npm run test:bb-integration` aggregate completed with
+`completed-with-capability-gaps`: T1–T3 passed, T4 reproduced its expected
+startup-queue diagnostic, and T5 passed its evidence and cleanup checks. The
+`startup-queued-dispatch` (#665) and `stop-writer-release` (#676) gates remain
+`failed-capability`, so dependent T02/T06/T08 work remains blocked.
+`npm run test:bb-prototype` passed its production-entry lifecycle, restart and
+replay checks. The combined run validates this dependency set without closing
+either capability gate.
+
+## BB 0.43 toolchain qualification — 25 September 2026
 
 The isolated `npm run test:bb-integration` aggregate completed on Node 24.21.0,
 npm 12.1.0, BB 0.43.4 (host SDK 0.5.9), and plugin SDK package 0.5.27 on macOS
@@ -151,10 +199,10 @@ as `failed-capability`, with T02/T06 writer-release work blocked by
 status-confirmation gap for this delayed-start setup; it does not show what BB
 would do if the queued message were released after the unconfirmed stop.
 
-The GitHub releases page still lists BB desktop **0.43.4** as the latest stable
-release on 2026-09-24 ([BB releases](https://github.com/get-bb/bb/releases)). The
-installed 0.43.4 runtime is therefore the latest stable available for this test;
-no newer stable runtime was available to qualify.
+At the time of the 2026-09-24 qualification, the GitHub releases page listed BB
+desktop **0.43.4** as the latest stable release ([BB releases](https://github.com/get-bb/bb/releases)).
+The installed 0.43.4 runtime was therefore the latest stable available for that
+test; no newer stable runtime was available to qualify then.
 
 ## Reproduce the T01 harness
 
@@ -166,15 +214,17 @@ From the repository root after `npm ci`, with Node 24.21.0 active, set
 node scripts/check-bb-integration.mjs "$BB_APP_PACKAGE" "$BB_SOURCE_CHECKOUT"
 ```
 
-The script checks installed BB package **0.43.4**, plugin SDK package **0.5.24**,
-Node **24.21.0**, and macOS arm64. It hashes sorted relative file paths and bytes
-for the installed unpacked BB `node_modules` runtime tree (SHA-256
-`950d603f24546984352d533a54946c2d900abcaef01b9516105d602494d3df34`)
-and the plugin SDK package tree (SHA-256
-`03c336f1fa462e1288f4aaebfbd413512dc65782a402eff590aa84a280288bdf`).
-This pins the exact files used by this run; it does not establish their upstream
-build provenance. The actual host declares plugin SDK **0.5.9** compatibility;
-this fixture has been loaded and exercised with SDK package 0.5.24 on that host.
+The current script checks installed BB package **0.44.0**, plugin SDK package
+**0.5.29**, Node **24.21.0**, and macOS arm64. It hashes sorted relative file
+paths and bytes within the installed `bb-app` package directory (SHA-256
+`f58ed532baf60277abf0e1df0311fde45247aecfaf9ea9723ce47d21215d4f5b`) and the
+plugin SDK package directory (SHA-256
+`66206c2e050b14524dbb9f00984b6b5f8fa26af7182fc507c68f073ee5d1d554`). These are
+installed package-tree hashes; the separate BB tarball integrity check is in
+the integration harness. The fixture requires host SDK compatibility at least
+**0.5.29**. These pins identify the tested package files, not their upstream
+build provenance. The standalone live diagnostic was not run because the
+required pinned BB source checkout was unavailable in this environment.
 The second path is a BB source checkout at
 `fdd3de3b19b97e6cd1ef7300cbb54711431249d3`; that revision pins only the source
 of BB's MIT-licensed scripted provider bridge. The harness rejects a dirty checkout

@@ -9,8 +9,8 @@
   },
   "packages": {
     "bb-app": {
-      "version": "0.43.4",
-      "treeSha256": "8b7837f26a75726c912fd1dfd12cd9ada9fbd6111da59ca7ca778117c48f0874"
+      "version": "0.44.0",
+      "treeSha256": "5c7f4a86d1ad626d5da990330e9130860d9c2b56c63b4bf4504a17ada543fa65"
     },
     "@get-bb/plugin-sdk": {
       "version": "0.5.29",

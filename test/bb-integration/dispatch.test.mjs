@@ -189,14 +189,14 @@ test("public dispatch handoff records bounded holds and an open startup capabili
       instance,
       "t4-sdk-floor-probe",
       "other-wait-server.ts",
-      ">=0.5.27",
+      ">=0.6.0",
     );
     assert.equal(incompatible.status, "incompatible");
     const hostSdkMatch = incompatible.statusDetail?.match(
-      /^requires bb plugin SDK >=0\.5\.27, running SDK is (\d+\.\d+\.\d+)$/u,
+      /^requires bb plugin SDK >=0\.6\.0, running SDK is (\d+\.\d+\.\d+)$/u,
     );
     assert(hostSdkMatch, "BB did not report its running plugin SDK version");
-    assert.equal(hostSdkMatch[1], "0.5.9");
+    assert.equal(hostSdkMatch[1], "0.5.29");
     record(instance, "t4PluginSdkCompatibility", {
       status: "passed",
       runtimeNode: process.versions.node,
