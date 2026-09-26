@@ -11,6 +11,7 @@ import {
   assertExpectedT4Failure,
   assertIntegrationReport,
   assertT5Reports,
+  buildIntegrationReport,
   readIntegrationReport,
   serializeIntegrationReport,
   writeIntegrationReport,
@@ -428,6 +429,111 @@ test("T5 keeps the writer held when cancellation is unconfirmed", () => {
   const report = stopWriterFailureReport();
   assert.deepEqual(report.dependentExecutionBlocked, ["T02", "T06", "T08"]);
   assert.doesNotThrow(() => assertIntegrationReport(report));
+});
+
+test("report blocks T02 unless stop evidence validates as open", () => {
+  const validOpen = validT5Reports();
+  const openReport = buildIntegrationReport({
+    slices: {},
+    t5Reports: validOpen,
+  });
+  assert.deepEqual(openReport.dependentExecutionBlocked, ["T06", "T08"]);
+  assert.equal(
+    openReport.rows.filter((entry) => entry.type === "t5-scenario").length,
+    REQUIRED_T5_REPORTS.length,
+  );
+  assert.doesNotThrow(() => assertT5Reports(validOpen));
+
+  const failed = validT5Reports();
+  const failedStop = failed.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  failedStop.verdict = "failed-capability";
+  failedStop.identities.delayedDeleteResponse = { ok: false };
+  failedStop.observed = failedStopWriterObserved();
+
+  const missing = validT5Reports().filter(
+    (entry) => entry.name !== "stop-writer-release",
+  );
+
+  const inconclusive = validT5Reports();
+  inconclusive.find((entry) => entry.name === "stop-writer-release").verdict =
+    "inconclusive";
+
+  const invalidOpen = validT5Reports();
+  const invalidOpenStop = invalidOpen.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  invalidOpenStop.identities.delayedDeleteResponse = { ok: false };
+  invalidOpenStop.observed = failedStopWriterObserved();
+
+  const blocked = ["T02", "T06", "T08"];
+  for (const [label, t5Reports] of [
+    ["failed", failed],
+    ["missing", missing],
+    ["inconclusive", inconclusive],
+    ["invalid open", invalidOpen],
+  ]) {
+    const report = buildIntegrationReport({ slices: {}, t5Reports });
+    assert.deepEqual(report.dependentExecutionBlocked, blocked, label);
+  }
+
+  assert.doesNotThrow(() => assertT5Reports(failed));
+  assert.throws(() => assertT5Reports(missing), /six named rows/u);
+  assert.throws(
+    () => assertT5Reports(inconclusive),
+    /product gate remains open/u,
+  );
+  assert.throws(
+    () => assertT5Reports(invalidOpen),
+    /unconfirmed cancellation must remain a failed capability/u,
+  );
+});
+
+test("integration report validates stop evidence before allowing T02 to unblock", () => {
+  const failedEvidence = stopWriterFailureReport();
+  assert.doesNotThrow(() => assertIntegrationReport(failedEvidence));
+  failedEvidence.dependentExecutionBlocked = ["T06", "T08"];
+  assert.throws(() => assertIntegrationReport(failedEvidence));
+
+  const missingEvidence = validReport();
+  missingEvidence.rows = missingEvidence.rows.filter(
+    (entry) =>
+      !(entry.type === "t5-scenario" && entry.id === "stop-writer-release"),
+  );
+  missingEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(missingEvidence),
+    /missing required t5-scenario/u,
+  );
+
+  const inconclusiveEvidence = validReport();
+  inconclusiveEvidence.rows.find(
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  ).verdict = "inconclusive";
+  inconclusiveEvidence.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "inconclusive";
+  inconclusiveEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(inconclusiveEvidence),
+    /Stop product gate remains open/u,
+  );
+
+  const invalidOpenEvidence = validReport();
+  const invalidOpenScenario = invalidOpenEvidence.rows.find(
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  );
+  invalidOpenScenario.observed.observations = failedStopWriterObserved();
+  invalidOpenScenario.observed.identities.delayedDeleteResponse = { ok: false };
+  invalidOpenEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(invalidOpenEvidence),
+    /unconfirmed cancellation must remain a failed capability/u,
+  );
 });
 
 test("T5 rejects unconfirmed or incomplete cancellation evidence before release", () => {

@@ -353,6 +353,16 @@ function t5Map(rows) {
   return new Map((rows ?? []).map((report) => [report.name, report]));
 }
 
+function hasValidatedOpenStopEvidence(reports) {
+  try {
+    assertT5Reports(reports);
+    return t5Map(reports).get("stop-writer-release")?.verdict === "open";
+  } catch {
+    // Validation reports the failure later; construction keeps dependents blocked.
+    return false;
+  }
+}
+
 export function buildIntegrationReport({
   ensembleHead,
   sourceDigest,
@@ -963,10 +973,9 @@ export function buildIntegrationReport({
       sanitize(entry, replacements),
     ),
     t5Reports: (t5Reports ?? []).map((entry) => sanitize(entry, replacements)),
-    dependentExecutionBlocked:
-      t5Gate("stop-writer-release")?.verdict === "failed-capability"
-        ? ["T02", "T06", "T08"]
-        : ["T06", "T08"],
+    dependentExecutionBlocked: hasValidatedOpenStopEvidence(t5Reports)
+      ? ["T06", "T08"]
+      : ["T02", "T06", "T08"],
   };
 }
 
@@ -1222,7 +1231,7 @@ export function assertIntegrationReport(report) {
   assert.equal(stop?.providerStopRequests, 1);
   assert.equal(stop?.toolEffects, 0);
   const stopScenario = keyed.get("t5-scenario:stop-writer-release");
-  assertStopWriterEvidence(
+  const stopEvidenceAllowsT02Unblock = assertStopWriterEvidence(
     stopScenario.verdict,
     stopScenario.observed.identities,
     stopScenario.observed.observations,
@@ -1240,9 +1249,7 @@ export function assertIntegrationReport(report) {
   );
   assert.deepEqual(
     report.dependentExecutionBlocked,
-    stopScenario.verdict === "failed-capability"
-      ? ["T02", "T06", "T08"]
-      : ["T06", "T08"],
+    stopEvidenceAllowsT02Unblock ? ["T06", "T08"] : ["T02", "T06", "T08"],
   );
   assert.match(startup.evidenceLimit, /#665/u);
   assert.equal(
@@ -1317,7 +1324,7 @@ function assertStopWriterEvidence(verdict, identities, observed) {
       ),
       "The unconfirmed stop must retain the observed plugin-held queue row",
     );
-    return;
+    return false;
   }
 
   assert.equal(observed.delayedCancellationConfirmed, true);
@@ -1397,6 +1404,7 @@ function assertStopWriterEvidence(verdict, identities, observed) {
     0,
     "provider tool effect after release",
   );
+  return true;
 }
 
 export function assertT5Reports(rows) {
