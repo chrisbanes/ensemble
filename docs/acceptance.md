@@ -195,12 +195,32 @@ pins measured after clean `npm ci` with Node 24.21.0 and npm 12.1.0.
 The raw T4 test intentionally exits nonzero for the known #665 startup violation;
 the aggregate accepts only its exact queue/provider/tool evidence and verified
 cleanup, records the gate as failed capability, and keeps dependent T06/T08
-blocked. T5 also records a failed capability when BB acknowledges a stop for a
-plugin-held delayed thread but the thread remains pending; it withholds recheck
-and blocks T02/T06 writer-release work through [#676](https://github.com/chrisbanes/ensemble/issues/676). Unrelated test failures, missing
-evidence/events, timeouts or leaks fail
-the aggregate. This report does not stand in for the authenticated-provider smoke
-required for the later operational release gate.
+blocked. The focused pre-correction T5 run measured 2,442 ms after recheck with
+2,150 ms stable no-start; a distinct earlier integrated pre-correction run
+measured 2,361 ms with 2,066 ms stable no-start. The later trace-timing finding
+means neither measurement is current no-start acceptance evidence.
+
+The final corrected integrated report at
+`33bd3062531bd2ab717d4ea8d4a29752c6388058` is the current acceptance evidence.
+On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
+checks passed: `npm run check`, `npm run test:bb-integration`, and
+`npm run test:bb-prototype`.
+The report has six T5 gate rows; the corrected stop observation records stop
+acknowledgement while pending, exact-ID cancellation with a matching
+`message.cancelled` event for the recorded thread/message IDs, queue absence
+before and after recheck, 2,378 ms after recheck with 2,087 ms stable no-start,
+and zero provider starts/effects. T4 produced its expected diagnostic, and every
+T1–T5 manifest confirms clean isolation cleanup.
+The corrected evidence supports removing only the #676-specific T02 block;
+T06/T08 remain blocked by #665 and other gates.
+
+`stop-writer-release` remains open. The result covers one scripted held first
+message, not arbitrary process termination or complete Ensemble writer
+exclusion. If cancellation is unconfirmed, the row remains `failed-capability`
+and recheck/release are withheld; fixture startup or event-capture failures are
+inconclusive. Unrelated test failures, missing evidence/events, timeouts or
+leaks fail the aggregate. This report does not stand in for the
+authenticated-provider smoke required for the later operational release gate.
 
 ## Gates
 

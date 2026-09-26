@@ -11,6 +11,7 @@ import {
   assertExpectedT4Failure,
   assertIntegrationReport,
   assertT5Reports,
+  buildIntegrationReport,
   readIntegrationReport,
   serializeIntegrationReport,
   writeIntegrationReport,
@@ -65,8 +66,10 @@ function sampleObserved(type, id) {
       identities:
         id === "stop-writer-release"
           ? {
+              delayedThreadId: "thread-delayed",
               delayedStopResponse: { ok: true },
               delayedQueuedMessageId: "queued-stop",
+              delayedDeleteResponse: { ok: true },
             }
           : { threadId: "thread-one" },
       observations:
@@ -83,18 +86,121 @@ function sampleObserved(type, id) {
 function stopWriterObserved() {
   return {
     delayedStatusBeforeStop: "pending",
-    delayedStatusAfterStop: "idle",
-    delayedStopConfirmed: true,
-    releaseAttempted: true,
-    releaseEvidence: { status: "idle" },
-    delayedQueueAfterStopBeforeRelease: [
-      { id: "queued-stop", waitingOn: { kind: "plugin" } },
-    ],
+    delayedStatusAfterStop: "pending",
+    delayedStopConfirmed: false,
+    delayedCancellationConfirmed: true,
+    delayedCancellationEvent: {
+      name: "message.cancelled",
+      threadId: "thread-delayed",
+      messageId: "queued-stop",
+    },
+    delayedQueueAfterStopBeforeRelease: [],
     delayedProviderTurnStartsBeforeRelease: 0,
     delayedProviderToolEffectsBeforeRelease: 0,
+    releaseAttempted: true,
+    releaseAttemptedAfterCancellationConfirmation: true,
+    releaseEvidence: {
+      threadId: "thread-delayed",
+      status: "pending",
+      queue: [],
+      observationWindowMs: 2_000,
+      stableNoStartMs: 2_000,
+      stableNoStartWindowMs: 2_000,
+    },
     delayedProviderTurnStartsAfterRelease: 0,
     delayedProviderToolEffectsAfterRelease: 0,
   };
+}
+
+function failedStopWriterObserved() {
+  return {
+    ...stopWriterObserved(),
+    delayedCancellationConfirmed: false,
+    delayedCancellationEvent: null,
+    delayedQueueAfterStopBeforeRelease: [
+      { id: "queued-stop", waitingOn: { kind: "plugin" } },
+    ],
+    releaseAttempted: false,
+    releaseAttemptedAfterCancellationConfirmation: false,
+    releaseEvidence: null,
+  };
+}
+
+function validT5Reports() {
+  return REQUIRED_T5_REPORTS.map((name) => ({
+    name,
+    verdict: "open",
+    identities:
+      name === "stop-writer-release"
+        ? {
+            delayedThreadId: "thread-delayed",
+            delayedStopResponse: { ok: true },
+            delayedQueuedMessageId: "queued-stop",
+            delayedDeleteResponse: { ok: true },
+          }
+        : { threadId: `thread-${name}` },
+    observed:
+      name === "stop-writer-release"
+        ? stopWriterObserved()
+        : { status: "observed" },
+    limits: ["Fixture evidence does not implement the product gate."],
+  }));
+}
+
+function slice(id, testOutcome) {
+  const t4Diagnostic = id === "T4";
+  return {
+    id,
+    exitCode: t4Diagnostic ? 1 : testOutcome === "passed" ? 0 : 1,
+    expectedExitCode: t4Diagnostic ? 1 : 0,
+    timedOut: false,
+    testOutcome,
+    manifest: {
+      outcome: t4Diagnostic ? "failed" : testOutcome,
+      checks: {
+        ownedProcessCleanup: {
+          allExited: true,
+          serverPortClosed: true,
+          daemonPortClosed: true,
+          forced: false,
+        },
+      },
+    },
+  };
+}
+
+function validSlices() {
+  return {
+    T1: slice("T1", "passed"),
+    T2: slice("T2", "passed"),
+    T3: slice("T3", "passed"),
+    T4: slice("T4", "expected-diagnostic"),
+    T5: slice("T5", "passed"),
+  };
+}
+
+function stopWriterFailureReport() {
+  const report = validReport();
+  const scenario = report.rows.find(
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  );
+  scenario.verdict = "failed-capability";
+  scenario.observed = {
+    identities: {
+      delayedThreadId: "thread-delayed",
+      delayedStopResponse: { ok: true },
+      delayedQueuedMessageId: "queued-stop",
+      delayedDeleteResponse: { ok: false },
+    },
+    observations: failedStopWriterObserved(),
+  };
+  report.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "failed-capability";
+  report.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  return report;
 }
 
 function row(type, id, overrides = {}) {
@@ -153,6 +259,17 @@ function validReport() {
     integrationSourceDigest: "digest-abc123",
     outcome: "completed-with-capability-gaps",
     toolchain: { node: "24.21.0", npm: "12.1.0" },
+    slices: {
+      T5: {
+        exitCode: 0,
+        expectedExitCode: 0,
+        timedOut: false,
+        testOutcome: "passed",
+        manifestAvailable: true,
+        manifestOutcome: "passed",
+        cleanupVerified: true,
+      },
+    },
     rows: [
       ...apiRows,
       ...REQUIRED_PROOF_GATES.map((id) =>
@@ -240,6 +357,36 @@ test("integration report requires one complete row per API and proof gate", () =
     (entry) => entry.id !== "startup-queued-dispatch",
   );
   assert.throws(() => assertIntegrationReport(missingGate), /proof-gate/u);
+});
+
+test("integration report requires a passed, verified T5 slice", () => {
+  const missingSlice = validReport();
+  delete missingSlice.slices.T5;
+  missingSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(missingSlice),
+    /T5 slice must exit successfully/u,
+  );
+
+  const failedSlice = validReport();
+  failedSlice.slices.T5.exitCode = 1;
+  failedSlice.slices.T5.testOutcome = "failed";
+  failedSlice.slices.T5.manifestOutcome = "failed";
+  failedSlice.outcome = "failed-harness";
+  failedSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(failedSlice),
+    /T5 slice must exit successfully/u,
+  );
+
+  const unverifiedSlice = validReport();
+  unverifiedSlice.slices.T5.manifestAvailable = false;
+  unverifiedSlice.slices.T5.cleanupVerified = false;
+  unverifiedSlice.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(unverifiedSlice),
+    /T5 slice must have a verified manifest/u,
+  );
 });
 
 test("combined stop and retry row requires confirmed stop evidence", () => {
@@ -331,39 +478,260 @@ test("integration report rejects duplicate API rows and empty evidence", () => {
   );
 });
 
-test("T5 fixture rows stay open and cannot claim product gates passed", () => {
-  const rows = REQUIRED_T5_REPORTS.map((name) => ({
-    name,
-    verdict: "open",
-    identities:
-      name === "stop-writer-release"
-        ? {
-            delayedStopResponse: { ok: true },
-            delayedQueuedMessageId: "queued-stop",
-          }
-        : { threadId: `thread-${name}` },
-    observed:
-      name === "stop-writer-release"
-        ? stopWriterObserved()
-        : { status: "observed" },
-    limits: ["Fixture evidence does not implement the product gate."],
-  }));
+test("T5 confirms exact cancellation before release and keeps the product gate open", () => {
+  const rows = validT5Reports();
   assert.doesNotThrow(() => assertT5Reports(rows));
   rows[0].verdict = "pass";
   assert.throws(() => assertT5Reports(rows), /product gate remains open/u);
-  rows[0].verdict = "open";
-  rows[1].observed.delayedStopConfirmed = false;
-  assert.throws(() => assertT5Reports(rows), /false !== true/u);
-  rows[1].verdict = "failed-capability";
-  rows[1].observed.delayedStatusAfterStop = "pending";
-  rows[1].observed.releaseAttempted = false;
-  rows[1].observed.releaseEvidence = null;
-  assert.doesNotThrow(() => assertT5Reports(rows));
 
   const report = validReport();
+  assert.deepEqual(report.dependentExecutionBlocked, ["T06", "T08"]);
+  assert.doesNotThrow(() => assertIntegrationReport(report));
   report.rows.find((entry) => entry.id === REQUIRED_T5_REPORTS[0]).verdict =
     "passed";
   assert.throws(() => assertIntegrationReport(report), /remains open/u);
+});
+
+test("T5 keeps the writer held when cancellation is unconfirmed", () => {
+  const rows = validT5Reports();
+  rows[1].verdict = "failed-capability";
+  rows[1].identities.delayedDeleteResponse = { ok: false };
+  rows[1].observed = failedStopWriterObserved();
+  assert.doesNotThrow(() => assertT5Reports(rows));
+
+  const report = stopWriterFailureReport();
+  assert.deepEqual(report.dependentExecutionBlocked, ["T02", "T06", "T08"]);
+  assert.doesNotThrow(() => assertIntegrationReport(report));
+});
+
+test("report blocks T02 unless stop evidence validates as open", () => {
+  const validOpen = validT5Reports();
+  const openReport = buildIntegrationReport({
+    slices: validSlices(),
+    t5Reports: validOpen,
+  });
+  assert.equal(openReport.outcome, "completed-with-capability-gaps");
+  assert.deepEqual(openReport.dependentExecutionBlocked, ["T06", "T08"]);
+  assert.equal(
+    openReport.rows.filter((entry) => entry.type === "t5-scenario").length,
+    REQUIRED_T5_REPORTS.length,
+  );
+  assert.doesNotThrow(() => assertT5Reports(validOpen));
+
+  const failed = validT5Reports();
+  const failedStop = failed.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  failedStop.verdict = "failed-capability";
+  failedStop.identities.delayedDeleteResponse = { ok: false };
+  failedStop.observed = failedStopWriterObserved();
+
+  const missing = validT5Reports().filter(
+    (entry) => entry.name !== "stop-writer-release",
+  );
+
+  const inconclusive = validT5Reports();
+  inconclusive.find((entry) => entry.name === "stop-writer-release").verdict =
+    "inconclusive";
+
+  const invalidOpen = validT5Reports();
+  const invalidOpenStop = invalidOpen.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  invalidOpenStop.identities.delayedDeleteResponse = { ok: false };
+  invalidOpenStop.observed = failedStopWriterObserved();
+
+  const blocked = ["T02", "T06", "T08"];
+  for (const [label, t5Reports] of [
+    ["failed", failed],
+    ["missing", missing],
+    ["inconclusive", inconclusive],
+    ["invalid open", invalidOpen],
+  ]) {
+    const report = buildIntegrationReport({
+      slices: validSlices(),
+      t5Reports,
+    });
+    assert.equal(
+      report.outcome,
+      label === "failed" ? "completed-with-capability-gaps" : "failed-harness",
+      label,
+    );
+    assert.deepEqual(report.dependentExecutionBlocked, blocked, label);
+  }
+
+  assert.doesNotThrow(() => assertT5Reports(failed));
+  assert.throws(() => assertT5Reports(missing), /six named rows/u);
+  assert.throws(
+    () => assertT5Reports(inconclusive),
+    /product gate remains open/u,
+  );
+  assert.throws(
+    () => assertT5Reports(invalidOpen),
+    /unconfirmed cancellation must remain a failed capability/u,
+  );
+});
+
+test("T02 stays blocked when the T5 slice is missing, failed, or unverified", () => {
+  const t5Reports = validT5Reports();
+  const missingSlice = validSlices();
+  delete missingSlice.T5;
+
+  const failedSlice = validSlices();
+  failedSlice.T5.testOutcome = "failed";
+  failedSlice.T5.exitCode = 1;
+  failedSlice.T5.manifest.outcome = "failed";
+
+  const unverifiedSlice = validSlices();
+  delete unverifiedSlice.T5.manifest;
+
+  for (const [label, slices] of [
+    ["missing", missingSlice],
+    ["failed", failedSlice],
+    ["unverified", unverifiedSlice],
+  ]) {
+    const report = buildIntegrationReport({ slices, t5Reports });
+    assert.equal(report.outcome, "failed-harness", `${label} T5 outcome`);
+    assert.deepEqual(
+      report.dependentExecutionBlocked,
+      ["T02", "T06", "T08"],
+      `${label} T5 dependencies`,
+    );
+  }
+});
+
+test("integration report validates stop evidence before allowing T02 to unblock", () => {
+  const failedEvidence = stopWriterFailureReport();
+  assert.doesNotThrow(() => assertIntegrationReport(failedEvidence));
+  failedEvidence.dependentExecutionBlocked = ["T06", "T08"];
+  assert.throws(() => assertIntegrationReport(failedEvidence));
+
+  const missingEvidence = validReport();
+  missingEvidence.rows = missingEvidence.rows.filter(
+    (entry) =>
+      !(entry.type === "t5-scenario" && entry.id === "stop-writer-release"),
+  );
+  missingEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(missingEvidence),
+    /missing required t5-scenario/u,
+  );
+
+  const inconclusiveEvidence = validReport();
+  inconclusiveEvidence.rows.find(
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  ).verdict = "inconclusive";
+  inconclusiveEvidence.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "inconclusive";
+  inconclusiveEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(inconclusiveEvidence),
+    /Stop product gate remains open/u,
+  );
+
+  const invalidOpenEvidence = validReport();
+  const invalidOpenScenario = invalidOpenEvidence.rows.find(
+    (entry) =>
+      entry.type === "t5-scenario" && entry.id === "stop-writer-release",
+  );
+  invalidOpenScenario.observed.observations = failedStopWriterObserved();
+  invalidOpenScenario.observed.identities.delayedDeleteResponse = { ok: false };
+  invalidOpenEvidence.dependentExecutionBlocked = ["T02", "T06", "T08"];
+  assert.throws(
+    () => assertIntegrationReport(invalidOpenEvidence),
+    /unconfirmed cancellation must remain a failed capability/u,
+  );
+});
+
+test("T5 rejects unconfirmed or incomplete cancellation evidence before release", () => {
+  const cases = [
+    [
+      "missing cancellation event",
+      (observed) => {
+        observed.delayedCancellationEvent = null;
+      },
+      /cancellation event/u,
+    ],
+    [
+      "cancellation event for another message",
+      (observed) => {
+        observed.delayedCancellationEvent.messageId = "another-message";
+      },
+      /cancellation event/u,
+    ],
+    [
+      "cancellation event for another thread",
+      (observed) => {
+        observed.delayedCancellationEvent.threadId = "another-thread";
+      },
+      /cancellation event/u,
+    ],
+    [
+      "retained queue row",
+      (observed) => {
+        observed.delayedQueueAfterStopBeforeRelease = [
+          { id: "queued-stop", waitingOn: { kind: "plugin" } },
+        ];
+      },
+      /queue row/u,
+    ],
+    [
+      "release before cancellation confirmation",
+      (observed) => {
+        observed.releaseAttemptedAfterCancellationConfirmation = false;
+      },
+      /before confirmed cancellation/u,
+    ],
+    [
+      "missing post-release observation window",
+      (observed) => {
+        delete observed.releaseEvidence.observationWindowMs;
+      },
+      /observation window/u,
+    ],
+    [
+      "retained queue row after release",
+      (observed) => {
+        observed.releaseEvidence.queue = [
+          { id: "queued-stop", waitingOn: { kind: "plugin" } },
+        ];
+      },
+      /queue row/u,
+    ],
+    [
+      "provider turn after release",
+      (observed) => {
+        observed.delayedProviderTurnStartsAfterRelease = 1;
+      },
+      /provider turn started after release/u,
+    ],
+    [
+      "tool effect after release",
+      (observed) => {
+        observed.delayedProviderToolEffectsAfterRelease = 1;
+      },
+      /tool effect after release/u,
+    ],
+  ];
+
+  for (const [label, mutate, message] of cases) {
+    const rows = validT5Reports();
+    mutate(rows[1].observed);
+    assert.throws(() => assertT5Reports(rows), message, label);
+  }
+
+  const releasedUnconfirmed = validT5Reports();
+  releasedUnconfirmed[1].verdict = "failed-capability";
+  releasedUnconfirmed[1].identities.delayedDeleteResponse = { ok: false };
+  releasedUnconfirmed[1].observed = failedStopWriterObserved();
+  releasedUnconfirmed[1].observed.releaseAttempted = true;
+  assert.throws(
+    () => assertT5Reports(releasedUnconfirmed),
+    /cannot release when cancellation is unconfirmed/u,
+  );
 });
 
 test("integration report detects missing events and unexpected duplicate effects", () => {

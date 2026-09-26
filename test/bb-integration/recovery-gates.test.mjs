@@ -240,6 +240,39 @@ async function providerTrace(instance) {
     .map((line) => JSON.parse(line));
 }
 
+async function readReleaseObservation(readState, readTrace, now = Date.now) {
+  const [queue, thread, observations] = await readState();
+  // The trace must be sampled after the slower BB reads, before accepting a
+  // no-start interval that elapsed while those reads were in flight.
+  const traceReadStartedAt = now();
+  const trace = await readTrace();
+  return { queue, thread, observations, trace, traceReadStartedAt };
+}
+
+nodeTest(
+  "T5 release observation sees a provider start during slow state reads",
+  async () => {
+    let finishStateRead;
+    const stateRead = new Promise((resolve) => {
+      finishStateRead = resolve;
+    });
+    const providerEntries = [];
+    const observation = readReleaseObservation(
+      () => stateRead,
+      async () => [...providerEntries],
+      () => 2_500,
+    );
+    providerEntries.push({
+      method: "turn/start",
+      params: { threadId: "held" },
+    });
+    finishStateRead([[], { status: "pending" }, []]);
+    const sample = await observation;
+    assert.equal(sample.traceReadStartedAt, 2_500);
+    assert.equal(sample.trace[0].params.threadId, "held");
+  },
+);
+
 async function waitForQueue(instance, threadId, label) {
   return waitFor(async () => {
     const queue = await execution(instance, "queue-list", { threadId });
@@ -575,13 +608,33 @@ gateTest(
       threadId: delayed.id,
     });
     assert.equal(delayedBeforeStop.status, "pending");
+    const queuedEvent = await waitFor(async () => {
+      const events = await pluginRpc(
+        instance,
+        fixturePluginId,
+        "recovery.run",
+        {
+          operation: "message-events",
+          threadId: delayed.id,
+        },
+      );
+      return events.find(
+        (event) =>
+          event.name === "message.queued" &&
+          event.threadId === delayed.id &&
+          event.messageId === delayedQueued.id,
+      );
+    }, "held first message queued event");
     capture({
       stage: "delayed-start writer held in the plugin queue",
       identities: {
         delayedThreadId: delayed.id,
         delayedQueuedMessageId: delayedQueued.id,
       },
-      observed: { delayedStatusBeforeStop: delayedBeforeStop.status },
+      observed: {
+        delayedStatusBeforeStop: delayedBeforeStop.status,
+        delayedQueuedEvent: queuedEvent,
+      },
     });
     const delayedStop = await pluginRpc(
       instance,
@@ -601,9 +654,61 @@ gateTest(
       },
       "delayed start stop confirmation",
       3_000,
-    ).catch(() => execution(instance, "get", { threadId: delayed.id }));
+    ).catch((error) => {
+      if (error.cause !== undefined) throw error;
+      return execution(instance, "get", { threadId: delayed.id });
+    });
     const delayedStopConfirmed =
       delayedAfterStop.status === "idle" || delayedAfterStop.status === "error";
+    const queueAfterStop = await execution(instance, "queue-list", {
+      threadId: delayed.id,
+    });
+    const delayedDeleteResponse = await pluginRpc(
+      instance,
+      fixturePluginId,
+      "recovery.run",
+      {
+        operation: "queue-delete",
+        threadId: delayed.id,
+        queuedMessageId: delayedQueued.id,
+      },
+    );
+    const cancellationEvents = await waitFor(
+      async () => {
+        const events = await pluginRpc(
+          instance,
+          fixturePluginId,
+          "recovery.run",
+          {
+            operation: "message-events",
+            threadId: delayed.id,
+          },
+        );
+        return events.some(
+          (event) =>
+            event.name === "message.cancelled" &&
+            event.threadId === delayed.id &&
+            event.messageId === delayedQueued.id,
+        )
+          ? events
+          : false;
+      },
+      "exact held first message cancellation event",
+      3_000,
+    ).catch((error) => {
+      if (error.cause !== undefined) throw error;
+      return pluginRpc(instance, fixturePluginId, "recovery.run", {
+        operation: "message-events",
+        threadId: delayed.id,
+      });
+    });
+    const delayedCancellationEvent =
+      cancellationEvents.find(
+        (event) =>
+          event.name === "message.cancelled" &&
+          event.threadId === delayed.id &&
+          event.messageId === delayedQueued.id,
+      ) ?? null;
     const preReleaseTrace = await providerTrace(instance);
     const preReleaseQueue = await execution(instance, "queue-list", {
       threadId: delayed.id,
@@ -624,11 +729,20 @@ gateTest(
     const effectsBeforeRelease = preReleaseTrace.filter(
       (entry) => entry.method === "t1/tool-result",
     );
+    const delayedCancellationConfirmed =
+      delayedDeleteResponse.ok === true &&
+      delayedCancellationEvent !== null &&
+      !preReleaseQueue.some((entry) => entry.id === delayedQueued.id) &&
+      delayedStartsBeforeRelease.length === 0 &&
+      effectsBeforeRelease.length === 0;
     capture({
       stage: "delayed stop disposition observed before any release",
       observed: {
         delayedStatusAfterStop: delayedAfterStop.status,
         delayedStopConfirmed,
+        delayedDeleteResponse,
+        delayedCancellationConfirmed,
+        delayedCancellationEvent,
         delayedProviderTurnStartsBeforeRelease:
           delayedStartsBeforeRelease.length,
         delayedProviderToolEffectsBeforeRelease: effectsBeforeRelease.length,
@@ -636,9 +750,17 @@ gateTest(
         delayedHookObservations: preReleaseObservations,
       },
     });
+    if (
+      !delayedCancellationConfirmed &&
+      !preReleaseQueue.some((entry) => entry.id === delayedQueued.id)
+    ) {
+      throw new Error(
+        "Inconclusive cancellation: the held row disappeared without all exact-ID confirmation evidence",
+      );
+    }
     let releaseAttempted = false;
     let releaseEvidence = null;
-    if (delayedStopConfirmed) {
+    if (delayedCancellationConfirmed) {
       releaseAttempted = true;
       await pluginRpc(instance, fixturePluginId, "recovery.run", {
         operation: "set-task-wait",
@@ -651,15 +773,24 @@ gateTest(
       let stableState = null;
       let stableSince = releaseObservedAt;
       while (Date.now() - releaseObservedAt < releaseWindowMs) {
-        const [trace, queue, current, observations] = await Promise.all([
-          providerTrace(instance),
-          execution(instance, "queue-list", { threadId: delayed.id }),
-          execution(instance, "get", { threadId: delayed.id }),
-          pluginRpc(instance, fixturePluginId, "recovery.run", {
-            operation: "observations",
-            taskId: "delayed-stop",
-          }),
-        ]);
+        const {
+          trace,
+          queue,
+          thread: current,
+          observations,
+          traceReadStartedAt,
+        } = await readReleaseObservation(
+          () =>
+            Promise.all([
+              execution(instance, "queue-list", { threadId: delayed.id }),
+              execution(instance, "get", { threadId: delayed.id }),
+              pluginRpc(instance, fixturePluginId, "recovery.run", {
+                operation: "observations",
+                taskId: "delayed-stop",
+              }),
+            ]),
+          () => providerTrace(instance),
+        );
         const turnStarts = trace.filter(
           (entry) =>
             entry.method === "turn/start" &&
@@ -672,7 +803,7 @@ gateTest(
         });
         if (state !== stableState) {
           stableState = state;
-          stableSince = Date.now();
+          stableSince = traceReadStartedAt;
         }
         releaseEvidence = {
           trace,
@@ -680,8 +811,9 @@ gateTest(
           thread: current,
           observations,
           turnStarts,
-          stableNoStartMs: Date.now() - stableSince,
+          stableNoStartMs: traceReadStartedAt - stableSince,
           stableNoStartWindowMs,
+          observationWindowMs: traceReadStartedAt - releaseObservedAt,
         };
         if (
           turnStarts.length > 0 ||
@@ -704,7 +836,7 @@ gateTest(
     const report = {
       verdict: unexpectedExecution
         ? "fail"
-        : delayedStopConfirmed
+        : delayedCancellationConfirmed
           ? "open"
           : "failed-capability",
       identities: {
@@ -714,6 +846,7 @@ gateTest(
         delayedThreadId: delayed.id,
         delayedQueuedMessageId: delayedQueued.id,
         delayedStopResponse: delayedStop.stopResponse,
+        delayedDeleteResponse,
       },
       observed: {
         activeStatusBeforeStop: running.status,
@@ -724,15 +857,21 @@ gateTest(
         delayedStatusBeforeStop: delayedBeforeStop.status,
         delayedStatusAfterStop: delayedAfterStop.status,
         delayedStopConfirmed,
+        delayedCancellationConfirmed,
+        delayedCancellationEvent,
+        delayedQueueAfterStop: queueAfterStop,
+        delayedMessageEvents: cancellationEvents,
         delayedProviderTurnStartsBeforeRelease:
           delayedStartsBeforeRelease.length,
         delayedProviderTurnStartTraceBeforeRelease: delayedStartsBeforeRelease,
         delayedProviderToolEffectsBeforeRelease: effectsBeforeRelease.length,
         delayedProviderToolEffectTraceBeforeRelease: effectsBeforeRelease,
         releaseAttempted,
-        releaseWithheldReason: delayedStopConfirmed
+        releaseAttemptedAfterCancellationConfirmation:
+          releaseAttempted && delayedCancellationConfirmed,
+        releaseWithheldReason: delayedCancellationConfirmed
           ? null
-          : "BB stop returned ok but thread stayed pending; no hook recheck was issued because a stop was not confirmed.",
+          : "Exact queued-message cancellation was not confirmed; hook recheck was withheld.",
         delayedProviderTurnStartsAfterRelease: delayedStartsAfterRelease.length,
         delayedProviderTurnStartTraceAfterRelease: delayedStartsAfterRelease,
         delayedProviderToolEffectsAfterRelease:
@@ -751,7 +890,9 @@ gateTest(
             ? null
             : {
                 queue: releaseEvidence.queue,
+                threadId: delayed.id,
                 status: releaseEvidence.thread.status,
+                observationWindowMs: releaseEvidence.observationWindowMs,
                 hookObservationCount: releaseEvidence.observations.length,
                 stableNoStartMs: releaseEvidence.stableNoStartMs,
                 stableNoStartWindowMs: releaseEvidence.stableNoStartWindowMs,
@@ -763,10 +904,10 @@ gateTest(
       },
       limits: [
         "The fixture observes BB's scripted provider and a plugin-held delayed start only; it does not implement an Ensemble writer reservation or enumerate arbitrary surviving workspace processes.",
-        ...(delayedStopConfirmed
+        ...(delayedCancellationConfirmed
           ? []
           : [
-              "BB returned ok for the delayed stop but left the thread pending, so the fixture withheld recheck and could not establish safe writer release.",
+              "Exact-ID cancellation was not confirmed, so the fixture withheld recheck and could not establish safe writer release.",
             ]),
       ],
     };
@@ -784,8 +925,8 @@ gateTest(
     });
     assert.equal(
       releaseAttempted,
-      delayedStopConfirmed,
-      "Do not recheck the delayed writer until the thread is confirmed stopped",
+      delayedCancellationConfirmed,
+      "Do not recheck the delayed writer until its exact queued message is cancelled",
     );
     assert.equal(
       delayedStartsBeforeRelease.length,
@@ -807,6 +948,21 @@ gateTest(
       0,
       "A confirmed stop must not allow provider effects after release",
     );
+    if (releaseAttempted) {
+      assert(
+        releaseEvidence.stableNoStartMs >=
+          releaseEvidence.stableNoStartWindowMs,
+        "Post-recheck observation did not reach a stable two-second no-start window",
+      );
+      assert(
+        releaseEvidence.observationWindowMs <= 5_000,
+        "Post-recheck observation exceeded its five-second bound",
+      );
+      assert(
+        releaseEvidence.queue.every((entry) => entry.id !== delayedQueued.id),
+        "Cancelled first message reappeared after recheck",
+      );
+    }
     return report;
   },
 );

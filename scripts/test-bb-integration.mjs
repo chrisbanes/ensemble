@@ -554,8 +554,9 @@ async function main() {
         assertTapSummary(
           scenario.id,
           result.output,
-          scenario.id === "T5" ? 6 : 1,
-          scenario.id === "T5" ? 6 : 1,
+          // T5 has six gate scenarios and one trace-timing regression.
+          scenario.id === "T5" ? 7 : 1,
+          scenario.id === "T5" ? 7 : 1,
           0,
         );
         assert.equal(
@@ -629,6 +630,7 @@ async function main() {
   report.toolchain = { node: process.versions.node, npm: npmVersion };
   if (failures.length > 0) {
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],
@@ -641,6 +643,7 @@ async function main() {
   } catch (error) {
     failures.push({ scenario: "report validation", message: String(error) });
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],
@@ -653,6 +656,7 @@ async function main() {
   } catch (error) {
     failures.push({ scenario: "report readback", message: String(error) });
     report.outcome = "failed-harness";
+    report.dependentExecutionBlocked = ["T02", "T06", "T08"];
     report.failures = sanitizeIntegrationData(failures, [
       [repositoryRoot, "<repository>"],
       [os.homedir(), "<home>"],

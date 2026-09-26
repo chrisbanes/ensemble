@@ -353,6 +353,35 @@ function t5Map(rows) {
   return new Map((rows ?? []).map((report) => [report.name, report]));
 }
 
+function hasVerifiedCleanup(cleanup) {
+  return (
+    cleanup?.allExited === true &&
+    cleanup.serverPortClosed === true &&
+    cleanup.daemonPortClosed === true &&
+    cleanup.forced === false
+  );
+}
+
+function hasPassedVerifiedT5Slice(slice) {
+  return (
+    slice?.exitCode === 0 &&
+    slice.expectedExitCode === 0 &&
+    slice.timedOut === false &&
+    slice.testOutcome === "passed" &&
+    slice.manifest?.outcome === "passed" &&
+    hasVerifiedCleanup(slice.manifest.checks?.ownedProcessCleanup)
+  );
+}
+
+function hasValidT5Reports(reports) {
+  try {
+    assertT5Reports(reports);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildIntegrationReport({
   ensembleHead,
   sourceDigest,
@@ -374,6 +403,9 @@ export function buildIntegrationReport({
   const t3Checks = lost?.manifest?.checks ?? {};
   const t4Checks = dispatch?.manifest?.checks ?? {};
   const t5Gate = (name) => t5.get(name);
+  const t5ReportsValid = hasValidT5Reports(t5Reports);
+  const stopEvidenceValidatedOpen =
+    t5ReportsValid && t5Gate("stop-writer-release")?.verdict === "open";
   const stopEvidence = t5Gate("stop-writer-release")?.observed;
   const staleEffectBaseline =
     t3Checks.lostResponse?.queuedSendRecovered?.providerToolEffectCount;
@@ -930,7 +962,9 @@ export function buildIntegrationReport({
     ["T1", "T2", "T3", "T5"].every(
       (id) => slices[id]?.testOutcome === "passed",
     ) &&
-    slices.T4?.testOutcome === "expected-diagnostic";
+    slices.T4?.testOutcome === "expected-diagnostic" &&
+    hasPassedVerifiedT5Slice(recovery) &&
+    t5ReportsValid;
 
   return {
     schemaVersion: 2,
@@ -949,10 +983,9 @@ export function buildIntegrationReport({
             timedOut: slice.timedOut,
             testOutcome: slice.testOutcome,
             manifestAvailable: Boolean(slice.manifest),
+            manifestOutcome: slice.manifest?.outcome ?? null,
             cleanupVerified: Boolean(
-              slice.manifest?.checks?.ownedProcessCleanup?.allExited &&
-                slice.manifest.checks.ownedProcessCleanup.serverPortClosed &&
-                slice.manifest.checks.ownedProcessCleanup.daemonPortClosed,
+              hasVerifiedCleanup(slice.manifest?.checks?.ownedProcessCleanup),
             ),
           },
         ]),
@@ -964,9 +997,9 @@ export function buildIntegrationReport({
     ),
     t5Reports: (t5Reports ?? []).map((entry) => sanitize(entry, replacements)),
     dependentExecutionBlocked:
-      t5Gate("stop-writer-release")?.verdict === "failed-capability"
-        ? ["T02", "T06", "T08"]
-        : ["T06", "T08"],
+      suitePassed && stopEvidenceValidatedOpen
+        ? ["T06", "T08"]
+        : ["T02", "T06", "T08"],
   };
 }
 
@@ -1091,6 +1124,30 @@ export function assertIntegrationReport(report) {
   );
   assert.equal(report.toolchain?.node, "24.21.0", "report Node.js pin changed");
   assert.equal(report.toolchain?.npm, "12.1.0", "report npm pin changed");
+  const t5Slice = report.slices?.T5;
+  assert.equal(t5Slice?.exitCode, 0, "T5 slice must exit successfully");
+  assert.equal(
+    t5Slice?.expectedExitCode,
+    0,
+    "T5 slice expected exit code must be successful",
+  );
+  assert.equal(t5Slice?.timedOut, false, "T5 slice must not time out");
+  assert.equal(t5Slice?.testOutcome, "passed", "T5 slice must pass");
+  assert.equal(
+    t5Slice?.manifestAvailable,
+    true,
+    "T5 slice must have a verified manifest",
+  );
+  assert.equal(
+    t5Slice?.manifestOutcome,
+    "passed",
+    "T5 slice manifest must pass",
+  );
+  assert.equal(
+    t5Slice?.cleanupVerified,
+    true,
+    "T5 slice cleanup must be verified",
+  );
   assert(Array.isArray(report.rows), "report.rows must be an array");
   const keyed = new Map();
   for (const entry of report.rows) {
@@ -1222,11 +1279,17 @@ export function assertIntegrationReport(report) {
   assert.equal(stop?.providerStopRequests, 1);
   assert.equal(stop?.toolEffects, 0);
   const stopScenario = keyed.get("t5-scenario:stop-writer-release");
-  assertStopWriterEvidence(
-    stopScenario.verdict,
-    stopScenario.observed.identities,
-    stopScenario.observed.observations,
-  );
+  const stopEvidenceAllowsT02Unblock =
+    report.outcome === "completed-with-capability-gaps" &&
+    t5Slice?.testOutcome === "passed" &&
+    t5Slice.manifestAvailable === true &&
+    t5Slice.manifestOutcome === "passed" &&
+    t5Slice.cleanupVerified === true &&
+    assertStopWriterEvidence(
+      stopScenario.verdict,
+      stopScenario.observed.identities,
+      stopScenario.observed.observations,
+    );
   assert.equal(
     keyed.get("proof-gate:stop-writer-release").verdict,
     stopScenario.verdict,
@@ -1240,9 +1303,7 @@ export function assertIntegrationReport(report) {
   );
   assert.deepEqual(
     report.dependentExecutionBlocked,
-    stopScenario.verdict === "failed-capability"
-      ? ["T02", "T06", "T08"]
-      : ["T06", "T08"],
+    stopEvidenceAllowsT02Unblock ? ["T06", "T08"] : ["T02", "T06", "T08"],
   );
   assert.match(startup.evidenceLimit, /#665/u);
   assert.equal(
@@ -1275,16 +1336,39 @@ export function assertIntegrationReport(report) {
 }
 
 function assertStopWriterEvidence(verdict, identities, observed) {
-  assert.equal(identities?.delayedStopResponse?.ok, true);
+  assert.equal(
+    identities?.delayedStopResponse?.ok,
+    true,
+    "delayed stop response must be recorded and acknowledged",
+  );
+  requireString(identities?.delayedThreadId, "delayed thread ID");
+  requireString(
+    identities?.delayedQueuedMessageId,
+    "delayed queued message ID",
+  );
+  requireObject(
+    identities?.delayedDeleteResponse,
+    "delayed queue delete response",
+  );
   assert.equal(observed?.delayedStatusBeforeStop, "pending");
+  assert.equal(typeof observed?.delayedStopConfirmed, "boolean");
   assert.equal(observed?.delayedProviderTurnStartsBeforeRelease, 0);
   assert.equal(observed?.delayedProviderToolEffectsBeforeRelease, 0);
-  assert.equal(observed?.delayedProviderTurnStartsAfterRelease, 0);
-  assert.equal(observed?.delayedProviderToolEffectsAfterRelease, 0);
-  if (verdict === "failed-capability") {
-    assert.equal(observed.delayedStatusAfterStop, "pending");
-    assert.equal(observed.delayedStopConfirmed, false);
-    assert.equal(observed.releaseAttempted, false);
+  requireString(observed?.delayedStatusAfterStop, "delayed status after stop");
+  assert(Array.isArray(observed?.delayedQueueAfterStopBeforeRelease));
+
+  if (observed.delayedCancellationConfirmed === false) {
+    assert.equal(
+      verdict,
+      "failed-capability",
+      "unconfirmed cancellation must remain a failed capability",
+    );
+    assert.equal(
+      observed.releaseAttempted,
+      false,
+      "cannot release when cancellation is unconfirmed",
+    );
+    assert.equal(observed.releaseAttemptedAfterCancellationConfirmation, false);
     assert.equal(observed.releaseEvidence, null);
     assert(
       observed.delayedQueueAfterStopBeforeRelease?.some(
@@ -1294,13 +1378,87 @@ function assertStopWriterEvidence(verdict, identities, observed) {
       ),
       "The unconfirmed stop must retain the observed plugin-held queue row",
     );
-  } else {
-    assert.equal(verdict, "open", "Stop product gate remains open");
-    assert(["idle", "error"].includes(observed.delayedStatusAfterStop));
-    assert.equal(observed.delayedStopConfirmed, true);
-    assert.equal(observed.releaseAttempted, true);
-    assert.notEqual(observed.releaseEvidence, null);
+    return false;
   }
+
+  assert.equal(observed.delayedCancellationConfirmed, true);
+  assert.equal(verdict, "open", "Stop product gate remains open");
+  assert.equal(
+    identities.delayedDeleteResponse.ok,
+    true,
+    "exact queued message deletion must be acknowledged",
+  );
+  const event = observed.delayedCancellationEvent;
+  assert(
+    event !== null && typeof event === "object" && !Array.isArray(event),
+    "matching message.cancelled cancellation event must be observed",
+  );
+  assert.equal(
+    event.name,
+    "message.cancelled",
+    "cancellation event must be message.cancelled",
+  );
+  assert.equal(
+    event.threadId,
+    identities.delayedThreadId,
+    "cancellation event must match the delayed thread ID",
+  );
+  assert.equal(
+    event.messageId,
+    identities.delayedQueuedMessageId,
+    "cancellation event must match the delayed queued message ID",
+  );
+  assert(
+    observed.delayedQueueAfterStopBeforeRelease.every(
+      (entry) => entry?.id !== identities.delayedQueuedMessageId,
+    ),
+    "cancelled queue row must be absent before release",
+  );
+  assert.equal(observed.releaseAttempted, true);
+  assert.equal(
+    observed.releaseAttemptedAfterCancellationConfirmation,
+    true,
+    "release was attempted before confirmed cancellation",
+  );
+
+  const release = observed.releaseEvidence;
+  assert(
+    release !== null && typeof release === "object" && !Array.isArray(release),
+    "bounded post-release observation window must be recorded",
+  );
+  assert.equal(release.threadId, identities.delayedThreadId);
+  requireString(release.status, "post-release delayed thread status");
+  assert(
+    Number.isFinite(release.observationWindowMs) &&
+      release.observationWindowMs >= 2_000 &&
+      release.observationWindowMs <= 5_000,
+    "post-release observation window must be between 2000 and 5000 ms",
+  );
+  assert.equal(release.stableNoStartWindowMs, 2_000);
+  assert(
+    Number.isFinite(release.stableNoStartMs) &&
+      release.stableNoStartMs >= release.stableNoStartWindowMs &&
+      release.stableNoStartMs <= release.observationWindowMs,
+    "post-release observation must include a stable two-second no-start window",
+  );
+  assert(Array.isArray(release.queue));
+  assert(
+    release.queue.every(
+      (entry) => entry?.id !== identities.delayedQueuedMessageId,
+    ),
+    "cancelled queue row must remain absent after release",
+  );
+  assert.equal(
+    observed.delayedProviderTurnStartsAfterRelease,
+    0,
+    "provider turn started after release",
+  );
+  assert.equal(
+    observed.delayedProviderToolEffectsAfterRelease,
+    0,
+    "provider tool effect after release",
+  );
+  return true;
 }
 
 export function assertT5Reports(rows) {

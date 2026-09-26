@@ -138,11 +138,31 @@ review, without treating startup as passed. Issue
 [#665](https://github.com/chrisbanes/ensemble/issues/665) tracks the unresolved
 accepted-queue/startup contract and blocks T06/T08 execution work until a public
 API design or tested BB capability proves protected work remains held while
-Ensemble is unavailable. The T5 delayed-stop probe also blocks T02/T06 writer
-release: BB acknowledged stop while the plugin-held thread remained pending, so
-the harness did not recheck it. [#676](https://github.com/chrisbanes/ensemble/issues/676)
-tracks that boundary. These findings do not yet establish that BB must
-change. Other harness and design work can continue.
+Ensemble is unavailable. Two earlier no-start measurements are historical:
+the focused pre-correction T5 run recorded 2,442 ms after recheck with 2,150 ms
+stable no-start; the distinct pre-correction integrated run recorded 2,361 ms
+with 2,066 ms stable no-start. The trace-timing race found afterward means
+neither measurement is current no-start acceptance evidence.
+
+The final corrected integrated report at
+`33bd3062531bd2ab717d4ea8d4a29752c6388058` is the current acceptance evidence.
+On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
+checks passed: `npm run check`, `npm run test:bb-integration`, and
+`npm run test:bb-prototype`.
+The report contains six T5 gate rows. Its corrected stop observation records
+stop acknowledgement while pending, exact-ID cancellation with the matching
+`message.cancelled` event and queue absence before and after recheck. The
+post-recheck window was 2,378 ms, including 2,087 ms of stable no-start, with
+zero provider starts and tool effects. T4 produced its expected diagnostic, and
+every T1–T5 manifest confirms clean isolation cleanup.
+
+The corrected evidence supports removing only the T02 block specific to
+[#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
+blocked by #665 and other gates.
+`stop-writer-release` remains open. This evidence covers one scripted held first
+message, not termination of arbitrary workspace processes or complete Ensemble
+writer exclusion. These findings do not yet establish that BB must change.
+Other harness and design work can continue.
 
 **Depends on:** reviewed product scope. **Acceptance:** A01, foundations for A08/A09/A17.
 
