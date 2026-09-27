@@ -579,25 +579,35 @@ The focused T2 stop record and integrated report at `1b70716` are historical
 client SDK 0.5.29 evidence; they measured 2,727 ms / 2,378 ms and 2,416 ms /
 2,125 ms respectively. The former integrated report at `88b4384` is also
 historical; it measured 2,388 ms after recheck with 2,091 ms stable no-start on
-client package 0.5.30 and host SDK 0.5.29. The current integrated report is
-bound to tested runtime head `712edd8c5e031af0a7deb4183e37c79c5e1a4dec`; it
-measured 4,387 ms after recheck with 2,286 ms stable no-start and has SHA-256
-`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. The
-pinned suites passed on that tested runtime head; this documentation-only
-follow-up adds no runtime result. The distinct runs confirm exact-ID cancellation,
-a matching event and queue absence before release, but not a general writer
-guarantee. `stop-writer-release` remains open: the observation
-covers one scripted held message, not arbitrary process termination or complete
-Ensemble writer exclusion. Unconfirmed cancellation remains
-`failed-capability`; startup or event-capture failure is inconclusive.
+client package 0.5.30 and host SDK 0.5.29. The report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec` is historical for this candidate; it
+has SHA-256
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. It
+measured 4,387 ms after recheck with 2,286 ms stable no-start, and its A17 run
+reported retirement after 21 samples over 306,740 ms.
 
-The live A17 run observed the dirty marker and shared worktree remain while the
-second live thread existed. After final archive and deletion, BB removed the
-marker and worktree and returned the original environment ID with status
-`destroyed` at 306,740 ms, across 21 samples. A focused report-validator
+The current integrated report is bound to tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48`, has SHA-256
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`, and
+matches that head in `sourceRevision`. Its integrated T2 execution and
+permission/environment manifests have SHA-256 values
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`; both
+passed, and cleanup was verified. Pinned Node 24.21.0/npm 12.1.0 suites passed
+on this runtime head; this documentation-only correction adds no runtime run.
+The current stop-writer-release observation window was 2,318 ms with 2,027 ms
+stable no-start. It confirms exact-ID cancellation, a matching event and queue
+absence before release, but not a general writer guarantee.
+
+The current live A17 run observed the dirty marker and shared worktree remain
+while the second live thread existed. After final archive and deletion, BB
+removed the marker and worktree and returned the original environment ID with
+status `destroyed` at 306,067 ms, across 21 samples. A focused report-validator
 regression accepted an environment result with a null ID; the live A17 run
-returned the original ID. A17 remains open because direct BB lifecycle
-observations do not prove delivery, preservation or automatic-cleanup policy.
+returned the original ID. The report keeps all six T5 rows open and #665 as
+`failed-capability`, with T06/T08 blocked. A17 and `stop-writer-release` remain
+open because direct BB lifecycle observations do not prove delivery,
+preservation, automatic-cleanup policy, or complete Ensemble writer exclusion.
 The accepted product guarantees remain unchanged.
 
 The inspected client SDK package 0.5.29 declarations exposed `threads.stop`,
@@ -613,7 +623,7 @@ integration test results.
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and fresh queue reads were observed. The historical focused 0.5.29 run measured 2,727 ms / 2,378 ms; the former integrated 0.5.30 report measured 2,388 ms / 2,091 ms. The current integrated report on tested runtime head `712edd8` measured 4,387 ms / 2,286 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and fresh queue reads were observed. The historical focused 0.5.29 run measured 2,727 ms / 2,378 ms; the former integrated 0.5.30 report measured 2,388 ms / 2,091 ms. The historical `712edd8` report measured 4,387 ms / 2,286 ms; the current `ce4419c` report records a 2,318 ms post-stop observation window with 2,027 ms stable no-start. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
 | Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent joined two attempts and chose one thread/environment after restart; two raw parallel BB spawns created separate environments. A synthetic missing environment was rejected without a provider trace | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |

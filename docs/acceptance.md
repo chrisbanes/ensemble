@@ -233,36 +233,45 @@ and host plugin SDK 0.5.29. Its stop observation measured 2,388 ms after
 recheck and 2,091 ms stable no-start; its A17 observation reported the
 environment destroyed at 306,059 ms.
 
-The current measured integrated report is bound to tested runtime head
-`712edd8c5e031af0a7deb4183e37c79c5e1a4dec`, SHA-256
-`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`; its
-`sourceRevision` matches that runtime head. On Node 24.21.0/npm 12.1.0, BB
-0.44.0, host plugin SDK 0.5.29, and client package `@get-bb/plugin-sdk` 0.5.30,
-`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
-passed on that tested runtime revision. This documentation-only follow-up does
-not claim a new runtime run. The report outcome is
-`completed-with-capability-gaps`.
+The integrated report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec` is historical for this candidate.
+Its SHA-256 is
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`, and its
+`sourceRevision` matches that head. That run measured 4,387 ms after recheck
+with 2,286 ms stable no-start. Its integrated T2 execution and
+permission/environment manifest hashes were
+`4ef00ed887dc0c60e87c6873cd982bac7f336357cd8b38100bbababb022b4c6a` and
+`36b63a6fd352d7ea520a175c3a4c39ff180ea88ec97bda45c8d5c2efcd8bd9aa`. Its live
+A17 observation found the original environment ID destroyed after 21 samples
+over 306,740 ms, with the marker and worktree absent.
+
+Current acceptance is the integrated report for tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48`, SHA-256
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`. Its
+`sourceRevision` matches that head. On Node 24.21.0/npm 12.1.0, BB 0.44.0, host
+plugin SDK 0.5.29, and client package `@get-bb/plugin-sdk` 0.5.30, the pinned
+`check`, BB integration and prototype suites passed on that tested revision;
+this documentation-only correction does not claim another runtime run. The
+report outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`4ef00ed887dc0c60e87c6873cd982bac7f336357cd8b38100bbababb022b4c6a`; the
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a`; the
 permission/environment manifest SHA-256 is
-`36b63a6fd352d7ea520a175c3a4c39ff180ea88ec97bda45c8d5c2efcd8bd9aa`. Both
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`. Both
 passed with client SDK package 0.5.30. All six T1–T5 fixture manifests, counting
 the two separate T2 manifests, record exited owned processes, closed server and
-daemon ports, no forced cleanup, and removal of their disposable roots. T4's
-raw test preserves the expected #665 failure diagnostic; its aggregate row is
-`failed-capability`, and T06/T08 remain blocked.
+daemon ports, no forced cleanup, and removal of their disposable roots.
 
-The report contains six T5 scenario rows, all `open`. The stop observation
-records stop acknowledgement while the delayed thread remained `pending`,
-exact-ID cancellation with a matching `message.cancelled` event, and an empty
-queue before release. It measured 4,387 ms after recheck with 2,286 ms stable
-no-start and zero provider starts/effects. The live A17 run sampled for
-306,740 ms over 21 observations; BB returned the original environment ID with
-status `destroyed`, and the marker and worktree were absent. The focused
-report-validator regression accepted an environment result with a null ID; the
-live A17 result returned the original ID. These are fixture observations only:
-`stop-writer-release` and A17 remain open, as do the other T5 gates. They do not
+The current stop-writer observation records cancellation confirmation, a
+matching `message.cancelled` event and an empty queue before release. Its
+post-stop observation window was 2,318 ms, including 2,027 ms with no provider
+start. The delayed thread was still `pending`; this remains fixture evidence,
+not a complete writer-release guarantee. The live A17 run observed the
+original environment ID as `destroyed` after 21 samples over 306,067 ms, with
+the marker and worktree absent. A focused report-validator regression accepted
+an environment result with a null ID; the live run returned the original ID.
+All six T5 rows remain `open`. T4's aggregate #665 row remains
+`failed-capability`, and T06/T08 remain blocked. These observations do not
 prove arbitrary process termination, complete writer exclusion, or Ensemble
 cleanup policy. The report does not stand in for the authenticated-provider
 smoke required for the later operational release gate.

@@ -152,21 +152,35 @@ it had SHA-256
 `a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8` and
 measured 2,388 ms after recheck with 2,091 ms stable no-start.
 
+The integrated report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec` is historical for this candidate.
+Its SHA-256 is
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`; its
+`sourceRevision` matched that head. It measured 4,387 ms after recheck with
+2,286 ms stable no-start and recorded A17 retirement after 21 samples over
+306,740 ms, with the marker and worktree absent.
+
 Current acceptance is the integrated report for tested runtime head
-`712edd8c5e031af0a7deb4183e37c79c5e1a4dec`, SHA-256
-`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. Its
-`sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0,
-BB 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
-`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
-on that tested revision; this documentation-only follow-up does not imply a new
-runtime run. The report outcome is `completed-with-capability-gaps`; its stop
-observation measured 4,387 ms after recheck and 2,286 ms stable no-start. The
-live A17 run returned the original environment ID with status `destroyed` after
-21 samples over 306,740 ms, with the marker and worktree absent. The focused
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48`, SHA-256
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`; its
+`sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0, BB
+0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed `npm run check`,
+`npm run test:bb-integration`, and `npm run test:bb-prototype` on that revision;
+this documentation-only correction does not imply a new runtime run. The
+report outcome is `completed-with-capability-gaps`.
+
+The integrated T2 execution manifest SHA-256 is
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a`; the
+permission/environment manifest SHA-256 is
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`. Both
+passed, and cleanup was verified across T1–T5. The current stop-writer
+observation window was 2,318 ms, including 2,027 ms stable no-start. The live
+A17 run returned the original environment ID with status `destroyed` after 21
+samples over 306,067 ms, with the marker and worktree absent. A focused
 report-validator regression accepted an environment result with a null ID; the
-live A17 run returned the original ID. All six T5 rows remain open. T4 retains
-the expected #665 accepted-queue failure as `failed-capability`, and T06/T08
-remain blocked.
+live run returned the original ID. All six T5 rows remain open. T4 retains the
+expected #665 accepted-queue failure as `failed-capability`, and T06/T08 remain
+blocked.
 
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
