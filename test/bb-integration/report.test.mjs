@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  isPathWithinRoot,
+  resolveExistingPathWithinRoot,
   resolveFixtureManifestPath,
   resolveT2FixtureManifestPaths,
+  writeA17RetentionMarker,
 } from "./harness.mjs";
 import {
   assertExpectedT4Failure,
@@ -32,21 +41,84 @@ const defaultFixtureManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
       "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
     );
 
-test("disposable root contains a child worktree path", () => {
-  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
-  assert.equal(isPathWithinRoot(root, path.join(root, "worktree")), true);
-});
+async function createDisposablePathFixture(t) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-fixture-paths-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const root = path.join(temporaryDirectory, "fixture");
+  const child = path.join(root, "worktree");
+  const sibling = `${root}-worktree`;
+  const escape = path.join(temporaryDirectory, "outside", "worktree");
+  await Promise.all(
+    [child, sibling, escape].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
+  );
+  return { root, child, sibling, escape, outside: path.dirname(escape) };
+}
 
-test("disposable root does not contain a sibling worktree path", () => {
-  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
-  assert.equal(isPathWithinRoot(root, `${root}-worktree`), false);
-});
-
-test("disposable root does not contain a normalized escape path", () => {
-  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
+test("disposable root resolves a child worktree path", async (t) => {
+  const { root, child } = await createDisposablePathFixture(t);
   assert.equal(
-    isPathWithinRoot(root, path.resolve(root, "..", "outside", "worktree")),
-    false,
+    await resolveExistingPathWithinRoot(root, child),
+    await realpath(child),
+  );
+});
+
+test("disposable root rejects a sibling worktree path", async (t) => {
+  const { root, sibling } = await createDisposablePathFixture(t);
+  await assert.rejects(
+    resolveExistingPathWithinRoot(root, sibling),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("disposable root rejects a normalized escape path", async (t) => {
+  const { root, escape } = await createDisposablePathFixture(t);
+  await assert.rejects(
+    resolveExistingPathWithinRoot(
+      root,
+      path.resolve(root, "..", "outside", "worktree"),
+    ),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("disposable root rejects a workspace symlink to an outside directory", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-fixture-symlink-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const root = path.join(temporaryDirectory, "fixture");
+  const outside = path.join(temporaryDirectory, "outside");
+  await mkdir(root, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const workspaceLink = path.join(root, "worktree");
+  await symlink(outside, workspaceLink, "dir");
+
+  await assert.rejects(
+    resolveExistingPathWithinRoot(root, workspaceLink),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("A17 marker creation refuses an existing symlink", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-marker-symlink-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const workspace = path.join(temporaryDirectory, "workspace");
+  await mkdir(workspace);
+  const outsideMarker = path.join(temporaryDirectory, "outside-marker.txt");
+  await writeFile(outsideMarker, "preserve this external file\n");
+  const markerPath = path.join(workspace, "T5-A17-retention.txt");
+  await symlink(outsideMarker, markerPath);
+
+  await assert.rejects(writeA17RetentionMarker(markerPath), { code: "EEXIST" });
+  assert.equal(
+    await readFile(outsideMarker, "utf8"),
+    "preserve this external file\n",
   );
 });
 

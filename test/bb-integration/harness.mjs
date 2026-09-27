@@ -6,6 +6,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  realpath,
   readFile,
   rm,
   symlink,
@@ -89,17 +90,26 @@ export function resolveT2FixtureManifestPaths(environment = process.env) {
   };
 }
 
-export function isPathWithinRoot(rootPath, candidatePath) {
-  const relativePath = path.relative(
-    path.resolve(rootPath),
-    path.resolve(candidatePath),
-  );
-  return (
+export async function resolveExistingPathWithinRoot(rootPath, candidatePath) {
+  const [canonicalRoot, canonicalCandidate] = await Promise.all([
+    realpath(rootPath),
+    realpath(candidatePath),
+  ]);
+  const relativePath = path.relative(canonicalRoot, canonicalCandidate);
+  assert(
     relativePath === "" ||
-    (!path.isAbsolute(relativePath) &&
-      relativePath !== ".." &&
-      !relativePath.startsWith(`..${path.sep}`))
+      (!path.isAbsolute(relativePath) &&
+        relativePath !== ".." &&
+        !relativePath.startsWith(`..${path.sep}`)),
+    "The managed worktree must remain inside the disposable T5 BB home",
   );
+  return canonicalCandidate;
+}
+
+export async function writeA17RetentionMarker(markerPath) {
+  await writeFile(markerPath, "Retain while second thread is live.\n", {
+    flag: "wx",
+  });
 }
 
 function sanitize(text, root) {

@@ -15,10 +15,11 @@ import { test as nodeTest } from "node:test";
 import {
   bbCli,
   fixtureGit,
-  isPathWithinRoot,
+  resolveExistingPathWithinRoot,
   restartBb,
   rpc,
   waitFor,
+  writeA17RetentionMarker,
   withFixture,
 } from "./harness.mjs";
 import { isMissingEnvironmentRejection } from "./report.mjs";
@@ -1710,13 +1711,12 @@ gateTest(
     );
     assert.equal(envRecord.environment.id, environmentId);
     assert.equal(typeof envRecord.environment.path, "string");
-    const workspacePath = envRecord.environment.path;
-    assert(
-      isPathWithinRoot(instance.root, workspacePath),
-      "The managed worktree must remain inside the disposable T5 BB home",
+    const workspacePath = await resolveExistingPathWithinRoot(
+      instance.root,
+      envRecord.environment.path,
     );
     const markerPath = path.join(workspacePath, "T5-A17-retention.txt");
-    await writeFile(markerPath, "Retain while second thread is live.\n");
+    await writeA17RetentionMarker(markerPath);
     capture({
       stage: "shared workspace and retention marker observed",
       identities: { workspacePath },
