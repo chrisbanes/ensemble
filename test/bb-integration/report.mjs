@@ -207,20 +207,77 @@ function hasEvidenceValue(value) {
   return false;
 }
 
+function causalErrorChain(error, seen = new Set()) {
+  if (typeof error === "string") return { codes: [], messages: [error] };
+  if (error === null || typeof error !== "object" || seen.has(error)) {
+    return { codes: [], messages: [] };
+  }
+  seen.add(error);
+
+  const currentCodes = typeof error.code === "string" ? [error.code] : [];
+  const currentMessages =
+    typeof error.message === "string" ? [error.message] : [];
+  const cause = causalErrorChain(error.cause, seen);
+  return {
+    codes: [...currentCodes, ...cause.codes],
+    messages: [...currentMessages, ...cause.messages],
+  };
+}
+
+function isEnvironmentMissingCode(code) {
+  const normalizedCode = code
+    .replace(/([a-z\d])([A-Z])/gu, "$1_$2")
+    .replace(/[^a-z\d]+/giu, "_")
+    .replace(/^_|_$/gu, "")
+    .toUpperCase();
+  return /^(?:BB_)?(?:ENVIRONMENT|ENV)_(?:NOT_FOUND|MISSING|UNAVAILABLE|NOT_AVAILABLE|DOES_NOT_EXIST)$/u.test(
+    normalizedCode,
+  );
+}
+
+function missingEnvironmentIdInMessage(message) {
+  const match = message.match(
+    /\b(?:environment|env)\s+(?:id\s+)?(?!(?:is|was|not|missing|unavailable|available|found|the|a|an)\b)([a-z0-9][a-z0-9._:-]*)\s+(?:(?:is|was)\s+)?(?:not[\s_-]+found|missing|unavailable|not[\s_-]+available|does[\s_-]+not[\s_-]+exist)\b/iu,
+  );
+  return match?.[1] ?? null;
+}
+
+function hasMissingEnvironmentMessage(message) {
+  return (
+    /\b(?:environment|env)\s+(?:(?:is|was)\s+)?(?:not[\s_-]+found|missing|unavailable|not[\s_-]+available|does[\s_-]+not[\s_-]+exist)\b/iu.test(
+      message,
+    ) ||
+    /\b(?:not[\s_-]+found|missing|unavailable|not[\s_-]+available)\s+(?:the\s+)?(?:environment|env)\b/iu.test(
+      message,
+    ) ||
+    /\bno\s+such\s+(?:environment|env)\b/iu.test(message) ||
+    missingEnvironmentIdInMessage(message) !== null
+  );
+}
+
 export function isMissingEnvironmentRejection(error, environmentId) {
+  if (typeof environmentId !== "string" || !environmentId.trim()) return false;
+  const { codes, messages } = causalErrorChain(error);
   if (
-    typeof environmentId !== "string" ||
-    !environmentId.trim() ||
-    !hasEvidenceValue(error)
+    codes.length === 0 &&
+    !messages.some((message) => message.trim().length > 0)
   ) {
     return false;
   }
-  const errorText = typeof error === "string" ? error : JSON.stringify(error);
-  return (
-    errorText.includes(environmentId) ||
-    /\benvironment[\s_-]+(?:was[\s_-]+)?not[\s_-]+found\b/iu.test(errorText) ||
-    /\bnot[\s_-]+found[\s_-]+(?:the[\s_-]+)?environment\b/iu.test(errorText)
-  );
+  if (
+    !codes.some(isEnvironmentMissingCode) &&
+    !messages.some(hasMissingEnvironmentMessage)
+  ) {
+    return false;
+  }
+
+  const namedEnvironmentIds = [
+    ...messages.map(missingEnvironmentIdInMessage).filter((id) => id !== null),
+    ...messages.flatMap((message) =>
+      [...message.matchAll(/\benv_[a-z0-9][a-z0-9_-]*\b/giu)].map(([id]) => id),
+    ),
+  ];
+  return namedEnvironmentIds.every((id) => id === environmentId);
 }
 
 function evidenceAtPath(value, fieldPath) {

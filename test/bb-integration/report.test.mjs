@@ -945,6 +945,20 @@ test("permission report binds unavailable-environment rejection to its target", 
   });
   assert.doesNotThrow(() => assertIntegrationReport(identifiedByNotFound));
 
+  const identifiedInCauseChain = validReport();
+  identifiedInCauseChain.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "PLUGIN_SPAWN_FAILED",
+    message: "Unable to spawn plugin thread",
+    context: { requestedEnvironmentId: targetId },
+    cause: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: "Environment not found",
+    },
+  };
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedInCauseChain));
+
   const unrelatedSpawnFailure = validReport();
   unrelatedSpawnFailure.rows.find(
     (entry) => entry.id === "permission-environment-forwarding",
@@ -970,21 +984,44 @@ test("permission report binds unavailable-environment rejection to its target", 
   );
 
   for (const error of [
-    { code: "THREAD_NOT_FOUND", message: "HTTP 404: Thread not found" },
+    {
+      code: "THREAD_NOT_FOUND",
+      message: "HTTP 404: Thread not found",
+      context: { requestedEnvironmentId: "env_missing_target" },
+    },
     {
       code: "DAEMON_ROUTE_NOT_FOUND",
       message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: "env_missing_target" },
     },
   ]) {
     const unrelatedNotFound = validReport();
-    unrelatedNotFound.rows.find(
+    const unavailableEnvironment = unrelatedNotFound.rows.find(
       (entry) => entry.id === "permission-environment-forwarding",
-    ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = error;
+    ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+    unavailableEnvironment.environmentId = "env_missing_target";
+    unavailableEnvironment.error = error;
     assert.throws(
       () => assertIntegrationReport(unrelatedNotFound),
       /must identify the requested missing environment or a not-found code/u,
     );
   }
+
+  const mismatchedCauseId = validReport();
+  const mismatchUnavailable = mismatchedCauseId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(mismatchUnavailable, {
+    environmentId: "env_missing_target",
+    error: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: "Environment env_other_target not found",
+    },
+  });
+  assert.throws(
+    () => assertIntegrationReport(mismatchedCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
 });
 
 test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
@@ -1185,14 +1222,24 @@ test("workspace report requires an asynchronous thread failure without provider 
 });
 
 test("workspace report rejects unrelated synchronous and asynchronous errors", () => {
+  const targetEnvironmentId = "env_missing_target";
   for (const spawnError of [
     "BB daemon connection reset",
-    "HTTP 404: BB daemon route not found",
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: targetEnvironmentId },
+    },
   ]) {
     const unrelatedSpawnFailure = validT5Reports();
-    unrelatedSpawnFailure.find(
+    const workspaceRow = unrelatedSpawnFailure.find(
       (entry) => entry.name === "initial-workspace-identity",
-    ).observed.missingEnvironment.spawnError = spawnError;
+    );
+    workspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+    Object.assign(workspaceRow.observed.missingEnvironment, {
+      environmentId: targetEnvironmentId,
+      spawnError,
+    });
     assert.throws(
       () => assertT5Reports(unrelatedSpawnFailure),
       /must identify the requested missing environment or a not-found code/u,
@@ -1201,14 +1248,35 @@ test("workspace report rejects unrelated synchronous and asynchronous errors", (
 
   const unrelatedThreadFailure =
     asynchronouslyFailedMissingEnvironmentReports();
-  unrelatedThreadFailure.find(
+  const workspaceRow = unrelatedThreadFailure.find(
     (entry) => entry.name === "initial-workspace-identity",
-  ).observed.missingEnvironment.threadEvents[0].data.error = {
+  );
+  workspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+  workspaceRow.observed.missingEnvironment.environmentId = targetEnvironmentId;
+  workspaceRow.observed.missingEnvironment.threadEvents[0].data.error = {
     code: "THREAD_NOT_FOUND",
     message: "HTTP 404: Thread not found",
+    context: { requestedEnvironmentId: targetEnvironmentId },
   };
   assert.throws(
     () => assertT5Reports(unrelatedThreadFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const mismatchedCauseId = asynchronouslyFailedMissingEnvironmentReports();
+  const mismatchedWorkspaceRow = mismatchedCauseId.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  mismatchedWorkspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+  mismatchedWorkspaceRow.observed.missingEnvironment.environmentId =
+    targetEnvironmentId;
+  mismatchedWorkspaceRow.observed.missingEnvironment.threadEvents[0].data.error =
+    {
+      code: "ENVIRONMENT_UNAVAILABLE",
+      message: "Environment env_other_target is unavailable",
+    };
+  assert.throws(
+    () => assertT5Reports(mismatchedCauseId),
     /must identify the requested missing environment or a not-found code/u,
   );
 });
