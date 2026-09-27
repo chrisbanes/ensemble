@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  isPathWithinRoot,
   resolveFixtureManifestPath,
   resolveT2FixtureManifestPaths,
 } from "./harness.mjs";
@@ -30,6 +31,24 @@ const defaultFixtureManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
       repositoryRoot,
       "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
     );
+
+test("disposable root contains a child worktree path", () => {
+  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
+  assert.equal(isPathWithinRoot(root, path.join(root, "worktree")), true);
+});
+
+test("disposable root does not contain a sibling worktree path", () => {
+  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
+  assert.equal(isPathWithinRoot(root, `${root}-worktree`), false);
+});
+
+test("disposable root does not contain a normalized escape path", () => {
+  const root = path.resolve(os.tmpdir(), "ensemble-fixture");
+  assert.equal(
+    isPathWithinRoot(root, path.resolve(root, "..", "outside", "worktree")),
+    false,
+  );
+});
 
 function evidenceValue(fieldPath) {
   const field = fieldPath.split(".").at(-1);

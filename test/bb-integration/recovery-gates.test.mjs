@@ -15,6 +15,7 @@ import { test as nodeTest } from "node:test";
 import {
   bbCli,
   fixtureGit,
+  isPathWithinRoot,
   restartBb,
   rpc,
   waitFor,
@@ -1711,8 +1712,8 @@ gateTest(
     assert.equal(typeof envRecord.environment.path, "string");
     const workspacePath = envRecord.environment.path;
     assert(
-      path.resolve(workspacePath).startsWith(path.resolve(instance.root)),
-      "The managed worktree must remain inside the disposable T1 BB home",
+      isPathWithinRoot(instance.root, workspacePath),
+      "The managed worktree must remain inside the disposable T5 BB home",
     );
     const markerPath = path.join(workspacePath, "T5-A17-retention.txt");
     await writeFile(markerPath, "Retain while second thread is live.\n");

@@ -89,6 +89,19 @@ export function resolveT2FixtureManifestPaths(environment = process.env) {
   };
 }
 
+export function isPathWithinRoot(rootPath, candidatePath) {
+  const relativePath = path.relative(
+    path.resolve(rootPath),
+    path.resolve(candidatePath),
+  );
+  return (
+    relativePath === "" ||
+    (!path.isAbsolute(relativePath) &&
+      relativePath !== ".." &&
+      !relativePath.startsWith(`..${path.sep}`))
+  );
+}
+
 function sanitize(text, root) {
   let sanitized = text
     .replaceAll(root, "<isolated-root>")
