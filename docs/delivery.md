@@ -186,9 +186,16 @@ Its SHA-256 was
 `ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`; it
 recorded 2,306 ms stop observation and 2,020 ms stable no-start.
 
+The former current report for runtime head
+`31d724b953a95d2e9355ecf101478128f019ce91` is historical for this candidate.
+Its SHA-256 was
+`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`; it
+recorded 2,320 ms / 2,041 ms stop observations and A17 retirement after 21
+samples over 305,986 ms.
+
 Current acceptance is the integrated report measured on runtime head
-`31d724b953a95d2e9355ecf101478128f019ce91`, SHA-256
-`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`; its
+`914663bacb1784e37ddc246caf49c22b5b8090a1`, SHA-256
+`0e0ade5d9ada89634d6b229989937425185386b592a31e7527924d93d958377f`; its
 `sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0, BB
 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
 `npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
@@ -196,22 +203,23 @@ on that measured revision. This documentation-only commit does not imply a new
 runtime run. The outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`53625102180388a748934012a374dda3945fc6184b24ac322d1201f512d52272`; the
+`47e31803a012d6c95538d9314604e13c09ef243c0b869e1f7faf36a9c65f639a`; the
 permission/environment manifest SHA-256 is
-`cc64c8769bbff5522bfd7fc204df7a5cd8c16e0b837ec8d9e01f186d5d46dcd8`. Both
-passed, and cleanup was verified across T1–T5: owned processes exited, server
-and daemon ports closed, no forced cleanup, and disposable roots removed. The
-current stop-writer observation window was 2,320 ms, including 2,041 ms stable
-no-start. The live A17 run observed the dirty marker and shared worktree remain
-while the second thread existed; after final archive and deletion, the original
-environment ID was `destroyed` after 21 samples over 305,986 ms, with the
-marker and worktree absent. Focused validator regressions require an
+`7ba84ced3e286b94612371b2f71b89d64e5d0267e8afc845573194267534cfd9`. Both
+passed. The recovery fixture source SHA-256 is
+`959ea59f00157e9d14a12fb3f476345a9ad5ac24de587a0ba723c3c01e8aba5e`. Cleanup
+was verified across T1–T5: owned processes exited, server and daemon ports
+closed, no forced cleanup, and disposable roots removed. The current stop-writer
+observation window was 2,399 ms, including 2,101 ms stable no-start. The live
+A17 run observed the dirty marker and shared worktree remain while the second
+thread existed; after final archive and deletion, BB returned the original
+environment ID `env_jza63r37yj` as `destroyed` after 21 samples over 305,973 ms,
+with the marker and worktree absent. Focused validator regressions require an
 environment-specific causal missing/unavailable error, reject unrelated
 thread/daemon 404s even when request context names the target ID, and retain
-the live wrapped Environment not-found observation; the live run returned the
-original ID. All six T5 rows remain open. T4 observed one accepted queued turn
-start and one additional tool effect (3 → 4); #665 remains `failed-capability`,
-and T06/T08 remain blocked.
+the live returned-ID path. All six T5 rows remain open. T4 observed one
+accepted queued turn start and one additional tool effect (3 → 4); #665 remains
+`failed-capability`, and T06/T08 remain blocked.
 
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain

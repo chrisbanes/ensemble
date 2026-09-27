@@ -373,7 +373,7 @@ temporary evidence. They are not required to run the T01 harness.
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
 | Composed writer admission | **Open**: T5 observed a second-plugin wait, zero provider effects before release and one tool effect after release. It has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Open**: stop returned `ok` while the scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. Historical focused T2 and integrated `1b70716` evidence from client SDK 0.5.29 measured 2,727 ms / 2,378 ms and 2,416 ms / 2,125 ms respectively. The former integrated report at `88b4384` is also historical; it measured 2,388 ms / 2,091 ms with client package 0.5.30 and host SDK 0.5.29. The `712edd8`, `ce4419c`, `c63da1e` and `f523e14` reports are historical for this candidate; the current `31d724b` integrated report records a 2,320 ms post-stop observation window with 2,041 ms stable no-start. These are fixture observations, not a writer-safety guarantee. This covers one scripted held message, not arbitrary workspace termination or complete Ensemble writer exclusion. |
+| Stop and writer release | **Open**: stop returned `ok` while the scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. Historical focused T2 and integrated `1b70716` evidence from client SDK 0.5.29 measured 2,727 ms / 2,378 ms and 2,416 ms / 2,125 ms respectively. The former integrated report at `88b4384` measured 2,388 ms / 2,091 ms with client package 0.5.30 and host SDK 0.5.29. Reports at `712edd8`, `ce4419c`, `c63da1e`, `f523e14` and `31d724b` are historical for this candidate. The current `914663b` integrated report records a 2,399 ms post-stop observation window with 2,101 ms stable no-start. These are fixture observations, not a writer-safety guarantee. This covers one scripted held message, not arbitrary workspace termination or complete Ensemble writer exclusion. |
 | Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. A synthetic missing environment was rejected before any provider trace. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
@@ -464,9 +464,16 @@ Its SHA-256 was
 `ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`; it
 measured a 2,306 ms stop observation window with 2,020 ms stable no-start.
 
+The former current report for runtime head
+`31d724b953a95d2e9355ecf101478128f019ce91` is historical for this candidate.
+Its SHA-256 was
+`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`; it
+recorded 2,320 ms / 2,041 ms stop observations and A17 retirement after 21
+samples over 305,986 ms.
+
 The current measured report is bound to runtime head
-`31d724b953a95d2e9355ecf101478128f019ce91`, with SHA-256
-`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9` and a
+`914663bacb1784e37ddc246caf49c22b5b8090a1`, with SHA-256
+`0e0ade5d9ada89634d6b229989937425185386b592a31e7527924d93d958377f` and a
 matching `sourceRevision`. On Node 24.21.0/npm 12.1.0, BB 0.44.0, client
 package SDK 0.5.30, and host SDK 0.5.29, `npm run check`,
 `npm run test:bb-integration`, and `npm run test:bb-prototype` passed on that
@@ -474,22 +481,24 @@ measured revision. This documentation-only commit does not imply a rerun. The
 report outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`53625102180388a748934012a374dda3945fc6184b24ac322d1201f512d52272`; the
+`47e31803a012d6c95538d9314604e13c09ef243c0b869e1f7faf36a9c65f639a`; the
 permission/environment manifest SHA-256 is
-`cc64c8769bbff5522bfd7fc204df7a5cd8c16e0b837ec8d9e01f186d5d46dcd8`. Both
-passed, and the report verified cleanup across T1–T5: owned processes exited,
-server and daemon ports closed, no forced cleanup, and disposable roots
-removed. The current stop-writer-release row records a 2,320 ms post-stop
-observation window with 2,041 ms stable no-start; the stop gate remains open.
-All six T5 scenario rows remain `open`. The #665 startup violation remains
-`failed-capability`; T06/T08 remain blocked.
+`7ba84ced3e286b94612371b2f71b89d64e5d0267e8afc845573194267534cfd9`. Both
+passed. The recovery fixture source SHA-256 is
+`959ea59f00157e9d14a12fb3f476345a9ad5ac24de587a0ba723c3c01e8aba5e`. The
+report verified cleanup across T1–T5: owned processes exited, server and
+daemon ports closed, no forced cleanup, and disposable roots removed. The
+current stop-writer-release row records a 2,399 ms post-stop observation
+window with 2,101 ms stable no-start; the delayed thread remained `pending`,
+so the stop gate remains open.
 
 The live A17 run observed the dirty marker and shared worktree remain while the
 second thread existed. After final archive and deletion, BB returned the
-original environment ID as `destroyed` after 21 samples over 305,986 ms, with
-the marker and worktree absent. Focused validator regressions require an
-environment-specific causal missing/unavailable error, reject unrelated
-thread/daemon 404s even when request context names the target ID, and retain
-the live wrapped Environment not-found observation; the live run returned the
-original ID. This evidence distinguishes the installed client SDK package
-0.5.30 from BB's reported host plugin SDK 0.5.29.
+original environment ID `env_jza63r37yj` as `destroyed` after 21 samples over
+305,973 ms, with the marker and worktree absent. Focused validator regressions
+require an environment-specific causal missing/unavailable error and reject
+unrelated thread/daemon 404s even when request context names the target ID;
+the live run returned the original ID. All six T5 scenario rows remain `open`.
+The #665 startup violation remains `failed-capability`; T06/T08 remain
+blocked. This evidence distinguishes the installed client SDK package 0.5.30
+from BB's reported host plugin SDK 0.5.29.
