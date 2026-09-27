@@ -207,6 +207,23 @@ function hasEvidenceValue(value) {
   return false;
 }
 
+export function isMissingEnvironmentRejection(error, environmentId) {
+  if (
+    typeof environmentId !== "string" ||
+    !environmentId.trim() ||
+    !hasEvidenceValue(error)
+  ) {
+    return false;
+  }
+  const errorText = typeof error === "string" ? error : JSON.stringify(error);
+  return (
+    errorText.includes(environmentId) ||
+    /\b404\b|\benvironment[\s_-]+not[\s_-]+found\b|\bnot[\s_-]+found[\s_-]+environment\b/iu.test(
+      errorText,
+    )
+  );
+}
+
 function evidenceAtPath(value, fieldPath) {
   return fieldPath.split(".").reduce((current, key) => current?.[key], value);
 }
@@ -353,8 +370,8 @@ function assertPermissionEnvironmentMatrix(matrix) {
   if (unavailable.rejectedAtSpawn) assert.equal(unavailable.threadId, null);
   else requireString(unavailable.threadId, "unavailable environment thread ID");
   assert(
-    hasEvidenceValue(unavailable.error),
-    "unavailable environment rejection needs an error",
+    isMissingEnvironmentRejection(unavailable.error, unavailable.environmentId),
+    "unavailable environment rejection must identify the requested missing environment or a not-found code",
   );
   assert.deepEqual(
     unavailable.providerTrace,
@@ -2085,7 +2102,10 @@ function assertInitialWorkspaceEvidence(identities, observed) {
   if (missing?.rejectedAtSpawn === true) {
     assert.equal(missing.threadId, null);
     assert.equal(missing.status, "rejected-at-spawn");
-    requireString(missing.spawnError, "missing environment rejection");
+    assert(
+      isMissingEnvironmentRejection(missing.spawnError, missing.environmentId),
+      "missing environment rejection must identify the requested missing environment or a not-found code",
+    );
     assert.deepEqual(missing.threadEvents, []);
   } else {
     assert.equal(missing?.rejectedAtSpawn, false);
@@ -2100,8 +2120,8 @@ function assertInitialWorkspaceEvidence(identities, observed) {
     assert.equal(failure.data?.thread?.id, missing.threadId);
     assert.equal(failure.data?.thread?.status, "error");
     assert(
-      hasEvidenceValue(failure.data?.error),
-      "missing environment thread failure must include its error",
+      isMissingEnvironmentRejection(failure.data?.error, missing.environmentId),
+      "missing environment rejection must identify the requested missing environment or a not-found code",
     );
   }
   assert.deepEqual(

@@ -918,6 +918,55 @@ test("permission forwarding report requires every mode, matching IDs and no hidd
   );
 });
 
+test("permission report binds unavailable-environment rejection to its target", () => {
+  const targetId =
+    permissionEnvironmentMatrix().unavailableEnvironment.environmentId;
+  const identifiedById = validReport();
+  identifiedById.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "SPAWN_REJECTED",
+    message: `Environment ${targetId} is unavailable`,
+  };
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedById));
+
+  const identifiedByNotFound = validReport();
+  const asynchronousMissing = identifiedByNotFound.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(asynchronousMissing, {
+    rejectedAtSpawn: false,
+    threadId: "missing-environment-thread",
+    status: "error",
+    error: { code: "ENVIRONMENT_NOT_FOUND" },
+  });
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedByNotFound));
+
+  const unrelatedSpawnFailure = validReport();
+  unrelatedSpawnFailure.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "ECONNRESET",
+    message: "BB daemon connection reset",
+  };
+  assert.throws(
+    () => assertIntegrationReport(unrelatedSpawnFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const unrelatedThreadFailure = validReport();
+  unrelatedThreadFailure.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "THREAD_NOT_FOUND",
+    message: "The thread was not found",
+  };
+  assert.throws(
+    () => assertIntegrationReport(unrelatedThreadFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+});
+
 test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
   const slices = validSlices();
   const matrix = permissionEnvironmentMatrix();
@@ -1112,6 +1161,30 @@ test("workspace report requires an asynchronous thread failure without provider 
   assert.throws(
     () => assertT5Reports(providerStarted),
     /must not start a provider/u,
+  );
+});
+
+test("workspace report rejects unrelated synchronous and asynchronous errors", () => {
+  const unrelatedSpawnFailure = validT5Reports();
+  unrelatedSpawnFailure.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.spawnError = "BB daemon connection reset";
+  assert.throws(
+    () => assertT5Reports(unrelatedSpawnFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const unrelatedThreadFailure =
+    asynchronouslyFailedMissingEnvironmentReports();
+  unrelatedThreadFailure.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.threadEvents[0].data.error = {
+    code: "WORKER_EXITED",
+    message: "Provider setup failed before the turn started",
+  };
+  assert.throws(
+    () => assertT5Reports(unrelatedThreadFailure),
+    /must identify the requested missing environment or a not-found code/u,
   );
 });
 

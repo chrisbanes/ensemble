@@ -370,8 +370,8 @@ was found in the inspected public SDK.
 | Automatic | Delivery, preservation or effects are unknown | Retain and hold cleanup |
 | Any | Workspace is missing or unknown | Hold cleanup and dispatch |
 
-The T1/T2/T5 fixtures provide bounded BB observations for this design. The
-permission matrix forwarded `accept-edits`, `auto` and `full` into one scripted
+The T2, T4 and T5 fixtures provide bounded BB observations for this design. The
+T2 permission matrix forwarded `accept-edits`, `auto` and `full` into one scripted
 provider request per mode, reused one managed environment, and read the same
 thread/environment identities after restart. A synthetic unavailable
 environment was rejected without a provider trace. This does not demonstrate

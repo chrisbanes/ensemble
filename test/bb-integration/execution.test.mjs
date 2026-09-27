@@ -11,6 +11,7 @@ import {
   waitFor,
   withFixture,
 } from "./harness.mjs";
+import { isMissingEnvironmentRejection } from "./report.mjs";
 
 const fixturePluginId = "ensemble-t1-fixture";
 
@@ -886,19 +887,23 @@ test("provider permission modes and managed environment inputs reach scripted tu
             (item) => item.text === missingEnvironmentPrompt,
           )),
     );
+    const missingEnvironmentFailureEvidence =
+      missingEnvironmentError ?? missingEnvironmentFailure?.data.error;
     matrixEvidence.unavailableEnvironment = {
       environmentId: missingEnvironmentId,
       prompt: missingEnvironmentPrompt,
       rejectedAtSpawn: missingEnvironmentError !== undefined,
       threadId: missingEnvironmentSpawn?.id ?? null,
       status: missingEnvironmentThread?.status ?? "rejected-at-spawn",
-      error: missingEnvironmentError ?? missingEnvironmentFailure?.data.error,
+      error: missingEnvironmentFailureEvidence,
       providerTrace: missingEnvironmentTrace,
     };
     assert(
-      missingEnvironmentError !== undefined ||
-        missingEnvironmentThread?.status === "error",
-      "BB must publicly reject an unavailable environment",
+      isMissingEnvironmentRejection(
+        missingEnvironmentFailureEvidence,
+        missingEnvironmentId,
+      ),
+      "BB must identify the requested unavailable environment or return a not-found code",
     );
     assert.equal(
       missingEnvironmentTrace.length,
