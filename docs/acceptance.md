@@ -265,33 +265,41 @@ window with 2,035 ms stable no-start and A17 retirement after 21 samples over
 `01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b` and
 `636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`.
 
+The previous integrated report for runtime head
+`f523e145b445837b73ee9f7082adb87ce7712c1f` is historical for this candidate.
+Its SHA-256 was
+`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`; it
+recorded a 2,306 ms stop observation window and 2,020 ms stable no-start.
+
 Current acceptance is the integrated report measured on runtime head
-`f523e145b445837b73ee9f7082adb87ce7712c1f`, SHA-256
-`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`. Its
+`31d724b953a95d2e9355ecf101478128f019ce91`, SHA-256
+`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`. Its
 `sourceRevision` matches that head. On pinned Node 24.21.0/npm 12.1.0, BB
 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29, `npm run check`,
 `npm run test:bb-integration`, and `npm run test:bb-prototype` passed on the
-measured runtime revision. This documentation-only update does not claim a new
+measured runtime revision. This documentation-only commit does not imply a new
 runtime run. The report outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`8987eea41eac4c26b5011373cd17b2c4c68b5ccb89acd58a0e6fe2c1490897b1`; the
+`53625102180388a748934012a374dda3945fc6184b24ac322d1201f512d52272`; the
 permission/environment manifest SHA-256 is
-`2c6edb73f4f308db0406ff66c0a756905fcbaaa3ae0b457abc88c5ebb50b7259`. Both
+`cc64c8769bbff5522bfd7fc204df7a5cd8c16e0b837ec8d9e01f186d5d46dcd8`. Both
 passed. Across T1–T5, owned processes exited, server and daemon ports closed,
 no forced cleanup occurred, and disposable roots were removed.
 
 The current stop-writer observation confirms exact-ID cancellation, a matching
 `message.cancelled` event and an empty queue before release. Its post-stop
-observation window was 2,306 ms, including 2,020 ms stable no-start; the
+observation window was 2,320 ms, including 2,041 ms stable no-start; the
 delayed thread remained `pending`. This is bounded fixture evidence, not a
 complete writer-release guarantee. The live A17 run observed the dirty marker
 and shared worktree remain while the second thread existed; after final archive
 and deletion, the original environment ID was `destroyed` after 21 samples over
-305,934 ms, with the marker and worktree absent. A focused validator regression
-accepts a null environment ID only with a confirmed missing response; the live
-run returned the original ID. All six T5 rows remain `open`. T4 observed one
-accepted queued turn start and one additional tool effect (3 → 4); #665 remains
+305,986 ms, with the marker and worktree absent. Focused validator regressions
+require an environment-specific causal missing/unavailable error, reject
+unrelated thread/daemon 404s even when request context names the target ID, and
+retain the live wrapped Environment not-found observation; the live run returned
+the original ID. All six T5 rows remain `open`. T4 observed one accepted queued
+turn start and one additional tool effect (3 → 4); #665 remains
 `failed-capability`, and T06/T08 remain blocked. These observations do not
 prove arbitrary process termination, complete writer exclusion, or Ensemble
 cleanup policy. The report does not stand in for the authenticated-provider
