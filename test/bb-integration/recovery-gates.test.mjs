@@ -20,6 +20,7 @@ import {
   waitFor,
   withFixture,
 } from "./harness.mjs";
+import { isMissingEnvironmentRejection } from "./report.mjs";
 
 const fixturePluginId = "ensemble-t1-fixture";
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -1848,27 +1849,33 @@ gateTest(
       const [environmentResult, markerExists, workspaceExists] =
         await Promise.all([
           pluginRpc(instance, fixturePluginId, "recovery.run", {
-            operation: "environment-by-id",
+            operation: "environment-by-id-observation",
             environmentId,
-          }).catch((error) => ({ error: String(error) })),
+          }).catch((error) => ({ fixtureRpcError: String(error) })),
           fileExists(markerPath),
           fileExists(workspacePath),
         ]);
       const environment = environmentResult.environment ?? null;
-      const environmentLookupError = environmentResult.error ?? null;
-      const environmentConfirmedMissing =
-        typeof environmentLookupError === "string" &&
-        /(?:404|not found|does not exist|no such environment)/iu.test(
-          environmentLookupError,
-        );
+      const environmentLookupError =
+        environmentResult.environmentLookupError ?? null;
+      const requestedEnvironmentId =
+        environmentResult.requestedEnvironmentId ?? environmentId;
+      const environmentConfirmedMissing = isMissingEnvironmentRejection(
+        environmentLookupError,
+        requestedEnvironmentId,
+      );
       const environmentRetired =
-        environmentConfirmedMissing || environment?.status === "destroyed";
+        environmentConfirmedMissing ||
+        (environment?.id === environmentId &&
+          environment.status === "destroyed");
       const observation = {
         elapsedMs: sampledAt - retirementStartedAt,
         sampledAt: new Date(sampledAt).toISOString(),
+        requestedEnvironmentId,
         environmentId: environment?.id ?? null,
         environmentStatus: environment?.status ?? null,
         environmentLookupError,
+        fixtureRpcError: environmentResult.fixtureRpcError ?? null,
         environmentConfirmedMissing,
         environmentRetired,
         workspaceExists,
@@ -1906,8 +1913,10 @@ gateTest(
             },
           }
         : {
+            requestedEnvironmentId: environmentId,
             error:
               finalRetirementObservation?.environmentLookupError ??
+              finalRetirementObservation?.fixtureRpcError ??
               "No post-delete environment observation was collected",
           };
     const markerExistsAfterLastDelete =

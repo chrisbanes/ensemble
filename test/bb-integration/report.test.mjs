@@ -387,6 +387,7 @@ function a17Observed() {
     retirementObservations: [
       {
         elapsedMs: 0,
+        requestedEnvironmentId: environmentId,
         environmentId,
         environmentStatus: "ready",
         environmentRetired: false,
@@ -396,6 +397,7 @@ function a17Observed() {
       },
       {
         elapsedMs: 15_000,
+        requestedEnvironmentId: environmentId,
         environmentId,
         environmentStatus: "destroyed",
         environmentRetired: true,
@@ -1380,11 +1382,17 @@ test("A17 accepts retirement confirmed by a missing environment response", () =>
   Object.assign(finalSample, {
     environmentId: null,
     environmentStatus: null,
-    environmentLookupError: "HTTP 404: Environment not found",
+    environmentLookupError: {
+      code: "http_500",
+      message: "HTTP 500: HTTP 404: Environment not found",
+    },
     environmentConfirmedMissing: true,
     environmentRetired: true,
   });
-  observed.environmentAfterLastDelete = finalSample.environmentLookupError;
+  observed.environmentAfterLastDelete = {
+    requestedEnvironmentId: a17Identities().environmentId,
+    error: finalSample.environmentLookupError,
+  };
 
   assert.doesNotThrow(() => assertT5Reports(reports));
 });
@@ -1431,8 +1439,10 @@ test("A17 accepts a null environment ID only with confirmed missing retirement",
     retirementObserved: false,
   });
   unconfirmedObserved.retirementObserved = false;
-  unconfirmedObserved.environmentAfterLastDelete =
-    unconfirmedSample.environmentLookupError;
+  unconfirmedObserved.environmentAfterLastDelete = {
+    requestedEnvironmentId: a17Identities().environmentId,
+    error: unconfirmedSample.environmentLookupError,
+  };
   assert.throws(() => assertT5Reports(unconfirmedMissing), /missing/u);
 
   const nonMissingFailure = validT5Reports();
@@ -1443,15 +1453,20 @@ test("A17 accepts a null environment ID only with confirmed missing retirement",
   Object.assign(failedSample, {
     environmentId: null,
     environmentStatus: null,
-    environmentLookupError: "HTTP 500: temporary server error",
+    environmentLookupError: {
+      code: "HTTP_500",
+      message: "HTTP 500: temporary server error",
+    },
     environmentConfirmedMissing: true,
     environmentRetired: true,
   });
-  failedObserved.environmentAfterLastDelete =
-    failedSample.environmentLookupError;
+  failedObserved.environmentAfterLastDelete = {
+    requestedEnvironmentId: a17Identities().environmentId,
+    error: failedSample.environmentLookupError,
+  };
   assert.throws(
     () => assertT5Reports(nonMissingFailure),
-    /confirmed missing response/u,
+    /environment-specific causal not-found/u,
   );
 
   const wrongReturnedId = validT5Reports();
@@ -1459,6 +1474,51 @@ test("A17 accepts a null environment ID only with confirmed missing retirement",
     .find((entry) => entry.name === "a17-shared-worktree-retention")
     .observed.retirementObservations.at(-1).environmentId = "other-environment";
   assert.throws(() => assertT5Reports(wrongReturnedId), /environment-a17/u);
+});
+
+test("A17 rejects unrelated fixture-plugin, daemon, and thread 404s as retirement", () => {
+  const { environmentId } = a17Identities();
+  const unrelatedErrors = [
+    "HTTP 404: Fixture plugin route not found",
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: environmentId },
+    },
+    {
+      code: "THREAD_NOT_FOUND",
+      message: "HTTP 404: Thread not found",
+      context: { requestedEnvironmentId: environmentId },
+    },
+  ];
+
+  for (const environmentLookupError of unrelatedErrors) {
+    const reports = validT5Reports();
+    const observed = reports.find(
+      (entry) => entry.name === "a17-shared-worktree-retention",
+    ).observed;
+    const finalSample = observed.retirementObservations.at(-1);
+    Object.assign(finalSample, {
+      requestedEnvironmentId: environmentId,
+      environmentId: null,
+      environmentStatus: null,
+      environmentLookupError,
+      environmentConfirmedMissing: true,
+      environmentRetired: true,
+      workspaceExists: false,
+      markerExists: false,
+      retirementObserved: true,
+    });
+    observed.environmentAfterLastDelete = {
+      requestedEnvironmentId: environmentId,
+      error: environmentLookupError,
+    };
+    observed.markerExistsAfterLastDelete = false;
+    observed.workspaceExistsAfterLastDelete = false;
+    observed.retirementObserved = true;
+
+    assert.throws(() => assertT5Reports(reports), /A17|environment|missing/u);
+  }
 });
 
 test("cleanup policy table stays proposed and fails closed for unknown evidence", () => {

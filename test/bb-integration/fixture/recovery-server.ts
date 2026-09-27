@@ -24,6 +24,31 @@ function rpcSchema<Schema extends z.ZodType>(
   };
 }
 
+function causalErrorEvidence(
+  error: unknown,
+  seen = new Set<object>(),
+): Record<string, unknown> {
+  if (error === null || typeof error !== "object") {
+    return { message: String(error) };
+  }
+  if (seen.has(error)) return { message: "[circular error cause]" };
+  seen.add(error);
+
+  const record = error as {
+    cause?: unknown;
+    code?: unknown;
+    message?: unknown;
+  };
+  const evidence: Record<string, unknown> = {};
+  if (typeof record.code === "string") evidence.code = record.code;
+  if (typeof record.message === "string") evidence.message = record.message;
+  if (record.cause !== undefined) {
+    evidence.cause = causalErrorEvidence(record.cause, seen);
+  }
+  if (Object.keys(evidence).length === 0) evidence.message = String(error);
+  return evidence;
+}
+
 type RecoveryArgs = {
   attemptId?: string | undefined;
   environmentId?: string | undefined;
@@ -35,6 +60,7 @@ type RecoveryArgs = {
     | "delete"
     | "environment"
     | "environment-by-id"
+    | "environment-by-id-observation"
     | "message-events"
     | "observations"
     | "queue-delete"
@@ -188,6 +214,7 @@ export default function recoveryFixture(bb: BbPluginApi): void {
               "delete",
               "environment",
               "environment-by-id",
+              "environment-by-id-observation",
               "message-events",
               "observations",
               "queue-delete",
@@ -373,6 +400,26 @@ export default function recoveryFixture(bb: BbPluginApi): void {
                 environmentId: args.environmentId,
               }),
             };
+          }
+          case "environment-by-id-observation": {
+            if (args.environmentId === undefined) {
+              throw new Error(
+                "environment-by-id-observation requires environmentId",
+              );
+            }
+            try {
+              return {
+                requestedEnvironmentId: args.environmentId,
+                environment: await bb.sdk.environments.get({
+                  environmentId: args.environmentId,
+                }),
+              };
+            } catch (error) {
+              return {
+                requestedEnvironmentId: args.environmentId,
+                environmentLookupError: causalErrorEvidence(error),
+              };
+            }
           }
           case "workspace-prepare": {
             if (

@@ -2273,6 +2273,11 @@ function assertA17RetentionEvidence(identities, observed) {
   let previousElapsed = -1;
   for (const sample of observed.retirementObservations) {
     assert(Number.isFinite(sample.elapsedMs) && sample.elapsedMs >= 0);
+    assert.equal(
+      sample.requestedEnvironmentId,
+      identities.environmentId,
+      "A17 lookup must remain bound to the requested environment ID",
+    );
     assert(
       sample.elapsedMs > previousElapsed,
       "A17 sample times must increase",
@@ -2288,22 +2293,33 @@ function assertA17RetentionEvidence(identities, observed) {
         true,
         "A17 missing environment must be confirmed retired",
       );
-      assert.equal(
-        typeof sample.environmentLookupError,
-        "string",
-        "A17 missing environment requires its lookup error",
-      );
-      assert.match(
-        sample.environmentLookupError,
-        /(?:404|not found|does not exist|no such environment)/iu,
-        "A17 missing environment requires a confirmed missing response",
+      assert(
+        isMissingEnvironmentRejection(
+          sample.environmentLookupError,
+          identities.environmentId,
+        ),
+        "A17 missing environment requires an environment-specific causal not-found response",
       );
     } else {
       assert.equal(sample.environmentId, identities.environmentId);
+      if (sample.environmentRetired) {
+        assert.equal(
+          sample.environmentStatus,
+          "destroyed",
+          "A17 retirement must refer to the requested destroyed environment",
+        );
+      }
     }
     assert.equal(typeof sample.workspaceExists, "boolean");
     assert.equal(typeof sample.markerExists, "boolean");
     assert.equal(typeof sample.environmentRetired, "boolean");
+    assert.equal(
+      sample.retirementObserved,
+      sample.environmentRetired &&
+        !sample.workspaceExists &&
+        !sample.markerExists,
+      "A17 sample retirement must match environment and dirty-worktree evidence",
+    );
     if (previousElapsed >= 0) {
       assert(
         sample.elapsedMs - previousElapsed <=
@@ -2321,10 +2337,13 @@ function assertA17RetentionEvidence(identities, observed) {
     "A17 retirement summary must agree with the final bounded sample",
   );
   if (last.environmentId === null) {
-    assert.equal(
+    assert.deepEqual(
       observed.environmentAfterLastDelete,
-      last.environmentLookupError,
-      "A17 missing environment summary must match its final lookup error",
+      {
+        requestedEnvironmentId: identities.environmentId,
+        error: last.environmentLookupError,
+      },
+      "A17 missing environment summary must bind its cause to the requested ID",
     );
   } else {
     assert.equal(
