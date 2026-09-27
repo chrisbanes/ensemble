@@ -211,9 +211,19 @@ execution and permission/environment manifest hashes were
 `f60b7fcc6fcd27934531e527816c9be094a826b6818e740d98ae4196bf0f6ac0` and
 `146c3d91325a00b71fdf80f8c16895a1c7ff2a1279a07aa010cc937166c72244`.
 
+The former current report for runtime head
+`95b8deaba2f74d18234df9df9c47136d1b85c3f9` is historical for this candidate.
+Its SHA-256 was
+`c6dc32ae3e9a82c14b31ae1f9aefe139aa0adcf469e4b172a7b55624a21f06f2`, and its
+`sourceRevision` matched that runtime head. It measured a 2,455 ms / 2,161 ms
+stop observation and A17 retirement after 22 samples over 321,348 ms. Its T2
+execution and permission/environment manifest hashes were
+`90b455e14c2b7e4c03e97b3beb68077818131dced29e2a9b7be6bd87add5ffef` and
+`89435df501c96a5b8aa09fc16ed6b23adc8a5a79f3c1752dc6f7bc6c7a365209`.
+
 Current acceptance is the integrated report measured on runtime head
-`95b8deaba2f74d18234df9df9c47136d1b85c3f9`, SHA-256
-`c6dc32ae3e9a82c14b31ae1f9aefe139aa0adcf469e4b172a7b55624a21f06f2`; its
+`27bc110a99b58efca87ad7a12b685a4bf0be8c15`, SHA-256
+`c70810879b646d4d17705ad403afb161fbed982ef03dda0c61e245273de8ffae`; its
 `sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0, BB
 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
 `npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
@@ -221,25 +231,29 @@ on that measured runtime revision. This documentation-only commit does not
 imply a new runtime run. The outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`90b455e14c2b7e4c03e97b3beb68077818131dced29e2a9b7be6bd87add5ffef`; the
+`5bfefb6869b87b7f191b2e9763e4a8f7cb88599c6fb0b5a5438b1e482fff0ecc`; the
 permission/environment manifest SHA-256 is
-`89435df501c96a5b8aa09fc16ed6b23adc8a5a79f3c1752dc6f7bc6c7a365209`. Both
+`ea9311aac2c43af7a1c65c72892b3c321c02cb960c23fe07dd8de30866e95c78`. Both
 passed. The recovery fixture source SHA-256 is
 `959ea59f00157e9d14a12fb3f476345a9ad5ac24de587a0ba723c3c01e8aba5e`. Cleanup
 was verified across T1–T5: owned processes exited, server and daemon ports
 closed, no forced cleanup, and disposable roots removed. The current stop-writer
-observation window was 2,455 ms, including 2,161 ms stable no-start. The live
+observation window was 2,459 ms, including 2,121 ms stable no-start. The live
 A17 run observed the dirty marker and shared worktree remain while the second
 thread existed; after final archive and deletion, BB returned the original
-environment ID `env_mzqn344gdv` as `destroyed` after 22 samples over 321,348 ms,
-with the marker and worktree absent. Before the A17 marker write, the fixture
-resolves the existing root and BB workspace with `realpath`, compares canonical
-path components, and creates the marker exclusively. Focused regressions accept
-an in-root child, reject sibling/traversal paths and an outside directory
-symlink, and refuse an existing marker symlink without changing its target.
-Focused validator regressions require an environment-specific causal
-missing/unavailable error and reject unrelated thread/daemon 404s even when
-request context names the target ID; the live run returned the original
+environment ID `env_gr4hf7wsuc` as `destroyed` after 21 samples over 306,333 ms,
+with the marker and worktree absent. Sample timestamps are recorded after the
+environment lookup and filesystem checks complete, so the measured window
+includes the final lookup request. The fixture requires observed retirement
+and final marker/worktree absence before A17 evidence passes. Before the A17
+marker write, the fixture resolves the existing root and BB workspace with
+`realpath`, compares canonical path components, and creates the marker
+exclusively. Focused regressions accept an in-root child, reject
+sibling/traversal paths and an outside directory symlink, and refuse an
+existing marker symlink without changing its target. Focused validator
+regressions require an environment-specific causal missing/unavailable error
+and reject unrelated thread/daemon 404s even when request context names the
+target ID; the live run returned the original
 environment ID. All six T5 rows remain open. T4 observed one accepted queued
 turn start and one additional tool effect (3 → 4); #665 remains
 `failed-capability`, and T06/T08 remain blocked.
