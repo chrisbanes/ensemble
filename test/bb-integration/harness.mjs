@@ -71,6 +71,24 @@ export function resolveFixtureManifestPath(override) {
   return override ? path.resolve(override) : runManifestPath;
 }
 
+export function resolveT2FixtureManifestPaths(environment = process.env) {
+  const manifestDirectory = path.dirname(runManifestPath);
+  const executionOverride = environment.ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH;
+  const permissionEnvironmentOverride =
+    environment.ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH;
+  return {
+    execution: executionOverride
+      ? path.resolve(executionOverride)
+      : path.join(manifestDirectory, "T2.execution.run-manifest.json"),
+    permissionEnvironment: permissionEnvironmentOverride
+      ? path.resolve(permissionEnvironmentOverride)
+      : path.join(
+          manifestDirectory,
+          "T2.permission-environment.run-manifest.json",
+        ),
+  };
+}
+
 function sanitize(text, root) {
   let sanitized = text
     .replaceAll(root, "<isolated-root>")

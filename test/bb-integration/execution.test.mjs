@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import {
   bbCli,
   fixtureGit,
+  resolveT2FixtureManifestPaths,
   restartBb,
   rpc,
-  resolveFixtureManifestPath,
   waitFor,
   withFixture,
 } from "./harness.mjs";
@@ -82,18 +82,16 @@ function holdScheduledMessageForDay() {
 }
 
 function withT2ExecutionFixture(callback) {
+  const manifestPaths = resolveT2FixtureManifestPaths();
   return withFixture(callback, {
-    manifestFile: resolveFixtureManifestPath(
-      process.env.ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH,
-    ),
+    manifestFile: manifestPaths.execution,
   });
 }
 
 function withT2PermissionEnvironmentFixture(callback) {
+  const manifestPaths = resolveT2FixtureManifestPaths();
   return withFixture(callback, {
-    manifestFile: resolveFixtureManifestPath(
-      process.env.ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH,
-    ),
+    manifestFile: manifestPaths.permissionEnvironment,
   });
 }
 

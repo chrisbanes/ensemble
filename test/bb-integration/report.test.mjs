@@ -4,17 +4,20 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { resolveFixtureManifestPath } from "./harness.mjs";
 import {
-  REQUIRED_API_ROWS,
-  REQUIRED_API_EVIDENCE,
-  REQUIRED_PROOF_GATES,
-  REQUIRED_T5_REPORTS,
+  resolveFixtureManifestPath,
+  resolveT2FixtureManifestPaths,
+} from "./harness.mjs";
+import {
   assertExpectedT4Failure,
   assertIntegrationReport,
   assertT5Reports,
   buildIntegrationReport,
   combineT2FixtureManifests,
+  REQUIRED_API_EVIDENCE,
+  REQUIRED_API_ROWS,
+  REQUIRED_PROOF_GATES,
+  REQUIRED_T5_REPORTS,
   readIntegrationReport,
   serializeIntegrationReport,
   writeIntegrationReport,
@@ -990,6 +993,20 @@ test("T2 fixture manifest path honors an explicit environment override", () => {
   assert.equal(resolveFixtureManifestPath(override), override);
 });
 
+test("direct T2 fixtures have separate default manifests without overrides", () => {
+  const paths = resolveT2FixtureManifestPaths({});
+
+  assert.equal(
+    path.basename(paths.execution),
+    "T2.execution.run-manifest.json",
+  );
+  assert.equal(
+    path.basename(paths.permissionEnvironment),
+    "T2.permission-environment.run-manifest.json",
+  );
+  assert.notEqual(paths.execution, paths.permissionEnvironment);
+});
+
 test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
   const report = validReport();
   const row = report.rows[0];
@@ -1202,6 +1219,33 @@ test("A17 accepts retirement confirmed by a missing environment response", () =>
     environmentRetired: true,
   });
   observed.environmentAfterLastDelete = finalSample.environmentLookupError;
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 accepts retirement observed by the first post-delete sample", () => {
+  const reports = validT5Reports();
+  const observed = reports.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const firstSample = observed.retirementObservations[0];
+  Object.assign(firstSample, {
+    environmentStatus: "destroyed",
+    environmentRetired: true,
+    workspaceExists: false,
+    markerExists: false,
+    retirementObserved: true,
+  });
+  observed.retirementObservations = [firstSample];
+  observed.retirementObservationCount = 1;
+  observed.retirementObservationWindowMs = firstSample.elapsedMs;
+  observed.retirementObserved = true;
+  observed.environmentAfterLastDelete = {
+    id: firstSample.environmentId,
+    status: "destroyed",
+  };
+  observed.markerExistsAfterLastDelete = false;
+  observed.workspaceExistsAfterLastDelete = false;
 
   assert.doesNotThrow(() => assertT5Reports(reports));
 });

@@ -2189,7 +2189,7 @@ function assertA17RetentionEvidence(identities, observed) {
     "A17 observed window must fit inside its bounded retirement window",
   );
   assert(Array.isArray(observed.retirementObservations));
-  assert(observed.retirementObservations.length >= 2);
+  assert(observed.retirementObservations.length >= 1);
   assert.equal(
     observed.retirementObservationCount,
     observed.retirementObservations.length,
