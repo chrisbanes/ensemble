@@ -1136,6 +1136,22 @@ test("permission report binds unavailable-environment rejection to its target", 
     () => assertIntegrationReport(mismatchedCauseId),
     /must identify the requested missing environment or a not-found code/u,
   );
+
+  const mismatchedSuffixCauseId = validReport();
+  const suffixMismatchUnavailable = mismatchedSuffixCauseId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(suffixMismatchUnavailable, {
+    environmentId: targetId,
+    error: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: `Environment not found: ${targetId}-other`,
+    },
+  });
+  assert.throws(
+    () => assertIntegrationReport(mismatchedSuffixCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
 });
 
 test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
@@ -1391,6 +1407,25 @@ test("workspace report rejects unrelated synchronous and asynchronous errors", (
     };
   assert.throws(
     () => assertT5Reports(mismatchedCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const mismatchedSuffixCauseId =
+    asynchronouslyFailedMissingEnvironmentReports();
+  const suffixMismatchWorkspaceRow = mismatchedSuffixCauseId.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  suffixMismatchWorkspaceRow.identities.missingEnvironmentId =
+    targetEnvironmentId;
+  suffixMismatchWorkspaceRow.observed.missingEnvironment.environmentId =
+    targetEnvironmentId;
+  suffixMismatchWorkspaceRow.observed.missingEnvironment.threadEvents[0].data.error =
+    {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: `Environment not found: ${targetEnvironmentId}-other`,
+    };
+  assert.throws(
+    () => assertT5Reports(mismatchedSuffixCauseId),
     /must identify the requested missing environment or a not-found code/u,
   );
 });

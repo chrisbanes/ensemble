@@ -236,10 +236,15 @@ function isEnvironmentMissingCode(code) {
 }
 
 function missingEnvironmentIdInMessage(message) {
-  const match = message.match(
+  const prefixMatch = message.match(
     /\b(?:environment|env)\s+(?:id\s+)?(?!(?:is|was|not|missing|unavailable|available|found|the|a|an)\b)([a-z0-9][a-z0-9._:-]*)\s+(?:(?:is|was)\s+)?(?:not[\s_-]+found|missing|unavailable|not[\s_-]+available|does[\s_-]+not[\s_-]+exist)\b/iu,
   );
-  return match?.[1] ?? null;
+  if (prefixMatch) return prefixMatch[1];
+
+  const suffixMatch = message.match(
+    /\b(?:environment|env)\s+(?:(?:is|was)\s+)?(?:not[\s_-]+found|missing|unavailable|not[\s_-]+available|does[\s_-]+not[\s_-]+exist)\s*[:(]\s*([a-z0-9][a-z0-9._:-]*)/iu,
+  );
+  return suffixMatch?.[1]?.replace(/[:.,;]+$/u, "") ?? null;
 }
 
 function hasMissingEnvironmentMessage(message) {
