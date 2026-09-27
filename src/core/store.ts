@@ -298,6 +298,17 @@ export class Store {
     );
   }
 
+  restoreUnsubmittedLaunch(id: string): boolean {
+    this.requireInitialized();
+    return (
+      this.db
+        .prepare(
+          "UPDATE assignments SET state = 'pending' WHERE id = ? AND state = 'launching' AND NOT EXISTS (SELECT 1 FROM conversation_bindings WHERE assignmentId = ?) RETURNING id",
+        )
+        .get(id, id) !== undefined
+    );
+  }
+
   attachConversation(
     assignmentId: string,
     hostKey: string,

@@ -75,6 +75,14 @@ revisions, capability-gated future operations and full product journeys remain
 with their feature tickets. Moving unfinished work between hosts is not a P01–P05
 acceptance criterion.
 
+Revision 4's prototype recovery covers only a final configuration refusal made
+before `threads.spawn`: no BB call is made, and the same unbound assignment
+returns to `pending` for a later authorized request. Tests reopen the SQLite
+file, retain the captured instructions and reject concurrent duplicate launch.
+SDK errors and absent reconciliation matches stay uncertain. The released BB
+T4 accepted-queue failure remains #665's open gate; this recovery does not
+establish A14 or unblock T06/T08. #676 remains separate.
+
 ### Operational product gate
 
 | ID | Given / when | Required observable result | Layer |

@@ -27,14 +27,21 @@ export function createBbWorkerHost(dependencies: {
     async spawn(assignment: Assignment, coordinatorConversationId: string) {
       const config = await settings.get();
       if (!config.provider || !config.model)
-        throw new Error("Configure the worker provider and model first");
+        return {
+          kind: "not-submitted" as const,
+          reason: "Configure the worker provider and model first",
+        };
       const projectId = externalProjectId(assignment);
       if (config.project !== projectId)
-        throw new Error(
-          "Assignment no longer belongs to the configured project",
-        );
+        return {
+          kind: "not-submitted" as const,
+          reason: "Assignment no longer belongs to the configured project",
+        };
       if (config.coordinatorThread !== coordinatorConversationId)
-        throw new Error("Caller is no longer the configured coordinator");
+        return {
+          kind: "not-submitted" as const,
+          reason: "Caller is no longer the configured coordinator",
+        };
       const thread = await threads.spawn({
         projectId,
         providerId: config.provider,

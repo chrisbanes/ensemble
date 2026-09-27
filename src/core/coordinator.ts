@@ -4,7 +4,7 @@ export interface WorkerHost {
   spawn(
     assignment: Assignment,
     coordinatorConversationId: string,
-  ): Promise<string>;
+  ): Promise<string | { kind: "not-submitted"; reason: string }>;
   find(assignment: Assignment): Promise<string[]>;
 }
 
@@ -23,11 +23,15 @@ export class Coordinator {
     const assignment = this.store.get(id);
     // Persist intent before crossing the host API boundary. Any throw leaves an
     // uncertain launch that may only be reconciled, never automatically retried.
-    const conversationId = await this.host.spawn(
+    const outcome = await this.host.spawn(
       assignment,
       coordinatorConversationId,
     );
-    this.store.attachConversation(id, this.hostKey, conversationId);
+    if (typeof outcome !== "string") {
+      this.store.restoreUnsubmittedLaunch(id);
+      throw new Error(outcome.reason);
+    }
+    this.store.attachConversation(id, this.hostKey, outcome);
     return this.store.get(id);
   }
 

@@ -1,5 +1,21 @@
 # BB capability evidence
 
+## Revision 4 local launch refusal recovery
+
+The Ensemble adapter can identify a refusal made by its final provider, model,
+project or coordinator check before calling `threads.spawn`. It restores the same
+unbound assignment from `launching` to `pending` only for that known local
+outcome, retaining its ID, task, brief and captured instructions. A fresh,
+authorized delegation must recheck the current configuration before retrying;
+restart does not dispatch pending assignments. An SDK call failure, lost response
+or zero reconciliation matches remains uncertain in `launching`, with no blind
+retry. A crash before the refusal is recorded may also leave it there.
+
+This recovery does not protect work once BB accepts it. The released BB 0.44.0
+and plugin SDK 0.5.30 T4 diagnostic below remains the #665 failed capability:
+an accepted queued row started after both wait owners failed. T06/T08 remain
+blocked, and the separate #676 writer-release gate remains open.
+
 ## BB 0.44 observation before the SDK package update — 26 September 2026
 
 Before the plugin SDK package update to 0.5.29, the pinned BB 0.44.0 package was

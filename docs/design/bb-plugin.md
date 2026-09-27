@@ -75,6 +75,12 @@ references. Unknown historical instructions remain null. Future product schema
 changes need their own migration decisions. No reset or update of the installed
 Haze prototype is part of the extraction.
 
+In the bounded prototype, a final adapter configuration refusal before
+`threads.spawn` restores only an unbound `launching` assignment to `pending`.
+The same assignment and instruction snapshot are retained for a later authorized
+request. Once the SDK is called, errors and missing reconciliation matches remain
+uncertain; this local recovery supplies no BB queue or provider-admission fence.
+
 | Record | Minimum fields and constraints |
 | --- | --- |
 | Project configuration | Ensemble project ID, enabled/paused, instruction revision, allowed profile IDs, cleanup mode, policy revision |

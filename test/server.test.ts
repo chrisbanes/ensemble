@@ -147,7 +147,12 @@ test("plugin tools enforce actor scope and reconnect after a lost BB response", 
   }
 });
 
-for (const changedSetting of ["project", "coordinatorThread"] as const) {
+for (const changedSetting of [
+  "project",
+  "coordinatorThread",
+  "provider",
+  "model",
+] as const) {
   test(`${changedSetting} changed after authorization prevents a BB spawn`, async () => {
     const db = new DatabaseSync(":memory:");
     const tools = new Map<
@@ -161,6 +166,8 @@ for (const changedSetting of ["project", "coordinatorThread"] as const) {
     >();
     let reads = 0;
     let spawns = 0;
+    let finalOverride = true;
+    let spawnedPrompt = "";
     const config = {
       project: "original-project",
       coordinatorThread: "lead",
@@ -180,7 +187,11 @@ for (const changedSetting of ["project", "coordinatorThread"] as const) {
             return {
               ...config,
               [changedSetting]:
-                reads >= 4 ? "replacement" : config[changedSetting],
+                finalOverride && reads >= 4
+                  ? changedSetting === "provider" || changedSetting === "model"
+                    ? ""
+                    : "replacement"
+                  : config[changedSetting],
             };
           },
         }),
@@ -198,9 +209,16 @@ for (const changedSetting of ["project", "coordinatorThread"] as const) {
       background: { service: () => {} },
       sdk: {
         threads: {
-          async spawn() {
+          async spawn(input: { prompt: string }) {
             spawns++;
-            return { id: "unexpected-worker" };
+            spawnedPrompt = input.prompt;
+            return { id: "worker" };
+          },
+          async list() {
+            return [];
+          },
+          async getPluginMetadata() {
+            return {};
           },
         },
       },
@@ -216,18 +234,43 @@ for (const changedSetting of ["project", "coordinatorThread"] as const) {
       await tools
         .get("ensemble_create_task")!
         .execute({ id: taskId, title: "Race" }, context);
-      await assert.rejects(
-        tools.get("ensemble_delegate")!.execute(
-          {
-            id: "10000000-0000-4000-8000-000000000011",
-            taskId,
-            brief: "Do not launch after revocation",
-          },
-          context,
-        ),
-        /configured (project|coordinator)/,
-      );
+      const request = {
+        id: "10000000-0000-4000-8000-000000000011",
+        taskId,
+        brief: "Do not launch after revocation",
+      };
+      const delegate = () =>
+        tools.get("ensemble_delegate")!.execute(request, context);
+      const refusal =
+        changedSetting === "provider" || changedSetting === "model"
+          ? /Configure the worker provider and model first/
+          : /configured (project|coordinator)/;
+      await assert.rejects(delegate(), refusal);
       assert.equal(spawns, 0);
+      reads = 0;
+      finalOverride = false;
+      const assignments = JSON.parse(
+        await tools.get("ensemble_assignments")!.execute({}, context),
+      );
+      assert.equal(assignments[0].state, "pending");
+      assert.equal(assignments[0].threadId, null);
+      assert.equal(assignments[0].id, request.id);
+      assert.equal(assignments[0].taskId, taskId);
+      assert.equal(assignments[0].brief, request.brief);
+      reads = 1;
+      finalOverride = true;
+      await assert.rejects(delegate(), refusal);
+      assert.equal(spawns, 0);
+      reads = 0;
+      finalOverride = false;
+      config.instructions = "Changed after refusal";
+      const launched = JSON.parse(await delegate());
+      assert.equal(launched.state, "running");
+      assert.equal(launched.id, request.id);
+      assert.equal(launched.threadId, "worker");
+      assert.equal(spawns, 1);
+      assert.match(spawnedPrompt, /Investigate only/);
+      assert.doesNotMatch(spawnedPrompt, /Changed after refusal/);
     } finally {
       db.close();
     }

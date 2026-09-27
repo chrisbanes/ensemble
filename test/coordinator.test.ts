@@ -221,3 +221,131 @@ test("ambiguous launches do not prevent later assignments from reconciling", asy
     f.close();
   }
 });
+
+test("known local refusal stays pending across restart and retries only on request", async () => {
+  const f = fixture();
+  let calls = 0;
+  try {
+    f.store.createTask("task", f.projectId, "Investigate");
+    const original = f.store.assign(
+      "assignment",
+      "task",
+      f.projectId,
+      "Find the cause",
+    );
+    const refused = new Coordinator(
+      f.store,
+      {
+        async spawn() {
+          calls++;
+          return { kind: "not-submitted", reason: "Configuration changed" };
+        },
+        async find() {
+          throw new Error("pending work must not be reconciled");
+        },
+      },
+      f.hostKey,
+    );
+    await assert.rejects(
+      refused.launch("assignment", "lead"),
+      /Configuration changed/,
+    );
+    const reopened = f.reopen();
+    assert.deepEqual(reopened.get("assignment"), original);
+    assert.equal(reopened.getConversationBinding("assignment"), undefined);
+    const retry = new Coordinator(
+      reopened,
+      {
+        async spawn(assignment) {
+          calls++;
+          assert.deepEqual({ ...assignment, state: "pending" }, original);
+          return "worker";
+        },
+        async find() {
+          throw new Error("pending work must not be reconciled");
+        },
+      },
+      f.hostKey,
+    );
+    await retry.reconcile();
+    assert.equal(calls, 1);
+    assert.equal((await retry.launch("assignment", "lead")).state, "running");
+    assert.equal(calls, 2);
+  } finally {
+    f.close();
+  }
+});
+
+test("local refusal cannot reset an attached or completed assignment", async () => {
+  const f = fixture();
+  try {
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
+    const coordinator = new Coordinator(
+      f.store,
+      {
+        async spawn() {
+          f.store.attachConversation("assignment", f.hostKey, "worker");
+          return { kind: "not-submitted", reason: "Configuration changed" };
+        },
+        async find() {
+          return [];
+        },
+      },
+      f.hostKey,
+    );
+    await assert.rejects(
+      coordinator.launch("assignment", "lead"),
+      /Configuration changed/,
+    );
+    assert.equal(f.store.get("assignment").state, "running");
+    assert.equal(
+      f.store.getConversationBinding("assignment")?.externalConversationId,
+      "worker",
+    );
+    f.store.complete("assignment", f.projectId, f.hostKey, "worker", "done");
+    assert.equal(f.store.restoreUnsubmittedLaunch("assignment"), false);
+    assert.equal(f.store.get("assignment").state, "completed");
+  } finally {
+    f.close();
+  }
+});
+
+test("concurrent delegation does not start a second launch during local refusal", async () => {
+  const f = fixture();
+  let calls = 0;
+  let refuse!: (value: { kind: "not-submitted"; reason: string }) => void;
+  const pending = new Promise<{ kind: "not-submitted"; reason: string }>(
+    (resolve) => {
+      refuse = resolve;
+    },
+  );
+  try {
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
+    const coordinator = new Coordinator(
+      f.store,
+      {
+        async spawn() {
+          calls++;
+          return pending;
+        },
+        async find() {
+          return [];
+        },
+      },
+      f.hostKey,
+    );
+    const first = coordinator.launch("assignment", "lead");
+    assert.equal(
+      (await coordinator.launch("assignment", "lead")).state,
+      "launching",
+    );
+    refuse({ kind: "not-submitted", reason: "Configuration changed" });
+    await assert.rejects(first, /Configuration changed/);
+    assert.equal(calls, 1);
+    assert.equal(f.store.get("assignment").state, "pending");
+  } finally {
+    f.close();
+  }
+});
