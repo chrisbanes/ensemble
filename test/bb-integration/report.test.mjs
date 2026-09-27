@@ -1036,6 +1036,68 @@ test("workspace intent report rejects competing owners, duplicate matches and mi
   );
 });
 
+function asynchronouslyFailedMissingEnvironmentReports() {
+  const reports = validT5Reports();
+  const missing = reports.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment;
+  const threadId = "missing-environment-thread";
+  Object.assign(missing, {
+    rejectedAtSpawn: false,
+    threadId,
+    status: "error",
+    spawnError: null,
+    threadEvents: [
+      {
+        name: "thread.failed",
+        threadId,
+        data: {
+          error: "HTTP 404: Environment not found",
+          thread: { id: threadId, status: "error" },
+        },
+      },
+    ],
+  });
+  return reports;
+}
+
+test("workspace report accepts synchronous and asynchronous missing-environment rejection", () => {
+  assert.doesNotThrow(() => assertT5Reports(validT5Reports()));
+  const reports = asynchronouslyFailedMissingEnvironmentReports();
+  const missing = reports.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment;
+
+  assert.deepEqual(missing.providerTrace, []);
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("workspace report requires an asynchronous thread failure without provider effects", () => {
+  const missingFailure = asynchronouslyFailedMissingEnvironmentReports();
+  missingFailure.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.threadEvents = [];
+  assert.throws(
+    () => assertT5Reports(missingFailure),
+    /must record thread.failed/u,
+  );
+
+  const wrongThread = asynchronouslyFailedMissingEnvironmentReports();
+  wrongThread.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.threadEvents[0].threadId = "other-thread";
+  assert.throws(() => assertT5Reports(wrongThread), /strictly equal/u);
+
+  const providerStarted = asynchronouslyFailedMissingEnvironmentReports();
+  providerStarted
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.missingEnvironment.providerTrace.push({ method: "turn/start" });
+  assert.throws(
+    () => assertT5Reports(providerStarted),
+    /must not start a provider/u,
+  );
+});
+
 test("workspace reconciliation follows the observed owner in either input order", () => {
   for (const ownerIndex of [0, 1]) {
     const reports = validT5Reports();

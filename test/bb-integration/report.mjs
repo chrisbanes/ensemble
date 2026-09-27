@@ -2082,9 +2082,28 @@ function assertInitialWorkspaceEvidence(identities, observed) {
   }
   const missing = observed.missingEnvironment;
   assert.equal(missing?.environmentId, identities.missingEnvironmentId);
-  assert.equal(missing?.rejectedAtSpawn, true);
-  assert.equal(missing.threadId, null);
-  requireString(missing.spawnError, "missing environment rejection");
+  if (missing?.rejectedAtSpawn === true) {
+    assert.equal(missing.threadId, null);
+    assert.equal(missing.status, "rejected-at-spawn");
+    requireString(missing.spawnError, "missing environment rejection");
+    assert.deepEqual(missing.threadEvents, []);
+  } else {
+    assert.equal(missing?.rejectedAtSpawn, false);
+    requireString(missing.threadId, "missing environment thread ID");
+    assert.equal(missing.status, "error");
+    assert.equal(missing.spawnError, null);
+    const failure = missing.threadEvents?.find(
+      (event) => event.name === "thread.failed",
+    );
+    assert(failure, "missing environment thread must record thread.failed");
+    assert.equal(failure.threadId, missing.threadId);
+    assert.equal(failure.data?.thread?.id, missing.threadId);
+    assert.equal(failure.data?.thread?.status, "error");
+    assert(
+      hasEvidenceValue(failure.data?.error),
+      "missing environment thread failure must include its error",
+    );
+  }
   assert.deepEqual(
     missing.providerTrace,
     [],

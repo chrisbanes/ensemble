@@ -225,43 +225,46 @@ confirm cancellation, the fixture keeps its wait and the report remains
 `failed-capability`; T02/T06/T08 stay blocked. Fixture startup or event-capture
 failures remain inconclusive, not BB capability failures.
 
-## T1–T3 permission, workspace and report evidence — 26 September 2026
+## T2 and T5 permission, workspace and report evidence — 26 September 2026
 
-T3's report contract gives explicit rows to the permission/environment matrix
-and six named T5 observations. Every row labels its scope as a BB fixture
-observation and carries the tested source revision, integration-source digest,
-provider-bridge hash, three fixture-source SHA-256 values, lockfile artifact
-integrities and installed package-tree hashes. A separate proposed Ensemble
-contract records cleanup decisions; the report does not count that policy as a
-BB observation or a passing product gate.
+The integration report contract gives explicit rows to the T2
+permission/environment matrix and six named T5 observations. Every row labels
+its scope as a BB fixture observation and carries the tested source revision,
+integration-source digest, provider-bridge hash, three fixture-source SHA-256
+values, lockfile artifact integrities and installed package-tree hashes. A
+separate proposed Ensemble contract records cleanup decisions; the report does
+not count that policy as a BB observation or a passing product gate.
 
-The T1 permission matrix requests `accept-edits`, `auto` and `full` from the
-scripted provider. Its report checks one matching `turn/start` trace per mode,
-the requested project/model/environment inputs, reuse of one managed worktree,
-and the environment/thread IDs after restart. A synthetic unavailable
-environment is rejected with no provider trace. This demonstrates request
-forwarding and public rejection only; it does not prove provider enforcement,
-shell containment, ambient-credential isolation or restrictions on direct BB
-API access.
+The T2 permission/environment scenario in
+`test/bb-integration/execution.test.mjs` requests `accept-edits`, `auto` and
+`full` from the scripted provider. Its report checks one matching `turn/start`
+trace per mode, the requested project/model/environment inputs, reuse of one
+managed worktree, and the environment/thread IDs after restart. A synthetic
+unavailable environment is rejected with no provider trace. This demonstrates
+request forwarding and public rejection only; it does not prove provider
+enforcement, shell containment, ambient-credential isolation or restrictions on
+direct BB API access.
 
-T2's test-local SQLite intent joined two competing provisioning attempts and,
-after a dropped accepted response and restart, reconciled one task thread and
-environment. Two raw parallel BB spawns still created two distinct environments;
-the fixture does not implement production task/workspace binding. Its
-unavailable-environment case uses a synthetic ID and therefore does not model an
-environment reclaimed by BB. The second-plugin scenario records zero provider
-effects while queued on that plugin and one tool effect after release, without
-an Ensemble writer reservation.
+The T5 initial-workspace scenario in
+`test/bb-integration/recovery-gates.test.mjs` uses a test-local SQLite intent to
+join two competing provisioning attempts and, after a dropped accepted response
+and restart, reconcile one task thread and environment. Two raw parallel BB
+spawns still created two distinct environments; the fixture does not implement
+production task/workspace binding. Its unavailable-environment case uses a
+synthetic ID and therefore does not model an environment reclaimed by BB. The
+T5 composed-writer-admission scenario in the same file records zero provider
+effects while queued on the second plugin and one tool effect after release,
+without an Ensemble writer reservation.
 
-The A17 fixture wrote a dirty marker into a managed worktree. Archiving and
-deleting the first thread left the marker and shared environment while the
-second thread remained live. After the final archive and deletion, the sampled
-environment became `destroyed` and both marker and worktree were absent within
-the seven-minute bound. This direct BB fixture observation keeps A17 open: it
-does not implement the proposed delivery/preservation policy or prove that
-automatic cleanup is safe for general workspaces. The stop/writer gate also
-remains open. #665 remains a separate failed startup capability and continues
-to block T06/T08.
+The T5 A17 scenario in `test/bb-integration/recovery-gates.test.mjs` wrote a
+dirty marker into a managed worktree. Archiving and deleting the first thread
+left the marker and shared environment while the second thread remained live.
+After the final archive and deletion, the sampled environment became
+`destroyed` and both marker and worktree were absent within the seven-minute
+bound. This direct BB fixture observation keeps A17 open: it does not implement
+the proposed delivery/preservation policy or prove that automatic cleanup is
+safe for general workspaces. The stop/writer gate also remains open. #665 remains
+a separate failed startup capability and continues to block T06/T08.
 
 At the time of the 2026-09-24 qualification, the GitHub releases page listed BB
 desktop **0.43.4** as the latest stable release ([BB releases](https://github.com/get-bb/bb/releases)).
