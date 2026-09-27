@@ -577,22 +577,28 @@ fixture-only evidence does not implement Ensemble ownership or cleanup policy.
 
 The focused T2 stop record and integrated report at `1b70716` are historical
 client SDK 0.5.29 evidence; they measured 2,727 ms / 2,378 ms and 2,416 ms /
-2,125 ms respectively. The current integrated report is bound to runtime head
-`88b438439868d42c03950c0d2db87436b036ad9a` and measured 2,388 ms after recheck
-with 2,091 ms stable no-start on client package 0.5.30 and host SDK 0.5.29. See
-the acceptance record for its report hash. The distinct runs confirm exact-ID
-cancellation, a matching event and queue absence before release, but not a
-general writer guarantee. `stop-writer-release` remains open: the observation
+2,125 ms respectively. The former integrated report at `88b4384` is also
+historical; it measured 2,388 ms after recheck with 2,091 ms stable no-start on
+client package 0.5.30 and host SDK 0.5.29. The current integrated report is
+bound to tested runtime head `712edd8c5e031af0a7deb4183e37c79c5e1a4dec`; it
+measured 4,387 ms after recheck with 2,286 ms stable no-start and has SHA-256
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. The
+pinned suites passed on that tested runtime head; this documentation-only
+follow-up adds no runtime result. The distinct runs confirm exact-ID cancellation,
+a matching event and queue absence before release, but not a general writer
+guarantee. `stop-writer-release` remains open: the observation
 covers one scripted held message, not arbitrary process termination or complete
 Ensemble writer exclusion. Unconfirmed cancellation remains
 `failed-capability`; startup or event-capture failure is inconclusive.
 
-The current A17 record observed the dirty marker and shared worktree remain
-while the second live thread existed. After final archive and deletion, BB
-removed the marker and worktree and reported the environment `destroyed` at
-306,059 ms, within the seven-minute sampling bound. A17 remains open because
-direct BB lifecycle observations do not prove delivery, preservation or
-automatic-cleanup policy. The accepted product guarantees remain unchanged.
+The live A17 run observed the dirty marker and shared worktree remain while the
+second live thread existed. After final archive and deletion, BB removed the
+marker and worktree and returned the original environment ID with status
+`destroyed` at 306,740 ms, across 21 samples. A focused report-validator
+regression accepted an environment result with a null ID; the live A17 run
+returned the original ID. A17 remains open because direct BB lifecycle
+observations do not prove delivery, preservation or automatic-cleanup policy.
+The accepted product guarantees remain unchanged.
 
 The inspected client SDK package 0.5.29 declarations exposed `threads.stop`,
 turn-specific `threads.retry`, queued-message APIs, and the `message.dispatch`
@@ -607,7 +613,7 @@ integration test results.
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and fresh queue reads were observed. The earlier focused 0.5.29 run measured 2,727 ms / 2,378 ms; the current integrated report with client SDK 0.5.30 and host SDK 0.5.29 measured 2,388 ms / 2,091 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and fresh queue reads were observed. The historical focused 0.5.29 run measured 2,727 ms / 2,378 ms; the former integrated 0.5.30 report measured 2,388 ms / 2,091 ms. The current integrated report on tested runtime head `712edd8` measured 4,387 ms / 2,286 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
 | Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent joined two attempts and chose one thread/environment after restart; two raw parallel BB spawns created separate environments. A synthetic missing environment was rejected without a provider trace | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |

@@ -146,16 +146,27 @@ neither measurement is current no-start acceptance evidence.
 
 The reports at `33bd3062531bd2ab717d4ea8d4a29752c6388058` and
 `1b70716c67aec82835c363776cb79f8625b0a605` are historical client SDK 0.5.29
-evidence and do not qualify the #683 delivery base. Current acceptance is the
-integrated report for runtime head `88b438439868d42c03950c0d2db87436b036ad9a`,
-SHA-256 `a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8`.
-Its `sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0,
+evidence and do not qualify the #683 delivery base. The former current report
+for runtime head `88b438439868d42c03950c0d2db87436b036ad9a` is historical too;
+it had SHA-256
+`a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8` and
+measured 2,388 ms after recheck with 2,091 ms stable no-start.
+
+Current acceptance is the integrated report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec`, SHA-256
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. Its
+`sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0,
 BB 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
-`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`.
-The report outcome is `completed-with-capability-gaps`; its stop observation measured
-2,388 ms after recheck and 2,091 ms stable no-start. All six T5 rows remain open.
-T4 retains the expected #665 accepted-queue failure as `failed-capability`, and
-T06/T08 remain blocked.
+`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
+on that tested revision; this documentation-only follow-up does not imply a new
+runtime run. The report outcome is `completed-with-capability-gaps`; its stop
+observation measured 4,387 ms after recheck and 2,286 ms stable no-start. The
+live A17 run returned the original environment ID with status `destroyed` after
+21 samples over 306,740 ms, with the marker and worktree absent. The focused
+report-validator regression accepted an environment result with a null ID; the
+live A17 run returned the original ID. All six T5 rows remain open. T4 retains
+the expected #665 accepted-queue failure as `failed-capability`, and T06/T08
+remain blocked.
 
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain

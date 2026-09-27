@@ -225,18 +225,28 @@ integrated report at `33bd3062531bd2ab717d4ea8d4a29752c6388058` recorded
 in focused T5 and 2,361 ms / 2,066 ms in an integrated run; the trace-timing
 finding invalidated their no-start measurements.
 
-The current measured integrated report is bound to runtime head
+The former integrated report for runtime head
 `88b438439868d42c03950c0d2db87436b036ad9a`, SHA-256
-`a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8`; its
+`a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8`, is
+historical. It used client package `@get-bb/plugin-sdk` 0.5.30 with BB 0.44.0
+and host plugin SDK 0.5.29. Its stop observation measured 2,388 ms after
+recheck and 2,091 ms stable no-start; its A17 observation reported the
+environment destroyed at 306,059 ms.
+
+The current measured integrated report is bound to tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec`, SHA-256
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`; its
 `sourceRevision` matches that runtime head. On Node 24.21.0/npm 12.1.0, BB
 0.44.0, host plugin SDK 0.5.29, and client package `@get-bb/plugin-sdk` 0.5.30,
 `npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
-passed. The report outcome is `completed-with-capability-gaps`.
+passed on that tested runtime revision. This documentation-only follow-up does
+not claim a new runtime run. The report outcome is
+`completed-with-capability-gaps`.
 
-The distinct T2 execution manifest SHA-256 is
-`fbc164a582ede0331659d9cf35c3c8d8e9615fa3d353479146f85ed9e7cc7124`; the
+The integrated T2 execution manifest SHA-256 is
+`4ef00ed887dc0c60e87c6873cd982bac7f336357cd8b38100bbababb022b4c6a`; the
 permission/environment manifest SHA-256 is
-`953f6477fe9402fa261863f9b228d1901fbcba6832d5cb707f9c6e35ce61b08a`. Both
+`36b63a6fd352d7ea520a175c3a4c39ff180ea88ec97bda45c8d5c2efcd8bd9aa`. Both
 passed with client SDK package 0.5.30. All six T1–T5 fixture manifests, counting
 the two separate T2 manifests, record exited owned processes, closed server and
 daemon ports, no forced cleanup, and removal of their disposable roots. T4's
@@ -246,15 +256,16 @@ raw test preserves the expected #665 failure diagnostic; its aggregate row is
 The report contains six T5 scenario rows, all `open`. The stop observation
 records stop acknowledgement while the delayed thread remained `pending`,
 exact-ID cancellation with a matching `message.cancelled` event, and an empty
-queue before release. It measured 2,388 ms after recheck with 2,091 ms stable
-no-start and zero provider starts/effects. The A17 observation retained the
-dirty marker and shared worktree while another thread was live; after final
-archive/delete BB removed them and reported the environment `destroyed` at
-306,059 ms. These are fixture observations only: `stop-writer-release` and A17
-remain open, as do the other T5 gates. They do not prove arbitrary process
-termination, complete writer exclusion, or Ensemble cleanup policy. The report
-does not stand in for the authenticated-provider smoke required for the later
-operational release gate.
+queue before release. It measured 4,387 ms after recheck with 2,286 ms stable
+no-start and zero provider starts/effects. The live A17 run sampled for
+306,740 ms over 21 observations; BB returned the original environment ID with
+status `destroyed`, and the marker and worktree were absent. The focused
+report-validator regression accepted an environment result with a null ID; the
+live A17 result returned the original ID. These are fixture observations only:
+`stop-writer-release` and A17 remain open, as do the other T5 gates. They do not
+prove arbitrary process termination, complete writer exclusion, or Ensemble
+cleanup policy. The report does not stand in for the authenticated-provider
+smoke required for the later operational release gate.
 
 The new evidence supports removing only the #676-specific T02 block; T06/T08
 remain blocked by #665 and other gates. If cancellation is unconfirmed, the stop
