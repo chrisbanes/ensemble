@@ -938,7 +938,10 @@ test("permission report binds unavailable-environment rejection to its target", 
     rejectedAtSpawn: false,
     threadId: "missing-environment-thread",
     status: "error",
-    error: { code: "ENVIRONMENT_NOT_FOUND" },
+    error: {
+      code: "http_500",
+      message: "HTTP 500: HTTP 404: Environment not found",
+    },
   });
   assert.doesNotThrow(() => assertIntegrationReport(identifiedByNotFound));
 
@@ -965,6 +968,23 @@ test("permission report binds unavailable-environment rejection to its target", 
     () => assertIntegrationReport(unrelatedThreadFailure),
     /must identify the requested missing environment or a not-found code/u,
   );
+
+  for (const error of [
+    { code: "THREAD_NOT_FOUND", message: "HTTP 404: Thread not found" },
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+    },
+  ]) {
+    const unrelatedNotFound = validReport();
+    unrelatedNotFound.rows.find(
+      (entry) => entry.id === "permission-environment-forwarding",
+    ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = error;
+    assert.throws(
+      () => assertIntegrationReport(unrelatedNotFound),
+      /must identify the requested missing environment or a not-found code/u,
+    );
+  }
 });
 
 test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
@@ -1165,22 +1185,27 @@ test("workspace report requires an asynchronous thread failure without provider 
 });
 
 test("workspace report rejects unrelated synchronous and asynchronous errors", () => {
-  const unrelatedSpawnFailure = validT5Reports();
-  unrelatedSpawnFailure.find(
-    (entry) => entry.name === "initial-workspace-identity",
-  ).observed.missingEnvironment.spawnError = "BB daemon connection reset";
-  assert.throws(
-    () => assertT5Reports(unrelatedSpawnFailure),
-    /must identify the requested missing environment or a not-found code/u,
-  );
+  for (const spawnError of [
+    "BB daemon connection reset",
+    "HTTP 404: BB daemon route not found",
+  ]) {
+    const unrelatedSpawnFailure = validT5Reports();
+    unrelatedSpawnFailure.find(
+      (entry) => entry.name === "initial-workspace-identity",
+    ).observed.missingEnvironment.spawnError = spawnError;
+    assert.throws(
+      () => assertT5Reports(unrelatedSpawnFailure),
+      /must identify the requested missing environment or a not-found code/u,
+    );
+  }
 
   const unrelatedThreadFailure =
     asynchronouslyFailedMissingEnvironmentReports();
   unrelatedThreadFailure.find(
     (entry) => entry.name === "initial-workspace-identity",
   ).observed.missingEnvironment.threadEvents[0].data.error = {
-    code: "WORKER_EXITED",
-    message: "Provider setup failed before the turn started",
+    code: "THREAD_NOT_FOUND",
+    message: "HTTP 404: Thread not found",
   };
   assert.throws(
     () => assertT5Reports(unrelatedThreadFailure),

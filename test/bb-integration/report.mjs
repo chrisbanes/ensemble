@@ -218,9 +218,8 @@ export function isMissingEnvironmentRejection(error, environmentId) {
   const errorText = typeof error === "string" ? error : JSON.stringify(error);
   return (
     errorText.includes(environmentId) ||
-    /\b404\b|\benvironment[\s_-]+not[\s_-]+found\b|\bnot[\s_-]+found[\s_-]+environment\b/iu.test(
-      errorText,
-    )
+    /\benvironment[\s_-]+(?:was[\s_-]+)?not[\s_-]+found\b/iu.test(errorText) ||
+    /\bnot[\s_-]+found[\s_-]+(?:the[\s_-]+)?environment\b/iu.test(errorText)
   );
 }
 
