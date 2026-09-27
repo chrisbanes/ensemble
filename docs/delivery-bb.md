@@ -434,7 +434,7 @@ confirms actual termination. Include unavailable-machine and canceled-request UI
 
 ## T10 — Qualify the complete local-task milestone
 
-**Depends on:** T05, T07, T08, T09, T02. **Acceptance:** local gate in acceptance.md.
+**Depends on:** T05, T07, T08, T09, T02. **Acceptance:** local gate in [acceptance-bb.md](acceptance-bb.md#gates).
 
 Automate the full UI-to-lead-to-owner-to-worker-to-result journey, including a
 review/revision chosen by instructions, human question, restart and duplicate
