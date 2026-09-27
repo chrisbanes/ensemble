@@ -2336,6 +2336,11 @@ function assertA17RetentionEvidence(identities, observed) {
     last.retirementObserved === true,
     "A17 retirement summary must agree with the final bounded sample",
   );
+  assert.equal(
+    observed.retirementObserved,
+    true,
+    "A17 must observe environment retirement and dirty-worktree absence within the bounded window",
+  );
   if (last.environmentId === null) {
     assert.deepEqual(
       observed.environmentAfterLastDelete,
@@ -2353,16 +2358,22 @@ function assertA17RetentionEvidence(identities, observed) {
   }
   assert.equal(typeof observed.markerExistsAfterLastDelete, "boolean");
   assert.equal(typeof observed.workspaceExistsAfterLastDelete, "boolean");
-  if (observed.retirementObserved) {
-    assert.equal(last.environmentRetired, true);
-    assert.equal(last.workspaceExists, false);
-    assert.equal(last.markerExists, false);
-    if (last.environmentId !== null) {
-      assert.equal(observed.environmentAfterLastDelete.status, "destroyed");
-    }
-    assert.equal(observed.markerExistsAfterLastDelete, false);
-    assert.equal(observed.workspaceExistsAfterLastDelete, false);
+  assert.equal(last.environmentRetired, true);
+  assert.equal(last.workspaceExists, false);
+  assert.equal(last.markerExists, false);
+  if (last.environmentId !== null) {
+    assert.equal(observed.environmentAfterLastDelete.status, "destroyed");
   }
+  assert.equal(
+    observed.markerExistsAfterLastDelete,
+    false,
+    "A17 final marker must be absent after the last delete",
+  );
+  assert.equal(
+    observed.workspaceExistsAfterLastDelete,
+    false,
+    "A17 final worktree must be absent after the last delete",
+  );
 }
 
 export function assertT5Reports(rows) {

@@ -15,6 +15,7 @@ import { test as nodeTest } from "node:test";
 import {
   bbCli,
   fixtureGit,
+  measureA17RetirementSample,
   resolveExistingPathWithinRoot,
   restartBb,
   rpc,
@@ -1846,44 +1847,51 @@ gateTest(
     const retirementObservations = [];
     let retirementObserved = false;
     while (Date.now() <= retirementDeadline) {
-      const sampledAt = Date.now();
-      const [environmentResult, markerExists, workspaceExists] =
-        await Promise.all([
-          pluginRpc(instance, fixturePluginId, "recovery.run", {
-            operation: "environment-by-id-observation",
-            environmentId,
-          }).catch((error) => ({ fixtureRpcError: String(error) })),
-          fileExists(markerPath),
-          fileExists(workspacePath),
-        ]);
-      const environment = environmentResult.environment ?? null;
-      const environmentLookupError =
-        environmentResult.environmentLookupError ?? null;
-      const requestedEnvironmentId =
-        environmentResult.requestedEnvironmentId ?? environmentId;
-      const environmentConfirmedMissing = isMissingEnvironmentRejection(
-        environmentLookupError,
-        requestedEnvironmentId,
+      const observation = await measureA17RetirementSample(
+        retirementStartedAt,
+        async () => {
+          const environmentResult = await pluginRpc(
+            instance,
+            fixturePluginId,
+            "recovery.run",
+            {
+              operation: "environment-by-id-observation",
+              environmentId,
+            },
+          ).catch((error) => ({ fixtureRpcError: String(error) }));
+          const [markerExists, workspaceExists] = await Promise.all([
+            fileExists(markerPath),
+            fileExists(workspacePath),
+          ]);
+          const environment = environmentResult.environment ?? null;
+          const environmentLookupError =
+            environmentResult.environmentLookupError ?? null;
+          const requestedEnvironmentId =
+            environmentResult.requestedEnvironmentId ?? environmentId;
+          const environmentConfirmedMissing = isMissingEnvironmentRejection(
+            environmentLookupError,
+            requestedEnvironmentId,
+          );
+          const environmentRetired =
+            environmentConfirmedMissing ||
+            (environment?.id === environmentId &&
+              environment.status === "destroyed");
+
+          return {
+            requestedEnvironmentId,
+            environmentId: environment?.id ?? null,
+            environmentStatus: environment?.status ?? null,
+            environmentLookupError,
+            fixtureRpcError: environmentResult.fixtureRpcError ?? null,
+            environmentConfirmedMissing,
+            environmentRetired,
+            workspaceExists,
+            markerExists,
+            retirementObserved:
+              environmentRetired && !workspaceExists && !markerExists,
+          };
+        },
       );
-      const environmentRetired =
-        environmentConfirmedMissing ||
-        (environment?.id === environmentId &&
-          environment.status === "destroyed");
-      const observation = {
-        elapsedMs: sampledAt - retirementStartedAt,
-        sampledAt: new Date(sampledAt).toISOString(),
-        requestedEnvironmentId,
-        environmentId: environment?.id ?? null,
-        environmentStatus: environment?.status ?? null,
-        environmentLookupError,
-        fixtureRpcError: environmentResult.fixtureRpcError ?? null,
-        environmentConfirmedMissing,
-        environmentRetired,
-        workspaceExists,
-        markerExists,
-        retirementObserved:
-          environmentRetired && !workspaceExists && !markerExists,
-      };
       retirementObservations.push(observation);
       capture({
         stage: "bounded post-delete dirty-worktree retirement observations",
@@ -1931,7 +1939,10 @@ gateTest(
       environmentSharedAfterArchiveAndDelete &&
       secondAfterArchive.status === "idle" &&
       remainingLiveThread.status === "idle" &&
-      remainingLiveThread.environmentId === environmentId;
+      remainingLiveThread.environmentId === environmentId &&
+      retirementObserved &&
+      markerExistsAfterLastDelete === false &&
+      finalRetirementObservation?.workspaceExists === false;
     const finalReport = {
       verdict: retentionPassed ? "open" : "fail",
       identities: {

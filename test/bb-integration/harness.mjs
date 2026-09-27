@@ -112,6 +112,20 @@ export async function writeA17RetentionMarker(markerPath) {
   });
 }
 
+export async function measureA17RetirementSample(
+  startedAt,
+  observe,
+  now = Date.now,
+) {
+  const observation = await observe();
+  const sampledAt = now();
+  return {
+    ...observation,
+    elapsedMs: sampledAt - startedAt,
+    sampledAt: new Date(sampledAt).toISOString(),
+  };
+}
+
 function sanitize(text, root) {
   let sanitized = text
     .replaceAll(root, "<isolated-root>")

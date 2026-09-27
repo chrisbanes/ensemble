@@ -13,6 +13,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  measureA17RetirementSample,
   resolveExistingPathWithinRoot,
   resolveFixtureManifestPath,
   resolveT2FixtureManifestPaths,
@@ -119,6 +120,26 @@ test("A17 marker creation refuses an existing symlink", async (t) => {
     await readFile(outsideMarker, "utf8"),
     "preserve this external file\n",
   );
+});
+
+test("A17 sample time includes completion of its lookup request", async () => {
+  const startedAt = 10_000;
+  let completedAt = startedAt;
+  const sample = await measureA17RetirementSample(
+    startedAt,
+    async () => {
+      await Promise.resolve();
+      completedAt = startedAt + 1_234;
+      return { environmentId: "env_fixture" };
+    },
+    () => completedAt,
+  );
+
+  assert.deepEqual(sample, {
+    environmentId: "env_fixture",
+    elapsedMs: 1_234,
+    sampledAt: new Date(startedAt + 1_234).toISOString(),
+  });
 });
 
 function evidenceValue(fieldPath) {
@@ -1461,6 +1482,43 @@ test("A17 requires dirty-file observations and a finite retirement window", () =
     () => assertT5Reports(missingDirtyFile),
     /markerExistsAfterFinalArchive/u,
   );
+});
+
+test("A17 requires observed retirement and final artifact absence", () => {
+  const unobservedRetirement = validT5Reports();
+  const unobserved = unobservedRetirement.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  unobserved.retirementObserved = false;
+  Object.assign(unobserved.retirementObservations.at(-1), {
+    environmentStatus: "ready",
+    environmentRetired: false,
+    retirementObserved: false,
+  });
+  unobserved.environmentAfterLastDelete.status = "ready";
+  assert.throws(
+    () => assertT5Reports(unobservedRetirement),
+    /A17 must observe environment retirement/u,
+  );
+
+  for (const field of [
+    "markerExistsAfterLastDelete",
+    "workspaceExistsAfterLastDelete",
+  ]) {
+    const artifactRemains = validT5Reports();
+    artifactRemains.find(
+      (entry) => entry.name === "a17-shared-worktree-retention",
+    ).observed[field] = true;
+    assert.throws(
+      () => assertT5Reports(artifactRemains),
+      new RegExp(
+        field === "markerExistsAfterLastDelete"
+          ? "A17 final marker must be absent"
+          : "A17 final worktree must be absent",
+        "u",
+      ),
+    );
+  }
 });
 
 test("A17 accepts retirement confirmed by a missing environment response", () => {
