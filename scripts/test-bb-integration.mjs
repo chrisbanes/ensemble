@@ -10,6 +10,7 @@ import {
   assertIntegrationReport,
   assertT5Reports,
   buildIntegrationReport,
+  combineT2FixtureManifests,
   readIntegrationReport,
   sanitizeIntegrationData,
   writeIntegrationReport,
@@ -49,7 +50,10 @@ const suiteRunDirectory = path.join(
   "node_modules/.cache/ensemble-bb-integration/suite-run",
 );
 const t5ReportDirectory = path.join(suiteRunDirectory, "t5-gates");
-const scenarioTimeoutMs = 300_000;
+// T5 includes a bounded seven-minute post-delete worktree observation.
+function scenarioTimeoutMs(scenarioId) {
+  return scenarioId === "T5" ? 900_000 : 300_000;
+}
 const maxOutputBytes = 16 * 1024 * 1024;
 
 const scenarios = [
@@ -126,7 +130,21 @@ async function integrationSourceDigest() {
 }
 
 async function runScenario(scenario, manifestFile) {
+  const timeoutMs = scenarioTimeoutMs(scenario.id);
   const command = `${process.execPath} --test --test-reporter=tap ${scenario.file}`;
+  const t2ManifestFiles =
+    scenario.id === "T2"
+      ? {
+          execution: path.join(
+            path.dirname(manifestFile),
+            "T2.execution.run-manifest.json",
+          ),
+          permissionEnvironment: path.join(
+            path.dirname(manifestFile),
+            "T2.permission-environment.run-manifest.json",
+          ),
+        }
+      : null;
   const child = spawn(
     process.execPath,
     ["--test", "--test-reporter=tap", scenario.file],
@@ -135,6 +153,14 @@ async function runScenario(scenario, manifestFile) {
       env: {
         ...process.env,
         ENSEMBLE_T1_RUN_MANIFEST_PATH: manifestFile,
+        ...(t2ManifestFiles
+          ? {
+              ENSEMBLE_T2_EXECUTION_RUN_MANIFEST_PATH:
+                t2ManifestFiles.execution,
+              ENSEMBLE_T2_PERMISSION_ENVIRONMENT_RUN_MANIFEST_PATH:
+                t2ManifestFiles.permissionEnvironment,
+            }
+          : {}),
         ENSEMBLE_T5_GATE_REPORT_DIRECTORY: t5ReportDirectory,
       },
       detached: process.platform !== "win32",
@@ -165,10 +191,7 @@ async function runScenario(scenario, manifestFile) {
   let timeoutCleanupError;
   let timeoutHandle;
   const timeoutResult = new Promise((resolve) => {
-    timeoutHandle = setTimeout(
-      () => resolve({ timedOut: true }),
-      scenarioTimeoutMs,
-    );
+    timeoutHandle = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
   });
   try {
     const first = await Promise.race([
@@ -192,11 +215,25 @@ async function runScenario(scenario, manifestFile) {
   } finally {
     clearTimeout(timeoutHandle);
   }
+  const readManifest = async (filePath) => {
+    try {
+      return JSON.parse(await readFile(filePath, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    }
+  };
   let manifest;
-  try {
-    manifest = JSON.parse(await readFile(manifestFile, "utf8"));
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  let t2FixtureManifests;
+  if (t2ManifestFiles) {
+    t2FixtureManifests = {
+      execution: await readManifest(t2ManifestFiles.execution),
+      permissionEnvironment: await readManifest(
+        t2ManifestFiles.permissionEnvironment,
+      ),
+    };
+  } else {
+    manifest = await readManifest(manifestFile);
   }
 
   return {
@@ -218,6 +255,7 @@ async function runScenario(scenario, manifestFile) {
         : "failed",
     output,
     manifest,
+    ...(t2FixtureManifests ? { t2FixtureManifests } : {}),
   };
 }
 
@@ -379,6 +417,31 @@ function assertT2Evidence(manifest) {
       `T2 required public event ${event} is missing`,
     );
   }
+}
+
+function assertT2PermissionEvidence(manifest) {
+  const checks = manifest.checks;
+  const advertisement = checks.permissionModeAdvertisementProbe;
+  assert(
+    advertisement,
+    "T2 provider permission advertisement evidence is missing",
+  );
+  assert.equal(advertisement.providerId, "ensemble-scripted");
+  const permissionModes = ["accept-edits", "auto", "full"];
+  assert.deepEqual(
+    [...(advertisement.advertisedModes ?? [])].sort(),
+    permissionModes,
+    "T2 provider must advertise each requested permission mode",
+  );
+  assert.deepEqual(
+    [...(advertisement.expectedModes ?? [])].sort(),
+    permissionModes,
+    "T2 permission fixture expected modes changed",
+  );
+  assert(
+    checks.permissionEnvironmentMatrix,
+    "T2 permission environment matrix is missing",
+  );
 }
 
 function assertT3Evidence(manifest) {
@@ -544,30 +607,61 @@ async function main() {
         assert.equal(
           result.timedOut,
           false,
-          `${scenario.id} timed out after ${scenarioTimeoutMs} ms${result.timeoutCleanupError ? `; ${result.timeoutCleanupError}` : ""}`,
+          `${scenario.id} timed out after ${scenarioTimeoutMs(scenario.id)} ms${
+            result.timeoutCleanupError ? `; ${result.timeoutCleanupError}` : ""
+          }`,
         );
         assert.equal(
           result.exitCode,
           0,
           `${scenario.id} test child failed\n${result.output}`,
         );
+        const expectedTestCount =
+          scenario.id === "T5" ? 7 : scenario.id === "T2" ? 2 : 1;
         assertTapSummary(
           scenario.id,
           result.output,
-          // T5 has six gate scenarios and one trace-timing regression.
-          scenario.id === "T5" ? 7 : 1,
-          scenario.id === "T5" ? 7 : 1,
+          expectedTestCount,
+          expectedTestCount,
           0,
         );
-        assert.equal(
-          result.manifest?.outcome,
-          "passed",
-          `${scenario.id} runtime manifest is not passed`,
-        );
-        assertPinnedManifest(scenario.id, result.manifest);
-        if (scenario.id === "T1") assertT1Evidence(result.manifest);
-        if (scenario.id === "T2") assertT2Evidence(result.manifest);
-        if (scenario.id === "T3") assertT3Evidence(result.manifest);
+        if (scenario.id === "T2") {
+          const executionManifest = result.t2FixtureManifests?.execution;
+          const permissionEnvironmentManifest =
+            result.t2FixtureManifests?.permissionEnvironment;
+          for (const [name, fixtureManifest] of [
+            ["T2 execution fixture", executionManifest],
+            [
+              "T2 permission environment fixture",
+              permissionEnvironmentManifest,
+            ],
+          ]) {
+            assert(fixtureManifest, `${name} did not persist a run manifest`);
+            assert.equal(
+              fixtureManifest.outcome,
+              "passed",
+              `${name} did not pass`,
+            );
+            assertPinnedManifest(name, fixtureManifest);
+          }
+          assertT2Evidence(executionManifest);
+          assertT2PermissionEvidence(permissionEnvironmentManifest);
+          result.manifest = combineT2FixtureManifests(
+            executionManifest,
+            permissionEnvironmentManifest,
+          );
+          assertPinnedManifest("T2 combined fixture evidence", result.manifest);
+          delete result.t2FixtureManifests;
+        } else {
+          assert.equal(
+            result.manifest?.outcome,
+            "passed",
+            `${scenario.id} runtime manifest is not passed`,
+          );
+          assertPinnedManifest(scenario.id, result.manifest);
+          if (scenario.id === "T1") assertT1Evidence(result.manifest);
+          if (scenario.id === "T3") assertT3Evidence(result.manifest);
+        }
       }
       if (scenario.id === "T4")
         assertPinnedManifest(scenario.id, result.manifest);
@@ -579,6 +673,7 @@ async function main() {
     } catch (error) {
       failures.push({ scenario: scenario.id, message: String(error) });
       if (result) {
+        delete result.t2FixtureManifests;
         slices[scenario.id] = result;
       } else {
         slices[scenario.id] = {

@@ -144,18 +144,135 @@ stable no-start; the distinct pre-correction integrated run recorded 2,361 ms
 with 2,066 ms stable no-start. The trace-timing race found afterward means
 neither measurement is current no-start acceptance evidence.
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` is the current acceptance evidence.
-On Node 24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29, all three
-checks passed: `npm run check`, `npm run test:bb-integration`, and
-`npm run test:bb-prototype`.
-The report contains six T5 gate rows. Its corrected stop observation records
-stop acknowledgement while pending, exact-ID cancellation with the matching
-`message.cancelled` event and queue absence before and after recheck. The
-post-recheck window was 2,378 ms, including 2,087 ms of stable no-start, with
-zero provider starts and tool effects. T4 produced its expected diagnostic, and
-every T1–T5 manifest confirms clean isolation cleanup.
+The reports at `33bd3062531bd2ab717d4ea8d4a29752c6388058` and
+`1b70716c67aec82835c363776cb79f8625b0a605` are historical client SDK 0.5.29
+evidence and do not qualify the #683 delivery base. The former current report
+for runtime head `88b438439868d42c03950c0d2db87436b036ad9a` is historical too;
+it had SHA-256
+`a1a90a8f1744e2aa077d1f259fd15854535ee23839cfb70ab298da11b0a73fd8` and
+measured 2,388 ms after recheck with 2,091 ms stable no-start.
 
+The integrated report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec` is historical for this candidate.
+Its SHA-256 is
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`; its
+`sourceRevision` matched that head. It measured 4,387 ms after recheck with
+2,286 ms stable no-start and recorded A17 retirement after 21 samples over
+306,740 ms, with the marker and worktree absent.
+
+The report for tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48` is historical for this candidate.
+Its SHA-256 is
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`; its
+`sourceRevision` matched that head. It measured a 2,318 ms stop observation
+window with 2,027 ms stable no-start and A17 retirement after 21 samples over
+306,067 ms. Its T2 execution and permission/environment manifest hashes were
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
+
+The integrated report for runtime head
+`c63da1e19221907d32e2693b7062e352c801384f` is historical for this candidate.
+Its SHA-256 is
+`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`, and its
+`sourceRevision` matched that head. It recorded a 2,316 ms stop observation
+window with 2,035 ms stable no-start and A17 retirement after 21 samples over
+305,839 ms. Its T2 execution and permission/environment manifest hashes were
+`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b` and
+`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`.
+
+The previous integrated report for runtime head
+`f523e145b445837b73ee9f7082adb87ce7712c1f` is historical for this candidate.
+Its SHA-256 was
+`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`; it
+recorded 2,306 ms stop observation and 2,020 ms stable no-start.
+
+The former current report for runtime head
+`31d724b953a95d2e9355ecf101478128f019ce91` is historical for this candidate.
+Its SHA-256 was
+`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`; it
+recorded 2,320 ms / 2,041 ms stop observations and A17 retirement after 21
+samples over 305,986 ms.
+
+The former current report for runtime head
+`914663bacb1784e37ddc246caf49c22b5b8090a1` is historical for this candidate.
+Its SHA-256 was
+`0e0ade5d9ada89634d6b229989937425185386b592a31e7527924d93d958377f`, and its
+`sourceRevision` matched that head. It recorded a 2,399 ms stop observation
+window with 2,101 ms stable no-start, and A17 retirement after 21 samples over
+305,973 ms.
+
+The former current report for runtime head
+`733271b963a5d367857984a9b8e55bd84ebd5b52` is historical for this candidate.
+Its SHA-256 was
+`dda84c3e8b81e51af8fb5c5f41f50dacd32d0a80c8e5322c1ac2adc7806bb58e`, and its
+`sourceRevision` matched that runtime head. It measured a 2,364 ms / 2,079 ms
+stop observation and A17 retirement after 21 samples over 306,019 ms. Its T2
+execution and permission/environment manifest hashes were
+`f60b7fcc6fcd27934531e527816c9be094a826b6818e740d98ae4196bf0f6ac0` and
+`146c3d91325a00b71fdf80f8c16895a1c7ff2a1279a07aa010cc937166c72244`.
+
+The former current report for runtime head
+`95b8deaba2f74d18234df9df9c47136d1b85c3f9` is historical for this candidate.
+Its SHA-256 was
+`c6dc32ae3e9a82c14b31ae1f9aefe139aa0adcf469e4b172a7b55624a21f06f2`, and its
+`sourceRevision` matched that runtime head. It measured a 2,455 ms / 2,161 ms
+stop observation and A17 retirement after 22 samples over 321,348 ms. Its T2
+execution and permission/environment manifest hashes were
+`90b455e14c2b7e4c03e97b3beb68077818131dced29e2a9b7be6bd87add5ffef` and
+`89435df501c96a5b8aa09fc16ed6b23adc8a5a79f3c1752dc6f7bc6c7a365209`.
+
+The report previously used as current was measured on runtime head
+`27bc110a99b58efca87ad7a12b685a4bf0be8c15`; it is historical for this
+candidate. Its SHA-256 was
+`c70810879b646d4d17705ad403afb161fbed982ef03dda0c61e245273de8ffae`. Its T2
+execution and permission/environment manifest hashes were
+`5bfefb6869b87b7f191b2e9763e4a8f7cb88599c6fb0b5a5438b1e482fff0ecc` and
+`ea9311aac2c43af7a1c65c72892b3c321c02cb960c23fe07dd8de30866e95c78`; both
+passed. It measured a 2,459 ms / 2,121 ms stop observation and A17 retirement
+after 21 samples over 306,333 ms.
+
+The former current acceptance report for runtime head
+`39c1ec656beb764ef10402430fb4757200de63b7` is historical for this candidate.
+Its SHA-256 was
+`25cc8f8005a7265624850116b6a13ba50855914b279645fafbccfd8cb71bfb90`; it
+measured a 2,770 ms / 2,473 ms stop observation and returned
+`env_qsj2u93zia` as destroyed after 21 samples over 306,064 ms.
+
+Current acceptance is the integrated report measured on runtime head
+`c5d68e93cc6a6d3bf7351b25d46a824d06b77b3f`, SHA-256
+`69b91f9eda310bea7382d875d2bc95cf33f0b0c84312e01d01dd83423d96a89a`; its
+`sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0, BB
+0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
+`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
+on that measured runtime revision. This documentation-only follow-up does not
+imply a new runtime run. The outcome is `completed-with-capability-gaps`.
+
+The integrated T2 execution manifest SHA-256 is
+`cdba6e402165787f47ed9a28c6486edad0154ba25b616ff2d890823c0950ee46`; the
+permission/environment manifest SHA-256 is
+`bbcbb016bc045559d8bf35bfbe20506829d28686f9c032317068fb15f4af6096`. Both
+passed. The recovery fixture source SHA-256 is
+`959ea59f00157e9d14a12fb3f476345a9ad5ac24de587a0ba723c3c01e8aba5e`. Cleanup
+was verified across T1–T5: owned processes exited, server and daemon ports
+closed, no forced cleanup, and disposable roots removed. The current stop-writer
+observation window was 2,402 ms, including 2,105 ms stable no-start. The live
+A17 run observed the dirty marker and shared worktree remain while the second
+thread existed; after final archive and deletion, BB returned the original
+environment ID `env_cybxa2cxx9` as `destroyed` after 21 samples over 306,509 ms,
+with the marker and worktree absent. Sample timestamps are recorded after the
+environment lookup and filesystem checks complete, so the measured window
+includes the final lookup request. The fixture requires observed retirement and
+final marker/worktree absence before A17 evidence passes. Before the A17 marker
+write, the fixture resolves the existing root and BB workspace with `realpath`,
+compares canonical path components, and creates the marker exclusively. Focused
+regressions accept an in-root child, reject sibling/traversal paths and an
+outside directory symlink, and refuse an existing marker symlink without
+changing its target. Focused T2 and T5 validator regressions reject a not-found
+cause whose suffix names a different environment while retaining valid missing
+and returned-ID shapes. Unrelated thread/daemon 404s remain rejected even when
+request context names the target ID. All six T5 rows remain open. T4 observed
+one accepted queued turn start and one additional tool effect (3 → 4); #665
+remains `failed-capability`, and T06/T08 remain blocked.
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
 blocked by #665 and other gates.

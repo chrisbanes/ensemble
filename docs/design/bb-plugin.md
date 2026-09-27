@@ -347,22 +347,54 @@ runtime evidence before implementation.
 
 ## 6. Workspaces, scheduling, and access
 
-Accepted: one task worktree for repository-changing work in a single-repository
-project, shared across its assignments. Only one writer holds it at a time.
-A multi-repository task would require a worktree for each participating repository;
-this does not imply a separate writing worktree per agent. Parallel read-only reviews use an immutable commit in
-separate workspaces where needed; changing the reviewed commit invalidates any
-approval tied to it. The first release serializes writing assignments in the task worktree.
+Proposed Ensemble contract: one task worktree for repository-changing work in a
+single-repository project, shared across its assignments. Only one writer holds
+it at a time. A multi-repository task would require a worktree for each
+participating repository; this does not imply a separate writing worktree per
+agent. Parallel read-only reviews use an immutable commit in separate workspaces
+where needed; changing the reviewed commit invalidates any approval tied to it.
+The first release serializes writing assignments in the task worktree.
 
-Use BB's existing workspace cleanup, configurable per project: retain task
-conversations until operator archival, or archive after confirmed delivery and
-checking work is preserved. Default to retain-until-archive.
-BB supports environment reuse across assignment threads. Its stock worktree
-provider retires an environment after its last live thread leaves (normally five
-minutes); removal can discard dirty files. Ensemble-initiated archival must check
-preserved work and unresolved effects; direct BB archival follows BB's lifecycle.
-No per-environment retention override was found in the inspected public SDK.
-T01/T02 must verify this contract against the pinned runtime.
+Use BB's existing workspace cleanup, configurable per project. The proposed
+default retains task conversations until operator archival. Optional automatic
+archival is eligible only after confirmed delivery, preserved work and resolved
+effects. Missing or unknown workspace identity holds both cleanup and dispatch.
+Ensemble-initiated archival checks preservation and unresolved effects; direct
+BB archival follows BB's own lifecycle. No per-environment retention override
+was found in the inspected public SDK.
+
+| Proposed cleanup mode | Required evidence | Ensemble decision |
+| --- | --- | --- |
+| Default | Workspace is present | Retain until operator archival |
+| Automatic | Delivery confirmed, work preserved, effects resolved, workspace present | Eligible for archival |
+| Automatic | Delivery, preservation or effects are unknown | Retain and hold cleanup |
+| Any | Workspace is missing or unknown | Hold cleanup and dispatch |
+
+The T2, T4 and T5 fixtures provide bounded BB observations for this design. The
+T2 permission matrix forwarded `accept-edits`, `auto` and `full` into one scripted
+provider request per mode, reused one managed environment, and read the same
+thread/environment identities after restart. A synthetic unavailable
+environment was rejected without a provider trace. This does not demonstrate
+provider enforcement, shell containment, ambient-credential isolation or direct
+BB API restrictions.
+
+For T5 workspace setup, two raw parallel BB spawns produced distinct
+environments. A separate test-local SQLite intent joined two attempts and
+reconciled one chosen task thread/environment after a dropped accepted response
+and restart; that fixture arbitration is not product workspace binding. The
+missing ID in that case is synthetic and does not represent BB reclaiming an
+existing environment. The T5 second-plugin wait produced no provider effects
+before release and one tool effect after release, with no Ensemble writer
+reservation.
+
+The T5 A17 dirty-marker fixture kept the marker and shared environment after
+the first thread was archived and deleted while another live thread retained
+it.
+After the second thread's archive and delete, BB retired the environment and
+removed the marker and worktree within a bounded seven-minute observation. This
+single direct BB lifecycle observation leaves A17 open; it does not prove that
+either proposed cleanup mode is safe for general task work. The product must
+preserve this distinction in its report and UI.
 
 Honor BB's Concurrency limit plugin for execution admission. Do not introduce an
 Ensemble global default or per-project execution cap in the first release. Use
@@ -394,10 +426,12 @@ Accepted access model: one trusted operator on a private BB installation.
 Ensemble enforces authorization for its own commands and integration actions.
 Agent execution uses BB/provider permissions and environment controls. The UI
 must distinguish these controls from project action policy and disclose shell,
-ambient credential, and direct BB API access limitations. T02 verifies this
-mapping and workspace lifecycle; it does not implement a new sandbox. Revocation
-of Ensemble actions is immediate at command admission; stopping agent access
-relies on BB/provider termination and observed confirmation.
+ambient credential, and direct BB API access limitations. T2 records provider
+request forwarding for the three tested permission modes; it does not prove
+provider enforcement or an independent sandbox, and it does not test rejection
+of an unauthorized Ensemble action. Revocation of Ensemble actions is immediate
+at command admission; stopping agent access relies on BB/provider termination
+and observed confirmation.
 
 ## 7. GitHub sources and provider writes
 
@@ -537,35 +571,160 @@ recheck with 2,150 ms stable no-start, while a distinct earlier integrated run
 recorded 2,361 ms with 2,066 ms stable no-start. The trace-timing race means
 neither is current acceptance proof.
 
-The final corrected integrated report at
-`33bd3062531bd2ab717d4ea8d4a29752c6388058` passed `npm run check`,
-`npm run test:bb-integration`, and `npm run test:bb-prototype` on Node
-24.21.0/npm 12.1.0, BB 0.44.0 and host/plugin SDK 0.5.29. It validates six T5
-gate rows; T4 produced its expected diagnostic. The corrected stop row confirms
-exact-ID cancellation with a matching event and queue absence before and after
-recheck, then records 2,378 ms after recheck with 2,087 ms stable no-start and
-zero starts/effects. T1–T5 isolation cleanup is clean.
+T1 and T2 records are now integrated into the capability report. The T2
+permission row checks the three provider request modes, project/environment
+identities, restart reads, and synthetic unavailable-environment rejection. T5
+records composed wait, stop, initial workspace, retry, revision and A17
+observations; fixture-only evidence does not implement Ensemble ownership or
+cleanup policy.
 
-`stop-writer-release` remains open. The corrected evidence supports removing
-only the #676-specific T02 block; T06/T08 remain blocked
-by #665 and other gates. The evidence covers one scripted first message, not
-arbitrary process termination or complete Ensemble writer exclusion.
-Unconfirmed cancellation remains `failed-capability`; startup or event-capture
-failure is inconclusive. The accepted guarantees remain unchanged.
+The focused T2 stop record and integrated report at `1b70716` are historical
+client SDK 0.5.29 evidence; they measured 2,727 ms / 2,378 ms and 2,416 ms /
+2,125 ms respectively. The former integrated report at `88b4384` is also
+historical; it measured 2,388 ms after recheck with 2,091 ms stable no-start on
+client package 0.5.30 and host SDK 0.5.29. The report for tested runtime head
+`712edd8c5e031af0a7deb4183e37c79c5e1a4dec` is historical for this candidate; it
+has SHA-256
+`c173e13aec0a7459136c6c01f046dfa86dd3c43696fddd35f7432727a4340d29`. It
+measured 4,387 ms after recheck with 2,286 ms stable no-start, and its A17 run
+reported retirement after 21 samples over 306,740 ms.
 
-Inspected SDK 0.5.9 declarations expose `threads.stop`, turn-specific
-`threads.retry`, queued-message APIs, and the `message.dispatch` hook with
-`recheck`. The stop contract explicitly requires status confirmation; dispatch
-hooks cover queue drains and retries, with an explicit Send-now bypass. These
-are source-level contracts, not integration test results.
+The integrated report for tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48` is historical for this candidate.
+It has SHA-256
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`, matches
+that head in `sourceRevision`, and records a 2,318 ms stop observation window
+with 2,027 ms stable no-start. Its T2 execution and permission/environment
+manifest hashes are
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
+
+The integrated report for runtime head
+`c63da1e19221907d32e2693b7062e352c801384f` is historical for this candidate.
+It has SHA-256
+`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`, and
+matches that head in `sourceRevision`. Its T2 execution and
+permission/environment manifests have SHA-256 values
+`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b` and
+`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`; both
+passed. Pinned Node 24.21.0/npm 12.1.0 `check`, BB integration and prototype
+suites passed on that measured runtime head. The report outcome is
+`completed-with-capability-gaps`; it does not describe the runtime measured
+below.
+
+The previous integrated report for runtime head
+`f523e145b445837b73ee9f7082adb87ce7712c1f` is historical for this candidate.
+Its SHA-256 was
+`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`; it
+measured 2,306 ms stop observation with 2,020 ms stable no-start.
+
+The former current integrated report for runtime head
+`31d724b953a95d2e9355ecf101478128f019ce91` is historical for this candidate.
+Its SHA-256 was
+`1fe351e65dcb125380e2cf0dda985bc856db74956f9cf879091c2f9cf08c26b9`; it
+recorded a 2,320 ms stop observation window with 2,041 ms stable no-start and
+A17 retirement after 21 samples over 305,986 ms.
+
+The former current integrated report for runtime head
+`914663bacb1784e37ddc246caf49c22b5b8090a1` is historical for this candidate.
+Its SHA-256 was
+`0e0ade5d9ada89634d6b229989937425185386b592a31e7527924d93d958377f`, and its
+`sourceRevision` matched that head. It recorded a 2,399 ms stop observation
+window with 2,101 ms stable no-start, and A17 retirement after 21 samples over
+305,973 ms.
+
+The former current integrated report for runtime head
+`733271b963a5d367857984a9b8e55bd84ebd5b52` is historical for this candidate.
+Its SHA-256 was
+`dda84c3e8b81e51af8fb5c5f41f50dacd32d0a80c8e5322c1ac2adc7806bb58e`, and its
+`sourceRevision` matched that head. Its T2 execution and permission/environment
+manifest hashes were
+`f60b7fcc6fcd27934531e527816c9be094a826b6818e740d98ae4196bf0f6ac0` and
+`146c3d91325a00b71fdf80f8c16895a1c7ff2a1279a07aa010cc937166c72244`; both
+passed. It measured a 2,364 ms / 2,079 ms stop observation and A17 retirement
+after 21 samples over 306,019 ms.
+
+The former current integrated report for runtime head
+`95b8deaba2f74d18234df9df9c47136d1b85c3f9` is historical for this candidate.
+Its SHA-256 was
+`c6dc32ae3e9a82c14b31ae1f9aefe139aa0adcf469e4b172a7b55624a21f06f2`, and its
+`sourceRevision` matched that head. Its T2 execution and permission/environment
+manifest hashes were
+`90b455e14c2b7e4c03e97b3beb68077818131dced29e2a9b7be6bd87add5ffef` and
+`89435df501c96a5b8aa09fc16ed6b23adc8a5a79f3c1752dc6f7bc6c7a365209`; both
+passed. It measured a 2,455 ms / 2,161 ms stop observation and A17 retirement
+after 22 samples over 321,348 ms.
+
+The report previously used as current was measured on runtime head
+`27bc110a99b58efca87ad7a12b685a4bf0be8c15`; it is historical for this
+candidate. Its SHA-256 was
+`c70810879b646d4d17705ad403afb161fbed982ef03dda0c61e245273de8ffae`. Its T2
+execution and permission/environment manifest hashes were
+`5bfefb6869b87b7f191b2e9763e4a8f7cb88599c6fb0b5a5438b1e482fff0ecc` and
+`ea9311aac2c43af7a1c65c72892b3c321c02cb960c23fe07dd8de30866e95c78`; both
+passed. It measured a 2,459 ms / 2,121 ms stop observation and A17 retirement
+after 21 samples over 306,333 ms.
+
+The former current integrated report for runtime head
+`39c1ec656beb764ef10402430fb4757200de63b7` is historical for this candidate.
+Its SHA-256 was
+`25cc8f8005a7265624850116b6a13ba50855914b279645fafbccfd8cb71bfb90`; it
+recorded a 2,770 ms / 2,473 ms stop observation and returned
+`env_qsj2u93zia` as destroyed after 21 samples over 306,064 ms.
+
+The current integrated report is bound to runtime head
+`c5d68e93cc6a6d3bf7351b25d46a824d06b77b3f`, has SHA-256
+`69b91f9eda310bea7382d875d2bc95cf33f0b0c84312e01d01dd83423d96a89a`, and
+matches that head in `sourceRevision`. Its T2 execution and
+permission/environment manifests have SHA-256 values
+`cdba6e402165787f47ed9a28c6486edad0154ba25b616ff2d890823c0950ee46` and
+`bbcbb016bc045559d8bf35bfbe20506829d28686f9c032317068fb15f4af6096`; both
+passed. The recovery fixture source SHA-256 is
+`959ea59f00157e9d14a12fb3f476345a9ad5ac24de587a0ba723c3c01e8aba5e`. Pinned
+Node 24.21.0/npm 12.1.0, BB 0.44.0, client package SDK 0.5.30, and host SDK
+0.5.29 `check`, BB integration and prototype suites passed on this measured
+runtime head. This documentation-only follow-up does not imply a rerun; the
+outcome is `completed-with-capability-gaps`.
+
+The current stop-writer-release observation window was 2,402 ms with 2,105 ms
+stable no-start. Exact-ID cancellation, a matching event and an empty queue
+were observed before release, while the delayed thread remained `pending`; this
+does not establish a general writer guarantee. The live A17 run observed the
+dirty marker and shared worktree remain while the second live thread existed.
+After final archive and deletion, BB returned the original environment ID
+`env_cybxa2cxx9` with status `destroyed` after 21 samples over 306,509 ms, and
+the marker and worktree were absent. Sample times are recorded after the
+environment lookup and filesystem checks complete, so the measured window
+includes the final lookup request. A17 evidence requires observed retirement
+and final marker/worktree absence. Before the A17 marker write, the fixture
+resolves the existing root and BB workspace with `realpath`, compares
+canonical path components, and creates the marker exclusively. Focused
+regressions accept an in-root child, reject sibling/traversal paths and an
+outside directory symlink, and refuse an existing marker symlink without
+changing its target. Focused T2 and T5 validator regressions reject a
+not-found cause whose suffix names a different environment while retaining
+valid missing and returned-ID serialization shapes; unrelated thread/daemon
+404s are also rejected even when request context names the target ID. All six
+T5 rows remain open and #665 remains `failed-capability`, with T06/T08 blocked.
+Direct BB lifecycle observations do not prove delivery, preservation, automatic
+cleanup policy or complete Ensemble writer exclusion. The accepted product
+guarantees remain unchanged.
+
+The inspected client SDK package 0.5.29 declarations exposed `threads.stop`,
+turn-specific `threads.retry`, queued-message APIs, and the `message.dispatch`
+hook with `recheck`. Current integration evidence uses client package 0.5.30
+with BB host plugin SDK 0.5.29. The stop contract explicitly requires status
+confirmation; dispatch hooks cover queue drains and retries, with an explicit
+Send-now bypass. The declaration details are source-level contracts, not
+integration test results.
 
 | Gate | Evidence required before dependent feature work | T1–T5 observation | Ticket |
 | --- | --- | --- | --- |
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: the final corrected integrated report records that `threads.stop` returned `ok` while one scripted thread stayed pending; exact-ID deletion, matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. The current 2,378 ms window includes 2,087 ms stable no-start and zero starts/effects. This does not prove arbitrary process termination or complete Ensemble writer exclusion | Supports removing only the #676-specific T02 block; T06/T08 remain blocked by #665 and other gates |
-| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent chose one thread/environment after restart; two raw parallel BB spawns created separate environments | T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and empty queue were observed. Historical focused 0.5.29, `ce4419c`, `c63da1e`, `f523e14`, `31d724b`, `914663b`, `733271b`, `95b8dea`, `27bc110` and `39c1ec6` timings remain separate observations; the former integrated `95b8dea` report measured 2,455 ms / 2,161 ms, `27bc110` measured 2,459 ms / 2,121 ms, and `39c1ec6` measured 2,770 ms / 2,473 ms. The current integrated `c5d68e9` report measured 2,402 ms / 2,105 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
+| Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent joined two attempts and chose one thread/environment after restart; two raw parallel BB spawns created separate environments. A synthetic missing environment was rejected without a provider trace | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |
 

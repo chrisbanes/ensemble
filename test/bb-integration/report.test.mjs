@@ -1,21 +1,147 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
-  REQUIRED_API_ROWS,
-  REQUIRED_API_EVIDENCE,
-  REQUIRED_PROOF_GATES,
-  REQUIRED_T5_REPORTS,
+  measureA17RetirementSample,
+  resolveExistingPathWithinRoot,
+  resolveFixtureManifestPath,
+  resolveT2FixtureManifestPaths,
+  writeA17RetentionMarker,
+} from "./harness.mjs";
+import {
   assertExpectedT4Failure,
   assertIntegrationReport,
   assertT5Reports,
+  serializeA17EnvironmentAfterLastDelete,
   buildIntegrationReport,
+  combineT2FixtureManifests,
+  REQUIRED_API_EVIDENCE,
+  REQUIRED_API_ROWS,
+  REQUIRED_PROOF_GATES,
+  REQUIRED_T5_REPORTS,
   readIntegrationReport,
   serializeIntegrationReport,
   writeIntegrationReport,
 } from "./report.mjs";
+
+const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const defaultFixtureManifestPath = process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH
+  ? path.resolve(process.env.ENSEMBLE_T1_RUN_MANIFEST_PATH)
+  : path.join(
+      repositoryRoot,
+      "node_modules/.cache/ensemble-bb-integration/run-manifest.json",
+    );
+
+async function createDisposablePathFixture(t) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-fixture-paths-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const root = path.join(temporaryDirectory, "fixture");
+  const child = path.join(root, "worktree");
+  const sibling = `${root}-worktree`;
+  const escapePath = path.join(temporaryDirectory, "outside", "worktree");
+  await Promise.all(
+    [child, sibling, escapePath].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
+  );
+  return { root, child, sibling, escapePath };
+}
+
+test("disposable root resolves a child worktree path", async (t) => {
+  const { root, child } = await createDisposablePathFixture(t);
+  assert.equal(
+    await resolveExistingPathWithinRoot(root, child),
+    await realpath(child),
+  );
+});
+
+test("disposable root rejects a sibling worktree path", async (t) => {
+  const { root, sibling } = await createDisposablePathFixture(t);
+  await assert.rejects(
+    resolveExistingPathWithinRoot(root, sibling),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("disposable root rejects a normalized escape path", async (t) => {
+  const { root, escapePath } = await createDisposablePathFixture(t);
+  const candidatePath = path.join(root, "..", "outside", "worktree");
+  assert.equal(path.resolve(candidatePath), escapePath);
+  await assert.rejects(
+    resolveExistingPathWithinRoot(root, candidatePath),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("disposable root rejects a workspace symlink to an outside directory", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-fixture-symlink-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const root = path.join(temporaryDirectory, "fixture");
+  const outside = path.join(temporaryDirectory, "outside");
+  await mkdir(root, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const workspaceLink = path.join(root, "worktree");
+  await symlink(outside, workspaceLink, "dir");
+
+  await assert.rejects(
+    resolveExistingPathWithinRoot(root, workspaceLink),
+    /inside the disposable T5 BB home/u,
+  );
+});
+
+test("A17 marker creation refuses an existing symlink", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "ensemble-marker-symlink-"),
+  );
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const workspace = path.join(temporaryDirectory, "workspace");
+  await mkdir(workspace);
+  const outsideMarker = path.join(temporaryDirectory, "outside-marker.txt");
+  await writeFile(outsideMarker, "preserve this external file\n");
+  const markerPath = path.join(workspace, "T5-A17-retention.txt");
+  await symlink(outsideMarker, markerPath);
+
+  await assert.rejects(writeA17RetentionMarker(markerPath), { code: "EEXIST" });
+  assert.equal(
+    await readFile(outsideMarker, "utf8"),
+    "preserve this external file\n",
+  );
+});
+
+test("A17 sample time includes completion of its lookup request", async () => {
+  const startedAt = 10_000;
+  let completedAt = startedAt;
+  const sample = await measureA17RetirementSample(
+    startedAt,
+    async () => {
+      await Promise.resolve();
+      completedAt = startedAt + 1_234;
+      return { environmentId: "env_fixture" };
+    },
+    () => completedAt,
+  );
+
+  assert.deepEqual(sample, {
+    environmentId: "env_fixture",
+    elapsedMs: 1_234,
+    sampledAt: new Date(startedAt + 1_234).toISOString(),
+  });
+});
 
 function evidenceValue(fieldPath) {
   const field = fieldPath.split(".").at(-1);
@@ -49,6 +175,9 @@ function evidenceValue(fieldPath) {
 }
 
 function sampleObserved(type, id) {
+  if (type === "public-api" && id === "permission-environment-forwarding") {
+    return { permissionEnvironmentMatrix: permissionEnvironmentMatrix() };
+  }
   const observed = {};
   const evidencePaths =
     type === "public-api" ? (REQUIRED_API_EVIDENCE[id] ?? []) : [];
@@ -71,16 +200,326 @@ function sampleObserved(type, id) {
               delayedQueuedMessageId: "queued-stop",
               delayedDeleteResponse: { ok: true },
             }
-          : { threadId: "thread-one" },
+          : id === "composed-writer-admission"
+            ? writerAdmissionIdentities()
+            : id === "initial-workspace-identity"
+              ? initialWorkspaceIdentities()
+              : id === "a17-shared-worktree-retention"
+                ? a17Identities()
+                : { threadId: "thread-one" },
       observations:
         id === "stop-writer-release"
           ? stopWriterObserved()
-          : { status: "open" },
+          : id === "composed-writer-admission"
+            ? writerAdmissionObserved()
+            : id === "initial-workspace-identity"
+              ? initialWorkspaceObserved()
+              : id === "a17-shared-worktree-retention"
+                ? a17Observed()
+                : { status: "open" },
     };
   }
   return Object.keys(observed).length > 0
     ? observed
     : { threadId: "thread-test", effectCount: 1 };
+}
+
+function permissionEnvironmentMatrix() {
+  const modes = ["accept-edits", "auto", "full"];
+  const projectId = "project-permission";
+  const environmentId = "environment-permission";
+  const environment = {
+    id: environmentId,
+    projectId,
+    hostId: "host-permission",
+    path: "/fixture/worktree",
+    status: "ready",
+  };
+  const requestedHostWorkspace = {
+    type: "host",
+    hostId: "host-permission",
+    workspace: {
+      type: "managed-worktree",
+      baseBranch: { kind: "default" },
+    },
+  };
+  const modeRequests = modes.map((permissionMode, index) => {
+    const threadId = `thread-${permissionMode}`;
+    const prompt = `T1 permission environment ${permissionMode}`;
+    return {
+      permissionMode,
+      prompt,
+      thread: { id: threadId, projectId, environmentId, status: "idle" },
+      requestedEnvironment:
+        index === 0 ? requestedHostWorkspace : { type: "reuse", environmentId },
+      environment,
+      providerTrace: [
+        {
+          method: "turn/start",
+          params: {
+            threadId,
+            input: [{ text: prompt }],
+            options: {
+              model: "fixture-model",
+              reasoningLevel: "medium",
+              serviceTier: "default",
+              permissionMode,
+              envVars: {
+                BB_PROJECT_ID: projectId,
+                BB_ENVIRONMENT_ID: environmentId,
+              },
+            },
+          },
+        },
+      ],
+    };
+  });
+  return {
+    providerId: "ensemble-scripted",
+    advertisedModes: modes,
+    requestedModes: modes,
+    projectId,
+    hostId: "host-permission",
+    requestedHostWorkspace,
+    environmentId,
+    environment,
+    modeRequests,
+    limits: {
+      providerRequestForwardingOnly: true,
+      shellContainment: "not tested",
+      ambientCredentialIsolation: "not tested",
+      directBbApiBypass: "not tested",
+    },
+    unavailableEnvironment: {
+      environmentId: "missing-environment",
+      rejectedAtSpawn: true,
+      threadId: null,
+      status: "rejected-at-spawn",
+      error: "HTTP 404: Environment not found",
+      providerTrace: [],
+    },
+    environmentAfterRestart: environment,
+    threadsAfterRestart: modeRequests.map(({ permissionMode, thread }) => ({
+      permissionMode,
+      threadId: thread.id,
+      environmentId,
+    })),
+  };
+}
+
+function t2FixtureManifest(checks) {
+  return {
+    outcome: "passed",
+    checks: {
+      ...checks,
+      ownedProcessCleanup: {
+        pids: [100, 101],
+        allExited: true,
+        serverPortClosed: true,
+        daemonPortClosed: true,
+        forced: false,
+      },
+      disposableRootCleanup: { removed: true },
+    },
+  };
+}
+
+function t2FixtureManifests() {
+  const execution = t2FixtureManifest({
+    executionSpawn: { threadId: "execution-thread" },
+    executionUnsupportedChoice: { threadId: "unsupported-thread" },
+    executionRetry: { threadId: "retry-thread" },
+    executionLifecycle: [{ name: "thread.created" }],
+    executionInteraction: { threadId: "interaction-thread" },
+    sharedEnvironmentAfterRestart: { environmentId: "shared-environment" },
+  });
+  const permissionEnvironment = t2FixtureManifest({
+    permissionModeAdvertisementProbe: { providerId: "ensemble-scripted" },
+    permissionEnvironmentMatrix: permissionEnvironmentMatrix(),
+  });
+  return { execution, permissionEnvironment };
+}
+
+function writerAdmissionIdentities() {
+  return {
+    projectId: "project-wait",
+    threadId: "thread-wait",
+    guardPluginId: "second-plugin",
+    queuedMessageId: "queued-wait",
+    environmentId: "environment-wait",
+  };
+}
+
+function writerAdmissionObserved() {
+  return {
+    waitingOn: {
+      kind: "plugin",
+      pluginId: "second-plugin",
+      reason: "T5 second-plugin wait",
+    },
+    preReleaseProviderEffects: 0,
+    postReleaseToolEffects: 1,
+    initialEnvironmentId: null,
+  };
+}
+
+function initialWorkspaceIdentities() {
+  return {
+    projectId: "project-workspace",
+    taskId: "task-workspace",
+    taskOperationId: "operation-workspace",
+    competingAttemptIds: ["attempt-owner", "attempt-joiner"],
+    rawConcurrentSpawnThreadIds: ["raw-thread-a", "raw-thread-b"],
+    rawEnvironmentIds: ["raw-environment-a", "raw-environment-b"],
+    chosenTaskThreadId: "chosen-thread",
+    chosenTaskEnvironmentId: "chosen-environment",
+    missingEnvironmentId: "missing-task-environment",
+  };
+}
+
+function initialWorkspaceObserved() {
+  const identities = initialWorkspaceIdentities();
+  const chosen = {
+    threadId: identities.chosenTaskThreadId,
+    environmentId: identities.chosenTaskEnvironmentId,
+    status: "idle",
+    environmentStatus: "ready",
+  };
+  const reconciliation = {
+    operationId: identities.taskOperationId,
+    taskId: identities.taskId,
+    projectId: identities.projectId,
+    state: "confirmed",
+    ownerAttemptId: identities.competingAttemptIds[0],
+    spawnCalls: 1,
+    chosenThreadId: identities.chosenTaskThreadId,
+    matches: [chosen],
+    attempts: [
+      { attemptId: identities.competingAttemptIds[0], disposition: "owner" },
+      { attemptId: identities.competingAttemptIds[1], disposition: "joined" },
+    ],
+    publicLookup: "threads.list + getPluginMetadata + threads.get",
+  };
+  return {
+    rawConcurrentSpawnCount: 2,
+    rawDistinctEnvironmentCount: 2,
+    rawTaskThreadEnvironmentIds: [chosen],
+    rawHookObservations: identities.rawConcurrentSpawnThreadIds.map(
+      (threadId) => ({
+        taskId: identities.taskId,
+        threadId,
+        environmentId: null,
+        threadStatus: "pending",
+        attempt: "start-turn",
+        queuedMessageIds: [],
+      }),
+    ),
+    duplicateRawTaskEnvironments: [],
+    rawProviderToolEffects: 2,
+    joinedAttempt: {
+      operationId: identities.taskOperationId,
+      taskId: identities.taskId,
+      attemptId: identities.competingAttemptIds[1],
+      disposition: "joined",
+      state: "provisioning",
+      ownerAttemptId: identities.competingAttemptIds[0],
+      spawnCalls: 1,
+      chosenThreadId: null,
+      replayed: false,
+    },
+    acceptedReconciliationBeforeRestart: reconciliation,
+    reconciliation,
+    taskHookObservations: [
+      {
+        taskId: identities.taskId,
+        threadId: identities.chosenTaskThreadId,
+        environmentId: null,
+        threadStatus: "pending",
+        attempt: "start-turn",
+        queuedMessageIds: [],
+      },
+    ],
+    totalProviderToolEffects: 3,
+    missingEnvironment: {
+      environmentId: identities.missingEnvironmentId,
+      rejectedAtSpawn: true,
+      threadId: null,
+      status: "rejected-at-spawn",
+      spawnError: "HTTP 404: Environment not found",
+      threadEvents: [],
+      providerTrace: [],
+    },
+  };
+}
+
+function a17Identities() {
+  return {
+    projectId: "project-a17",
+    threadIds: ["thread-a17-first", "thread-a17-second"],
+    environmentId: "environment-a17",
+    workspacePath: "/fixture/dirty-worktree",
+  };
+}
+
+function a17Observed() {
+  const { threadIds, environmentId } = a17Identities();
+  return {
+    statusesBeforeCleanup: ["idle", "idle"],
+    firstThreadArchive: {
+      archiveResponse: { ok: true, archivedThreadIds: [threadIds[0]] },
+      thread: { id: threadIds[0], environmentId },
+    },
+    firstThreadArchived: true,
+    environmentAfterArchive: { id: environmentId, status: "ready" },
+    markerRetainedAfterArchive: true,
+    environmentRetainedAfterArchive: true,
+    firstThreadDelete: { ok: true },
+    sharedEnvironmentAfterFirstDelete: { id: environmentId, status: "ready" },
+    markerRetainedAfterDelete: true,
+    sharedRetentionAfterArchiveAndDelete: true,
+    remainingLiveThread: { id: threadIds[1], environmentId, status: "idle" },
+    finalThreadArchive: {
+      archiveResponse: { ok: true, archivedThreadIds: [threadIds[1]] },
+      thread: { id: threadIds[1], environmentId },
+    },
+    finalThreadArchived: true,
+    environmentAfterFinalArchive: { id: environmentId, status: "ready" },
+    markerExistsAfterFinalArchive: true,
+    workspaceExistsAfterFinalArchive: true,
+    markerRetainedWhileShared: true,
+    secondThreadDelete: { ok: true },
+    environmentAfterLastDelete: { id: environmentId, status: "destroyed" },
+    markerExistsAfterLastDelete: false,
+    workspaceExistsAfterLastDelete: false,
+    retirementWindowMs: 420_000,
+    retirementSampleIntervalMs: 15_000,
+    retirementObservationCount: 2,
+    retirementObservationWindowMs: 15_000,
+    retirementObserved: true,
+    retirementObservations: [
+      {
+        elapsedMs: 0,
+        requestedEnvironmentId: environmentId,
+        environmentId,
+        environmentStatus: "ready",
+        environmentRetired: false,
+        workspaceExists: true,
+        markerExists: true,
+        retirementObserved: false,
+      },
+      {
+        elapsedMs: 15_000,
+        requestedEnvironmentId: environmentId,
+        environmentId,
+        environmentStatus: "destroyed",
+        environmentRetired: true,
+        workspaceExists: false,
+        markerExists: false,
+        retirementObserved: true,
+      },
+    ],
+    providerToolEffects: 2,
+  };
 }
 
 function stopWriterObserved() {
@@ -138,11 +577,23 @@ function validT5Reports() {
             delayedQueuedMessageId: "queued-stop",
             delayedDeleteResponse: { ok: true },
           }
-        : { threadId: `thread-${name}` },
+        : name === "composed-writer-admission"
+          ? writerAdmissionIdentities()
+          : name === "initial-workspace-identity"
+            ? initialWorkspaceIdentities()
+            : name === "a17-shared-worktree-retention"
+              ? a17Identities()
+              : { threadId: `thread-${name}` },
     observed:
       name === "stop-writer-release"
         ? stopWriterObserved()
-        : { status: "observed" },
+        : name === "composed-writer-admission"
+          ? writerAdmissionObserved()
+          : name === "initial-workspace-identity"
+            ? initialWorkspaceObserved()
+            : name === "a17-shared-worktree-retention"
+              ? a17Observed()
+              : { status: "observed" },
     limits: ["Fixture evidence does not implement the product gate."],
   }));
 }
@@ -199,6 +650,12 @@ function stopWriterFailureReport() {
     (entry) =>
       entry.type === "proof-gate" && entry.id === "stop-writer-release",
   ).verdict = "failed-capability";
+  const t5Stop = report.t5Reports.find(
+    (entry) => entry.name === "stop-writer-release",
+  );
+  t5Stop.verdict = scenario.verdict;
+  t5Stop.identities = scenario.observed.identities;
+  t5Stop.observed = scenario.observed.observations;
   report.dependentExecutionBlocked = ["T02", "T06", "T08"];
   return report;
 }
@@ -209,6 +666,7 @@ function row(type, id, overrides = {}) {
     id,
     ...(type === "public-api" ? { publicApi: id } : {}),
     scenario: `scenario for ${id}`,
+    evidenceScope: "BB fixture observation",
     runtime: {
       bb: "0.44.0",
       hostSdk: "0.5.29",
@@ -221,6 +679,12 @@ function row(type, id, overrides = {}) {
       integrationSourceDigest: "digest-abc123",
       providerBridge: "fdd3de3b19b97e6cd1ef7300cbb54711431249d3",
       installedBbSource: null,
+      providerBridgeSha256: "c".repeat(64),
+      fixtureSourceSha256: {
+        scriptedProvider: "d".repeat(64),
+        executionRpc: "e".repeat(64),
+        recoveryRpc: "f".repeat(64),
+      },
     },
     packageArtifacts: {
       lockfileTarballIntegrity: {
@@ -251,6 +715,7 @@ function validReport() {
       ...(eventContract === undefined
         ? {}
         : { requiredEvents: eventContract, observedEvents: eventContract }),
+      ...(id === "shared-worktree-retention" ? { verdict: "open" } : {}),
     });
   });
   return {
@@ -290,6 +755,64 @@ function validReport() {
         row("t5-scenario", id, { verdict: "open" }),
       ),
     ],
+    t5Reports: validT5Reports(),
+    proposedEnsembleContract: {
+      evidenceScope: "proposed-Ensemble-contract",
+      actionAuthorization: "dependent-future-acceptance",
+      userInterface: "dependent-future-acceptance",
+      permissionBoundary:
+        "BB/provider request forwarding only; shell, ambient credentials and direct BB API bypass are not tested.",
+      cleanupDecisionTable: [
+        {
+          mode: "default",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "retain-until-operator-archive",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "archive",
+        },
+        {
+          mode: "automatic",
+          delivery: "unknown",
+          preservedWork: "preserved",
+          effects: "resolved",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "unknown",
+          effects: "resolved",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "automatic",
+          delivery: "confirmed",
+          preservedWork: "preserved",
+          effects: "unknown",
+          workspace: "present",
+          decision: "hold-cleanup",
+        },
+        {
+          mode: "any",
+          delivery: "any",
+          preservedWork: "any",
+          effects: "any",
+          workspace: "missing-or-unknown",
+          decision: "hold-cleanup-and-dispatch",
+        },
+      ],
+    },
     dependentExecutionBlocked: ["T06", "T08"],
   };
 }
@@ -475,6 +998,786 @@ test("integration report rejects duplicate API rows and empty evidence", () => {
   assert.throws(
     () => assertIntegrationReport(report),
     /no observed identities/u,
+  );
+});
+
+test("permission forwarding report requires every mode, matching IDs and no hidden start", () => {
+  assert.doesNotThrow(() => assertIntegrationReport(validReport()));
+
+  const missingMode = validReport();
+  missingMode.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.modeRequests[1].permissionMode =
+    "full";
+  assert.throws(
+    () => assertIntegrationReport(missingMode),
+    /auto request is missing/u,
+  );
+
+  const missingId = validReport();
+  delete missingId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.modeRequests[0].thread.id;
+  assert.throws(() => assertIntegrationReport(missingId), /thread ID/u);
+
+  const hiddenStart = validReport();
+  hiddenStart.rows
+    .find((entry) => entry.id === "permission-environment-forwarding")
+    .observed.permissionEnvironmentMatrix.unavailableEnvironment.providerTrace.push(
+      { method: "turn/start", params: { threadId: "unexpected-thread" } },
+    );
+  assert.throws(
+    () => assertIntegrationReport(hiddenStart),
+    /zero provider starts/u,
+  );
+});
+
+test("permission report binds unavailable-environment rejection to its target", () => {
+  const targetId =
+    permissionEnvironmentMatrix().unavailableEnvironment.environmentId;
+  const identifiedById = validReport();
+  identifiedById.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "SPAWN_REJECTED",
+    message: `Environment ${targetId} is unavailable`,
+  };
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedById));
+
+  const identifiedByNotFound = validReport();
+  const asynchronousMissing = identifiedByNotFound.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(asynchronousMissing, {
+    rejectedAtSpawn: false,
+    threadId: "missing-environment-thread",
+    status: "error",
+    error: {
+      code: "http_500",
+      message: "HTTP 500: HTTP 404: Environment not found",
+    },
+  });
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedByNotFound));
+
+  const identifiedInCauseChain = validReport();
+  identifiedInCauseChain.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "PLUGIN_SPAWN_FAILED",
+    message: "Unable to spawn plugin thread",
+    context: { requestedEnvironmentId: targetId },
+    cause: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: "Environment not found",
+    },
+  };
+  assert.doesNotThrow(() => assertIntegrationReport(identifiedInCauseChain));
+
+  const unrelatedSpawnFailure = validReport();
+  unrelatedSpawnFailure.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "ECONNRESET",
+    message: "BB daemon connection reset",
+  };
+  assert.throws(
+    () => assertIntegrationReport(unrelatedSpawnFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const unrelatedThreadFailure = validReport();
+  unrelatedThreadFailure.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment.error = {
+    code: "THREAD_NOT_FOUND",
+    message: "The thread was not found",
+  };
+  assert.throws(
+    () => assertIntegrationReport(unrelatedThreadFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  for (const error of [
+    {
+      code: "THREAD_NOT_FOUND",
+      message: "HTTP 404: Thread not found",
+      context: { requestedEnvironmentId: "env_missing_target" },
+    },
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: "env_missing_target" },
+    },
+  ]) {
+    const unrelatedNotFound = validReport();
+    const unavailableEnvironment = unrelatedNotFound.rows.find(
+      (entry) => entry.id === "permission-environment-forwarding",
+    ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+    unavailableEnvironment.environmentId = "env_missing_target";
+    unavailableEnvironment.error = error;
+    assert.throws(
+      () => assertIntegrationReport(unrelatedNotFound),
+      /must identify the requested missing environment or a not-found code/u,
+    );
+  }
+
+  const mismatchedCauseId = validReport();
+  const mismatchUnavailable = mismatchedCauseId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(mismatchUnavailable, {
+    environmentId: "env_missing_target",
+    error: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: "Environment env_other_target not found",
+    },
+  });
+  assert.throws(
+    () => assertIntegrationReport(mismatchedCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const mismatchedSuffixCauseId = validReport();
+  const suffixMismatchUnavailable = mismatchedSuffixCauseId.rows.find(
+    (entry) => entry.id === "permission-environment-forwarding",
+  ).observed.permissionEnvironmentMatrix.unavailableEnvironment;
+  Object.assign(suffixMismatchUnavailable, {
+    environmentId: targetId,
+    error: {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: `Environment not found: ${targetId}-other`,
+    },
+  });
+  assert.throws(
+    () => assertIntegrationReport(mismatchedSuffixCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+});
+
+test("thread spawn report uses the permission matrix when execution spawn is absent", () => {
+  const slices = validSlices();
+  const matrix = permissionEnvironmentMatrix();
+  slices.T2.manifest.checks.permissionEnvironmentMatrix = matrix;
+
+  const report = buildIntegrationReport({
+    ensembleHead: "abc123",
+    sourceDigest: "digest-abc123",
+    slices,
+    t5Reports: validT5Reports(),
+  });
+  const spawnRow = report.rows.find(
+    (entry) => entry.id === "thread-spawn-execution-options",
+  );
+  const acceptedEdits = matrix.modeRequests[0];
+
+  assert.equal(spawnRow.observed.threadId, acceptedEdits.thread.id);
+  assert.equal(spawnRow.observed.environmentId, acceptedEdits.environment.id);
+  assert.deepEqual(
+    spawnRow.observed.providerRequest,
+    acceptedEdits.providerTrace[0],
+  );
+  assert.equal(spawnRow.verdict, "passed");
+});
+
+test("T2 combines the two validated fixture manifests and keeps their checks", () => {
+  const { execution, permissionEnvironment } = t2FixtureManifests();
+
+  const combined = combineT2FixtureManifests(execution, permissionEnvironment);
+
+  assert.deepEqual(
+    combined.checks.executionSpawn,
+    execution.checks.executionSpawn,
+  );
+  assert.deepEqual(
+    combined.checks.permissionEnvironmentMatrix,
+    permissionEnvironment.checks.permissionEnvironmentMatrix,
+  );
+  assert.equal(combined.checks.ownedProcessCleanup.allExited, true);
+  assert.deepEqual(
+    combined.checks.ownedProcessCleanup.fixtureRuns.map((run) => run.name),
+    ["execution", "permissionEnvironment"],
+  );
+  assert.deepEqual(combined.checks.disposableRootCleanup.fixtureRoots, {
+    execution: true,
+    permissionEnvironment: true,
+  });
+});
+
+test("T2 aggregation rejects either missing fixture manifest", () => {
+  const { execution, permissionEnvironment } = t2FixtureManifests();
+
+  assert.throws(
+    () => combineT2FixtureManifests(undefined, permissionEnvironment),
+    /T2 execution fixture manifest is missing/u,
+  );
+  assert.throws(
+    () => combineT2FixtureManifests(execution, undefined),
+    /T2 permissionEnvironment fixture manifest is missing/u,
+  );
+});
+
+test("T2 fixture manifest path keeps the fixture default without an override", () => {
+  assert.equal(
+    resolveFixtureManifestPath(undefined),
+    defaultFixtureManifestPath,
+  );
+  assert.equal(resolveFixtureManifestPath(""), defaultFixtureManifestPath);
+});
+
+test("T2 fixture manifest path honors an explicit environment override", () => {
+  const override = path.join(repositoryRoot, "direct-t2-run-manifest.json");
+  assert.equal(resolveFixtureManifestPath(override), override);
+});
+
+test("direct T2 fixtures have separate default manifests without overrides", () => {
+  const paths = resolveT2FixtureManifestPaths({});
+
+  assert.equal(
+    path.basename(paths.execution),
+    "T2.execution.run-manifest.json",
+  );
+  assert.equal(
+    path.basename(paths.permissionEnvironment),
+    "T2.permission-environment.run-manifest.json",
+  );
+  assert.notEqual(paths.execution, paths.permissionEnvironment);
+});
+
+test("report binds fixture and provider bridge hashes separately from package artifacts", () => {
+  const report = validReport();
+  const row = report.rows[0];
+  assert.match(row.sourceRevisions.providerBridgeSha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(Object.keys(row.sourceRevisions.fixtureSourceSha256), [
+    "scriptedProvider",
+    "executionRpc",
+    "recoveryRpc",
+  ]);
+  row.sourceRevisions.fixtureSourceSha256.recoveryRpc = null;
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /fixtureSourceSha256.recoveryRpc/u,
+  );
+});
+
+test("workspace intent report rejects competing owners, duplicate matches and missing environment starts", () => {
+  const duplicateOwner = validT5Reports();
+  duplicateOwner.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation.attempts[1].disposition = "owner";
+  assert.throws(
+    () => assertT5Reports(duplicateOwner),
+    /one owner and one joined/u,
+  );
+
+  const duplicateMatch = validT5Reports();
+  const reconciliation = duplicateMatch.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation;
+  reconciliation.matches.push({ ...reconciliation.matches[0] });
+  assert.throws(
+    () => assertT5Reports(duplicateMatch),
+    /duplicate workspace matches/u,
+  );
+
+  const hiddenStart = validT5Reports();
+  hiddenStart
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.missingEnvironment.providerTrace.push({ method: "turn/start" });
+  assert.throws(
+    () => assertT5Reports(hiddenStart),
+    /must not start a provider/u,
+  );
+});
+
+function asynchronouslyFailedMissingEnvironmentReports() {
+  const reports = validT5Reports();
+  const missing = reports.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment;
+  const threadId = "missing-environment-thread";
+  Object.assign(missing, {
+    rejectedAtSpawn: false,
+    threadId,
+    status: "error",
+    spawnError: null,
+    threadEvents: [
+      {
+        name: "thread.failed",
+        threadId,
+        data: {
+          error: "HTTP 404: Environment not found",
+          thread: { id: threadId, status: "error" },
+        },
+      },
+    ],
+  });
+  return reports;
+}
+
+test("workspace report accepts synchronous and asynchronous missing-environment rejection", () => {
+  assert.doesNotThrow(() => assertT5Reports(validT5Reports()));
+  const reports = asynchronouslyFailedMissingEnvironmentReports();
+  const missing = reports.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment;
+
+  assert.deepEqual(missing.providerTrace, []);
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("workspace report requires an asynchronous thread failure without provider effects", () => {
+  const missingFailure = asynchronouslyFailedMissingEnvironmentReports();
+  missingFailure.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.threadEvents = [];
+  assert.throws(
+    () => assertT5Reports(missingFailure),
+    /must record thread.failed/u,
+  );
+
+  const wrongThread = asynchronouslyFailedMissingEnvironmentReports();
+  wrongThread.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.missingEnvironment.threadEvents[0].threadId = "other-thread";
+  assert.throws(() => assertT5Reports(wrongThread), /strictly equal/u);
+
+  const providerStarted = asynchronouslyFailedMissingEnvironmentReports();
+  providerStarted
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.missingEnvironment.providerTrace.push({ method: "turn/start" });
+  assert.throws(
+    () => assertT5Reports(providerStarted),
+    /must not start a provider/u,
+  );
+});
+
+test("workspace report rejects unrelated synchronous and asynchronous errors", () => {
+  const targetEnvironmentId = "env_missing_target";
+  for (const spawnError of [
+    "BB daemon connection reset",
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: targetEnvironmentId },
+    },
+  ]) {
+    const unrelatedSpawnFailure = validT5Reports();
+    const workspaceRow = unrelatedSpawnFailure.find(
+      (entry) => entry.name === "initial-workspace-identity",
+    );
+    workspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+    Object.assign(workspaceRow.observed.missingEnvironment, {
+      environmentId: targetEnvironmentId,
+      spawnError,
+    });
+    assert.throws(
+      () => assertT5Reports(unrelatedSpawnFailure),
+      /must identify the requested missing environment or a not-found code/u,
+    );
+  }
+
+  const unrelatedThreadFailure =
+    asynchronouslyFailedMissingEnvironmentReports();
+  const workspaceRow = unrelatedThreadFailure.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  workspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+  workspaceRow.observed.missingEnvironment.environmentId = targetEnvironmentId;
+  workspaceRow.observed.missingEnvironment.threadEvents[0].data.error = {
+    code: "THREAD_NOT_FOUND",
+    message: "HTTP 404: Thread not found",
+    context: { requestedEnvironmentId: targetEnvironmentId },
+  };
+  assert.throws(
+    () => assertT5Reports(unrelatedThreadFailure),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const mismatchedCauseId = asynchronouslyFailedMissingEnvironmentReports();
+  const mismatchedWorkspaceRow = mismatchedCauseId.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  mismatchedWorkspaceRow.identities.missingEnvironmentId = targetEnvironmentId;
+  mismatchedWorkspaceRow.observed.missingEnvironment.environmentId =
+    targetEnvironmentId;
+  mismatchedWorkspaceRow.observed.missingEnvironment.threadEvents[0].data.error =
+    {
+      code: "ENVIRONMENT_UNAVAILABLE",
+      message: "Environment env_other_target is unavailable",
+    };
+  assert.throws(
+    () => assertT5Reports(mismatchedCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+
+  const mismatchedSuffixCauseId =
+    asynchronouslyFailedMissingEnvironmentReports();
+  const suffixMismatchWorkspaceRow = mismatchedSuffixCauseId.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  suffixMismatchWorkspaceRow.identities.missingEnvironmentId =
+    targetEnvironmentId;
+  suffixMismatchWorkspaceRow.observed.missingEnvironment.environmentId =
+    targetEnvironmentId;
+  suffixMismatchWorkspaceRow.observed.missingEnvironment.threadEvents[0].data.error =
+    {
+      code: "ENVIRONMENT_NOT_FOUND",
+      message: `Environment not found: ${targetEnvironmentId}-other`,
+    };
+  assert.throws(
+    () => assertT5Reports(mismatchedSuffixCauseId),
+    /must identify the requested missing environment or a not-found code/u,
+  );
+});
+
+test("workspace reconciliation follows the observed owner in either input order", () => {
+  for (const ownerIndex of [0, 1]) {
+    const reports = validT5Reports();
+    const row = reports.find(
+      (entry) => entry.name === "initial-workspace-identity",
+    );
+    if (ownerIndex === 1) row.identities.competingAttemptIds.reverse();
+    const ownerAttemptId = row.identities.competingAttemptIds[ownerIndex];
+    const joinedAttemptId = row.identities.competingAttemptIds[1 - ownerIndex];
+    const observed = row.observed;
+    observed.joinedAttempt.ownerAttemptId = ownerAttemptId;
+    observed.joinedAttempt.attemptId = joinedAttemptId;
+    for (const label of [
+      "acceptedReconciliationBeforeRestart",
+      "reconciliation",
+    ]) {
+      const reconciliation = observed[label];
+      reconciliation.ownerAttemptId = ownerAttemptId;
+      reconciliation.attempts = row.identities.competingAttemptIds.map(
+        (attemptId) => ({
+          attemptId,
+          disposition: attemptId === ownerAttemptId ? "owner" : "joined",
+        }),
+      );
+      if (ownerIndex === 1) reconciliation.attempts.reverse();
+    }
+    assert.doesNotThrow(() => assertT5Reports(reports));
+  }
+});
+
+test("workspace reconciliation rejects inconsistent owner and spawn observations", () => {
+  const inconsistentOwner = validT5Reports();
+  const row = inconsistentOwner.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  );
+  row.observed.reconciliation.ownerAttemptId = "unobserved-owner";
+  assert.throws(() => assertT5Reports(inconsistentOwner), /ownerAttemptId/u);
+
+  const duplicateAttempt = validT5Reports();
+  const reconciliation = duplicateAttempt.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.reconciliation;
+  reconciliation.attempts[1].attemptId = reconciliation.attempts[0].attemptId;
+  assert.throws(
+    () => assertT5Reports(duplicateAttempt),
+    /unique competing attempts/u,
+  );
+
+  const duplicateSpawn = validT5Reports();
+  duplicateSpawn.find(
+    (entry) => entry.name === "initial-workspace-identity",
+  ).observed.joinedAttempt.spawnCalls = 2;
+  assert.throws(
+    () => assertT5Reports(duplicateSpawn),
+    /joinedAttempt.spawnCalls/u,
+  );
+});
+
+test("workspace report accepts either order for concurrent hook observations", () => {
+  const reports = validT5Reports();
+  reports
+    .find((entry) => entry.name === "initial-workspace-identity")
+    .observed.rawHookObservations.reverse();
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 requires dirty-file observations and a finite retirement window", () => {
+  const missingWindow = validT5Reports();
+  delete missingWindow.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.retirementWindowMs;
+  assert.throws(() => assertT5Reports(missingWindow), /finite window/u);
+
+  const unboundedWindow = validT5Reports();
+  unboundedWindow.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.retirementWindowMs = 7 * 60 * 1000 + 1;
+  assert.throws(() => assertT5Reports(unboundedWindow), /finite window/u);
+
+  const missingDirtyFile = validT5Reports();
+  missingDirtyFile.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed.markerExistsAfterFinalArchive = undefined;
+  assert.throws(
+    () => assertT5Reports(missingDirtyFile),
+    /markerExistsAfterFinalArchive/u,
+  );
+});
+
+test("A17 requires observed retirement and final artifact absence", () => {
+  const unobservedRetirement = validT5Reports();
+  const unobserved = unobservedRetirement.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  unobserved.retirementObserved = false;
+  Object.assign(unobserved.retirementObservations.at(-1), {
+    environmentStatus: "ready",
+    environmentRetired: false,
+    retirementObserved: false,
+  });
+  unobserved.environmentAfterLastDelete.status = "ready";
+  assert.throws(
+    () => assertT5Reports(unobservedRetirement),
+    /A17 must observe environment retirement/u,
+  );
+
+  for (const field of [
+    "markerExistsAfterLastDelete",
+    "workspaceExistsAfterLastDelete",
+  ]) {
+    const artifactRemains = validT5Reports();
+    artifactRemains.find(
+      (entry) => entry.name === "a17-shared-worktree-retention",
+    ).observed[field] = true;
+    assert.throws(
+      () => assertT5Reports(artifactRemains),
+      new RegExp(
+        field === "markerExistsAfterLastDelete"
+          ? "A17 final marker must be absent"
+          : "A17 final worktree must be absent",
+        "u",
+      ),
+    );
+  }
+});
+
+test("A17 accepts retirement confirmed by a missing environment response", () => {
+  const reports = validT5Reports();
+  const observed = reports.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const finalSample = observed.retirementObservations.at(-1);
+  Object.assign(finalSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: {
+      code: "http_500",
+      message: "HTTP 500: HTTP 404: Environment not found",
+    },
+    environmentConfirmedMissing: true,
+    environmentRetired: true,
+  });
+  observed.environmentAfterLastDelete = serializeA17EnvironmentAfterLastDelete(
+    finalSample,
+    a17Identities().environmentId,
+  );
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 missing-environment serialization retains the requested ID", () => {
+  const environmentId = a17Identities().environmentId;
+  const error = {
+    code: "http_500",
+    message: "HTTP 500: HTTP 404: Environment not found",
+  };
+
+  assert.deepEqual(
+    serializeA17EnvironmentAfterLastDelete(
+      { environmentId: null, environmentLookupError: error },
+      environmentId,
+    ),
+    { requestedEnvironmentId: environmentId, error },
+  );
+  assert.deepEqual(
+    serializeA17EnvironmentAfterLastDelete(
+      { environmentId, environmentStatus: "destroyed" },
+      environmentId,
+    ),
+    { id: environmentId, status: "destroyed" },
+  );
+});
+
+test("A17 accepts retirement observed by the first post-delete sample", () => {
+  const reports = validT5Reports();
+  const observed = reports.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const firstSample = observed.retirementObservations[0];
+  Object.assign(firstSample, {
+    environmentStatus: "destroyed",
+    environmentRetired: true,
+    workspaceExists: false,
+    markerExists: false,
+    retirementObserved: true,
+  });
+  observed.retirementObservations = [firstSample];
+  observed.retirementObservationCount = 1;
+  observed.retirementObservationWindowMs = firstSample.elapsedMs;
+  observed.retirementObserved = true;
+  observed.environmentAfterLastDelete = {
+    id: firstSample.environmentId,
+    status: "destroyed",
+  };
+  observed.markerExistsAfterLastDelete = false;
+  observed.workspaceExistsAfterLastDelete = false;
+
+  assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 accepts a null environment ID only with confirmed missing retirement", () => {
+  const unconfirmedMissing = validT5Reports();
+  const unconfirmedObserved = unconfirmedMissing.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const unconfirmedSample = unconfirmedObserved.retirementObservations.at(-1);
+  Object.assign(unconfirmedSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: "temporary lookup failure",
+    environmentConfirmedMissing: false,
+    environmentRetired: false,
+    retirementObserved: false,
+  });
+  unconfirmedObserved.retirementObserved = false;
+  unconfirmedObserved.environmentAfterLastDelete = {
+    requestedEnvironmentId: a17Identities().environmentId,
+    error: unconfirmedSample.environmentLookupError,
+  };
+  assert.throws(() => assertT5Reports(unconfirmedMissing), /missing/u);
+
+  const nonMissingFailure = validT5Reports();
+  const failedObserved = nonMissingFailure.find(
+    (entry) => entry.name === "a17-shared-worktree-retention",
+  ).observed;
+  const failedSample = failedObserved.retirementObservations.at(-1);
+  Object.assign(failedSample, {
+    environmentId: null,
+    environmentStatus: null,
+    environmentLookupError: {
+      code: "HTTP_500",
+      message: "HTTP 500: temporary server error",
+    },
+    environmentConfirmedMissing: true,
+    environmentRetired: true,
+  });
+  failedObserved.environmentAfterLastDelete = {
+    requestedEnvironmentId: a17Identities().environmentId,
+    error: failedSample.environmentLookupError,
+  };
+  assert.throws(
+    () => assertT5Reports(nonMissingFailure),
+    /environment-specific causal not-found/u,
+  );
+
+  const wrongReturnedId = validT5Reports();
+  wrongReturnedId
+    .find((entry) => entry.name === "a17-shared-worktree-retention")
+    .observed.retirementObservations.at(-1).environmentId = "other-environment";
+  assert.throws(() => assertT5Reports(wrongReturnedId), /environment-a17/u);
+});
+
+test("A17 rejects unrelated fixture-plugin, daemon, and thread 404s as retirement", () => {
+  const { environmentId } = a17Identities();
+  const unrelatedErrors = [
+    "HTTP 404: Fixture plugin route not found",
+    {
+      code: "DAEMON_ROUTE_NOT_FOUND",
+      message: "HTTP 404: Daemon route not found",
+      context: { requestedEnvironmentId: environmentId },
+    },
+    {
+      code: "THREAD_NOT_FOUND",
+      message: "HTTP 404: Thread not found",
+      context: { requestedEnvironmentId: environmentId },
+    },
+  ];
+
+  for (const environmentLookupError of unrelatedErrors) {
+    const reports = validT5Reports();
+    const observed = reports.find(
+      (entry) => entry.name === "a17-shared-worktree-retention",
+    ).observed;
+    const finalSample = observed.retirementObservations.at(-1);
+    Object.assign(finalSample, {
+      requestedEnvironmentId: environmentId,
+      environmentId: null,
+      environmentStatus: null,
+      environmentLookupError,
+      environmentConfirmedMissing: true,
+      environmentRetired: true,
+      workspaceExists: false,
+      markerExists: false,
+      retirementObserved: true,
+    });
+    observed.environmentAfterLastDelete = {
+      requestedEnvironmentId: environmentId,
+      error: environmentLookupError,
+    };
+    observed.markerExistsAfterLastDelete = false;
+    observed.workspaceExistsAfterLastDelete = false;
+    observed.retirementObserved = true;
+
+    assert.throws(() => assertT5Reports(reports), /A17|environment|missing/u);
+  }
+});
+
+test("cleanup policy table stays proposed and fails closed for unknown evidence", () => {
+  const report = validReport();
+  assert.doesNotThrow(() => assertIntegrationReport(report));
+  const unknownDelivery =
+    report.proposedEnsembleContract.cleanupDecisionTable.find(
+      (entry) => entry.delivery === "unknown",
+    );
+  unknownDelivery.decision = "archive";
+  assert.throws(
+    () => assertIntegrationReport(report),
+    /cleanup decision table/u,
+  );
+});
+
+test("unproved writer, stop, A17 and accepted-queue guarantees cannot pass", () => {
+  const writer = validReport();
+  writer.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "composed-writer-admission",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(writer),
+    /must preserve the T5 capability verdict/u,
+  );
+
+  const stop = validReport();
+  stop.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "stop-writer-release",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(stop),
+    /Stop proof gate.*remains open/u,
+  );
+
+  const a17 = validReport();
+  a17.rows.find(
+    (entry) =>
+      entry.type === "public-api" && entry.id === "shared-worktree-retention",
+  ).verdict = "passed";
+  assert.throws(() => assertIntegrationReport(a17), /A17 remains/u);
+
+  const startup = validReport();
+  startup.rows.find(
+    (entry) =>
+      entry.type === "proof-gate" && entry.id === "startup-queued-dispatch",
+  ).verdict = "passed";
+  assert.throws(
+    () => assertIntegrationReport(startup),
+    /Known T4 startup capability failure/u,
   );
 });
 
