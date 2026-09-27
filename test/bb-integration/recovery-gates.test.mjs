@@ -23,7 +23,10 @@ import {
   writeA17RetentionMarker,
   withFixture,
 } from "./harness.mjs";
-import { isMissingEnvironmentRejection } from "./report.mjs";
+import {
+  isMissingEnvironmentRejection,
+  serializeA17EnvironmentAfterLastDelete,
+} from "./report.mjs";
 
 const fixturePluginId = "ensemble-t1-fixture";
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -1913,21 +1916,10 @@ gateTest(
       );
     }
     const finalRetirementObservation = retirementObservations.at(-1);
-    const environmentAfterLastDelete =
-      finalRetirementObservation?.environmentId === environmentId
-        ? {
-            environment: {
-              id: finalRetirementObservation.environmentId,
-              status: finalRetirementObservation.environmentStatus,
-            },
-          }
-        : {
-            requestedEnvironmentId: environmentId,
-            error:
-              finalRetirementObservation?.environmentLookupError ??
-              finalRetirementObservation?.fixtureRpcError ??
-              "No post-delete environment observation was collected",
-          };
+    const environmentAfterLastDelete = serializeA17EnvironmentAfterLastDelete(
+      finalRetirementObservation,
+      environmentId,
+    );
     const markerExistsAfterLastDelete =
       finalRetirementObservation?.markerExists ?? null;
     const retentionPassed =
@@ -1976,9 +1968,7 @@ gateTest(
         finalThreadAfterArchive,
         markerRetainedWhileShared: markerRetained,
         secondThreadDelete: lastDeletion,
-        environmentAfterLastDelete:
-          environmentAfterLastDelete.environment ??
-          environmentAfterLastDelete.error,
+        environmentAfterLastDelete,
         markerExistsAfterLastDelete,
         workspaceExistsAfterLastDelete:
           finalRetirementObservation?.workspaceExists ?? null,

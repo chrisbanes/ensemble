@@ -2187,6 +2187,25 @@ function assertInitialWorkspaceEvidence(identities, observed) {
   );
 }
 
+export function serializeA17EnvironmentAfterLastDelete(
+  observation,
+  requestedEnvironmentId,
+) {
+  if (observation?.environmentId === requestedEnvironmentId) {
+    return {
+      id: observation.environmentId,
+      status: observation.environmentStatus,
+    };
+  }
+  return {
+    requestedEnvironmentId,
+    error:
+      observation?.environmentLookupError ??
+      observation?.fixtureRpcError ??
+      "No post-delete environment observation was collected",
+  };
+}
+
 function assertA17RetentionEvidence(identities, observed) {
   requireString(identities?.projectId, "A17 project ID");
   requireString(identities?.environmentId, "A17 environment ID");

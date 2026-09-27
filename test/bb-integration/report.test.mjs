@@ -23,6 +23,7 @@ import {
   assertExpectedT4Failure,
   assertIntegrationReport,
   assertT5Reports,
+  serializeA17EnvironmentAfterLastDelete,
   buildIntegrationReport,
   combineT2FixtureManifests,
   REQUIRED_API_EVIDENCE,
@@ -1537,12 +1538,35 @@ test("A17 accepts retirement confirmed by a missing environment response", () =>
     environmentConfirmedMissing: true,
     environmentRetired: true,
   });
-  observed.environmentAfterLastDelete = {
-    requestedEnvironmentId: a17Identities().environmentId,
-    error: finalSample.environmentLookupError,
-  };
+  observed.environmentAfterLastDelete = serializeA17EnvironmentAfterLastDelete(
+    finalSample,
+    a17Identities().environmentId,
+  );
 
   assert.doesNotThrow(() => assertT5Reports(reports));
+});
+
+test("A17 missing-environment serialization retains the requested ID", () => {
+  const environmentId = a17Identities().environmentId;
+  const error = {
+    code: "http_500",
+    message: "HTTP 500: HTTP 404: Environment not found",
+  };
+
+  assert.deepEqual(
+    serializeA17EnvironmentAfterLastDelete(
+      { environmentId: null, environmentLookupError: error },
+      environmentId,
+    ),
+    { requestedEnvironmentId: environmentId, error },
+  );
+  assert.deepEqual(
+    serializeA17EnvironmentAfterLastDelete(
+      { environmentId, environmentStatus: "destroyed" },
+      environmentId,
+    ),
+    { id: environmentId, status: "destroyed" },
+  );
 });
 
 test("A17 accepts retirement observed by the first post-delete sample", () => {
