@@ -378,16 +378,18 @@ environment was rejected without a provider trace. This does not demonstrate
 provider enforcement, shell containment, ambient-credential isolation or direct
 BB API restrictions.
 
-For workspace setup, two raw parallel BB spawns produced distinct environments.
-A separate test-local SQLite intent joined two attempts and reconciled one
-chosen task thread/environment after a dropped accepted response and restart;
-that fixture arbitration is not product workspace binding. The missing ID in
-that case is synthetic and does not represent BB reclaiming an existing
-environment. The second-plugin wait produced no provider effects before release
-and one tool effect after release, with no Ensemble writer reservation.
+For T5 workspace setup, two raw parallel BB spawns produced distinct
+environments. A separate test-local SQLite intent joined two attempts and
+reconciled one chosen task thread/environment after a dropped accepted response
+and restart; that fixture arbitration is not product workspace binding. The
+missing ID in that case is synthetic and does not represent BB reclaiming an
+existing environment. The T5 second-plugin wait produced no provider effects
+before release and one tool effect after release, with no Ensemble writer
+reservation.
 
-The A17 dirty-marker fixture kept the marker and shared environment after the
-first thread was archived and deleted while another live thread retained it.
+The T5 A17 dirty-marker fixture kept the marker and shared environment after
+the first thread was archived and deleted while another live thread retained
+it.
 After the second thread's archive and delete, BB retired the environment and
 removed the marker and worktree within a bounded seven-minute observation. This
 single direct BB lifecycle observation leaves A17 open; it does not prove that
@@ -424,7 +426,7 @@ Accepted access model: one trusted operator on a private BB installation.
 Ensemble enforces authorization for its own commands and integration actions.
 Agent execution uses BB/provider permissions and environment controls. The UI
 must distinguish these controls from project action policy and disclose shell,
-ambient credential, and direct BB API access limitations. T1 records provider
+ambient credential, and direct BB API access limitations. T2 records provider
 request forwarding for the three tested permission modes; it does not prove
 provider enforcement or an independent sandbox, and it does not test rejection
 of an unauthorized Ensemble action. Revocation of Ensemble actions is immediate
@@ -569,11 +571,12 @@ recheck with 2,150 ms stable no-start, while a distinct earlier integrated run
 recorded 2,361 ms with 2,066 ms stable no-start. The trace-timing race means
 neither is current acceptance proof.
 
-T1/T2 records are now integrated into the capability report. Its permission row
-checks the three provider request modes, project/environment identities,
-restart reads, and synthetic unavailable-environment rejection. T5 records
-composed wait, stop, initial workspace, retry, revision and A17 observations;
-fixture-only evidence does not implement Ensemble ownership or cleanup policy.
+T1 and T2 records are now integrated into the capability report. The T2
+permission row checks the three provider request modes, project/environment
+identities, restart reads, and synthetic unavailable-environment rejection. T5
+records composed wait, stop, initial workspace, retry, revision and A17
+observations; fixture-only evidence does not implement Ensemble ownership or
+cleanup policy.
 
 The focused T2 stop record and integrated report at `1b70716` are historical
 client SDK 0.5.29 evidence; they measured 2,727 ms / 2,378 ms and 2,416 ms /
