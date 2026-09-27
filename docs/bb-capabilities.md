@@ -373,7 +373,7 @@ temporary evidence. They are not required to run the T01 harness.
 | Startup and queued dispatch | **Failed on tested runtime**: an accepted queued row stayed held if Ensemble loaded and rejected it, but when Ensemble and the original wait owner were both unavailable BB cleared the hold and sent the row to the provider. Ensemble-local unsent work survived; it cannot govern an accepted BB row while its plugin is absent. |
 | Message acceptance and replay | **Partial**: lost spawn/sent/queued responses recovered through unique public markers after restart without blind resend. A bounded stale-generation row was deleted before provider effect; zero/multiple matches remain held, and general idempotency or an atomic generation fence is unproved. |
 | Composed writer admission | **Open**: T5 observed a second-plugin wait, zero provider effects before release and one tool effect after release. It has no Ensemble writer reservation to prove admission or ownership cannot be stranded. |
-| Stop and writer release | **Open**: stop returned `ok` while the scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. Historical focused T2 and integrated `1b70716` evidence from client SDK 0.5.29 measured 2,727 ms / 2,378 ms and 2,416 ms / 2,125 ms respectively. The former integrated report at `88b4384` is also historical; it measured 2,388 ms / 2,091 ms with client package 0.5.30 and host SDK 0.5.29. The `712edd8` report is historical and measured 4,387 ms / 2,286 ms. The current integrated `ce4419c` report records a 2,318 ms post-stop observation window, including 2,027 ms with no provider start. These are fixture observations, not a writer-safety guarantee. This covers one scripted held message, not arbitrary workspace termination or complete Ensemble writer exclusion. |
+| Stop and writer release | **Open**: stop returned `ok` while the scripted thread stayed `pending`; exact-ID deletion, a matching cancellation event and fresh queue reads confirmed cancellation before and after recheck. Historical focused T2 and integrated `1b70716` evidence from client SDK 0.5.29 measured 2,727 ms / 2,378 ms and 2,416 ms / 2,125 ms respectively. The former integrated report at `88b4384` is also historical; it measured 2,388 ms / 2,091 ms with client package 0.5.30 and host SDK 0.5.29. The `712edd8` report is historical and measured 4,387 ms / 2,286 ms. The historical integrated `ce4419c` report recorded a 2,318 ms post-stop observation window with 2,027 ms stable no-start; the current measured `c63da1e` report records 2,316 ms with 2,035 ms stable no-start. These are fixture observations, not a writer-safety guarantee. This covers one scripted held message, not arbitrary workspace termination or complete Ensemble writer exclusion. |
 | Initial workspace identity | **Open**: two attempts against one test-local SQLite intent reconciled one task thread/environment after restart. Two raw parallel BB spawns created distinct environments; production binding and concurrency policy remain unproved. A synthetic missing environment was rejected before any provider trace. |
 | Retry ownership | **Open**: BB per-turn retries and effects were observed across restart; no shared Ensemble/BB retry counter proves the two-retry limit. |
 | Revision application | **Open**: T5 matched dynamic instruction revisions to provider requests on the next ordinary turn. It has no operator-authorized apply operation or immutable assignment snapshot. |
@@ -438,27 +438,38 @@ It has SHA-256
 4,387 ms after recheck with 2,286 ms stable no-start, and recorded an A17
 retirement observation after 21 samples over 306,740 ms.
 
-The current measured report is bound to tested runtime head
-`ce4419ce22bafc8dbfaa4438885fcf5e914acb48`, with SHA-256
-`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595` and a
+The report for tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48` is historical for this candidate.
+Its SHA-256 is
+`52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`, and its
+`sourceRevision` matched that head. It recorded a 2,318 ms stop observation
+window with 2,027 ms stable no-start and A17 retirement after 21 samples over
+306,067 ms. Its T2 execution and permission/environment manifest hashes were
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
+
+The current measured report is bound to runtime head
+`c63da1e19221907d32e2693b7062e352c801384f`, with SHA-256
+`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf` and a
 matching `sourceRevision`. On Node 24.21.0/npm 12.1.0, BB 0.44.0, client
-package SDK 0.5.30, and host SDK 0.5.29, the pinned check, integration and
-prototype suites passed on that runtime head; this documentation-only update
-does not claim another runtime run. Its outcome is
-`completed-with-capability-gaps`.
+package SDK 0.5.30, and host SDK 0.5.29, `npm run check`,
+`npm run test:bb-integration`, and `npm run test:bb-prototype` passed on that
+measured revision. This documentation-only update does not claim a rerun. The
+report outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a`; the
+`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b`; the
 permission/environment manifest SHA-256 is
-`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`. Both
-passed, and the report verified cleanup across T1–T5. The current
-stop-writer-release row records a 2,318 ms post-stop observation window,
-including 2,027 ms with no provider start; the stop gate remains open. All six
-T5 scenario rows remain `open`. The #665 startup violation remains
+`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`. Both
+passed, and the report verified cleanup across T1–T5: owned processes exited,
+server and daemon ports closed, no forced cleanup, and disposable roots
+removed. The current stop-writer-release row records a 2,316 ms post-stop
+observation window with 2,035 ms stable no-start; the stop gate remains open.
+All six T5 scenario rows remain `open`. The #665 startup violation remains
 `failed-capability`; T06/T08 remain blocked.
 
 The live A17 run observed the original environment ID as `destroyed` after 21
-samples over 306,067 ms, with the marker and worktree absent. A focused
+samples over 305,839 ms, with the marker and worktree absent. A focused
 validator regression accepted an environment result with a null ID; the live
 run returned the original ID. This evidence distinguishes the installed
 client SDK package 0.5.30 from BB's reported host plugin SDK 0.5.29.

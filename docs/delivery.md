@@ -160,27 +160,38 @@ Its SHA-256 is
 2,286 ms stable no-start and recorded A17 retirement after 21 samples over
 306,740 ms, with the marker and worktree absent.
 
-Current acceptance is the integrated report for tested runtime head
-`ce4419ce22bafc8dbfaa4438885fcf5e914acb48`, SHA-256
+The report for tested runtime head
+`ce4419ce22bafc8dbfaa4438885fcf5e914acb48` is historical for this candidate.
+Its SHA-256 is
 `52107494376a763e6e9329666baee9b6138010f869eb2539ba877f875d0ef595`; its
+`sourceRevision` matched that head. It measured a 2,318 ms stop observation
+window with 2,027 ms stable no-start and A17 retirement after 21 samples over
+306,067 ms. Its T2 execution and permission/environment manifest hashes were
+`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
+`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
+
+Current acceptance is the integrated report measured on runtime head
+`c63da1e19221907d32e2693b7062e352c801384f`, SHA-256
+`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`; its
 `sourceRevision` matches that runtime head. Pinned Node 24.21.0/npm 12.1.0, BB
-0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed `npm run check`,
-`npm run test:bb-integration`, and `npm run test:bb-prototype` on that revision;
-this documentation-only correction does not imply a new runtime run. The
-report outcome is `completed-with-capability-gaps`.
+0.44.0, client package SDK 0.5.30, and host SDK 0.5.29 passed
+`npm run check`, `npm run test:bb-integration`, and `npm run test:bb-prototype`
+on that measured revision. This documentation-only update does not imply a new
+runtime run. The outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a`; the
+`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b`; the
 permission/environment manifest SHA-256 is
-`4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`. Both
-passed, and cleanup was verified across T1–T5. The current stop-writer
-observation window was 2,318 ms, including 2,027 ms stable no-start. The live
-A17 run returned the original environment ID with status `destroyed` after 21
-samples over 306,067 ms, with the marker and worktree absent. A focused
-report-validator regression accepted an environment result with a null ID; the
-live run returned the original ID. All six T5 rows remain open. T4 retains the
-expected #665 accepted-queue failure as `failed-capability`, and T06/T08 remain
-blocked.
+`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`. Both
+passed, and cleanup was verified across T1–T5: owned processes exited, server
+and daemon ports closed, no forced cleanup, and disposable roots removed. The
+current stop-writer observation window was 2,316 ms, including 2,035 ms stable
+no-start. The live A17 run returned the original environment ID with status
+`destroyed` after 21 samples over 305,839 ms, with the marker and worktree
+absent. A focused report-validator regression accepted an environment result
+with a null ID; the live run returned the original ID. All six T5 rows remain
+open. T4 observed one accepted queued turn start and one additional tool effect
+(3 → 4); #665 remains `failed-capability`, and T06/T08 remain blocked.
 
 The corrected evidence supports removing only the T02 block specific to
 [#676](https://github.com/chrisbanes/ensemble/issues/676); T06/T08 remain
