@@ -255,9 +255,19 @@ window with 2,027 ms stable no-start, and A17 retirement after 21 samples over
 `9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
 `4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
 
+The integrated report measured on runtime head
+`c63da1e19221907d32e2693b7062e352c801384f` is historical for this candidate.
+Its SHA-256 is
+`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`, and its
+`sourceRevision` matched that head. It recorded a 2,316 ms stop observation
+window with 2,035 ms stable no-start and A17 retirement after 21 samples over
+305,839 ms. Its T2 execution and permission/environment manifest hashes were
+`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b` and
+`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`.
+
 Current acceptance is the integrated report measured on runtime head
-`c63da1e19221907d32e2693b7062e352c801384f`, SHA-256
-`4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`. Its
+`f523e145b445837b73ee9f7082adb87ce7712c1f`, SHA-256
+`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`. Its
 `sourceRevision` matches that head. On pinned Node 24.21.0/npm 12.1.0, BB
 0.44.0, client package SDK 0.5.30, and host SDK 0.5.29, `npm run check`,
 `npm run test:bb-integration`, and `npm run test:bb-prototype` passed on the
@@ -265,20 +275,23 @@ measured runtime revision. This documentation-only update does not claim a new
 runtime run. The report outcome is `completed-with-capability-gaps`.
 
 The integrated T2 execution manifest SHA-256 is
-`01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b`; the
+`8987eea41eac4c26b5011373cd17b2c4c68b5ccb89acd58a0e6fe2c1490897b1`; the
 permission/environment manifest SHA-256 is
-`636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`. Both
+`2c6edb73f4f308db0406ff66c0a756905fcbaaa3ae0b457abc88c5ebb50b7259`. Both
 passed. Across T1–T5, owned processes exited, server and daemon ports closed,
 no forced cleanup occurred, and disposable roots were removed.
 
 The current stop-writer observation confirms exact-ID cancellation, a matching
 `message.cancelled` event and an empty queue before release. Its post-stop
-observation window was 2,316 ms, including 2,035 ms stable no-start; the
+observation window was 2,306 ms, including 2,020 ms stable no-start; the
 delayed thread remained `pending`. This is bounded fixture evidence, not a
-complete writer-release guarantee. The live A17 run observed the original
-environment ID as `destroyed` after 21 samples over 305,839 ms, with the marker
-and worktree absent. All six T5 rows remain `open`. T4 observed one accepted
-queued turn start and one additional tool effect (3 → 4); #665 remains
+complete writer-release guarantee. The live A17 run observed the dirty marker
+and shared worktree remain while the second thread existed; after final archive
+and deletion, the original environment ID was `destroyed` after 21 samples over
+305,934 ms, with the marker and worktree absent. A focused validator regression
+accepts a null environment ID only with a confirmed missing response; the live
+run returned the original ID. All six T5 rows remain `open`. T4 observed one
+accepted queued turn start and one additional tool effect (3 → 4); #665 remains
 `failed-capability`, and T06/T08 remain blocked. These observations do not
 prove arbitrary process termination, complete writer exclusion, or Ensemble
 cleanup policy. The report does not stand in for the authenticated-provider

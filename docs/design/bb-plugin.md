@@ -596,30 +596,58 @@ manifest hashes are
 `9d5d581e4dddf42e8298cc67c8f56fee5be0a75035c022719764454701ec2b3a` and
 `4d39daee9b22cbd8cff7b28a629ce85e01d4898a59a31544c8905d5da25159f5`.
 
-The current integrated report is bound to runtime head
-`c63da1e19221907d32e2693b7062e352c801384f`, has SHA-256
+The integrated report for runtime head
+`c63da1e19221907d32e2693b7062e352c801384f` is historical for this candidate.
+It has SHA-256
 `4afae8b09ebf17328690a73aaaf99a11f20179cf38a050f7bdb087dd7e8f7fcf`, and
 matches that head in `sourceRevision`. Its T2 execution and
 permission/environment manifests have SHA-256 values
 `01bb3087171aa35f7ebbca40830453be64f7cf70c5d95ac04e3af229627bca8b` and
 `636bf92d7191a526a5b240aa197e7390f840ea2b3d3d9bfdb97205799f0cfb4c`; both
 passed. Pinned Node 24.21.0/npm 12.1.0 `check`, BB integration and prototype
+suites passed on that measured runtime head. The report outcome is
+`completed-with-capability-gaps`; it does not describe the runtime measured
+below.
+
+The current integrated report is bound to runtime head
+`f523e145b445837b73ee9f7082adb87ce7712c1f`, has SHA-256
+`ec54e887f86adf327f8f31c507ac9c888c6167d6fdc64b27d8e824174420e8da`, and
+matches that head in `sourceRevision`. Its T2 execution and
+permission/environment manifests have SHA-256 values
+`8987eea41eac4c26b5011373cd17b2c4c68b5ccb89acd58a0e6fe2c1490897b1` and
+`2c6edb73f4f308db0406ff66c0a756905fcbaaa3ae0b457abc88c5ebb50b7259`; both
+passed. Pinned Node 24.21.0/npm 12.1.0 `check`, BB integration and prototype
 suites passed on this measured runtime head. This documentation-only update
 does not claim a rerun; the outcome is `completed-with-capability-gaps`.
 
-The current stop-writer-release observation window was 2,316 ms with 2,035 ms
-stable no-start. Exact-ID cancellation, a matching event and an empty queue
-were observed before release, while the delayed thread remained `pending`; this
+The historical `c63da1e` stop-writer-release observation window was
+2,316 ms, with 2,035 ms stable no-start. Exact-ID cancellation, a matching
+event and an empty queue were observed before release, while the delayed thread remained `pending`; this
 does not establish a general writer guarantee. The live A17 run observed the
 dirty marker and shared worktree remain while the second live thread existed.
 After final archive and deletion, BB removed the marker and worktree and
 returned the original environment ID with status `destroyed` after 21 samples
-over 305,839 ms. A focused report-validator regression accepted an environment
-result with a null ID; the live run returned the original ID. All six T5 rows
+over 305,839 ms. A focused report-validator regression accepted a null
+environment ID only with a confirmed missing response; the live run returned
+the original ID. All six T5 rows
 remain open and #665 remains `failed-capability`, with T06/T08 blocked. Direct
 BB lifecycle observations do not prove delivery, preservation, automatic
 cleanup policy or complete Ensemble writer exclusion. The accepted product
 guarantees remain unchanged.
+
+The current stop-writer-release observation window was 2,306 ms with 2,020 ms
+stable no-start. Exact-ID cancellation, a matching event and an empty queue
+were observed before release, while the delayed thread remained `pending`; this
+does not establish a general writer guarantee. The current live A17 run
+observed the dirty marker and shared worktree remain while the second live
+thread existed. After final archive and deletion, BB removed the marker and
+worktree and returned the original environment ID with status `destroyed` after
+21 samples over 305,934 ms. A focused report-validator regression accepts a
+null environment ID only with a confirmed missing response; the live run
+returned the original ID. All six T5 rows remain open and #665 remains
+`failed-capability`, with T06/T08 blocked. Direct BB lifecycle observations do
+not prove delivery, preservation, automatic cleanup policy or complete
+Ensemble writer exclusion.
 
 The inspected client SDK package 0.5.29 declarations exposed `threads.stop`,
 turn-specific `threads.retry`, queued-message APIs, and the `message.dispatch`
@@ -634,7 +662,7 @@ integration test results.
 | Startup and queued dispatch | Paused/stopped tasks cannot start from BB's persisted queue before plugin guards are installed; startup failure cannot silently release protected work | **Failed capability**: both hook owners failed startup, BB dispatched the accepted row, and one provider turn/tool effect was observed; #665 remains open | T06/T08 blocked |
 | Message acceptance and replay | Correlate accepted/queued sends after lost response; invalidate stale-generation queued messages; otherwise expose a recoverable hold instead of blind resend | **Partial**: marker reconciliation and one bounded stale-generation delete were observed; atomic fencing and general idempotency remain open | T01/T07 |
 | Composed writer admission | Acquire writer only when BB will execute the turn; other plugin waits, dispatch failure and cancellation cannot strand a reservation; serialize competing writers without pre-spawn ownership | **Open**: T5 observed another-plugin wait and gate release, without an Ensemble writer reservation | T01/T02/T06 |
-| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and empty queue were observed. The historical focused 0.5.29 run measured 2,727 ms / 2,378 ms; the historical integrated `ce4419c` report measured 2,318 ms / 2,027 ms. The current `c63da1e` report measured 2,316 ms / 2,035 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
+| Stop and writer release | Confirm termination including delayed starts and relevant workspace processes; safely yield owner writer to child; never infer release from a result alone | **Open**: stop returned `ok` while the scripted thread remained pending; exact-ID cancellation, matching event and empty queue were observed. Historical focused 0.5.29 and integrated `ce4419c` timings remain separate observations; the historical integrated `c63da1e` report measured 2,316 ms / 2,035 ms, while the current integrated `f523e14` report measured 2,306 ms / 2,020 ms. No general termination or writer-release guarantee follows | A15/A16/T01/T02/T06 |
 | Initial workspace identity | Bind one task environment before parallel assignment launches; reconcile uncertain provisioning without creating competing task worktrees | **Open**: a test-local SQLite intent joined two attempts and chose one thread/environment after restart; two raw parallel BB spawns created separate environments. A synthetic missing environment was rejected without a provider trace | T01/T02/T06 |
 | Retry ownership | Confirm how BB automatic/manual retries interact with Ensemble counters and dispatch policy | **Open**: T5 observed per-turn retry identity/effects across restart; no shared retry ceiling was tested | T01/T08 |
 | Revision application | Prove explicit updated instructions reach an existing conversation's next turn, with replacement only when safely required | **Open**: T5 matched dynamic instructions in ordinary next-turn provider requests; no operator apply operation or immutable assignment snapshot exists | T01/T04/T06 |
