@@ -49,13 +49,13 @@ async function createDisposablePathFixture(t) {
   const root = path.join(temporaryDirectory, "fixture");
   const child = path.join(root, "worktree");
   const sibling = `${root}-worktree`;
-  const escape = path.join(temporaryDirectory, "outside", "worktree");
+  const escapePath = path.join(temporaryDirectory, "outside", "worktree");
   await Promise.all(
-    [child, sibling, escape].map((directory) =>
+    [child, sibling, escapePath].map((directory) =>
       mkdir(directory, { recursive: true }),
     ),
   );
-  return { root, child, sibling, escape, outside: path.dirname(escape) };
+  return { root, child, sibling, escapePath };
 }
 
 test("disposable root resolves a child worktree path", async (t) => {
@@ -75,12 +75,11 @@ test("disposable root rejects a sibling worktree path", async (t) => {
 });
 
 test("disposable root rejects a normalized escape path", async (t) => {
-  const { root, escape } = await createDisposablePathFixture(t);
+  const { root, escapePath } = await createDisposablePathFixture(t);
+  const candidatePath = path.join(root, "..", "outside", "worktree");
+  assert.equal(path.resolve(candidatePath), escapePath);
   await assert.rejects(
-    resolveExistingPathWithinRoot(
-      root,
-      path.resolve(root, "..", "outside", "worktree"),
-    ),
+    resolveExistingPathWithinRoot(root, candidatePath),
     /inside the disposable T5 BB home/u,
   );
 });
