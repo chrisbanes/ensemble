@@ -1,8 +1,13 @@
 ---
 status: accepted
+partially_superseded_by: ADR-1004
 ---
 
 # Keep Ensemble's core independent of its host
+
+BB ownership and integration choices below are superseded by
+[ADR-1004](1004-standalone-service.md). Other product policies remain in force.
+The following text records the earlier decision.
 
 Ensemble owns project and task identities, assignments, policy, durable
 coordination, results, and recovery decisions in a host-independent core. BB

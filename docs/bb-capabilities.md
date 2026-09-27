@@ -1,3 +1,5 @@
+> Historical BB prototype/design evidence. [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture. This document does not authorize further BB product work.
+
 # BB capability evidence
 
 ## BB 0.44 observation before the SDK package update — 26 September 2026

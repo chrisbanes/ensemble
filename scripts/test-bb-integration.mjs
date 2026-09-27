@@ -87,7 +87,7 @@ const scenarios = [
 const sourceFiles = new Set([
   ".github/workflows/ci.yml",
   ".node-version",
-  "docs/acceptance.md",
+  "docs/acceptance-bb.md",
   "docs/bb-capabilities.md",
   "docs/design/bb-plugin.md",
   "package-lock.json",

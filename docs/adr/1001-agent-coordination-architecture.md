@@ -1,12 +1,17 @@
 ---
 status: accepted
+partially_superseded_by: ADR-1004
 ---
 
 # Build Ensemble around agent coordination
 
-The host ownership and identity choices below are partially superseded by
-[ADR-1003](1003-host-independent-core.md). BB remains the initial host of a
-host-independent Ensemble core; the other product policies remain in force.
+BB ownership and integration choices below are superseded by
+[ADR-1004](1004-standalone-service.md). Other product policies remain in force.
+The following text records the earlier decision.
+
+The intermediate host-independent-core decision is recorded in
+[ADR-1003](1003-host-independent-core.md). ADR-1004 subsequently removes BB;
+use the current specification for retained product policies.
 
 Ensemble is a BB plugin where agents organise work through instructions
 and runtime tools. Agents decide how to plan, implement, review, and revise work;

@@ -1,10 +1,12 @@
 # Ensemble
 
-This branch implements Ensemble as a TypeScript BB plugin for agent coordination.
+Ensemble is moving to a standalone TypeScript service without BB (ADR-1004).
+The current code remains a BB feasibility prototype with a reusable core.
 Read `CONTEXT.md` and `docs/adr/` before making architectural changes. `README.md`
 distinguishes current implementation from the accepted target design.
-Read `docs/SPEC.md` for proposed operating behaviour and acceptance scenarios;
-its draft details and open choices are not automatically accepted requirements.
+Read `docs/SPEC.md` for the reviewed operating behaviour and `docs/acceptance.md`
+for required evidence. Unresolved technical choices are listed in the standalone
+design; they are not implicitly accepted implementation contracts.
 
 The previous implementation is preserved on `cb/pipeline-implementation`.
 Consult it for evidence or reusable code when useful; its pipeline architecture,
@@ -12,12 +14,15 @@ configuration schema, and persisted runs are not compatibility requirements.
 
 ## Planning gate
 
-The current code is a feasibility prototype. Do not extend product implementation
-until the user has reviewed `docs/SPEC.md`, `docs/design/bb-plugin.md`,
-`docs/acceptance.md`, and `docs/delivery.md`. Resolve capability gates before their
-dependent tickets. Delivery includes automated BB/UI integration and bounded live
-validation run by the implementation agent; do not hand incremental testing to the
-user. Preserve the installed Haze prototype until a reviewed cutover.
+The current code is a feasibility prototype. Chris reviewed and confirmed the
+standalone specification, design choices, acceptance scope and delivery sequence
+on 27 September 2026. Do not request that product review again for unchanged scope.
+S01 in `docs/delivery.md` is the next capability gate; resolve its execution-control
+proofs before dependent implementation. Settle detailed contracts using that evidence,
+and return material scope or guarantee changes for review. Delivery includes
+automated service/runtime/UI integration and bounded live validation run by the
+implementation agent; do not hand incremental testing to the user. Preserve the
+installed Haze prototype until a reviewed cutover.
 
 ## Working conventions
 
@@ -31,20 +36,20 @@ user. Preserve the installed Haze prototype until a reviewed cutover.
 - Tasks belong to Ensemble projects; source integrations do not own project policy.
   Deduplicate external identity across sources and keep repository access explicit.
 - Enforce Ensemble action policy in its tools and integrations. Agent execution
-  relies on BB/provider controls; disclose their limits without claiming an
+  relies on runtime/deployment controls; disclose their limits without claiming an
   independent Ensemble sandbox.
 
 ## TypeScript and Node.js
 
 - Use TypeScript with strict type checking on a supported Node.js LTS release.
 - Validate external data at runtime; static types do not validate provider payloads,
-  plugin messages, or persisted data.
-- Use BB public plugin APIs and ordinary modules. Introduce task-source interfaces when
+  runtime messages, or persisted data.
+- Use ordinary modules and supported runtime APIs. Introduce task-source interfaces when
   concrete integrations establish what they need.
 - Keep blocking operations and heavy computation off the coordinating event loop.
 - Handle cancellation and asynchronous failures explicitly.
 - Do not treat in-process plugins or Node.js permission flags as a sandbox for
-  untrusted code. Execution isolation belongs to BB/provider/deployment controls;
+  untrusted code. Execution isolation belongs to runtime/deployment controls;
   Ensemble does not implement a separate host security boundary.
 - Keep domain terms in `CONTEXT.md` and durable architectural decisions in `docs/adr/`.
 - Update documentation when changing user-visible behaviour or contracts. Clearly
@@ -54,9 +59,10 @@ user. Preserve the installed Haze prototype until a reviewed cutover.
 
 Use Node.js from `.node-version` and the package manager pinned in `package.json`.
 Run `npm ci` then `npm run check` (type checking, lint, formatting, build, tests).
-CI runs the same check. Tests use a real SQLite file and an explicit fake BB host;
-they do not establish compatibility with a running BB installation or a provider.
-See `docs/bb-prototype.md` for the live validation still required. Do not claim
+CI runs the same check. Existing tests use real SQLite and a fake host; the BB
+suites remain transitional evidence until S02 retires them. Standalone release
+evidence must exercise the chosen real runtime and operator UI; see
+`docs/acceptance.md`. Do not claim
 project isolation, autonomous scheduling, or result delivery is implemented.
 
 ## Git
