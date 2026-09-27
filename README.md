@@ -1,57 +1,40 @@
 # Ensemble
 
-Ensemble is being built around a host-independent core for agents working on
-project-scoped tasks, with BB as its first host and UI integration.
-Agent instructions determine the process. Ensemble owns tasks, assignments, and
-durable coordination; a host adapter supplies conversations, agent execution,
-and workspaces. The bounded prototype now has a standalone core in `src/core` and a BB adapter
-in `src/adapters/bb`; it still runs inside BB.
-Taskboard informs the UI design; Ensemble is an independent implementation.
+Ensemble is being built as a standalone service for agents working on project-scoped
+tasks. **BB is no longer part of the target architecture.** Ensemble will own
+scheduling, execution supervision, task workspaces and its operator interface,
+alongside durable tasks, assignments, results and recovery.
 
-## Product model
-
-- **Projects and tasks:** local or imported work, ownership, delegation, results
-  and questions needing operator attention.
-- **Agent profiles:** reusable instructions and execution settings, selected for
-  leads and assignments; BB conversations carry out the work.
-- **GitHub sync:** optional issue/Project discovery, readiness and permitted
-  progress updates using the same task model.
-
-The interface centers on projects and tasks. Persistent bot identities, personal
-bot state and a separate bot management UI are outside scope. Instructions guide
-how agents deliver work; Ensemble retains ownership and pending work.
-
-## Planning checkpoint
-
-The prototype has established feasibility. Further product implementation is paused
-for review of the specification, technical design, automated acceptance plan, and
-published delivery tickets. The next handback is a complete tested flow, not
-a series of user-operated integration tests.
+Agents decide how work proceeds through instructions and coordination tools;
+Ensemble enforces ownership, admission and permissions. Projects have reusable
+profiles, local tasks and optional GitHub sources. There is no configured process
+graph or separate persistent-bot model.
 
 ## Current status
 
-This branch contains a bounded TypeScript prototype using SDK package 0.5.30
-and declaring BB host SDK 0.5.9 compatibility:
+The repository still contains the bounded BB prototype: a reusable TypeScript/
+SQLite core in `src/core`, a BB adapter in `src/adapters/bb`, and its packaging and
+integration suites. It supports local task creation, one worker assignment per task,
+instruction snapshots, results and conservative uncertain-launch reconciliation.
+It is not a standalone service or autonomous coordinator. The standalone scheduler,
+workspace manager and operator UI are not implemented.
 
-- Local task creation in one configured BB project.
-- One worker assignment per task, launched through the BB SDK.
-- Core-owned project identity, launch intent, instruction snapshots, and results
-  in SQLite, with explicit host project and conversation bindings.
-- Reconciliation of uncertain launches without automatic duplicate dispatch.
-- Agent tools for creation, delegation, reporting, and reading assignments.
+The [accepted direction](docs/adr/1004-standalone-service.md) removes BB rather than
+retaining it as an optional backend. The [delivery plan](docs/delivery.md) retires
+its packages, adapter and CI during replacement bootstrap. Existing core behavior
+and historical failure evidence remain useful. The installed Haze prototype is
+preserved until a reviewed operational cutover.
 
-This is not an operational autonomous coordinator. There is no task panel,
-GitHub integration, automatic result delivery, project scheduler, or enforced
-project sandbox. Local-path installation and tool registration were verified on
-BB 0.43.4 with plugin SDK 0.5.9. The user reported successful live delegation
-after configuring Haze. Standalone tests run the compiled core with BB absent and real SQLite files.
-The isolated BB suites use a scripted provider; authenticated-provider release
-evidence remains separate.
+## Planning checkpoint
 
-The accepted target adds local tasks plus multiple external sources per project,
-project leads, task owners, concurrent delegation, durable handoffs, and a BB task
-panel. GitHub repository issues and GitHub Projects are the first external sources;
-Jira and Linear remain deferred.
+Chris reviewed and confirmed the standalone product scope, design choices,
+acceptance plan and delivery sequence on 27 September 2026.
+First prove a real execution runtime's admission, cancellation and recovery boundary;
+then build the complete local-task journey, followed by GitHub integration.
+The reviewed choices are Codex with the existing login, macOS first, and a web
+interface over Tailscale with a separate Ensemble login. Start with a fresh database.
+Codex App Server and macOS crash termination still need qualification; the service
+reuses the harness for model execution and agent tools.
 
 ## Development
 
@@ -62,33 +45,41 @@ npm ci
 npm run check
 ```
 
-`check` runs strict type checking, lint, formatting checks, compilation, and tests.
-`npm run format` applies formatting. `npm run build` emits JavaScript into `dist/`;
-it does not package or install the plugin into BB. The BB manifest points to the
-TypeScript server entry for BB's plugin tooling.
-
-See [the prototype guide](docs/bb-prototype.md) for configuration, tools, failure
-handling, migration, and validation boundaries.
+`check` runs strict type checking, lint, formatting, compilation and tests. Current
+package metadata and BB suites describe the transitional prototype; they do not
+establish standalone compatibility. This direction change makes no runtime/package
+changes and has no effect on an installed instance.
 
 ## Design documents
 
-- [ADR-1001](docs/adr/1001-agent-coordination-architecture.md): agent coordination architecture.
-- [ADR-1003](docs/adr/1003-host-independent-core.md): accepted host-independent core and portability boundary.
-- [Behavioural specification](docs/SPEC.md): target behaviour and the [first local-task journey](docs/SPEC.md#first-local-task-journey).
-- [Technical design](docs/design/bb-plugin.md): boundaries, persistence and recovery.
-- [Acceptance plan](docs/acceptance.md): automated journeys and release gates.
-- [Delivery tickets](docs/delivery.md): published issues with dependencies and acceptance IDs.
+
+The specification owns product behaviour, the design owns component boundaries,
+and the acceptance plan owns required evidence. The delivery plan maps that work
+into slices; ADRs explain decisions. Current confirmed choices take precedence
+over historical BB documents. A reviewed requirement is not an implemented capability.
+
+
+- [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
+- [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
+- [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
+- [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.
+- [Delivery plan](docs/delivery.md): reviewed sequence, S01 proof scope and BB ticket reconciliation.
 - [Glossary](CONTEXT.md): canonical language.
 - [Agent workflows](docs/agents/): contribution conventions.
 
-## Previous implementation
+Historical references: [BB specification](docs/SPEC-bb.md), [BB design](docs/design/bb-plugin.md),
+[BB acceptance](docs/acceptance-bb.md), [BB delivery](docs/delivery-bb.md),
+[capability evidence](docs/bb-capabilities.md), and [prototype guide](docs/bb-prototype.md).
+These do not authorize new BB feature development. Earlier ADRs retain product
+policy except where explicitly superseded by ADR-1004.
 
-The Rust pipeline implementation is preserved on `cb/pipeline-implementation` at
-`272adb7`. Its old configuration and persisted
-runs have no compatibility requirement; finish or explicitly retire existing runs
-before operational cutover.
+## Previous implementation and license
 
-## License
+The Rust pipeline implementation remains on `cb/pipeline-implementation` at `272adb7`.
+Its configuration and persisted runs are not compatibility requirements. Finish or
+explicitly retire existing work before operational cutover; retained records do not
+prove safe resumption on another runtime.
 
-Apache-2.0. See [LICENSE](LICENSE). No Taskboard or BB implementation source has
-been copied into this repository; dependencies retain their own licenses.
+Apache-2.0. See [LICENSE](LICENSE). Taskboard informs the UI design; no Taskboard or
+BB implementation source has been copied into this repository. Dependencies retain
+their own licenses.

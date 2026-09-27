@@ -1,3 +1,5 @@
+> Historical BB prototype/design evidence. [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture. This document does not authorize further BB product work.
+
 # Bots Sidebar research
 
 Date: 2026-09-24. Read-only subagent investigation of

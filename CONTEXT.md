@@ -37,7 +37,7 @@ The agent responsible for coordinating a task's work and bringing it to an outco
 _Avoid_: Project lead when referring to responsibility for one task
 
 **Agent profile**:
-A reusable, operator-defined identity and instructions, selected for project leads and task assignments. Its execution settings are bound to the selected host.
+A reusable, operator-defined identity and instructions, selected for project leads and task assignments. Its execution settings are validated for the selected runtime.
 _Avoid_: Bot identity or assignment when referring to reusable configuration
 
 **Assignment**:
@@ -48,10 +48,16 @@ _Avoid_: Step when referring to delegated work
 The interaction history used by an agent to carry out work. An assignment can continue across replacement conversations.
 _Avoid_: Assignment when referring only to its conversation history
 
-**Execution host**:
-The system providing agent execution, conversations, and workspaces for an Ensemble installation. An installation uses one execution host at a time.
-_Avoid_: Provider when referring to the system hosting Ensemble's agent work
+**Execution runtime**:
+The agent harness or execution engine that carries out admitted agent turns and
+reports their observations to Ensemble.
+_Avoid_: Scheduler when referring to the system executing one agent turn
 
-**Host binding**:
-The association between an Ensemble project, profile, assignment, or task and its host-specific identity or execution settings.
-_Avoid_: Project identity when referring only to a host's project reference
+**Execution binding**:
+The association between an assignment and its runtime-specific session or process
+identity and validated execution settings.
+_Avoid_: Assignment identity when referring only to an execution session
+
+**Task workspace**:
+The working files allocated to a task, retained independently of its conversations.
+_Avoid_: Conversation when referring to a task's working files

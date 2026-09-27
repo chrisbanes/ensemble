@@ -1,3 +1,5 @@
+> Historical BB prototype/design evidence. [ADR-1004](../adr/1004-standalone-service.md) removes BB from the target architecture. This document does not authorize further BB product work.
+
 # Core and BB integration technical design
 
 Host ownership follows [ADR-1003](../adr/1003-host-independent-core.md).
@@ -7,8 +9,8 @@ the core. The bounded prototype has been extracted into `src/core` and
 
 Status: proposal for review. ADR-1001 records the accepted product direction;
 this document proposes implementation contracts. No additional implementation is
-authorized by this document. Read with [SPEC](../SPEC.md),
-[acceptance plan](../acceptance.md), and [delivery tickets](../delivery.md).
+authorized by this document. Read with [SPEC](../SPEC-bb.md),
+[acceptance plan](../acceptance-bb.md), and [delivery tickets](../delivery-bb.md).
 
 Related research: [Bots Sidebar patterns and reuse limits](../bb-bots-sidebar-research.md).
 Conversation binding and navigation are candidate patterns. Persistent bot
@@ -17,7 +19,7 @@ product scope.
 
 ## Design entry point
 
-The [local-task journey](../SPEC.md#first-local-task-journey) is the first delivery
+The [local-task journey](../SPEC-bb.md#first-local-task-journey) is the first delivery
 unit: configure a project and profiles, admit a local task, run its owner and any
 delegates, surface results/questions, and preserve the outcome. The operator
 navigates projects and tasks; reusable profiles live in configuration.
