@@ -5,6 +5,24 @@ from the local S01 investigation so a fresh checkout can inspect their scope.
 It is a reviewed summary of existing reports, not a new probe run, a substitute
 for underlying traces, or acceptance of the implemented service.
 
+## Later qualification and trust-boundary amendment
+
+This matrix is a historical snapshot of the evidence available at the minimum
+integration reset. Later qualification on local `cb/35-s01-proof` at
+`77a383fd64144df83dcc65f7b1888286d1f39b55`, in
+`docs/evidence/s01-minimum-contract-qualification-2026-09-28.md`, reports matching
+live/stored command items and effective selected shell write/loopback policy before
+and after restart, plus stale-generation and ambiguous-binding fixtures. That
+checkout and its underlying traces remain the evidence source; they are not
+published by this amendment.
+
+Chris subsequently approved the [runtime trust boundary](../design/standalone.md#runtime-trust-boundary).
+The later report's requirement for exhaustive method observations is superseded;
+its unexplained file effect remains a diagnostic finding. Reconcile evidence using
+the [finite S01 completion rule](../delivery.md#s01-completion-rule). The older
+"unproved" rows below describe this snapshot, not an instruction to rerun evidence
+qualified later. Neither this note nor the contract amendment accepts S01.
+
 ## Provenance and limits
 
 Source: `docs/evidence/s01-consolidated-discovery-2026-09-28.md` in the separate

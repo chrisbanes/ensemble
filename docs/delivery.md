@@ -8,7 +8,8 @@ S01 runtime qualification is the next gate; detailed dependent contracts remain 
 approved the minimum S01 integration contract on 28 September 2026; the current
 S01 issue is [#688](https://github.com/chrisbanes/ensemble/issues/688).
 The [previous T01–T12 briefs and decision register](delivery-bb.md) remain historical.
-This reset does not pass S01 or authorize dependent work; Multica CB-35 is unchanged.
+The subsequent approved runtime trust boundary is recorded below. Neither contract
+amendment alone passes S01 or releases dependent work.
 
 ## Delivery sequence
 
@@ -48,7 +49,7 @@ no new model experiments and does not authorize a new login or deployment.
 | Admission and durable state — A14/A16 | Define admission relative to submission; SQLite fixtures serialize contenders, preserve intent/holds across reopen and fail closed on initialization/storage/policy failure, pause/Stop races and service absence. No independent runtime queue of unadmitted turns. Full scheduler races/caps belong to S03/S05. |
 | Ambiguous submission — A08/A09 | Drop response/crash around submission/binding, include stale revisions, and retain one durable operation with no accidental duplicate dispatch. Reattach only if the same live execution is uniquely identified; otherwise retain uncertainty with the recovery path. Historical resume is not live reattachment; a positive reattachment result is not a universal gate. |
 | Cancellation and survival — A15 | Persist Stop before a supported cancellation request, observe for a predeclared bounded interval, record any continued effects and retain unresolved Stop/writer/capacity holds across restart. Crash survival is a documented limit, not a demand to kill every descendant. |
-| Cooperative handoff — A16/A18 | Identified successful final turn, ended registered tools, complete observations and no known survivor permit one serialized successor. Preserve the existing detached-child overlap counterexample and negative crash/Stop/failure/missing-observation/survivor cases. All other holds need independent resolution. |
+| Cooperative handoff — A16/A18 | Trust successful terminal status for the bound thread/turn, require ended Ensemble callbacks and no other hold/known unfinished execution, then serialize one successor. Missing diagnostic tool items alone do not block handoff. Preserve negative crash/Stop/failure/missing-or-conflicting-terminal/callback/survivor cases and accepted unobserved-effect overlap. Other holds need independent resolution. |
 | Effective policy and observations — A25/R01 | Apply the design's explicit `workspaceWrite`/`never` policy through supported App Server controls. Record attributable inside-write and outside-write behavior, effective command-network controls, rejected broader access, broad reads and ambient limits. Preserve real streamed/stored turn evidence; standalone `command/exec` cannot prove model-turn history. Named restricted profiles and outside-read denial are not required. |
 
 Retain exact versions, commands, identities, effects and fixture cleanup. Separate
@@ -59,10 +60,39 @@ never silently broaden access. Document the
 [operator recovery route](design/standalone.md#operator-recovery-of-uncertain-execution)
 and limitations, including indefinite holds if evidence cannot settle ownership.
 
+### S01 completion rule
+
+The seven rows above are the finite S01 checklist under the approved
+[runtime trust boundary](design/standalone.md#runtime-trust-boundary). Reuse
+existing evidence and record one disposition per row with exact provenance:
+qualified within its stated bounds, demonstrated blocker, or missing required
+bounded evidence. Once each row is qualified, the evidence owner returns one
+candidate and the coordinator records acceptance; that completes S01 and releases
+its native dependency gate. This documentation change alone does neither.
+
+Do not add exhaustive tool-history coverage, a general model-tool allowlist,
+physical writer exclusion or installed-service tests to this checklist. Missing
+diagnostic items and untested tool classes are not themselves demonstrated policy
+breaches. Preserve the unexplained earlier file effect as a diagnostic finding;
+its explanation does not gate S01. S02–S05 own ordinary file-edit, enabled-tool,
+scheduler, recovery and UI integration checks. A demonstrated policy breach or
+contradiction of the trusted terminal outcome still blocks the affected capability.
+
+Existing execution authorization covers reconciliation and any genuinely missing
+bounded checklist evidence. Do not repeat qualified probes or open an alternative
+runtime/version investigation merely to obtain exhaustive observations. Escalate
+only a concrete required capability failure or a material change to this boundary.
+
 ### Evidence and remaining-work mapping
 
 The [durable existing-evidence matrix](evidence/s01-existing-evidence-2026-09-28.md)
-records each bounded observation, provenance and remaining gap in this repository.
+records the earlier bounded observations, provenance and gaps in this repository.
+It predates the later qualification on `cb/35-s01-proof` at
+`77a383fd64144df83dcc65f7b1888286d1f39b55`; reconcile that checkout's
+`docs/evidence/s01-minimum-contract-qualification-2026-09-28.md` against the finite
+checklist. Its shell-policy/history probes before and after restart report positive
+evidence; its exhaustive-observation blocker is superseded by this trust amendment.
+The unexplained earlier file effect remains unresolved, not a retroactive pass.
 It can be read in a fresh checkout; underlying local fixtures/traces are not included
 and the summary alone cannot qualify uncovered cases.
 
@@ -77,7 +107,7 @@ Do not import raw traces/configuration or change prior findings to passes.
 | Disposition | Evidence and remaining work |
 | --- | --- |
 | Reuse within S01 | Real existing-login turn/stored resume, trusted callback, crash survival, best-effort Stop holds and cooperative handoff have bounded evidence. SQLite probes cover admission, state reopen and negative holds. Reconcile their exact coverage against the required rows above; none proves the service. |
-| Still required for S01 | Close gaps in the selected authenticated write/network/approval policy and real streamed/persisted turn evidence; map restart/authentication, stale-generation and ambiguous-submission cases to exact evidence. Record each uncovered case as unproved, and the recovery route as a contract to implement. No new pass is asserted here. |
+| Still required for S01 | Reconcile the later evidence head against the seven checklist rows and return one acceptance candidate. Preserve any genuinely missing bounded evidence as unproved and the recovery route as a contract to implement. Do not repeat qualified shell/history/restart probes or gate on exhaustive observations. No new pass is asserted here. |
 | Documented runtime limits | Admitted work can survive failure/Stop; untracked children can overlap a normal-success successor; stored resume is not live reattachment. Existing sibling-read success is still a failure of the former read-denial contract and now documents an accepted broad-read limit. Process/cleanup failures remain failures of stronger containment. |
 | Later service/integration | S02–S05 implement and qualify service startup/login, all admission races, durable results/inbox, policy and approval enforcement, operator visibility and recovery, full UI/runtime journeys and relevant A/R scenarios. S08 owns operational restart/restore/cutover procedures. |
 | Optional product/deployment hardening | Restricted reads, named permission profiles, complete descendant containment and stronger host isolation require a separate explicit decision and evidence; they do not block minimum orchestration. |

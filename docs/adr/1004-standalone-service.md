@@ -85,6 +85,19 @@ is at `e87ed326182b602c412606d1e88d6ae481188eb2`. See the
    Historical resume is not live reattachment; when reattachment is unsupported,
    visible uncertainty and the documented operator recovery route are acceptable.
    Positive live reattachment is not a universal gate.
+5. **Runtime trust boundary:** Chris subsequently approved trusting Codex's
+   successful terminal status for the bound thread/turn, with ended Ensemble-owned
+   callbacks and no known unfinished execution or other hold, for normal cooperative
+   handoff. This supersedes revision 5's exhaustive interpretation of "complete
+   observations" and "registered tools". Detailed tool history is diagnostic;
+   missing items alone do not prevent handoff. Incomplete observation and possible
+   unobserved effects or overlapping writers are accepted, without claiming their
+   policy/audit trail is proved. Crash, Stop, failure, ambiguous submission,
+   missing/conflicting terminal identity/status and unfinished callbacks retain
+   holds under the existing recovery rule. S01 qualifies a finite integration
+   checklist, not every possible model tool or a general tool allowlist; see the
+   [trust boundary](../design/standalone.md#runtime-trust-boundary) and
+   [completion rule](../delivery.md#s01-completion-rule).
 
 The default policy uses supported Codex workspace-write controls with explicit
 write roots, command network access disabled and no automatic escalation

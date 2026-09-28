@@ -189,12 +189,18 @@ admitted writer generation at a time under the cooperative rule below. Independe
 tasks can proceed concurrently; parallel reviews
 reference a fixed revision. Repository-free tasks need no Git worktree.
 
-Normal successful completion permits cooperative handoff only when the identified
-final turn succeeds, every registered tool has ended, observations are complete and
-no survivor is known. Serialize release with admission of exactly one successor.
-This accepts that an untracked detached child may still write alongside its
-successor; it is not physical writer exclusion. Crash, Stop, failure/interruption,
-missing observations and known survivors retain holds until independently resolved.
+Normal successful completion trusts Codex's successful terminal status for the
+bound thread/turn. After every Ensemble-owned callback has ended, with no known
+unfinished execution or other hold, persist completion and serialize ownership
+release with admission of one successor. Detailed tool history supports diagnosis;
+an absent item alone does not veto an otherwise qualified normal completion.
+This accepts incomplete runtime observation and possible unobserved effects or
+detached-child writes overlapping a successor. It does not prove physical writer
+exclusion or the policy of an unobserved action. See the
+[runtime trust boundary](design/standalone.md#runtime-trust-boundary).
+Crash, Stop, failure/interruption, missing or conflicting terminal identity/status,
+unfinished Ensemble callbacks and known survivors retain holds until independently
+resolved.
 A timer, expired lease, quiet interval, empty terminal list, acknowledged Stop or
 operator acknowledgement cannot release them. Conversation replacement and archival
 do not automatically delete
