@@ -1,0 +1,23 @@
+{"at": {"wall": 1790589604.616594, "mono_ns": 1098181521506916}, "sqlite": "intent_committed_before_submission", "generation": "s01-stop-1790589604616398000", "row": ["s01-stop-1790589604616398000", 1, "intent", 1, 1, 0, null, null]}
+{"at": {"wall": 1790589604.622949, "mono_ns": 1098181527859958}, "server": {"pid": 56317, "ppid": 56237, "pgid": 56317, "sid": 56317, "birth_lstart": "Mon Sep 28 11:00:04 2026", "stat": "Rs", "comm": "codex"}}
+{"at": {"wall": 1790589604.622997, "mono_ns": 1098181527904958}, "send": "initialize", "id": 1}
+{"at": {"wall": 1790589604.738013, "mono_ns": 1098181642927500}, "send": "thread/start", "id": 2}
+{"at": {"wall": 1790589604.96194, "mono_ns": 1098181866849791}, "send": "turn/start", "id": 3}
+{"at": {"wall": 1790589604.98555, "mono_ns": 1098181890458500}, "sqlite": "binding_committed", "thread": "01a0e775-13e3-7582-8d03-886bc8a1c793", "turn": "01a0e775-1464-70e3-8267-e45e1f523ccd"}
+{"at": {"wall": 1790589612.089995, "mono_ns": 1098188994844833}, "writer_parent": {"pid": 56711, "ppid": 56317, "pgid": 56711, "sid": 56711, "birth_lstart": "Mon Sep 28 11:00:11 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "writer_child": {"pid": 56726, "ppid": 56711, "pgid": 56726, "sid": 56726, "birth_lstart": "Mon Sep 28 11:00:11 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "effect_bytes_before": 40}
+{"at": {"wall": 1790589612.091397, "mono_ns": 1098188996232666}, "sqlite": "stop_hold_committed"}
+{"at": {"wall": 1790589612.091455, "mono_ns": 1098188996289250}, "send": "turn/interrupt", "id": 4}
+{"at": {"wall": 1790589612.091607, "mono_ns": 1098188996440958}, "event": "item/started", "item_type": "userMessage", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091632, "mono_ns": 1098188996466208}, "event": "item/completed", "item_type": "userMessage", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091647, "mono_ns": 1098188996480541}, "event": "item/started", "item_type": "reasoning", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091665, "mono_ns": 1098188996498250}, "event": "item/completed", "item_type": "reasoning", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091677, "mono_ns": 1098188996511166}, "event": "item/started", "item_type": "agentMessage", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091736, "mono_ns": 1098188996569166}, "event": "item/completed", "item_type": "agentMessage", "item_status": null, "turn_status": null}
+{"at": {"wall": 1790589612.091753, "mono_ns": 1098188996586583}, "event": "item/started", "item_type": "commandExecution", "item_status": "inProgress", "turn_status": null}
+{"at": {"wall": 1790589612.095904, "mono_ns": 1098189000740666}, "interrupt_response": {}}
+{"at": {"wall": 1790589612.096002, "mono_ns": 1098189000838166}, "event": "turn/completed", "item_type": null, "item_status": null, "turn_status": "interrupted"}
+{"at": {"wall": 1790589612.096039, "mono_ns": 1098189000873250}, "turn_completed": "interrupted"}
+{"at": {"wall": 1790589613.12666, "mono_ns": 1098190031497666}, "server_exit": null, "writer_parent_after": {"pid": 56711, "ppid": 56317, "pgid": 56711, "sid": 56711, "birth_lstart": "Mon Sep 28 11:00:11 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "writer_child_after": {"pid": 56726, "ppid": 56711, "pgid": 56726, "sid": 56726, "birth_lstart": "Mon Sep 28 11:00:11 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "effect_bytes_after": 120}
+{"at": {"wall": 1790589613.135688, "mono_ns": 1098190040516416}, "sqlite": "reopened", "row": ["s01-stop-1790589604616398000", 1, "stopping", 1, 1, 1, "01a0e775-13e3-7582-8d03-886bc8a1c793", "01a0e775-1464-70e3-8267-e45e1f523ccd"], "replacement_allowed": false}
+{"at": {"wall": 1790589613.144081, "mono_ns": 1098190048910791}, "cleanup_pid": 56711}
+{"at": {"wall": 1790589613.152065, "mono_ns": 1098190056893250}, "cleanup_pid": 56726}

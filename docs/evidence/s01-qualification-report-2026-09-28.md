@@ -69,7 +69,7 @@ that absence. The script hash remained unchanged across both turns.
 The source records script SHA-256
 `37c6462a3787e391ed3aef479daec91d67e519be305bafcb1a2eafd79128aefb`
 and trace SHA-256
-`d0d8aa65b84c3ebee632af19d4112f199b511be27512faf7824bb8b796d178ed`.
+`bf5e115d06d367004a778d6230b0d57bf76ea7bbb08fdbd25685418d44f73265`.
 The listener closed; both owned servers exited, and exact-PID checks found neither
 alive. Disposable inside markers remained for audit. This cleanup observation is
 not a proof of complete descendant containment.

@@ -1,0 +1,15 @@
+{"at": {"wall": 1790592827.23519, "mono_ns": 29886458}, "sqlite": "intent_committed_before_submission", "generation": "s01-lost-response-1790592827234975000", "row": ["s01-lost-response-1790592827234975000", 1, "intent", 1, 1, 0, null, null]}
+{"at": {"wall": 1790592827.241342, "mono_ns": 36039291}, "server": {"pid": 76923, "ppid": 76909, "pgid": 76923, "sid": 76923, "birth_lstart": "Mon Sep 28 11:53:47 2026", "stat": "Rs", "comm": "codex"}}
+{"at": {"wall": 1790592827.241414, "mono_ns": 36106666}, "send": "initialize", "id": 1}
+{"at": {"wall": 1790592827.359172, "mono_ns": 153868833}, "send": "thread/start", "id": 2}
+{"at": {"wall": 1790592827.59889, "mono_ns": 393584666}, "send": "turn/start", "id": 3}
+{"at": {"wall": 1790592827.624095, "mono_ns": 418792375}, "sqlite": "response_discarded_without_binding", "thread": "01a0e7a6-403e-7d70-b08a-11d89225df2a", "stored_turn": null}
+{"at": {"wall": 1790592834.739617, "mono_ns": 7534290791}, "writer_parent": {"pid": 77247, "ppid": 76923, "pgid": 77247, "sid": 77247, "birth_lstart": "Mon Sep 28 11:53:54 2026", "stat": "Ss", "comm": "<python3>"}, "writer_child": {"pid": 77323, "ppid": 77247, "pgid": 77323, "sid": 77323, "birth_lstart": "Mon Sep 28 11:53:54 2026", "stat": "Ss", "comm": "<python3>"}, "effect_bytes_before": 40}
+{"at": {"wall": 1790592834.739841, "mono_ns": 7534502458}, "signal": "SIGKILL", "target_app_server_pgid": 76923}
+{"at": {"wall": 1790592835.786145, "mono_ns": 8580812125}, "server_exit": -9, "writer_parent_after": {"pid": 77247, "ppid": 1, "pgid": 77247, "sid": 77247, "birth_lstart": "Mon Sep 28 11:53:54 2026", "stat": "Ss", "comm": "<python3>"}, "writer_child_after": {"pid": 77323, "ppid": 77247, "pgid": 77323, "sid": 77323, "birth_lstart": "Mon Sep 28 11:53:54 2026", "stat": "Ss", "comm": "<python3>"}, "effect_bytes_after": 120}
+{"at": {"wall": 1790592835.793606, "mono_ns": 8588267541}, "sqlite": "reopened", "row": ["s01-lost-response-1790592827234975000", 1, "uncertain", 1, 1, 0, "01a0e7a6-403e-7d70-b08a-11d89225df2a", null], "replacement_allowed": false}
+{"at": {"wall": 1790592835.795293, "mono_ns": 8589951583}, "recovery_attempt": 1, "found_trusted_active_binding": false, "resubmitted": false, "row": ["uncertain", 1, 1, null]}
+{"at": {"wall": 1790592835.79681, "mono_ns": 8591467125}, "recovery_attempt": 2, "found_trusted_active_binding": false, "resubmitted": false, "row": ["uncertain", 1, 1, null]}
+{"at": {"wall": 1790592835.798028, "mono_ns": 8592685375}, "stale_revision_callback_applied": false, "work_revision": 2}
+{"at": {"wall": 1790592835.807212, "mono_ns": 8601878083}, "cleanup_pid": 77247}
+{"at": {"wall": 1790592835.813979, "mono_ns": 8608640833}, "cleanup_pid": 77323}

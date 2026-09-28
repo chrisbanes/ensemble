@@ -1,0 +1,10 @@
+{"wall": 1790610008.947999, "mono_ns": 16055083, "work": "<workspace>/.s01-minimum-turn-20260928-b/work", "outside": "<workspace>/.s01-minimum-turn-20260928-b/outside", "policy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-minimum-turn-20260928-b/work"], "networkAccess": false, "excludeSlashTmp": true, "excludeTmpdirEnvVar": true}, "call_budget": 2, "rerun_budget": 0}
+{"wall": 1790610008.949642, "mono_ns": 17698625, "server_pid": 75934, "server_pgid": 75934}
+{"wall": 1790610008.94969, "mono_ns": 17745666, "request": "initialize", "id": 1, "policy": null}
+{"wall": 1790610009.081527, "mono_ns": 149583125, "request": "account/read", "id": 2, "policy": null}
+{"wall": 1790610009.614702, "mono_ns": 682754708, "account_type": "chatgpt"}
+{"wall": 1790610009.614789, "mono_ns": 682841458, "request": "config/read", "id": 3, "policy": null}
+{"wall": 1790610009.686217, "mono_ns": 754270250, "config_selected": {"approval_policy": "never", "sandbox_mode": "workspace-write"}}
+{"wall": 1790610009.6864269, "mono_ns": 754479875, "request": "thread/start", "id": 4, "policy": null}
+{"wall": 1790610009.686651, "mono_ns": 754703250, "result": "failed", "error": "RuntimeError({'code': -32600, 'message': 'thread/start.environments requires experimentalApi capability'})"}
+{"wall": 1790610009.6955662, "mono_ns": 763619041, "server_stopped_pid": 75934, "server_exit": -9}

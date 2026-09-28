@@ -1,0 +1,12 @@
+{"at": {"wall": 1790589585.06183, "mono_ns": 1098161966935041}, "sqlite": "intent_committed_before_submission", "generation": "s01-crash-1790589585061260000", "row": ["s01-crash-1790589585061260000", 1, "intent", 1, 1, 0, null, null]}
+{"at": {"wall": 1790589585.068445, "mono_ns": 1098161973549541}, "server": {"pid": 55815, "ppid": 55738, "pgid": 55815, "sid": 55815, "birth_lstart": "Mon Sep 28 10:59:45 2026", "stat": "Rs", "comm": "codex"}}
+{"at": {"wall": 1790589585.06849, "mono_ns": 1098161973591000}, "send": "initialize", "id": 1}
+{"at": {"wall": 1790589585.186714, "mono_ns": 1098162091822500}, "send": "thread/start", "id": 2}
+{"at": {"wall": 1790589585.419289, "mono_ns": 1098162324391583}, "send": "turn/start", "id": 3}
+{"at": {"wall": 1790589585.442282, "mono_ns": 1098162347384041}, "sqlite": "binding_committed", "thread": "01a0e774-c788-78e0-8415-af287e1e4e6a", "turn": "01a0e774-c80e-7a33-b1ac-e55cebbca64a"}
+{"at": {"wall": 1790589591.989847, "mono_ns": 1098168894883291}, "writer_parent": {"pid": 56201, "ppid": 55815, "pgid": 56201, "sid": 56201, "birth_lstart": "Mon Sep 28 10:59:51 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "writer_child": {"pid": 56215, "ppid": 56201, "pgid": 56215, "sid": 56215, "birth_lstart": "Mon Sep 28 10:59:51 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "effect_bytes_before": 40}
+{"at": {"wall": 1790589591.989927, "mono_ns": 1098168894960000}, "signal": "SIGKILL", "target_app_server_pgid": 55815}
+{"at": {"wall": 1790589593.029211, "mono_ns": 1098169934249250}, "server_exit": -9, "writer_parent_after": {"pid": 56201, "ppid": 1, "pgid": 56201, "sid": 56201, "birth_lstart": "Mon Sep 28 10:59:51 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "writer_child_after": {"pid": 56215, "ppid": 56201, "pgid": 56215, "sid": 56215, "birth_lstart": "Mon Sep 28 10:59:51 2026", "stat": "Ss", "comm": "<user-home>/.pyenv/versions/3.14.4/bin/python3"}, "effect_bytes_after": 120}
+{"at": {"wall": 1790589593.051, "mono_ns": 1098169956025541}, "sqlite": "reopened", "row": ["s01-crash-1790589585061260000", 1, "bound", 1, 1, 0, "01a0e774-c788-78e0-8415-af287e1e4e6a", "01a0e774-c80e-7a33-b1ac-e55cebbca64a"], "replacement_allowed": false}
+{"at": {"wall": 1790589593.059548, "mono_ns": 1098169964576208}, "cleanup_pid": 56201}
+{"at": {"wall": 1790589593.06765, "mono_ns": 1098169972676166}, "cleanup_pid": 56215}

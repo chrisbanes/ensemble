@@ -1,0 +1,13 @@
+{"wall": 1790610122.1090329, "mono_ns": 30445208, "case": "intent_and_dispatch_committed", "row": ["A", 2, 7, "thread-A", null, "op-A", "uncertain", 1, 1]}
+{"wall": 1790610122.1091158, "mono_ns": 30527541, "case": "callback", "trusted_thread": "thread-A", "supplied_generation": 2, "claimed_assignment": "A", "accepted": true, "binding": ["A", 2, 1]}
+{"wall": 1790610122.10914, "mono_ns": 30552083, "case": "callback", "trusted_thread": "thread-A", "supplied_generation": 2, "claimed_assignment": "B", "accepted": false, "binding": ["A", 2, 1]}
+{"wall": 1790610122.1091578, "mono_ns": 30570083, "case": "callback", "trusted_thread": "thread-A", "supplied_generation": 1, "claimed_assignment": "A", "accepted": false, "binding": ["A", 2, 1]}
+{"wall": 1790610122.109174, "mono_ns": 30585375, "case": "callback", "trusted_thread": "unbound-thread", "supplied_generation": 2, "claimed_assignment": "A", "accepted": false, "binding": null}
+{"wall": 1790610122.1092522, "mono_ns": 30663750, "case": "callback", "trusted_thread": "thread-A", "supplied_generation": 2, "claimed_assignment": "A", "accepted": false, "binding": ["A", 2, 0]}
+{"wall": 1790610122.114571, "mono_ns": 35983000, "case": "before_binding_missing", "observed_count": 0, "match_count": 0, "bound": null, "dispatch_count": 1, "current": ["uncertain", 1, 1, null]}
+{"wall": 1790610122.1151261, "mono_ns": 36537583, "case": "before_binding_multiple", "observed_count": 2, "match_count": 2, "bound": null, "dispatch_count": 1, "current": ["uncertain", 1, 1, null]}
+{"wall": 1790610122.119499, "mono_ns": 40910958, "case": "before_binding_unique", "observed_count": 1, "match_count": 1, "bound": "turn-1", "dispatch_count": 1, "current": ["uncertain", 1, 1, "turn-1"]}
+{"wall": 1790610122.120715, "mono_ns": 42126625, "case": "after_binding_missing", "observed_count": 0, "match_count": 0, "bound": null, "dispatch_count": 1, "current": ["uncertain", 1, 1, "turn-1"]}
+{"wall": 1790610122.121133, "mono_ns": 42545083, "case": "after_binding_conflicting", "observed_count": 1, "match_count": 1, "bound": null, "dispatch_count": 1, "current": ["uncertain", 1, 1, "turn-1"]}
+{"wall": 1790610122.121541, "mono_ns": 42952291, "case": "after_binding_same_live", "observed_count": 1, "match_count": 1, "bound": "turn-1", "dispatch_count": 1, "current": ["uncertain", 1, 1, "turn-1"]}
+{"wall": 1790610122.122831, "mono_ns": 44242583, "case": "stale_revision", "applied": false, "dispatch_count": 1, "holds": [1, 1], "integrity": "ok"}

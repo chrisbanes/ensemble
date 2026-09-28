@@ -1,0 +1,3 @@
+{"wall": 1790591585.270436, "mono_ns": 35852833, "command": "codex login status", "exit": 1, "status": "Not logged in"}
+{"wall": 1790591585.3339012, "mono_ns": 99317625, "initialize_ok": true, "account_null": true, "account_error": null}
+{"wall": 1790591585.33824, "mono_ns": 103655958, "server_exit": -9}

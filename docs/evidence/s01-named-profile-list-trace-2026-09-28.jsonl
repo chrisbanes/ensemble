@@ -1,0 +1,9 @@
+{"wall": 1790594231.647734, "mono_ns": 21483541, "server_pid": 85202, "server_pgid": 85202, "workspace": "<workspace>/.s01-named-profile-2026-09-28", "sibling": "<workspace>/.s01-named-profile-2026-09-28-sibling", "home_like": "<workspace>/.s01-named-profile-2026-09-28-home-like", "server_argv": ["codex", "app-server", "-c", "approval_policy=never", "-c", "permissions.s01_probe.extends=\":workspace\"", "-c", "permissions.s01_probe.filesystem.\":root\"=\"deny\"", "-c", "permissions.s01_probe.filesystem.\":minimal\"=\"read\"", "-c", "permissions.s01_probe.filesystem.\":tmpdir\"=\"deny\"", "-c", "permissions.s01_probe.filesystem.\":slash_tmp\"=\"deny\"", "-c", "permissions.s01_probe.network.enabled=false", "--stdio"]}
+{"wall": 1790594231.647815, "mono_ns": 21562625, "send": "initialize", "id": 1, "params": null}
+{"wall": 1790594231.7725482, "mono_ns": 146298125, "response_id": 1, "result": {"userAgent": "Codex Desktop/0.157.1 (Mac OS 26.7.0; arm64) dumb (ensemble_s01_named_profile; 0.1.0)", "codexHome": "<workspace-instance>/codex-home", "platformFamily": "unix", "platformOs": "macos"}, "error": null}
+{"wall": 1790594231.772654, "mono_ns": 146403291, "send": "config/read", "id": 2, "params": null}
+{"wall": 1790594231.869573, "mono_ns": 243323541, "response_id": 2, "approval_policy": "never", "sandbox_mode": "danger-full-access", "profile_configured": true}
+{"wall": 1790594231.869903, "mono_ns": 243653250, "send": "permissionProfile/list", "id": 3, "params": null}
+{"wall": 1790594231.8941069, "mono_ns": 267857916, "response_id": 3, "profiles": [{"id": ":read-only", "allowed": true}, {"id": ":workspace", "allowed": true}, {"id": ":danger-full-access", "allowed": true}, {"id": "s01_probe", "allowed": false}]}
+{"wall": 1790594231.894188, "mono_ns": 267938541, "result": "failed", "error": "AssertionError('named profile absent or disallowed')"}
+{"wall": 1790594231.8980858, "mono_ns": 271836208, "server_exit": -9}

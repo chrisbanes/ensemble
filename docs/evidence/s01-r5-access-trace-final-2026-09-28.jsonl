@@ -1,0 +1,24 @@
+{"wall": 1790593219.056072, "mono_ns": 20346333, "send": "initialize", "id": 1}
+{"wall": 1790593219.180867, "mono_ns": 145139375, "send": "account/read", "id": 2}
+{"wall": 1790593220.005981, "mono_ns": 970249000, "account_type": "chatgpt"}
+{"wall": 1790593220.0060532, "mono_ns": 970321083, "send": "thread/start", "id": 3}
+{"wall": 1790593220.234124, "mono_ns": 1198391000, "thread_id": "01a0e7ac-3dc7-7f92-9cb9-335f4c875875", "sandbox": "workspace-write", "approval_policy": "never"}
+{"wall": 1790593220.234287, "mono_ns": 1198554125, "send": "turn/start", "id": 4}
+{"wall": 1790593223.312146, "mono_ns": 4276400416, "item_completed": {"type": "userMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593225.3136141, "mono_ns": 6277859875, "item_completed": {"type": "reasoning", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593225.733186, "mono_ns": 6697429458, "item_completed": {"type": "agentMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593227.1426702, "mono_ns": 8106906625, "item_completed": {"type": "commandExecution", "status": "completed", "exitCode": 0, "command": "/bin/zsh -lc 'printf INSIDE_OK > inside.txt'", "aggregatedOutput": null}}
+{"wall": 1790593228.968954, "mono_ns": 9933183041, "item_completed": {"type": "agentMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593228.99646, "mono_ns": 9960688125, "turn_completed": {"id": "01a0e7ac-3e8c-7aa1-944c-58f93eee5db3", "status": "completed"}}
+{"wall": 1790593228.9965389, "mono_ns": 9960766458, "turn_summary": {"id": "01a0e7ac-3e8c-7aa1-944c-58f93eee5db3", "status": "completed", "item_types": ["userMessage", "reasoning", "agentMessage", "commandExecution", "agentMessage"]}}
+{"wall": 1790593228.9969962, "mono_ns": 9961224416, "inside_write": "INSIDE_OK"}
+{"wall": 1790593228.997094, "mono_ns": 9961322083, "send": "turn/start", "id": 5}
+{"wall": 1790593229.221388, "mono_ns": 10185615458, "item_completed": {"type": "userMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593231.1169121, "mono_ns": 12081130833, "item_completed": {"type": "reasoning", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593231.5636952, "mono_ns": 12527913250, "item_completed": {"type": "agentMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593237.080819, "mono_ns": 18045011958, "item_completed": {"type": "agentMessage", "status": null, "exitCode": null, "command": null, "aggregatedOutput": null}}
+{"wall": 1790593237.092716, "mono_ns": 18056908083, "turn_completed": {"id": "01a0e7ac-60c9-7892-a49e-ad17860b10cc", "status": "completed"}}
+{"wall": 1790593237.092768, "mono_ns": 18056960000, "turn_summary": {"id": "01a0e7ac-60c9-7892-a49e-ad17860b10cc", "status": "completed", "item_types": ["userMessage", "reasoning", "agentMessage", "agentMessage"]}}
+{"wall": 1790593237.0928252, "mono_ns": 18057016833, "outside_write_exists": false, "external_command_exits": []}
+{"wall": 1790593237.092845, "mono_ns": 18057037083, "result": "probe_failed", "error": "AssertionError('model did not execute the boundary command')"}
+{"wall": 1790593237.103491, "mono_ns": 18067683041, "server_exit": -9}

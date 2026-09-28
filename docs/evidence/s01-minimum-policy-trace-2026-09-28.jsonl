@@ -1,0 +1,22 @@
+{"wall": 1790610138.7986119, "mono_ns": 29418041, "server_pid": 77200, "server_pgid": 77200, "work": "<workspace>/.s01-minimum-policy-20260928-b/work", "outside": "<workspace>/.s01-minimum-policy-20260928-b/outside", "temp": "<workspace>/.s01-minimum-policy-20260928-b/temp", "policy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-minimum-policy-20260928-b/work"], "networkAccess": false, "excludeSlashTmp": true, "excludeTmpdirEnvVar": true}, "listener_port": 57287}
+{"wall": 1790610138.79872, "mono_ns": 29523291, "request": "initialize", "id": 1, "case": null}
+{"wall": 1790610138.937963, "mono_ns": 168766333, "request": "config/read", "id": 2, "case": null}
+{"wall": 1790610139.041377, "mono_ns": 272179708, "config_selected": {"approval_policy": "never", "sandbox_mode": "workspace-write"}}
+{"wall": 1790610139.058762, "mono_ns": 289564458, "host_loopback_control": 1}
+{"wall": 1790610139.058879, "mono_ns": 289680958, "request": "command/exec", "id": 3, "case": "inside"}
+{"wall": 1790610139.080205, "mono_ns": 311007625, "case": "inside", "exit": 0, "output": []}
+{"wall": 1790610139.080271, "mono_ns": 311072750, "request": "command/exec", "id": 4, "case": "sibling"}
+{"wall": 1790610139.100323, "mono_ns": 331124625, "case": "sibling", "exit": 1, "output": [["stderr", "sh: <workspace>/.s01-minimum-policy-20260928-b/outside/write: Operation not permitted\n"]]}
+{"wall": 1790610139.100397, "mono_ns": 331199000, "request": "command/exec", "id": 5, "case": "symlink"}
+{"wall": 1790610139.1193888, "mono_ns": 350190500, "case": "symlink", "exit": 1, "output": [["stderr", "/bin/sh: escape/write: Operation not permitted\n"]]}
+{"wall": 1790610139.1194508, "mono_ns": 350252791, "request": "command/exec", "id": 6, "case": "temp"}
+{"wall": 1790610139.138743, "mono_ns": 369544583, "case": "temp", "exit": 1, "output": [["stderr", "/bin/sh: <workspace>/.s01-minimum-policy-20260928-b/temp/write: Operation not permitted\n"]]}
+{"wall": 1790610139.138829, "mono_ns": 369630875, "request": "command/exec", "id": 7, "case": "slash_tmp"}
+{"wall": 1790610139.1578171, "mono_ns": 388618333, "case": "slash_tmp", "exit": 1, "output": [["stderr", "sh: /tmp/.s01-minimum-policy-20260928-b-write: Operation not permitted\n"]]}
+{"wall": 1790610139.1578822, "mono_ns": 388683000, "request": "command/exec", "id": 8, "case": "outside_read"}
+{"wall": 1790610139.1753669, "mono_ns": 406168166, "case": "outside_read", "exit": 0, "output": [["stdout", "S01_SYNTHETIC_OUTSIDE"]]}
+{"wall": 1790610139.175435, "mono_ns": 406236333, "request": "command/exec", "id": 9, "case": "network"}
+{"wall": 1790610139.200088, "mono_ns": 430889666, "case": "network", "exit": 7, "output": [["stderr", "curl: (7) Failed to connect to 127.0.0."], ["stderr", "1 port 57287 after 0 ms: Couldn't connect to server\n"]]}
+{"wall": 1790610139.200217, "mono_ns": 431018291, "effects": {"inside": true, "sibling": false, "symlink": false, "temp": false, "slash_tmp": false, "network_accepted_after_control": false}}
+{"wall": 1790610139.200233, "mono_ns": 431034416, "result": "selected_command_controls_passed"}
+{"wall": 1790610139.2040691, "mono_ns": 434870500, "server_exit": -9}

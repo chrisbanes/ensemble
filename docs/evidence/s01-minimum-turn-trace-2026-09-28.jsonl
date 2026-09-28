@@ -1,0 +1,25 @@
+{"wall": 1790610021.050377, "mono_ns": 15609416, "work": "<workspace>/.s01-minimum-turn-20260928-c/work", "outside": "<workspace>/.s01-minimum-turn-20260928-c/outside", "policy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-minimum-turn-20260928-c/work"], "networkAccess": false, "excludeSlashTmp": true, "excludeTmpdirEnvVar": true}, "call_budget": 2, "rerun_budget": 0}
+{"wall": 1790610021.051859, "mono_ns": 17091916, "server_pid": 75990, "server_pgid": 75990}
+{"wall": 1790610021.051902, "mono_ns": 17133958, "request": "initialize", "id": 1, "policy": null}
+{"wall": 1790610021.172414, "mono_ns": 137646041, "request": "account/read", "id": 2, "policy": null}
+{"wall": 1790610021.589903, "mono_ns": 555132416, "account_type": "chatgpt"}
+{"wall": 1790610021.5899992, "mono_ns": 555228250, "request": "config/read", "id": 3, "policy": null}
+{"wall": 1790610021.6673129, "mono_ns": 632542916, "config_selected": {"approval_policy": "never", "sandbox_mode": "workspace-write"}}
+{"wall": 1790610021.667549, "mono_ns": 632777708, "request": "thread/start", "id": 4, "policy": null}
+{"wall": 1790610021.880645, "mono_ns": 845873916, "thread_id": "01a0e8ac-9d45-73b1-942c-fa1ff6f7402e", "thread_policy": "workspace-write", "approval_policy": "never"}
+{"wall": 1790610021.880726, "mono_ns": 845953750, "request": "turn/start", "id": 5, "policy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-minimum-turn-20260928-c/work"], "networkAccess": false, "excludeSlashTmp": true, "excludeTmpdirEnvVar": true}}
+{"wall": 1790610024.799041, "mono_ns": 3764254791, "stream_event": "item/started", "item_type": "userMessage", "item_id": "01a0e8ac-a95e-7581-84a6-26862793578f", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610024.800541, "mono_ns": 3765755125, "stream_event": "item/completed", "item_type": "userMessage", "item_id": "01a0e8ac-a95e-7581-84a6-26862793578f", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610026.208904, "mono_ns": 5174112708, "stream_event": "item/started", "item_type": "reasoning", "item_id": "rs_0ece9eae420451bc016aba8a6a31d887d2b640adbec11b88c8", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610027.165952, "mono_ns": 6131156041, "stream_event": "item/completed", "item_type": "reasoning", "item_id": "rs_0ece9eae420451bc016aba8a6a31d887d2b640adbec11b88c8", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610027.167284, "mono_ns": 6132486708, "stream_event": "item/started", "item_type": "agentMessage", "item_id": "msg_0ece9eae420451bc016aba8a6b25ec87d29a07be97d7900749", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610027.506334, "mono_ns": 6471537083, "stream_event": "item/completed", "item_type": "agentMessage", "item_id": "msg_0ece9eae420451bc016aba8a6b25ec87d29a07be97d7900749", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610030.508516, "mono_ns": 9473703875, "stream_event": "item/started", "item_type": "agentMessage", "item_id": "msg_0ece9eae420451bc016aba8a6e7ef887d2b7e81d02928c2a5b", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610031.278647, "mono_ns": 10243831125, "stream_event": "item/completed", "item_type": "agentMessage", "item_id": "msg_0ece9eae420451bc016aba8a6e7ef887d2b7e81d02928c2a5b", "command": null, "exit_code": null, "status": null, "output": null, "turn_status": null}
+{"wall": 1790610031.330005, "mono_ns": 10295187375, "stream_event": "turn/completed", "item_type": null, "item_id": null, "command": null, "exit_code": null, "status": null, "output": null, "turn_status": "completed"}
+{"wall": 1790610031.330086, "mono_ns": 10295268041, "turn_id": "01a0e8ac-9dfb-7de1-b3e4-d68c02dc000b", "turn_status": "completed"}
+{"wall": 1790610031.330176, "mono_ns": 10295358250, "first_turn": "01a0e8ac-9dfb-7de1-b3e4-d68c02dc000b", "inside_exists": true, "outside_exists": false}
+{"wall": 1790610031.330334, "mono_ns": 10295516166, "request": "thread/read", "id": 6, "policy": null}
+{"wall": 1790610031.334018, "mono_ns": 10299200583, "history_turns": 1, "history_commands": []}
+{"wall": 1790610031.334068, "mono_ns": 10299250750, "result": "failed", "error": "AssertionError()"}
+{"wall": 1790610031.342964, "mono_ns": 10308147208, "server_stopped_pid": 75990, "server_exit": -9}
