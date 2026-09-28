@@ -28,7 +28,7 @@ that successfully detects an unsafe effect still records a failed capability.
 
 | ID | Given / when | Required observable result | Layer |
 | --- | --- | --- | --- |
-| A01 | Install standalone service; restart with BB absent | Service, migrations, tools and UI operate without BB; failed initialization does not release pending work | Service + UI |
+| A01 | Install standalone service; restart | Service, migrations, tools and UI operate; failed initialization does not release pending work | Service + UI |
 | A02 | Operator configures two projects and profiles | Shared profile can be selected by both projects with distinct project instructions; configuration is validated and retained; both initially paused | UI + runtime |
 | A03 | Create/edit a local task in the UI; restart | Content and stable identity survive; unready by default; Create and start marks Ready without bypassing pause; no external issue is created | UI + SQLite |
 | A04 | Enable a project with eligible tasks | Routing-enabled project starts a selected assignee without a preliminary lead turn; disabled routing uses explicit lead allocation; no chat setup ritual | Service + UI |

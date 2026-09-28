@@ -1,12 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,13 +8,10 @@ import { test } from "node:test";
 const standaloneProgram = `
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Coordinator, EnsembleService, Store } from "./dist/src/core/index.js";
 
-assert.throws(() => import.meta.resolve("@get-bb/plugin-sdk"), /ERR_MODULE_NOT_FOUND/);
-assert.equal(existsSync(resolve("dist/src/adapters/bb/plugin.js")), false);
 assert.ok(fileURLToPath(import.meta.resolve("zod")).startsWith(resolve("node_modules/zod") + sep));
 
 const database = resolve("ensemble.db");
@@ -103,7 +93,7 @@ try {
   const first = await service.delegate(caller, {
     id: firstAssignmentId,
     taskId: firstTaskId,
-    brief: "Complete without BB",
+    brief: "Complete the task",
   });
   assert.equal(first.projectId, binding.projectId);
   assert.equal(first.state, "running");
@@ -222,7 +212,7 @@ try {
 }
 `;
 
-test("compiled core runs through authorization and recovery with BB unavailable", () => {
+test("compiled core runs through authorization and recovery in isolation", () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-core-standalone-"));
   try {
     writeFileSync(
@@ -241,11 +231,6 @@ test("compiled core runs through authorization and recovery with BB unavailable"
     });
     const runner = join(directory, "standalone.mjs");
     writeFileSync(runner, standaloneProgram);
-    assert.equal(
-      existsSync(join(directory, "node_modules", "@get-bb", "plugin-sdk")),
-      false,
-    );
-
     const result = spawnSync(process.execPath, [runner], {
       cwd: directory,
       env: { ...process.env, NODE_PATH: "", NODE_OPTIONS: "" },

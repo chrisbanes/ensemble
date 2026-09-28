@@ -180,38 +180,42 @@ test("core boundary checker accepts a core-to-core import chain", () => {
     {
       "index.ts": 'export { value } from "./helper.js";\n',
       "helper.ts":
-        'import { createHash } from "node:crypto";\nimport { z } from "zod";\nimport { leaf } from "./leaf.js";\nexport const value = `${createHash} ${z} ${leaf}`;\n',
+        'import { createHash } from "node:crypto";\nimport { z } from "zod";\nimport { leaf } from "./leaf.js";\nexport const value = [createHash, z, leaf];\n',
       "leaf.ts": "export const leaf = 'core';\n",
     },
     (core) => assert.deepEqual(scanCoreGraph(core), []),
   );
 });
 
-test("core boundary checker rejects direct, type-only, re-exported, helper, and dynamic BB dependencies", () => {
+test("core boundary checker rejects direct, type-only, re-exported, helper, and dynamic external dependencies", () => {
   fixture(
     {
-      "direct.ts": 'import { z } from "@get-bb/plugin-sdk";\n',
+      "direct.ts": 'import { z } from "external-runtime-sdk";\n',
       "type-only.ts":
-        'import type { BbPluginApi } from "@get-bb/plugin-sdk";\n',
-      "reexport.ts": 'export { plugin } from "..\/adapters\/bb\/plugin.js";\n',
+        'import type { RuntimeApi } from "external-runtime-sdk";\n',
+      "reexport.ts":
+        'export { plugin } from "../adapters/runtime/plugin.js";\n',
       "index.ts": 'export { value } from "./helper.js";\n',
       "helper.ts":
-        'import { value } from "..\/..\/adapters\/bb\/helper.js";\nexport { value };\n',
-      "literal-dynamic.ts": 'void import("@get-bb/plugin-sdk");\n',
-      "import-equals.ts": 'import SDK = require("@get-bb/plugin-sdk");\n',
+        'import { value } from "../../adapters/runtime/helper.js";\nexport { value };\n',
+      "literal-dynamic.ts": 'void import("external-runtime-sdk");\n',
+      "import-equals.ts": 'import SDK = require("external-runtime-sdk");\n',
       "import-type.ts":
-        'type SDK = import("@get-bb/plugin-sdk").BbPluginApi;\n',
+        'type SDK = import("external-runtime-sdk").RuntimeApi;\n',
       "nonliteral-dynamic.ts": "void import(moduleName);\n",
-      "require.ts": 'require("@get-bb/plugin-sdk");\n',
+      "require.ts": 'require("external-runtime-sdk");\n',
       "create-require.ts":
-        'import { createRequire as loader } from "node:module";\nconst load = loader(import.meta.url);\nload("@get-bb/plugin-sdk");\n',
+        'import { createRequire as loader } from "node:module";\nconst load = loader(import.meta.url);\nload("external-runtime-sdk");\n',
       "builtin-loader.ts": 'process.getBuiltinModule("module");\n',
       "valid.ts": 'import { leaf } from "./leaf.js";\nexport { leaf };\n',
       "leaf.ts": "export const leaf = 'core';\n",
     },
     (core) => {
       const violations = scanCoreGraph(core).join("\n");
-      assert.match(violations, /forbidden external module @get-bb\/plugin-sdk/);
+      assert.match(
+        violations,
+        /forbidden external module external-runtime-sdk/,
+      );
       assert.match(violations, /forbidden external module node:module/);
       assert.match(violations, /imports outside core/);
       assert.match(violations, /non-literal dynamic import/);
