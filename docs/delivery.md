@@ -97,6 +97,11 @@ trust amendment; the earlier unexplained file effect remains a diagnostic findin
 Original fixtures/raw traces are not included, so independent replay requires those
 artifacts or separately bounded probes. Neither report qualifies uncovered cases.
 
+The dedicated publication branch adds the [seven-row coverage report](evidence/s01-acceptance-candidate-2026-09-28.md)
+and path-sanitized copies of the original fixtures/traces. Six rows qualify
+within bounds; row 7 lacks an attributable broader-access rejection. This
+branch does not release S01 or downstream work.
+
 The S01 checkout `cb/35-s01-proof` was inspected read-only at
 `e87ed326182b602c412606d1e88d6ae481188eb2`. Its
 `docs/evidence/s01-consolidated-discovery-2026-09-28.md` indexes the traces; approved

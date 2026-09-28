@@ -1,0 +1,15 @@
+{"case": "missing_thread", "rejected": true, "successors": 0, "time": 1790614947.019302, "writer_capacity_holds": [1, 1]}
+{"case": "wrong_thread", "rejected": true, "successors": 0, "time": 1790614947.020142, "writer_capacity_holds": [1, 1]}
+{"case": "missing_turn", "rejected": true, "successors": 0, "time": 1790614947.021012, "writer_capacity_holds": [1, 1]}
+{"case": "wrong_turn", "rejected": true, "successors": 0, "time": 1790614947.021794, "writer_capacity_holds": [1, 1]}
+{"case": "missing_status", "rejected": true, "successors": 0, "time": 1790614947.022492, "writer_capacity_holds": [1, 1]}
+{"case": "failed_status", "rejected": true, "successors": 0, "time": 1790614947.0231738, "writer_capacity_holds": [1, 1]}
+{"case": "interrupted_status", "rejected": true, "successors": 0, "time": 1790614947.023846, "writer_capacity_holds": [1, 1]}
+{"case": "active_callback", "rejected": true, "successors": 0, "time": 1790614947.02461, "writer_capacity_holds": [1, 1]}
+{"case": "known_unfinished", "rejected": true, "successors": 0, "time": 1790614947.025592, "writer_capacity_holds": [1, 1]}
+{"case": "stop_hold", "rejected": true, "successors": 0, "time": 1790614947.026443, "writer_capacity_holds": [1, 1]}
+{"case": "crash_hold", "rejected": true, "successors": 0, "time": 1790614947.027745, "writer_capacity_holds": [1, 1]}
+{"case": "uncertainty_hold", "rejected": true, "successors": 0, "time": 1790614947.02861, "writer_capacity_holds": [1, 1]}
+{"case": "late_success_after_stop_hold", "rejected": true, "time": 1790614947.0293498}
+{"case": "late_success_after_crash_hold", "rejected": true, "time": 1790614947.030043}
+{"case": "eligible_success", "final": ["handed_off", 0, 0], "integrity": "ok", "results": {"A": false, "B": true}, "successor_operation": "B", "time": 1790614947.03213}

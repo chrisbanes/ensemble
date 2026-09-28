@@ -1,0 +1,22 @@
+{"wall": 1790593798.5425138, "mono_ns": 19936791, "server_pid": 82276, "server_pgid": 82276, "cwd": "<workspace>/.s01-r5-command-access-sanitized", "outside": "<workspace>/.s01-r5-command-access-sanitized-outside"}
+{"wall": 1790593798.542606, "mono_ns": 20027083, "send": "initialize", "id": 1, "params": null}
+{"wall": 1790593798.668104, "mono_ns": 145526958, "response_id": 1, "result": {"userAgent": "Codex Desktop/0.157.1 (Mac OS 26.7.0; arm64) dumb (ensemble_s01_access_command; 0.1.0)", "codexHome": "<workspace-instance>/codex-home", "platformFamily": "unix", "platformOs": "macos"}, "error": null}
+{"wall": 1790593798.6682591, "mono_ns": 145681000, "send": "config/read", "id": 5, "params": null}
+{"wall": 1790593798.77012, "mono_ns": 247543708, "response_id": 5, "config_approval_policy": "never", "config_sandbox_mode": "danger-full-access"}
+{"wall": 1790593798.770399, "mono_ns": 247821875, "effective_approval_policy": "never", "effective_sandbox_mode": "danger-full-access"}
+{"wall": 1790593798.770443, "mono_ns": 247866291, "send": "command/exec", "id": 2, "params": {"command": ["/bin/zsh", "-c", "printf INSIDE_OK > inside.txt; printf 'inside exit=%s\\n' $?"], "cwd": "<workspace>/.s01-r5-command-access-sanitized", "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-r5-command-access-sanitized"], "networkAccess": false}, "processId": "inside-write", "streamStdoutStderr": true, "timeoutMs": 5000}}
+{"wall": 1790593798.791361, "mono_ns": 268785000, "output_delta": {"processId": "inside-write", "stream": "stdout", "text": "inside exit=0\n", "capReached": false}}
+{"wall": 1790593798.7916238, "mono_ns": 269047500, "response_id": 2, "result": {"exitCode": 0, "stdout": "", "stderr": ""}, "error": null}
+{"wall": 1790593798.7916548, "mono_ns": 269078083, "case": "inside-write", "exit_code": 0}
+{"wall": 1790593798.791809, "mono_ns": 269232666, "send": "command/exec", "id": 3, "params": {"command": ["/bin/zsh", "-c", "printf OUTSIDE_ATTEMPT > \"$1\"", "probe", "<workspace>/.s01-r5-command-access-sanitized-outside/attempt.txt"], "cwd": "<workspace>/.s01-r5-command-access-sanitized", "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-r5-command-access-sanitized"], "networkAccess": false}, "processId": "outside-write", "streamStdoutStderr": true, "timeoutMs": 5000}}
+{"wall": 1790593798.810741, "mono_ns": 288165458, "output_delta": {"processId": "outside-write", "stream": "stderr", "text": "zsh:1: operation not permitted: <workspace>/.s01-r5-command-access-sanitized-outside/attempt.txt\n", "capReached": false}}
+{"wall": 1790593798.810969, "mono_ns": 288393583, "response_id": 3, "result": {"exitCode": 1, "stdout": "", "stderr": ""}, "error": null}
+{"wall": 1790593798.811014, "mono_ns": 288437458, "case": "outside-write", "exit_code": 1}
+{"wall": 1790593798.8110569, "mono_ns": 288480666, "outside_write_exists": false}
+{"wall": 1790593798.8110862, "mono_ns": 288509583, "send": "command/exec", "id": 4, "params": {"command": ["/bin/cat", "<workspace>/.s01-r5-command-access-sanitized-outside/marker.txt"], "cwd": "<workspace>/.s01-r5-command-access-sanitized", "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": ["<workspace>/.s01-r5-command-access-sanitized"], "networkAccess": false}, "processId": "outside-read", "streamStdoutStderr": true, "timeoutMs": 5000}}
+{"wall": 1790593798.827574, "mono_ns": 304998375, "output_delta": {"processId": "outside-read", "stream": "stdout", "text": "SYNTHETIC_OUTSIDE_MARKER", "capReached": false}}
+{"wall": 1790593798.8276732, "mono_ns": 305097291, "response_id": 4, "result": {"exitCode": 0, "stdout": "", "stderr": ""}, "error": null}
+{"wall": 1790593798.8276942, "mono_ns": 305118208, "case": "outside-read", "exit_code": 0}
+{"wall": 1790593798.8277051, "mono_ns": 305128625, "outside_read_allowed": true}
+{"wall": 1790593798.827712, "mono_ns": 305136166, "result": "completed"}
+{"wall": 1790593798.8322, "mono_ns": 309623833, "server_exit": -9}

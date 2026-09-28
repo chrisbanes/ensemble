@@ -1,0 +1,7 @@
+{"wall": 1790610174.447346, "mono_ns": 28942208, "server_pid": 77972, "server_pgid": 77972, "thread_id": "01a0e8ac-9d45-73b1-942c-fa1ff6f7402e"}
+{"wall": 1790610174.982254, "mono_ns": 563845583, "account_type": "chatgpt"}
+{"wall": 1790610175.059816, "mono_ns": 641408208, "config_selected": ["never", "workspace-write"]}
+{"wall": 1790610175.3145049, "mono_ns": 896095458, "resumed_thread": "01a0e8ac-9d45-73b1-942c-fa1ff6f7402e", "response_keys": ["agentNickname", "agentRole", "canAcceptDirectInput", "cliVersion", "createdAt", "cwd", "daybreakEnabled", "environments", "ephemeral", "extra", "forkedFromId", "gitInfo", "historyMode", "id", "model", "modelProvider", "name", "originator", "parentThreadId", "path", "preview", "projectId", "reasoningEffort", "recencyAt", "section", "sectionEnteredAt", "sessionId", "source", "status", "threadSource", "turns", "updatedAt"]}
+{"wall": 1790610175.317945, "mono_ns": 899535333, "stored_turn_count": 1, "stored_item_types": [["userMessage", "reasoning", "agentMessage", "agentMessage"]]}
+{"wall": 1790610175.318005, "mono_ns": 899594458, "result": "restart_read_resume_passed_without_model_call"}
+{"wall": 1790610175.326748, "mono_ns": 908338375, "server_exit": -9}

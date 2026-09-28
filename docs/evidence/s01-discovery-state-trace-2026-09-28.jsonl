@@ -1,0 +1,17 @@
+{"wall": 1790597554.6672761, "mono_ns": 26668916, "case": "startup-task", "operation": "startup-before-init", "accepted": false, "active_before": 0, "row_before": [0, 0, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.667426, "mono_ns": 26817625, "case": "startup-task", "operation": "startup-before-policy", "accepted": false, "active_before": 0, "row_before": [1, 0, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.667658, "mono_ns": 27049708, "case": "storage_rollback", "assignment_held": false, "submission_count": 0}
+{"wall": 1790597554.66786, "mono_ns": 27252291, "case": "startup-task", "operation": "startup-after-recovery", "accepted": true, "active_before": 0, "row_before": [1, 1, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.667886, "mono_ns": 27277875, "case": "startup-task", "operation": "duplicate-startup", "accepted": false, "active_before": 1, "row_before": [1, 1, 0, "g-startup", 1, 1, 1, 0]}
+{"wall": 1790597554.6682189, "mono_ns": 27610291, "case": "A-first", "operation": "A-paused-first", "accepted": false, "active_before": 1, "row_before": [1, 1, 0, null, 0, 0, 1, 1]}
+{"wall": 1790597554.6682398, "mono_ns": 27632166, "case": "A-followup", "operation": "A-paused-followup", "accepted": false, "active_before": 1, "row_before": [1, 1, 0, null, 0, 0, 1, 1]}
+{"wall": 1790597554.668341, "mono_ns": 27733166, "case": "B-first", "operation": "B-continues", "accepted": true, "active_before": 1, "row_before": [1, 1, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.6774988, "mono_ns": 36891250, "case": "A-first", "operation": "A-resumed", "accepted": true, "active_before": 2, "row_before": [1, 1, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.677557, "mono_ns": 36949125, "case": "A-followup", "operation": "A-capacity-full", "accepted": false, "active_before": 3, "row_before": [1, 1, 0, null, 0, 0, 1, 0]}
+{"wall": 1790597554.6775749, "mono_ns": 36966666, "case": "pause_restart_capacity", "A_submissions": 1, "B_submissions": 1, "capacity_holds": 3}
+{"wall": 1790597554.678189, "mono_ns": 37580666, "case": "stop_committed_before_delivery", "generation": "g-stop", "stop_hold": true}
+{"wall": 1790597554.6809962, "mono_ns": 40388166, "case": "stop-active", "operation": "stop-duplicate", "accepted": false, "active_before": 4, "row_before": [1, 1, 1, "g-stop", 1, 1, 1, 0]}
+{"wall": 1790597554.681026, "mono_ns": 40417458, "case": "stop-followup", "operation": "stop-followup", "accepted": false, "active_before": 4, "row_before": [1, 1, 1, null, 0, 0, 1, 0]}
+{"wall": 1790597554.681049, "mono_ns": 40440541, "case": "stop_reopened", "replacement": false, "followup": false, "holds": [1, 1, 1]}
+{"wall": 1790597554.6858711, "mono_ns": 45263083, "case": "lost_ack_redelivery", "event": ["event-1", "recorded", "continuation-1", 0], "events": 1, "stale_revision_applied": false}
+{"wall": 1790597554.68596, "mono_ns": 45351625, "result": "sqlite_boundaries_passed", "integrity": "ok", "submissions": 4, "events": 1}
