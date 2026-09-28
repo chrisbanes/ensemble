@@ -5,6 +5,9 @@ tasks. **BB is no longer part of the target architecture.** Ensemble will own
 scheduling, execution supervision, task workspaces and its operator interface,
 alongside durable tasks, assignments, results and recovery.
 
+Project leads are accountable for task outcomes, with separate conversations per
+task. Optional service-driven TypeSafe routing selects assignment assignees using
+profile capabilities and project guidance; uncertainty returns to the lead.
 Agents decide how work proceeds through instructions and coordination tools;
 Ensemble enforces ownership, admission and permissions. Projects have reusable
 profiles, local tasks and optional GitHub sources. There is no configured process
@@ -17,7 +20,7 @@ SQLite core in `src/core`, a BB adapter in `src/adapters/bb`, and its packaging 
 integration suites. It supports local task creation, one worker assignment per task,
 instruction snapshots, results and conservative uncertain-launch reconciliation.
 It is not a standalone service or autonomous coordinator. The standalone scheduler,
-workspace manager and operator UI are not implemented.
+workspace manager, assignment router and operator UI are not implemented.
 
 The [accepted direction](docs/adr/1004-standalone-service.md) removes BB rather than
 retaining it as an optional backend. The [delivery plan](docs/delivery.md) retires
@@ -33,7 +36,9 @@ First prove a real execution runtime's admission, cancellation and recovery boun
 then build the complete local-task journey, followed by GitHub integration.
 The reviewed choices are Codex with the existing login, macOS first, and a web
 interface over Tailscale with a separate Ensemble login. Start with a fresh database.
-Codex App Server and macOS crash termination still need qualification; the service
+The 28 September amendment adds optional TypeSafe assignment routing to the first
+release and defers a separate task-owner role. TypeSafe uses separately configured
+API credentials and explicit project opt-in. Codex App Server and macOS crash termination still need qualification; the service
 reuses the harness for model execution and agent tools.
 
 ## Development
@@ -60,6 +65,8 @@ over historical BB documents. A reviewed requirement is not an implemented capab
 
 
 - [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
+- [ADR-1005](docs/adr/1005-service-assignment-routing.md): service routing and project-lead accountability.
+- [Assignment-routing design](docs/design/assignment-routing.md): selection, fallback and durable result destinations.
 - [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
 - [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
 - [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.

@@ -1,9 +1,14 @@
 ---
 status: accepted
-partially_superseded_by: ADR-1004
+partially_superseded_by: [ADR-1004, ADR-1005]
 ---
 
 # Keep Ensemble's core independent of its host
+
+The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
+separate task-owner accountability and lead-only initial allocation where described
+here. Project leads retain accountability; the service may route assignments
+directly. Existing admission, execution and recovery obligations remain.
 
 BB ownership and integration choices below are superseded by
 [ADR-1004](1004-standalone-service.md). Other product policies remain in force.

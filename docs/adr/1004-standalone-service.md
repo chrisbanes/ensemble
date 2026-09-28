@@ -1,8 +1,14 @@
 ---
 status: accepted
+partially_superseded_by: ADR-1005
 ---
 
 # Build Ensemble as a standalone service without BB
+
+The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
+separate task-owner accountability and lead-only initial allocation where described
+here. Project leads retain accountability; the service may route assignments
+directly. Existing admission, execution and recovery obligations remain.
 
 On 27 September 2026 Chris decided to remove BB and build Ensemble's own service.
 Ensemble owns scheduling, execution admission, process supervision, task workspaces,
@@ -32,7 +38,8 @@ the BB prototype separately rather than importing its records. Active agent
 execution must stop on service failure, with termination proven before writer
 replacement. These are requirements to qualify, not implemented guarantees.
 Other platforms are deferred. Codex is the first harness, using the existing operator login; Claude and API-key
-billing support are deferred. Codex App Server is the integration candidate,
+billing for agent execution are deferred. ADR-1005 separately permits opt-in
+TypeSafe API access for assignment routing. Codex App Server is the integration candidate,
 subject to the runtime proof rather than assumed compatibility. Ensemble
 must prove control of admission, cancellation, recovery and workspace writers;
 wrapping another queue does not satisfy that requirement. Runtime and deployment

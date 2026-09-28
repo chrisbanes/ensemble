@@ -1,7 +1,9 @@
 # Ensemble behavioural specification
 
 **Product scope reviewed and confirmed by Chris on 27 September 2026.**
-Runtime-specific implementation contracts remain subject to S01 evidence.
+Assignment routing and project-lead accountability were confirmed on 28 September
+2026; see [ADR-1005](adr/1005-service-assignment-routing.md). Runtime-specific
+implementation contracts remain subject to S01 evidence.
 [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
 ADR-1003 with that ownership change. The [BB specification](SPEC-bb.md) is history.
@@ -22,9 +24,10 @@ historical BB record import is outside the first release.
 Agent instructions determine how to plan, implement, review and revise work.
 Those activities are not required stages or assignment types. Projects contain
 optional linked repositories, reusable profiles, instructions and permissions.
-Project leads select admitted work; each task has one accountable owner who may
-work directly or delegate concurrent assignments. Agents may select permitted
-profiles but cannot create profiles or expand project authority.
+The project lead is accountable for every task outcome, using a separate
+conversation per task with the same lead profile. There is no separate task-owner
+role. Assignees execute work and may delegate concurrent assignments. Agents may
+select permitted profiles but cannot create profiles or expand project authority.
 
 Local tasks are built in. GitHub.com repository issues and GitHub Projects are the
 first external sources. Import the selected backlog, excluding PRs and draft
@@ -39,9 +42,12 @@ configures profiles and permissions, and creates a task with an expected outcome
 New projects start paused; new tasks start unready. Create and start may mark a
 task Ready, but cannot bypass project pause. Enablement admits eligible work.
 
-The lead selects Ready work and assigns an owner. The owner may delegate, yield
-its writer access, receive a durable result and continue. Questions appear in the
-attention inbox and task detail; answers resume the correct assignment. Outcomes,
+With routing enabled, the service uses the eligible task's requested outcome as
+the initial assignment brief and invokes TypeSafe to select an assignee without
+a preliminary lead turn. With routing disabled, the lead allocates work explicitly.
+Assignees may investigate, delegate, yield writer access, receive results and
+continue. Initial results wake the lead for assessment and a completion decision.
+Questions appear in the attention inbox and task detail; answers resume the correct assignment. Outcomes,
 evidence, conversations and artifacts remain available after restart. The operator
 need not enter conversation IDs, poll workers or manually nudge each activity.
 
@@ -50,7 +56,41 @@ plus separate repository-free, question, pause, stop and restart scenarios.
 Artifact completion is not proof of GitHub delivery. The implementation agent runs
 automated service/UI integration and bounded real-runtime validation before handback.
 
-## Admission, ownership and task dependencies
+## Assignment routing and accountability
+
+Routing is optional per project and part of the first standalone release. It
+requires explicit project opt-in and configured TypeSafe credentials. The service
+calls TypeSafe directly, with no PA agent turn. Supply the assignment brief,
+relevant supplied findings, candidate descriptions and operator-written project
+routing guidance; exclude credentials and full transcripts. Profile capabilities
+and project guidance define suitability, not required development stages.
+
+The service filters candidates by explicit eligibility and permissions. Route a
+new assignment when no assignee was specified; honor an explicit permitted profile
+selection without invoking TypeSafe. Routing does not authorize execution or grant
+readiness. Recheck all admission controls before starting work. Select for fit,
+then queue for capacity; do not substitute another profile merely because the
+selected profile is busy. An in-scope repair retains its assignee and profile;
+reassignment is explicit, rather than automatic routing on every follow-up.
+
+Missing routing context, uncertain recommendations, no suitable candidate or
+TypeSafe unavailability wake the project lead with the brief and available routing
+evidence. The lead can allocate explicitly without another TypeSafe call. Material
+ambiguity discovered during execution goes to the lead; the existing requirement
+for operator input on unresolved material scope or authority still applies.
+
+Initial assignment results return to the task-scoped lead conversation. Nested
+assignment results return to their requester; the lead can inspect all work without
+being woken for every child result. These destinations survive restart. All lead
+turns use normal admission and capacity accounting, including task pause/stop and
+writer controls. Project-wide coordination uses project context, separate from
+individual task histories. The lead assesses initial results and requests further
+work or task completion; the service enforces completion conditions and permissions.
+
+See the [routing design](design/assignment-routing.md) for revision and failure
+boundaries. Typed judgments and confidence are not proof of correctness or authority.
+
+## Admission, project placement and task dependencies
 
 The operator admits local work or defines an authoritative source readiness rule.
 The lead may inspect and triage unready tasks but cannot grant readiness. For
@@ -60,7 +100,7 @@ work within scope, without a universal per-task plan approval. Material ambiguit
 scope expansion or ungranted actions require operator input.
 
 Dependencies gate execution separately from Ready. A blocked task remains visible
-and Ready but starts no owner, new turn or delegation. Only the operator edits
+and Ready but starts no task execution, new turn or delegation. Only the operator edits
 local task edges, within the same project; reject cycles and self-dependencies.
 Local Done clears a blocker; cancellation does not. Imported GitHub tasks follow
 native dependency edges, including blockers outside the selection, without importing
@@ -72,12 +112,13 @@ appears; results and ownership remain. Clearance rechecks every other control.
 
 External identity includes provider instance and is independent of source query.
 Multiple sources in one project produce one task with multiple memberships.
-Cross-project overlap requires operator placement: preserve existing ownership,
-hold newly conflicted unowned work and never combine permissions. Transfers of
-already-owned tasks are deferred. Discovery grants no additional repository access.
+Cross-project overlap requires operator placement: preserve existing project
+placement and assignments; hold newly conflicted work without established assignments
+and never combine permissions. Transfers of tasks with established assignments
+between projects are deferred. Discovery grants no additional repository access.
 
 Losing readiness, leaving all selections or external closure holds new delegation
-and asks the owner to reach a safe stopping point. Operator resolution is needed
+and notifies the lead and active assignees to reach a safe stopping point. Operator resolution is needed
 to resume, except confirmed closure from this task's own delivery. Harmless edits
 can be incorporated; materially changed scope holds work for clarification.
 
@@ -85,7 +126,8 @@ can be incorporated; materially changed scope holds work for clarification.
 
 Pause allows active turns to finish but holds queued and new turns, including
 result continuations. Results, observations and answers persist. Other projects
-continue. Stop requests termination of every active assignment in the task, holds
+continue. Stop requests termination of every active execution in the task, including its
+lead turn and delegated assignments, holds
 pending work and requires explicit resume. Stop is not cancellation or completion.
 Show stopping or uncertain until termination is confirmed; preserve files/history.
 Resume revalidates readiness, dependencies, permissions and execution ownership.
@@ -113,7 +155,7 @@ Record results and handoffs through coordination commands, not transcript infere
 A successful process exit is not a task outcome. One reporting prompt may repair a
 completed turn with neither result nor waiting reason; then hold for attention.
 Persist that allowance and apply normal admission controls. Results arriving while
-the owner is active wait for its next turn; coalesce continuation wakeups while
+their recipient is active wait for its next turn; coalesce continuation wakeups while
 retaining individual acknowledgements. Paused/stopped recipients retain their inbox.
 
 Active execution must stop when the service fails; runtime qualification must
@@ -156,7 +198,7 @@ without trusting agent-supplied project or assignment IDs.
 ## Operator interface and human requests
 
 Provide project/task lists, task detail, conversations and execution history,
-configuration and a shared attention inbox. Show capacity, source health, owners,
+configuration and a shared attention inbox. Show capacity, source health, the lead, assignees,
 results and artifacts. Distinguish empty, loading, stale, failed, paused, waiting,
 stopping and uncertain states. Start with a list; Kanban is optional.
 
@@ -165,7 +207,7 @@ target, requester and reviewed material; changed material invalidates approval.
 Answers do not grant unrelated permission. Denial persists. Replayed requests or
 responses cannot duplicate effects. Controls acknowledge persisted outcomes.
 
-Ensemble displays conversation history and accepts durable task-owner messages
+Ensemble displays conversation history and accepts durable messages to the task-scoped lead conversation
 for the next eligible turn. They cannot bypass pause, stop or other admission
 controls. Live steering is deferred; stop is a separate control. Exact transcript
 and message transport is part of Codex App Server qualification.
@@ -193,7 +235,7 @@ cannot masquerade as confirmed remote updates.
 
 Each project chooses reviewable PR or through-merge delivery in the operational
 release. Reviewable-PR handback waits for settlement; feedback/CI failures wake the
-owner, while merge remains operator-owned. Through-merge requires granted authority,
+task-scoped project lead, while merge remains operator-owned. Through-merge requires granted authority,
 project instructions and actual GitHub requirements. No universal review count is
 imposed. Non-code tasks record the requested outcome and evidence; no universal
 human acceptance is required beyond configured instructions and permissions.
@@ -204,6 +246,7 @@ remove a workspace.
 
 The [standalone design](design/standalone.md), [acceptance plan](acceptance.md)
 and [delivery plan](delivery.md) were reviewed with Chris on 27 September 2026.
+The 28 September routing and accountability amendment is also confirmed.
 The shared product understanding is confirmed; Codex protocol qualification, macOS containment, authentication, scheduling
 fairness and concrete schema/lifecycle contracts still need design and evidence. Historical
 BB failures motivate the new proof cases; they do not establish that standalone
