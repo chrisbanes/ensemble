@@ -55,8 +55,9 @@ or its runtime and UI.
 ## Design documents
 
 The specification owns product behaviour, the design owns component boundaries,
-and the acceptance plan owns required evidence. The delivery plan maps that work
-into slices; ADRs explain decisions. Current confirmed choices take precedence
+and the acceptance plan owns product evidence requirements. GitHub issues own
+delivery scope, sequencing, native dependencies, status and slice completion
+criteria; ADRs explain decisions. Current confirmed choices take precedence
 over historical documents. A reviewed requirement is not an implemented capability.
 
 - [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
@@ -65,7 +66,7 @@ over historical documents. A reviewed requirement is not an implemented capabili
 - [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
 - [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
 - [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.
-- [Delivery plan](docs/delivery.md): reviewed sequence and S01 proof scope.
+- [Delivery backlog](https://github.com/chrisbanes/ensemble/issues/649): authoritative issues and native dependencies; [S01](https://github.com/chrisbanes/ensemble/issues/688) owns its bounded proof checklist.
 - [Glossary](CONTEXT.md): canonical language.
 - [Agent workflows](docs/agents/): contribution conventions.
 

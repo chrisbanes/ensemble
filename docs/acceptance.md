@@ -11,7 +11,7 @@ Routing and accountability were amended on 28 September 2026 under
 ## Gates
 
 1. **Runtime feasibility:** S01 proves the minimum Codex integration and bounded
-   coordination contract in [delivery](delivery.md#s01--bounded-codexmacos-proof),
+   coordination contract in [S01 #688](https://github.com/chrisbanes/ensemble/issues/688),
    as amended on 28 September. It does not require a complete service or OS sandbox.
 2. **Local-task milestone:** service, UI and real-runtime journeys cover A01–A18,
    A25, A27, local A28/A30 and R07–R10. GitHub-dependent portions wait for integration.
@@ -103,7 +103,7 @@ or pass these complete product scenarios.
   Strict outside-read denial is not part of default acceptance. S02–S05 also test
   ordinary file edits and the broader enabled tool policy. S01 does not certify
   every tool class or require a general model-tool allowlist. Under the approved
-  [S01-only evidence amendment](delivery.md#s01-only-approval-evidence-amendment--28-september-2026),
+  [S01-only evidence amendment](https://github.com/chrisbanes/ensemble/issues/688),
   S01 records model-originated escalation rejection as unproved and uses the existing
   effective-policy and attributable write/network/history evidence. The product's
   denial requirement remains: S02 implements and deterministically tests rejection

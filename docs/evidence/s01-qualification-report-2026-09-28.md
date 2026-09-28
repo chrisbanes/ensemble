@@ -1,7 +1,7 @@
 # S01 qualification report — 28 September 2026
 
 This durable report preserves the later investigation's bounded observations for
-assessment against the [seven S01 rows](../delivery.md#s01-completion-rule) from a
+assessment against the [seven S01 rows](https://github.com/chrisbanes/ensemble/issues/688) from a
 fresh checkout. It supplements the [earlier evidence matrix](s01-existing-evidence-2026-09-28.md).
 It records reported results, not new experiments or an S01 acceptance decision.
 
@@ -94,7 +94,7 @@ accept the candidate before S01 or its native dependencies are released.
 ## Subsequent S01 approval-evidence decision
 
 On 28 September Chris approved the
-[S01-only evidence amendment](../delivery.md#s01-only-approval-evidence-amendment--28-september-2026).
+[S01-only evidence amendment](https://github.com/chrisbanes/ensemble/issues/688).
 The later sanitized candidate `e2145d69cb871645a97b56c617b1828c0c8ae976`
 records one attempted escalation with no command item, approval request or forbidden
 effect. That result remains inconclusive. S01 may use the existing effective-policy
