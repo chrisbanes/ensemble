@@ -4,11 +4,14 @@
 The ownership decision is accepted in [ADR-1004](../adr/1004-standalone-service.md).
 Runtime-specific contracts below require the bounded S01 proof before dependent implementation.
 The existing implementation remains the BB prototype with a reusable SQLite core.
+[ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
+assignment-routing and project-lead accountability decisions.
 
 ## Confirmed review decisions
 
 - Use Codex first, with the existing operator login; Claude and API-key billing
-  support are deferred. Qualify Codex App Server as the integration surface.
+  for agent execution are deferred. Separately configured TypeSafe API access is
+  permitted for projects that explicitly enable assignment routing. Qualify Codex App Server as the integration surface.
 - Do not silently switch authentication or add API billing if unattended use fails.
 - Deliver the first deployment on Chris's Mac; Linux qualification follows later.
 - Serve a web operator interface with private remote access from Chris's own devices
@@ -37,6 +40,7 @@ plugin system without a concrete need.
 | --- | --- |
 | Core | Projects, tasks, assignments, instructions, permissions, command receipts, results and human requests |
 | Scheduler | Durable pending turns, eligibility, capacity, retry allowances and wakeups |
+| Assignment routing | Direct TypeSafe calls for unspecified assignees, eligible profile candidates, revision-bound recommendations and lead fallback |
 | Execution supervisor | Runtime process/session identity, launch admission, observation, cancellation and restart reconciliation |
 | Workspace manager | Task worktrees, provisioning recovery, writer ownership, preservation and cleanup |
 | Runtime integration | Validated execution settings, agent tool calls, transcripts, provider events and conversation resume where supported |
@@ -47,6 +51,24 @@ The runtime integration supplies agent execution, not project scheduling or an
 independently draining queue. “Build ourselves” covers the coordination product;
 model interaction and agent tools use Codex. Qualify its App Server protocol in
 S01 rather than assuming documented operations satisfy Ensemble's guarantees.
+
+## Accountability and assignment routing
+
+The project lead is accountable for task outcomes, with separate per-task
+conversations using the same lead profile. Assignees perform assignments; there
+is no separate task-owner role. Lead task conversations need durable, task-scoped
+execution identities, recipients and control bindings without an operator-managed
+owner record. Establish the concrete schema after S01, including lead turns in
+normal capacity, stop, recovery and writer protocols.
+
+The service may create the initial assignment from an eligible task's requested
+outcome and route it without waking the lead. Explicit permitted assignees bypass
+routing. Disabled routing and unavailable/uncertain routing use lead allocation;
+worker results do not bypass the lead's task-completion decision. Nested results
+return to the delegator, initial results to the task-scoped lead conversation.
+The [assignment-routing design](assignment-routing.md) owns the detailed routing
+boundary. Keep this an ordinary service module, not another execution runtime or
+an agent-driven PA workflow.
 
 ## Dispatch and failure boundary
 
@@ -90,7 +112,9 @@ execution isolation. Retention is independent of conversation lifetime.
 
 Commit a result and its recipient's inbox event together. Deliver one logical
 continuation for pending events, preserving individual acknowledgement and work
-revision checks. Human answers use the same durable mechanism; approval additionally
+revision checks. Recipients include task-scoped lead conversations and delegating assignments;
+record the destination explicitly rather than inferring it from transcript text.
+Human answers use the same durable mechanism; approval additionally
 binds exact reviewed action/material. Recheck permissions when executing an action.
 
 The UI calls validated core commands. Runtime tool callers receive a binding created
@@ -127,6 +151,8 @@ reviewed cutover; never run competing writers against the same task workspace.
 - Web API/UI technology and a separate authenticated operator session over the
   private Tailscale transport, including CSRF/origin checks for control requests.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
+- Routing persistence, task-scoped lead execution identities, candidate validation,
+  confidence criteria and separate API timeout/retry budgets; see the routing design.
 - Versioned fresh-database schemas, backup/restore and explicit old-work retirement.
 
 Codex on macOS is the selected first combination. Additional platforms are separate
