@@ -20,7 +20,9 @@ The repository contains a reusable TypeScript/SQLite coordination core in
 `src/standalone`. The bootstrap owns a marked fresh data directory, persists
 execution intent and binding, and holds uncertain work across restart. The BB
 plugin, packaging and integration harness have been removed. Scheduler, workspace
-manager, assignment router and operator UI are still pending. The installed Haze
+manager, assignment router and authenticated remote operator UI are still pending.
+S04a adds versioned local domain commands and a minimal loopback operator interface;
+it does not dispatch assignments. The installed Haze
 prototype stays in place until the reviewed operational cutover.
 
 ## Planning checkpoint
@@ -54,14 +56,23 @@ npm run check
 checks cover the retained core and S02 bootstrap fixtures. They do not qualify
 the later scheduler or UI integration.
 
-The S02 command surface is `npm run service -- <serve|run|list> ABSOLUTE_DATA_DIR`.
+The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
 and optionally `previousWorkId` for a follow-up in a completed conversation.
 `serve` initializes the database and App Server, then waits for SIGINT or SIGTERM;
 it does not schedule work. Reusing a work ID never resubmits it. A held result
 requires independent reconciliation; there is no automatic retry or force unlock.
-The directory must be empty on first use or carry Ensemble's standalone marker.
-The only database filename opened is `standalone.sqlite` in that directory.
+On first use, the directory must be empty or carry Ensemble's standalone marker.
+Startup can also recover an interrupted first start when the only files are an
+empty `.ensemble-owner.sqlite`, its SQLite journal if present, and an absent or
+partial marker whose contents match the beginning of the expected marker.
+Unrelated unmarked contents, including prototype data, remain refused.
+The service database is `standalone.sqlite`; `.ensemble-owner.sqlite` provides
+cross-process ownership of the marked directory.
+`operator` serves the local forms at `http://127.0.0.1:8787/` while the service
+runs. It has no remote access or separate login; #703 owns that foundation.
+The [S04a boundary](docs/design/s04a-command-boundary.md) describes the command,
+read-view and admission records available to dependent slices.
 
 ## Design documents
 

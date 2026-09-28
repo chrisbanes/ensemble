@@ -10,21 +10,66 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { isAbsolute, join, resolve } from "node:path";
 import { Store } from "../core/store.js";
+import { DomainStore } from "../core/domain.js";
 import { CodexRuntime, type Runtime } from "./codex.js";
 import { ExecutionState, type ExecutionIntent } from "./state.js";
 
 const marker = "ensemble-standalone-v1\n";
+const markerName = ".ensemble-standalone";
+const ownerName = ".ensemble-owner.sqlite";
+
+/** Only the owner's empty SQLite file can identify an interrupted first start. */
+function markerReady(directory: string): boolean {
+  const entries = readdirSync(directory);
+  const mark = join(directory, markerName);
+  const hasMarker = entries.includes(markerName);
+  if (hasMarker) {
+    const state = lstatSync(mark);
+    if (!state.isFile() || state.isSymbolicLink())
+      throw new Error("Data directory marker must be a regular file");
+    const contents = readFileSync(mark, "utf8");
+    if (contents === marker) return true;
+    if (!marker.startsWith(contents))
+      throw new Error("Data directory marker mismatch");
+  }
+  const expected = [
+    ownerName,
+    `${ownerName}-journal`,
+    ...(hasMarker ? [markerName] : []),
+  ];
+  if (entries.length === 0) return false;
+  if (
+    !entries.includes(ownerName) ||
+    !entries.every((entry) => expected.includes(entry))
+  )
+    throw new Error("Unmarked data directory must be empty");
+  const owner = lstatSync(join(directory, ownerName));
+  if (!owner.isFile() || owner.isSymbolicLink() || owner.size !== 0)
+    throw new Error("Interrupted owner file is not a fresh installation");
+  if (entries.includes(`${ownerName}-journal`)) {
+    const journal = lstatSync(join(directory, `${ownerName}-journal`));
+    if (!journal.isFile() || journal.isSymbolicLink())
+      throw new Error("Interrupted owner journal is not a regular file");
+  }
+  return false;
+}
 
 /** Owns only standalone.sqlite in a marked data directory. No import or attach path exists. */
 export class StandaloneService {
+  private owner: DatabaseSync | undefined;
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
+  private domainState: DomainStore | undefined;
   private runtime: Runtime | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
 
   constructor(
     private readonly dataDir: string,
     private readonly runtimeFactory: () => Runtime = () => new CodexRuntime(),
+    private readonly markerWriter: (path: string, flag: "wx" | "w") => void = (
+      path,
+      flag,
+    ) => writeFileSync(path, marker, { flag, mode: 0o600 }),
   ) {}
 
   async start(): Promise<void> {
@@ -38,26 +83,40 @@ export class StandaloneService {
         !lstatSync(directory).isDirectory()
       )
         throw new Error("Data directory must be a real directory");
-      const mark = join(directory, ".ensemble-standalone");
-      if (!existsSync(mark) && readdirSync(directory).length !== 0)
-        throw new Error("Unmarked data directory must be empty");
-      if (existsSync(mark) && lstatSync(mark).isSymbolicLink())
-        throw new Error("Data directory marker must not be a symlink");
-      if (existsSync(mark) && readFileSync(mark, "utf8") !== marker)
-        throw new Error("Data directory marker mismatch");
+      markerReady(directory);
     } else mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const mark = join(directory, ".ensemble-standalone");
-    if (!existsSync(mark))
-      writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
-    const database = join(realpathSync(directory), "standalone.sqlite");
-    if (existsSync(database) && lstatSync(database).isSymbolicLink())
-      throw new Error("Standalone database must not be a symlink");
-    const db = new DatabaseSync(database);
+    // SQLite owns the OS file lock for this transaction. A process crash releases
+    // it without consulting stale PID files or a clock.
+    const canonical = realpathSync(directory);
+    const ownerPath = join(canonical, ownerName);
+    if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
+      throw new Error("Service ownership file must not be a symlink");
+    const owner = new DatabaseSync(ownerPath, { timeout: 0 });
     try {
+      try {
+        owner.exec("BEGIN IMMEDIATE");
+      } catch (error) {
+        throw new Error("Data directory is already owned", { cause: error });
+      }
+      this.owner = owner;
+      if (!markerReady(canonical)) {
+        const mark = join(canonical, markerName);
+        this.markerWriter(mark, existsSync(mark) ? "w" : "wx");
+        if (!markerReady(canonical))
+          throw new Error("Data directory marker write incomplete");
+      }
+      const database = join(canonical, "standalone.sqlite");
+      if (existsSync(database) && lstatSync(database).isSymbolicLink())
+        throw new Error("Standalone database must not be a symlink");
+      const db = new DatabaseSync(database);
+      this.db = db;
       db.exec(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL",
       );
       new Store(db).ensureHost("standalone-codex");
+      const domain = new DomainStore(db);
+      domain.migrate();
+      this.domainState = domain;
       const state = new ExecutionState(db);
       for (const item of state.list()) {
         let workspaceKey: string;
@@ -70,7 +129,6 @@ export class StandaloneService {
           state.setWorkspaceKey(item.id, workspaceKey);
       }
       state.holdUnfinishedOnOpen();
-      this.db = db;
       this.state = state;
       const runtime = this.runtimeFactory();
       this.runtime = runtime;
@@ -116,18 +174,30 @@ export class StandaloneService {
       });
       await runtime.start();
     } catch (error) {
-      if (this.state)
-        for (const item of this.state.list())
-          if (item.state === "ready")
-            this.state.hold(
-              item.id,
-              "Runtime or login unavailable during startup",
-            );
-      await this.runtime?.stop().catch(() => {});
-      this.runtime = undefined;
-      this.state = undefined;
-      this.db = undefined;
-      db.close();
+      try {
+        if (this.state)
+          for (const item of this.state.list())
+            if (item.state === "ready")
+              this.state.hold(
+                item.id,
+                "Runtime or login unavailable during startup",
+              );
+      } finally {
+        try {
+          await this.runtime?.stop().catch(() => {});
+        } finally {
+          this.runtime = undefined;
+          this.domainState = undefined;
+          this.state = undefined;
+          try {
+            this.db?.close();
+          } finally {
+            this.db = undefined;
+            owner.close();
+            this.owner = undefined;
+          }
+        }
+      }
       throw error;
     }
   }
@@ -145,16 +215,29 @@ export class StandaloneService {
     const db = this.db;
     this.db = undefined;
     this.state = undefined;
+    this.domainState = undefined;
     try {
       db?.close();
     } catch (error) {
       if (failure === undefined) failure = error;
+    }
+    try {
+      this.owner?.close();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+    } finally {
+      this.owner = undefined;
     }
     if (failure !== undefined) throw failure;
   }
 
   list(): ExecutionIntent[] {
     return this.requireState().list();
+  }
+
+  domain(): DomainStore {
+    if (!this.domainState) throw new Error("Service is not started");
+    return this.domainState;
   }
 
   /** One explicit dispatch; same work ID never submits twice, including after errors. */
