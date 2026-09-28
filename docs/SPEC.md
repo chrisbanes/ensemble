@@ -1,6 +1,7 @@
 # Ensemble behavioural specification
 
 **Product scope reviewed and confirmed by Chris on 27 September 2026.**
+Chris approved the minimum S01 integration contract on 28 September 2026.
 Runtime-specific implementation contracts remain subject to S01 evidence.
 [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
@@ -85,9 +86,12 @@ can be incorporated; materially changed scope holds work for clarification.
 
 Pause allows active turns to finish but holds queued and new turns, including
 result continuations. Results, observations and answers persist. Other projects
-continue. Stop requests termination of every active assignment in the task, holds
-pending work and requires explicit resume. Stop is not cancellation or completion.
-Show stopping or uncertain until termination is confirmed; preserve files/history.
+continue. Stop durably holds pending work and requests best-effort cancellation of
+every active assignment in the task. Observe for a predeclared bounded interval;
+effects may continue afterwards. Stop is not task cancellation or completion.
+Unverified termination retains Stop, writer and capacity holds and remains visibly
+stopping/uncertain. Explicit resume clears only the operator Stop, never unresolved
+execution ownership. Preserve files/history; time and acknowledgements cannot unlock.
 Resume revalidates readiness, dependencies, permissions and execution ownership.
 Hold a macOS sleep assertion while execution is active, releasing it when idle.
 Forced sleep or wake requires execution reconciliation before admitting more work.
@@ -116,9 +120,13 @@ Persist that allowance and apply normal admission controls. Results arriving whi
 the owner is active wait for its next turn; coalesce continuation wakeups while
 retaining individual acknowledgements. Paused/stopped recipients retain their inbox.
 
-Active execution must stop when the service fails; runtime qualification must
-prove this for relevant tool descendants. If termination is uncertain, retain the
-writer hold rather than launch a replacement.
+Already-admitted execution and tools may survive coordinator or App Server failure
+and continue effects. A crash releases neither writer ownership nor capacity. No
+queued turn, follow-up, delegation or replacement may gain admission while Ensemble
+is unavailable. Retain unresolved holds rather than relaunching work. Historical
+conversation resume does not prove reattachment to a live execution. If unique live
+reattachment is unavailable, retain uncertainty and use the operator recovery path
+in the [standalone design](design/standalone.md#operator-recovery-of-uncertain-execution).
 
 Persist launch and external-action intent before effects. Reconcile uncertain
 acceptance, surviving executions and external writes after restart before competing
@@ -135,18 +143,31 @@ is promised exactly-once effects.
 
 Ensemble owns task workspace creation, identity, retention and cleanup. Use one
 worktree per participating repository per task, shared by assignments with one
-writer at a time. Independent tasks can proceed concurrently; parallel reviews
+admitted writer generation at a time under the cooperative rule below. Independent
+tasks can proceed concurrently; parallel reviews
 reference a fixed revision. Repository-free tasks need no Git worktree.
 
-Confirm an old writer and relevant descendants can no longer mutate the workspace
-before admitting its replacement. A timer, expired lease or acknowledged stop alone
-is insufficient. Conversation replacement and archival do not automatically delete
+Normal successful completion permits cooperative handoff only when the identified
+final turn succeeds, every registered tool has ended, observations are complete and
+no survivor is known. Serialize release with admission of exactly one successor.
+This accepts that an untracked detached child may still write alongside its
+successor; it is not physical writer exclusion. Crash, Stop, failure/interruption,
+missing observations and known survivors retain holds until independently resolved.
+A timer, expired lease, quiet interval, empty terminal list, acknowledged Stop or
+operator acknowledgement cannot release them. Conversation replacement and archival
+do not automatically delete
 workspaces. Retain until operator archival by default; automatic cleanup requires
 confirmed delivery and preservation checks for uncommitted work, handoffs and
 reconciliation evidence. Missing workspaces hold affected execution visibly.
 
-New projects default to workspace-limited Codex execution. Broader execution
-requires operator approval; qualification must verify the effective restrictions.
+New projects default to Codex `workspaceWrite` with explicit task writable roots,
+command network access disabled and approval policy `never`. Broader command
+sandbox escalation is denied; expanding that policy requires separate operator
+approval and fresh admission.
+Reads retain Codex full read access subject to host permissions; outside-read
+denial is not implied. Runtime temporary write roots and protected paths must be
+disclosed with the effective policy. See the [default execution policy](design/standalone.md#default-execution-policy)
+for supported controls, qualification and ambient-access limits.
 Ensemble enforces project policy on its own tools and integrations. Runtime and
 OS/deployment controls govern shell, filesystem, network and ambient credentials;
 disclose their actual limits and do not claim an independent sandbox. External
@@ -204,7 +225,8 @@ remove a workspace.
 
 The [standalone design](design/standalone.md), [acceptance plan](acceptance.md)
 and [delivery plan](delivery.md) were reviewed with Chris on 27 September 2026.
-The shared product understanding is confirmed; Codex protocol qualification, macOS containment, authentication, scheduling
+The shared product understanding, including the 28 September S01 reset, is confirmed;
+Codex protocol qualification, service lifecycle, authentication, scheduling
 fairness and concrete schema/lifecycle contracts still need design and evidence. Historical
 BB failures motivate the new proof cases; they do not establish that standalone
 execution already satisfies them.

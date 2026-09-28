@@ -28,14 +28,15 @@ Reuse an existing agent harness for model interaction and tools through a narrow
 integration. The first deployment is macOS on Chris's Mac, with a web operator
 interface served by Ensemble and accessible privately over Tailscale with a
 separate Ensemble login. The first installation uses a fresh database, preserving
-the BB prototype separately rather than importing its records. Active agent
-execution must stop on service failure, with termination proven before writer
-replacement. These are requirements to qualify, not implemented guarantees.
+the BB prototype separately rather than importing its records. The original
+27 September decision required crash termination and physical writer exclusion.
+The approved 28 September amendments below supersede those guarantees; none
+claims an implemented service or a passing S01 result.
 Other platforms are deferred. Codex is the first harness, using the existing operator login; Claude and API-key
-billing support are deferred. Codex App Server is the integration candidate,
-subject to the runtime proof rather than assumed compatibility. Ensemble
-must prove control of admission, cancellation, recovery and workspace writers;
-wrapping another queue does not satisfy that requirement. Runtime and deployment
+billing support are deferred. Codex App Server is the selected integration
+surface, with installed-version qualification still required. Ensemble
+must prove admission, cancellation requests, conservative recovery and cooperative
+workspace ownership; wrapping another queue does not satisfy that requirement. Runtime and deployment
 controls enforce execution access; an in-process service is not a security sandbox.
 
 The existing BB prototype is transitional code, not a standalone implementation.
@@ -44,3 +45,52 @@ and mandatory BB CI in the reviewed replacement work. Do not mutate the installe
 Haze prototype or assume its unfinished work can migrate. Chris confirmed the shared understanding after reviewing the design, acceptance
 scope and delivery sequence on 27 September 2026. Runtime-specific contracts
 and dependent implementation remain gated on S01 capability evidence. This decision does not by itself publish tickets or change remote issue state.
+
+## Amendments — 28 September 2026
+
+Chris approved these changes after the S01 probes exposed the difference between
+orchestration, durable coordination and OS execution containment. The approved
+revision 3–5 contract is recorded at local commit
+`56976c0cea82d4dadfac73ab60979e0cfed69c30` on `cb/35-s01-proof`; consolidated evidence
+is at `e87ed326182b602c412606d1e88d6ae481188eb2`. See the
+[delivery evidence mapping](../delivery.md#evidence-and-remaining-work-mapping) and
+[preserved issue history](https://github.com/chrisbanes/ensemble/issues/688).
+
+1. **Crash survival (revision 3):** already-admitted execution may survive
+   coordinator/App Server crashes and continue effects. Unavailable Ensemble
+   cannot admit queued work. Preserve ownership/capacity and uncertain submissions;
+   never blindly resubmit or automatically release them.
+2. **Best-effort Stop (revision 4):** persist Stop, request cancellation for active
+   assignments and observe for a bounded interval. Continued effects are possible.
+   Unresolved Stop/writer/capacity holds remain until independently resolved; time,
+   acknowledgements, empty terminal lists or operator acknowledgement do not unlock.
+3. **Cooperative normal-success handoff (revision 5):** an identified successful
+   final turn, ended registered tools, complete observations and no known survivor
+   permit serialized handoff to one successor. This accepts an untracked detached
+   child writing alongside the successor. It is not physical writer exclusion.
+   Crash, Stop, failure/interruption, missing observations and known survivors do
+   not qualify; those holds still require independent resolution.
+4. **Minimum integration reset:** S01 qualifies existing-login App Server execution,
+   events/results, follow-up or supported resume and cancellation requests, plus
+   bounded feasibility of trusted identity, admission, durable state and conservative
+   ambiguous-submission handling. Full service/runtime/UI tests follow in S02–S05.
+   Historical resume is not live reattachment; when reattachment is unsupported,
+   visible uncertainty and the documented operator recovery route are acceptable.
+   Positive live reattachment is not a universal gate.
+
+The default policy uses supported Codex workspace-write controls with explicit
+write roots, command network access disabled and no automatic escalation
+(`approvalPolicy: never`). Reads retain full access subject to host permissions;
+“workspace-limited” must not imply outside-read denial. Disclose temporary roots,
+protected paths, ambient credentials and other tool/network surfaces. The exact
+policy and recovery route are in the [standalone design](../design/standalone.md).
+Strict read isolation and complete descendant containment are separate explicit
+product/deployment choices. This does not approve full-access execution, shared
+config/login changes, credential copying, a different runtime or deployment.
+
+Earlier process, cleanup and outside-read failures remain valid findings against
+the stronger contracts they tested. They are not retroactive passes. The tradeoff
+is continued effects and possible indefinite loss of workspace/capacity availability;
+there is no force-unlock waiver. Actual evidence remains necessary to pass S01 or
+release dependent work. The installed Haze prototype and Multica CB-35 are unchanged
+by this source-contract and GitHub #688 documentation reset.
