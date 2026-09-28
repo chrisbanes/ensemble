@@ -16,7 +16,7 @@ amendment alone passes S01 or releases dependent work.
 | Slice | Outcome and acceptance | Dependencies |
 | --- | --- | --- |
 | S01 — Prove minimum Codex integration | Existing-login execution, events/results, follow-up or supported resume and cancellation requests; bounded admission, trusted identity, durable-state and ambiguous-submission probes. Record access/runtime limits and operator recovery. No product scheduler/UI claim; R01. | Confirmed product scope; bounded proof below |
-| S02 — Build standalone bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. BB source cleanup is complete. Test SQLite reopen, runtime failure and preserved uncertain state; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
+| S02 — Build standalone bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. BB source cleanup is complete. Test SQLite reopen, runtime failure, preserved uncertain state and deterministic rejection of unexpected approval callbacks; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
 | S03 — Own dispatch and workspaces | Durable eligible-turn queue, global/project caps (defaults 4/2), active-work sleep assertion, holds, worktree provisioning, cooperative writer admission, restart reconciliation and bounded retries. Capacity-one delegation cannot deadlock; pause/stop races and uncertain/orphan executions retain holds. | S02; A07–A09, A14–A18, A27, R02/R03 |
 | S04 — Deliver local work and operator UI | Web UI with separate operator login over Tailscale, project/profile setup, tasks, conversations/history, lead/assignee tools, direct TypeSafe routing with project opt-in and lead fallback, transactional results/inbox, durable operator messages (no live steering), questions/approvals, instruction revisions and task dependencies. Integrate UI with each command as it lands. | S03; A02–A13, A25, local A28/A30, R04/R05/R07–R10 |
 | S05 — Qualify complete local journey | Automated UI/service/runtime journey with a disposable repo and repository-free work; routing-enabled and disabled paths, nested returns, lead completion, routing failures, stop/restart/recovery variants, preservation and exact evidence. No GitHub integration required. | S04; local-task acceptance gate |
@@ -50,7 +50,7 @@ no new model experiments and does not authorize a new login or deployment.
 | Ambiguous submission — A08/A09 | Drop response/crash around submission/binding, include stale revisions, and retain one durable operation with no accidental duplicate dispatch. Reattach only if the same live execution is uniquely identified; otherwise retain uncertainty with the recovery path. Historical resume is not live reattachment; a positive reattachment result is not a universal gate. |
 | Cancellation and survival — A15 | Persist Stop before a supported cancellation request, observe for a predeclared bounded interval, record any continued effects and retain unresolved Stop/writer/capacity holds across restart. Crash survival is a documented limit, not a demand to kill every descendant. |
 | Cooperative handoff — A16/A18 | Trust successful terminal status for the bound thread/turn, require ended Ensemble callbacks and no other hold/known unfinished execution, then serialize one successor. Missing diagnostic tool items alone do not block handoff. Preserve negative crash/Stop/failure/missing-or-conflicting-terminal/callback/survivor cases and accepted unobserved-effect overlap. Other holds need independent resolution. |
-| Effective policy and observations — A25/R01 | Apply the design's explicit `workspaceWrite`/`never` policy through supported App Server controls. Record attributable inside-write and outside-write behavior, effective command-network controls, rejected broader access, broad reads and ambient limits. Preserve real streamed/stored turn evidence; standalone `command/exec` cannot prove model-turn history. Named restricted profiles and outside-read denial are not required. |
+| Effective policy and observations — A25/R01 | Apply the design's explicit `workspaceWrite`/`never` policy through supported App Server controls. Record attributable inside-write and outside-write behavior, effective command-network controls, policy selection/readback, broad reads and ambient limits. The approved S01-only evidence amendment below records model-originated escalation rejection as unproved. Preserve real streamed/stored turn evidence; standalone `command/exec` cannot prove model-turn history. Named restricted profiles and outside-read denial are not required. |
 
 Retain exact versions, commands, identities, effects and fixture cleanup. Separate
 protocol/runtime observations from deterministic coordination fixtures and from
@@ -59,6 +59,26 @@ policy still blocks that capability: raise the concrete configuration decision,
 never silently broaden access. Document the
 [operator recovery route](design/standalone.md#operator-recovery-of-uncertain-execution)
 and limitations, including indefinite holds if evidence cannot settle ownership.
+
+### S01-only approval evidence amendment — 28 September 2026
+
+Chris approved accepting the absence of an attributable model-originated broader-access
+rejection as an S01 limitation. Row 7 may qualify from the existing effective
+`workspaceWrite`/`never` selection/readback and bounded attributable write, command-network
+and streamed/stored-history results. The attempted escalation produced no command or
+approval request and no forbidden effect; it remains inconclusive, not a rejection
+or a policy breach. Do not repeat that prompt or reopen qualified rows without
+changed code/configuration or concrete contrary evidence.
+
+The product must still deny broader command access. S02 must implement and
+deterministically test rejection of unexpected approval callbacks in the runtime
+adapter, without granting permissions or broadening policy. S05 must test the
+integrated approval flow before release. Adapter fixtures prove Ensemble's response,
+not a model-originated rejection inside Codex. Any demonstrated breach of the
+selected policy still blocks the affected capability. This amendment changes only
+S01 evidence scope; it does not pass S01, release dependencies or alter crash,
+Stop, handoff or recovery rules. Reconcile one final candidate and use the existing
+review/delivery workflow for acceptance.
 
 ### S01 completion rule
 
@@ -121,7 +141,8 @@ only actual qualification evidence can release dependent work.
 
 ## Feature integration and operational ownership
 
-S02 owns service bootstrap and repeatable startup/shutdown with a fresh database;
+S02 owns service bootstrap, repeatable startup/shutdown with a fresh database, and
+runtime-adapter rejection of unexpected approval callbacks with deterministic tests;
 S03 adds the scheduler, supervision integration, workspace lifecycle and sleep
 assertion. These must work together before UI or autonomous release claims.
 S04 owns the web authentication/session boundary as well as coordination tools,
@@ -130,8 +151,8 @@ UI/service tests, rather than treating its single plan ID as one oversized patch
 S04 also owns routing settings and the direct TypeSafe integration, durable
 routing decisions, explicit-assignee bypass, task-scoped lead conversations and
 result destinations. S03 supplies admission/capacity boundaries; S04 must not
-route around them. S05 exercises the assembled local journey including R07–R10,
-using deterministic routing failures and representative, bounded live routing
+route around them. S05 exercises the assembled local journey, including the
+integrated approval flow and R07–R10, using deterministic routing failures and representative, bounded live routing
 validation with explicitly enabled credentials and project access. Model calls
 are not authorized by this documentation change. Measure errors, fallback,
 latency and cost; do not assume savings or select thresholds without evidence. S08 owns backup/restore qualification,

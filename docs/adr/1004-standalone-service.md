@@ -98,6 +98,16 @@ is at `e87ed326182b602c412606d1e88d6ae481188eb2`. See the
    checklist, not every possible model tool or a general tool allowlist; see the
    [trust boundary](../design/standalone.md#runtime-trust-boundary) and
    [completion rule](../delivery.md#s01-completion-rule).
+6. **S01-only approval evidence amendment:** Chris approved retaining unproved
+   model-originated escalation rejection as an explicit S01 limitation. Existing
+   effective `workspaceWrite`/`never` selection and attributable write, network and
+   live/stored-history evidence can qualify that bounded row. The attempted request
+   was inconclusive and is not a retroactive rejection. The product still denies
+   broader command access: S02 implements and deterministically tests unexpected
+   approval-callback rejection in the runtime adapter; S05 qualifies the integrated
+   approval flow before release. Demonstrated policy breaches remain blockers.
+   This changes no crash/Stop/handoff guarantee and does not itself pass S01 or
+   release dependencies. See the [evidence amendment](../delivery.md#s01-only-approval-evidence-amendment--28-september-2026).
 
 The default policy uses supported Codex workspace-write controls with explicit
 write roots, command network access disabled and no automatic escalation

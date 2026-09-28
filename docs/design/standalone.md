@@ -172,6 +172,13 @@ broader command access rather than auto-approving escalation. A policy change ne
 separate operator approval and fresh admission. Do not inherit `dangerFullAccess`
 as a fallback or change shared configuration/login to make a probe pass.
 
+The [approved S01 evidence amendment](../delivery.md#s01-only-approval-evidence-amendment--28-september-2026)
+accepts unproved model-originated escalation rejection for feasibility only. S02
+must implement and deterministically test the runtime adapter's rejection of any
+unexpected approval callback without granting permissions or broadening policy.
+S05 qualifies the integrated approval flow before release. These checks preserve
+the denial requirement; an adapter fixture cannot prove Codex's internal rejection.
+
 This limits command writes, not reads outside the workspace. Inventory effective
 temporary write roots and protected paths; do not advertise task-root-only writes
 without checking them. Host-readable files, inherited environment and credentials

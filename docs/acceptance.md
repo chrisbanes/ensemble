@@ -102,7 +102,15 @@ or pass these complete product scenarios.
   command result cannot prove persisted model-turn history; test that separately.
   Strict outside-read denial is not part of default acceptance. S02–S05 also test
   ordinary file edits and the broader enabled tool policy. S01 does not certify
-  every tool class or require a general model-tool allowlist.
+  every tool class or require a general model-tool allowlist. Under the approved
+  [S01-only evidence amendment](delivery.md#s01-only-approval-evidence-amendment--28-september-2026),
+  S01 records model-originated escalation rejection as unproved and uses the existing
+  effective-policy and attributable write/network/history evidence. The product's
+  denial requirement remains: S02 implements and deterministically tests rejection
+  of unexpected approval callbacks in the runtime adapter without granting access;
+  S05 tests the integrated approval flow before release. A fixture does not prove
+  Codex rejected a model-originated escalation. Demonstrated policy breaches still
+  block the affected capability.
 
 A failure blocks the dependent claim. Only an explicit product decision changes a
 requirement; the 28 September reset is such a decision, not a retroactive probe pass.
