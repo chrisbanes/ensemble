@@ -98,10 +98,37 @@ for await (const line of lines) {
   }
 });
 
-test("App Server exit during initialization rejects promptly", {
+test("stdin closure during initialization rejects promptly", {
   timeout: 7000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-init-pipe-"));
+  const executable = join(root, "fake-codex.sh");
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+IFS= read -r request
+exec 0<&-
+printf '{"id":1,"result":{}}\\n'
+exec sleep 10
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable);
+  try {
+    await assert.rejects(
+      bounded(runtime.start(), 3000),
+      /stdin closed|EPIPE|Runtime stopped/,
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("App Server exit during initialization rejects promptly", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-init-exit-"));
   const executable = join(root, "fake-codex.mjs");
   writeFileSync(
     executable,
