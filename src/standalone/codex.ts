@@ -52,6 +52,30 @@ export function deniedServerRequest(id: string | number, method: string) {
   };
 }
 
+export interface UnexpectedRequest {
+  method: string;
+  threadId?: string;
+  turnId?: string;
+}
+
+/** Modern approval params carry server-owned thread/turn IDs; legacy params do not. */
+export function unexpectedRequest(
+  method: string,
+  params: unknown,
+): UnexpectedRequest {
+  if (
+    method === "item/commandExecution/requestApproval" ||
+    method === "item/fileChange/requestApproval" ||
+    method === "item/permissions/requestApproval"
+  ) {
+    const identity = z
+      .object({ threadId: z.string().min(1), turnId: z.string().min(1) })
+      .safeParse(params);
+    if (identity.success) return { method, ...identity.data };
+  }
+  return { method };
+}
+
 export interface Runtime {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -66,7 +90,7 @@ export interface Runtime {
     threadId: string,
     turnId: string,
   ): Promise<"completed" | "failed">;
-  onUnexpectedRequest(listener: (method: string) => void): void;
+  onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void;
 }
 
 /** One private stdio App Server process. It never sends an approval grant. */
@@ -83,11 +107,11 @@ export class CodexRuntime implements Runtime {
   >();
   private readonly events = new EventEmitter();
   private readonly terminals = new Map<string, "completed" | "failed">();
-  private unexpected?: (method: string) => void;
+  private unexpected?: (request: UnexpectedRequest) => void;
 
   constructor(private readonly executable = "codex") {}
 
-  onUnexpectedRequest(listener: (method: string) => void): void {
+  onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
     this.unexpected = listener;
   }
 
@@ -263,9 +287,23 @@ export class CodexRuntime implements Runtime {
     }
     if (message.method && message.id !== undefined) {
       const method = message.method;
-      this.unexpected?.(method);
-      this.child?.stdin.write(
+      let holdFailed = false;
+      try {
+        this.unexpected?.(unexpectedRequest(method, message.params));
+      } catch (error) {
+        holdFailed = true;
+        this.fail(
+          new Error(
+            `Could not persist unexpected request hold: ${String(error)}`,
+          ),
+        );
+      }
+      const child = this.child;
+      child?.stdin.write(
         `${JSON.stringify(deniedServerRequest(message.id, method))}\n`,
+        () => {
+          if (holdFailed) child.kill("SIGTERM");
+        },
       );
       return;
     }

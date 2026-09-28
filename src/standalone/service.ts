@@ -59,18 +59,41 @@ export class StandaloneService {
       );
       new Store(db).ensureHost("standalone-codex");
       const state = new ExecutionState(db);
+      for (const item of state.list()) {
+        let workspaceKey: string;
+        try {
+          workspaceKey = realpathSync(item.workspace);
+        } catch {
+          workspaceKey = resolve(item.workspace);
+        }
+        if (workspaceKey !== item.workspace)
+          state.setWorkspaceKey(item.id, workspaceKey);
+      }
       state.holdUnfinishedOnOpen();
       this.db = db;
       this.state = state;
       const runtime = this.runtimeFactory();
       this.runtime = runtime;
-      runtime.onUnexpectedRequest((method) => {
-        for (const item of state.list())
-          if (item.state === "submitting" || item.state === "running")
-            state.hold(
-              item.id,
-              `Unexpected App Server request denied: ${method}`,
-            );
+      runtime.onUnexpectedRequest((request) => {
+        const active = state
+          .list()
+          .filter(
+            (item) => item.state === "submitting" || item.state === "running",
+          );
+        const bound =
+          request.threadId && request.turnId
+            ? active.filter(
+                (item) =>
+                  item.threadId === request.threadId &&
+                  item.turnId === request.turnId,
+              )
+            : [];
+        const affected = bound.length === 1 ? bound : active;
+        for (const item of affected)
+          state.hold(
+            item.id,
+            `Unexpected App Server request denied: ${request.method}`,
+          );
       });
       await runtime.start();
     } catch (error) {
@@ -93,15 +116,22 @@ export class StandaloneService {
   async stop(): Promise<void> {
     const runtime = this.runtime;
     this.runtime = undefined;
+    let failure: unknown;
     try {
       if (runtime) await runtime.stop();
-    } finally {
-      await Promise.allSettled(this.active);
+    } catch (error) {
+      failure = error;
     }
+    await Promise.allSettled(this.active);
     const db = this.db;
     this.db = undefined;
     this.state = undefined;
-    db?.close();
+    try {
+      db?.close();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+    }
+    if (failure !== undefined) throw failure;
   }
 
   list(): ExecutionIntent[] {
@@ -129,7 +159,13 @@ export class StandaloneService {
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
-    const intent = state.create(workId, prompt, workspace);
+    let workspaceKey: string;
+    try {
+      workspaceKey = realpathSync(workspace);
+    } catch {
+      workspaceKey = resolve(workspace);
+    }
+    const intent = state.create(workId, prompt, workspaceKey);
     if (intent.state !== "ready" || intent.reason) return intent;
     let previous: ExecutionIntent | undefined;
     try {
@@ -140,7 +176,7 @@ export class StandaloneService {
         if (
           previous?.state !== "completed" ||
           !previous.threadId ||
-          previous.workspace !== workspace
+          previous.workspace !== workspaceKey
         )
           throw new Error(
             "Previous work is not a completed binding in this workspace",
@@ -151,7 +187,11 @@ export class StandaloneService {
       return state.get(intent.id);
     }
     try {
-      if (!state.begin(intent.id)) return state.get(intent.id);
+      if (!state.begin(intent.id)) {
+        if (state.get(intent.id).state === "ready")
+          state.hold(intent.id, "Workspace has unresolved execution");
+        return state.get(intent.id);
+      }
     } catch (error) {
       state.hold(
         intent.id,
@@ -162,12 +202,22 @@ export class StandaloneService {
     try {
       let threadId: string;
       if (previous?.threadId) {
+        if (state.get(intent.id).state !== "submitting")
+          throw new Error("Execution admission was held");
         await runtime.resumeThread(previous.threadId);
         threadId = previous.threadId;
-      } else threadId = await runtime.startThread(workspace);
-      state.bindThread(intent.id, threadId);
-      const turnId = await runtime.startTurn(threadId, workspace, prompt);
-      state.bindTurn(intent.id, turnId);
+      } else {
+        if (state.get(intent.id).state !== "submitting")
+          throw new Error("Execution admission was held");
+        threadId = await runtime.startThread(workspaceKey);
+      }
+      if (!state.bindThread(intent.id, threadId))
+        throw new Error("Thread binding was held or changed");
+      if (state.get(intent.id).state !== "submitting")
+        throw new Error("Execution admission was held");
+      const turnId = await runtime.startTurn(threadId, workspaceKey, prompt);
+      if (!state.bindTurn(intent.id, turnId))
+        throw new Error("Turn binding was held or changed");
       const outcome = await runtime.waitForTurn(threadId, turnId);
       if (outcome === "completed") state.complete(intent.id, threadId, turnId);
       else state.hold(intent.id, "Bound turn failed or was interrupted");

@@ -17,19 +17,32 @@ import type { Runtime } from "../src/standalone/codex.js";
 import {
   deniedServerRequest,
   executionPolicy,
+  unexpectedRequest,
+  type UnexpectedRequest,
 } from "../src/standalone/codex.js";
 
 class FakeRuntime implements Runtime {
-  onRequest: ((method: string) => void) | undefined;
+  onRequest: ((request: UnexpectedRequest) => void) | undefined;
   failAt: "start" | "thread" | "turn" | "wait" | undefined;
   starts = 0;
+  turnStarts = 0;
   approveDuringWait = false;
+  failStop = false;
+  threadGate: Promise<void> | undefined;
+  onThreadEntered: (() => void) | undefined;
   async start() {
     if (this.failAt === "start") throw new Error("login unavailable");
   }
-  async stop() {}
+  async stop() {
+    if (this.failStop) {
+      this.failStop = false;
+      throw new Error("injected stop failure");
+    }
+  }
   async startThread() {
     this.starts++;
+    this.onThreadEntered?.();
+    await this.threadGate;
     if (this.failAt === "thread") throw new Error("lost thread response");
     return "thread-1";
   }
@@ -37,16 +50,17 @@ class FakeRuntime implements Runtime {
     assert.equal(id, "thread-1");
   }
   async startTurn() {
+    this.turnStarts++;
     if (this.failAt === "turn") throw new Error("lost turn response");
     return "turn-1";
   }
   async waitForTurn() {
     if (this.approveDuringWait)
-      this.onRequest?.("item/permissions/requestApproval");
+      this.onRequest?.({ method: "item/permissions/requestApproval" });
     if (this.failAt === "wait") throw new Error("lost terminal status");
     return "completed" as const;
   }
-  onUnexpectedRequest(listener: (method: string) => void) {
+  onUnexpectedRequest(listener: (request: UnexpectedRequest) => void) {
     this.onRequest = listener;
   }
 }
@@ -71,6 +85,21 @@ test("all installed approval callback forms deny without policy expansion", () =
     excludeSlashTmp: true,
     excludeTmpdirEnvVar: true,
   });
+  assert.deepEqual(
+    unexpectedRequest("item/commandExecution/requestApproval", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+    }),
+    {
+      method: "item/commandExecution/requestApproval",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    },
+  );
+  assert.deepEqual(
+    unexpectedRequest("execCommandApproval", { conversationId: "thread-1" }),
+    { method: "execCommandApproval" },
+  );
 });
 
 test("fresh schema, restart, completed binding and no duplicate dispatch", async () => {
@@ -124,7 +153,7 @@ test("fresh schema, restart, completed binding and no duplicate dispatch", async
   }
 });
 
-test("lost submission and approval callback hold across reopen", async () => {
+test("lost submission blocks a second work ID before and after reopen", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
   const data = join(root, "data");
   const workspace = join(root, "work");
@@ -138,6 +167,15 @@ test("lost submission and approval callback hold across reopen", async () => {
     assert.equal(lost.state, "held");
     assert.equal(lost.threadId, "thread-1");
     assert.equal(lost.turnId, null);
+    const second = await service.submit(
+      "second",
+      "test",
+      `${workspace}/../work`,
+    );
+    assert.equal(second.state, "held");
+    assert.match(second.reason ?? "", /Workspace has unresolved execution/);
+    assert.equal(runtime.starts, 1);
+    assert.equal(runtime.turnStarts, 1);
     await service.stop();
     runtime = new FakeRuntime();
     service = new StandaloneService(data, () => runtime);
@@ -147,10 +185,142 @@ test("lost submission and approval callback hold across reopen", async () => {
       "held",
     );
     assert.equal(runtime.starts, 0);
-    runtime.approveDuringWait = true;
-    const pending = await service.submit("other", "test", workspace);
+    const pending = await service.submit(
+      "other",
+      "test",
+      `${workspace}/../work`,
+    );
     assert.equal(pending.state, "held");
-    assert.match(pending.reason ?? "", /Unexpected App Server request denied/);
+    assert.match(pending.reason ?? "", /Workspace has unresolved execution/);
+    assert.equal(runtime.starts, 0);
+    assert.equal(runtime.turnStarts, 0);
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unbound approval callback during delayed thread start prevents turn submission", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+  const data = join(root, "data");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  const runtime = new FakeRuntime();
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  runtime.threadGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  runtime.onThreadEntered = entered;
+  const service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    const pending = service.submit("callback-race", "test", workspace);
+    await started;
+    runtime.onRequest?.({ method: "item/permissions/requestApproval" });
+    release();
+    const held = await pending;
+    assert.equal(held.state, "held");
+    assert.equal(held.threadId, null);
+    assert.equal(runtime.turnStarts, 0);
+    assert.match(held.reason ?? "", /Unexpected App Server request denied/);
+    await service.stop();
+    await service.start();
+    assert.equal(
+      (await service.submit("callback-race", "test", workspace)).state,
+      "held",
+    );
+    assert.equal(runtime.turnStarts, 0);
+  } finally {
+    release();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("approval callback on a bound turn retains hold after terminal completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+  const data = join(root, "data");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  const runtime = new FakeRuntime();
+  runtime.approveDuringWait = true;
+  const service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    const held = await service.submit("callback", "test", workspace);
+    assert.equal(held.state, "held");
+    assert.equal(held.threadId, "thread-1");
+    assert.equal(held.turnId, "turn-1");
+    assert.match(held.reason ?? "", /Unexpected App Server request denied/);
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trusted callback identity holds only its bound turn; unknown identity holds all active turns", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+  const data = join(root, "data");
+  const runtime = new FakeRuntime();
+  const service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    const db = new DatabaseSync(join(data, "standalone.sqlite"));
+    const state = new ExecutionState(db);
+    const first = state.create("first", "test", join(root, "work-a"));
+    const second = state.create("second", "test", join(root, "work-b"));
+    assert.equal(state.begin(first.id), true);
+    assert.equal(state.bindThread(first.id, "thread-a"), true);
+    assert.equal(state.bindTurn(first.id, "turn-a"), true);
+    assert.equal(state.begin(second.id), true);
+    assert.equal(state.bindThread(second.id, "thread-b"), true);
+    assert.equal(state.bindTurn(second.id, "turn-b"), true);
+    runtime.onRequest?.({
+      method: "item/commandExecution/requestApproval",
+      threadId: "thread-a",
+      turnId: "turn-a",
+    });
+    assert.equal(state.get(first.id).state, "held");
+    assert.equal(state.get(second.id).state, "running");
+    runtime.onRequest?.({
+      method: "item/permissions/requestApproval",
+      threadId: "unknown",
+      turnId: "unknown",
+    });
+    assert.equal(state.get(second.id).state, "held");
+    db.close();
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed stop closes SQLite and allows restart on the same service object", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+  const data = join(root, "data");
+  const runtime = new FakeRuntime();
+  const service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    runtime.failStop = true;
+    await assert.rejects(service.stop(), /injected stop failure/);
+    await service.start();
+    assert.deepEqual(service.list(), []);
+    await service.stop();
+    const db = new DatabaseSync(join(data, "standalone.sqlite"));
+    assert.equal(
+      (
+        db.prepare("PRAGMA integrity_check").get() as {
+          integrity_check: string;
+        }
+      ).integrity_check,
+      "ok",
+    );
+    db.close();
   } finally {
     await service.stop();
     rmSync(root, { recursive: true, force: true });

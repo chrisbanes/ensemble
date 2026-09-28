@@ -67,6 +67,12 @@ export class ExecutionState {
       .map((row) => intentSchema.parse(row));
   }
 
+  setWorkspaceKey(id: string, workspace: string): void {
+    this.db
+      .prepare("UPDATE execution_intents SET workspace = ? WHERE id = ?")
+      .run(workspace, id);
+  }
+
   /** An interrupted service cannot prove a send failed or a writer stopped. */
   holdUnfinishedOnOpen(): void {
     this.db
@@ -80,41 +86,43 @@ export class ExecutionState {
     return (
       this.db
         .prepare(
-          "UPDATE execution_intents SET state = 'submitting', reason = NULL WHERE id = ? AND state = 'ready' RETURNING id",
+          `UPDATE execution_intents SET state = 'submitting', reason = NULL
+           WHERE id = ? AND state = 'ready'
+           AND NOT EXISTS (
+             SELECT 1 FROM execution_intents AS other
+             WHERE other.workspace = execution_intents.workspace
+             AND other.id != execution_intents.id
+             AND other.state IN ('held','submitting','running')
+           ) RETURNING id`,
         )
         .get(id) !== undefined
     );
   }
 
-  bindThread(id: string, threadId: string): void {
-    this.db
-      .prepare(
-        "UPDATE execution_intents SET threadId = ? WHERE id = ? AND state = 'submitting' AND threadId IS NULL",
-      )
-      .run(threadId, id);
+  bindThread(id: string, threadId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE execution_intents SET threadId = ? WHERE id = ? AND state = 'submitting' AND threadId IS NULL RETURNING id",
+        )
+        .get(threadId, id) !== undefined
+    );
   }
 
-  bindTurn(id: string, turnId: string): void {
-    this.db
-      .prepare(
-        "UPDATE execution_intents SET state = 'running', turnId = ? WHERE id = ? AND state = 'submitting' AND turnId IS NULL",
-      )
-      .run(turnId, id);
+  bindTurn(id: string, turnId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE execution_intents SET state = 'running', turnId = ? WHERE id = ? AND state = 'submitting' AND turnId IS NULL RETURNING id",
+        )
+        .get(turnId, id) !== undefined
+    );
   }
 
   hold(id: string, reason: string): void {
     this.db
       .prepare(
         "UPDATE execution_intents SET state = 'held', reason = ? WHERE id = ? AND state != 'completed'",
-      )
-      .run(reason, id);
-  }
-
-  /** Only a proven refusal before any App Server submission may return to ready. */
-  preSubmissionRefusal(id: string, reason: string): void {
-    this.db
-      .prepare(
-        "UPDATE execution_intents SET state = 'ready', reason = ? WHERE id = ? AND state = 'submitting' AND threadId IS NULL AND turnId IS NULL",
       )
       .run(reason, id);
   }
