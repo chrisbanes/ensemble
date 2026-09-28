@@ -15,7 +15,7 @@ was observed, not that a standalone Ensemble service implements it.
 **Failed** means the tested candidate did not meet the required boundary.
 **Unproved** means no qualifying evidence exists. **Blocked** names a specific
 dependency or permission preventing the next safe probe. The rows cover every
-`docs/delivery.md` S01 probe and R01/A08/A09/A14–A16/A18/A25.
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) probe and R01/A08/A09/A14–A16/A18/A25.
 
 | Capability / acceptance | Status and exact evidence | Remaining gate / consequence |
 | --- | --- | --- |

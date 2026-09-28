@@ -6,8 +6,9 @@ the approved [runtime trust boundary](../design/standalone.md#runtime-trust-boun
 The failed termination and unexplained file-effect observations below remain
 unchanged findings. Published trace copies have path placeholders and updated
 SHA-256 values; private originals were retained outside the publication branch.
-The current seven-row disposition is in the
-[fix-first coverage report](s01-acceptance-candidate-2026-09-28.md).
+The current seven-row disposition, governed by
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688), is in the
+[final acceptance candidate](s01-acceptance-candidate-2026-09-28.md).
 
 ## Reconciliation checkpoint before new probes
 
@@ -29,7 +30,7 @@ The published existing-evidence summary is a secondary index. The local raw
 traces, fixtures, and contemporaneous reports remain primary for bounded
 observations. The old outside-read denial and named-profile/new-login gates are
 superseded, not passed. S01 remains unpassed pending the minimum-contract gaps in
-`docs/delivery.md`; service implementation evidence belongs to S02–S05.
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688); service implementation evidence belongs to S02–S05.
 
 ## New qualification and decision
 
@@ -108,7 +109,7 @@ start to stop; the post-restart read took 0.91 seconds. The command probe took
 
 ### Integrated minimum-contract matrix
 
-| `docs/delivery.md` row / acceptance | Current S01 status | Service-owned remainder |
+| Then-current S01 row / acceptance (now [#688](https://github.com/chrisbanes/ensemble/issues/688)) | Historical status at this checkpoint | Service-owned remainder |
 | --- | --- | --- |
 | Authenticated lifecycle — R01/A18 | **Passed with limits:** existing login, native command result in live and stored history after a later restart (follow-up below), prior stored resume and unavailable-login detection. **Unproved:** post-restart execution-policy effectiveness and expired-login response. | S02/S05 installed-service launch, login hold and UI-visible recovery. |
 | Trusted caller — A25 | **Passed with limits:** prior real spoofed payload denial; new stale/unbound/invalidation fixture. | S04/S05 full generation, action-policy and approval binding. |

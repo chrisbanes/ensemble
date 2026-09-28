@@ -108,7 +108,8 @@ termination proof. A candidate needs an execution boundary with complete
 membership, a way to stop process creation and terminate all writers, and
 identity-safe confirmation before releasing ownership. The existing-login
 and deployment implications of any larger boundary remain decisions for
-Churchill/Chris. The remaining `docs/delivery.md` probes remain unproved.
+Churchill/Chris. At this historical checkpoint, the remaining
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) probes were unproved.
 
 The probe created only isolated fixture files and new ephemeral Codex test
 threads. Both writers and the App Server were stopped; the effect files and

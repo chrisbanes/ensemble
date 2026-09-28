@@ -76,5 +76,6 @@ reported install. It may have affected the earlier initialization timeouts,
 whose cause remains unproved. A successful login and real turn do not pass
 the termination gate. The existing direct-group approach and parent/group
 scanner remain insufficient; complete, race-safe writer termination is still
-unproved. CB-35, descendants, and the other `docs/delivery.md` probes remain
-held pending the separate design decision.
+unproved. At that checkpoint CB-35, descendants, and the other
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) probes remained
+held pending a separate design decision.
