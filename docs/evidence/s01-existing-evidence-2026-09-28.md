@@ -12,9 +12,9 @@ integration reset. Later qualification on local `cb/35-s01-proof` at
 `77a383fd64144df83dcc65f7b1888286d1f39b55`, in
 `docs/evidence/s01-minimum-contract-qualification-2026-09-28.md`, reports matching
 live/stored command items and effective selected shell write/loopback policy before
-and after restart, plus stale-generation and ambiguous-binding fixtures. That
-checkout and its underlying traces remain the evidence source; they are not
-published by this amendment.
+and after restart, plus stale-generation and ambiguous-binding fixtures. The [published qualification report](s01-qualification-report-2026-09-28.md)
+preserves those later observations and limits for assessment from a fresh checkout.
+Original scripts/raw traces remain local; independent replay is not provided here.
 
 Chris subsequently approved the [runtime trust boundary](../design/standalone.md#runtime-trust-boundary).
 The later report's requirement for exhaustive method observations is superseded;

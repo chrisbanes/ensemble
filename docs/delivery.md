@@ -87,14 +87,15 @@ only a concrete required capability failure or a material change to this boundar
 
 The [durable existing-evidence matrix](evidence/s01-existing-evidence-2026-09-28.md)
 records the earlier bounded observations, provenance and gaps in this repository.
-It predates the later qualification on `cb/35-s01-proof` at
-`77a383fd64144df83dcc65f7b1888286d1f39b55`; reconcile that checkout's
-`docs/evidence/s01-minimum-contract-qualification-2026-09-28.md` against the finite
-checklist. Its shell-policy/history probes before and after restart report positive
-evidence; its exhaustive-observation blocker is superseded by this trust amendment.
-The unexplained earlier file effect remains unresolved, not a retroactive pass.
-It can be read in a fresh checkout; underlying local fixtures/traces are not included
-and the summary alone cannot qualify uncovered cases.
+The [later qualification report](evidence/s01-qualification-report-2026-09-28.md)
+publishes the bounded observations from local evidence head
+`77a383fd64144df83dcc65f7b1888286d1f39b55`. Reconcile these two published reports
+against the finite checklist; access to the author's local checkout is not required
+for that assessment. Selected shell-policy/history probes before and after restart
+report positive evidence. The exhaustive-observation blocker is superseded by the
+trust amendment; the earlier unexplained file effect remains a diagnostic finding.
+Original fixtures/raw traces are not included, so independent replay requires those
+artifacts or separately bounded probes. Neither report qualifies uncovered cases.
 
 The S01 checkout `cb/35-s01-proof` was inspected read-only at
 `e87ed326182b602c412606d1e88d6ae481188eb2`. Its
@@ -107,7 +108,7 @@ Do not import raw traces/configuration or change prior findings to passes.
 | Disposition | Evidence and remaining work |
 | --- | --- |
 | Reuse within S01 | Real existing-login turn/stored resume, trusted callback, crash survival, best-effort Stop holds and cooperative handoff have bounded evidence. SQLite probes cover admission, state reopen and negative holds. Reconcile their exact coverage against the required rows above; none proves the service. |
-| Still required for S01 | Reconcile the later evidence head against the seven checklist rows and return one acceptance candidate. Preserve any genuinely missing bounded evidence as unproved and the recovery route as a contract to implement. Do not repeat qualified shell/history/restart probes or gate on exhaustive observations. No new pass is asserted here. |
+| Still required for S01 | Reconcile the published qualification reports against the seven checklist rows and return one acceptance candidate. Preserve any genuinely missing bounded evidence as unproved and the recovery route as a contract to implement. Do not repeat qualified shell/history/restart probes or gate on exhaustive observations. No new pass is asserted here. |
 | Documented runtime limits | Admitted work can survive failure/Stop; untracked children can overlap a normal-success successor; stored resume is not live reattachment. Existing sibling-read success is still a failure of the former read-denial contract and now documents an accepted broad-read limit. Process/cleanup failures remain failures of stronger containment. |
 | Later service/integration | S02–S05 implement and qualify service startup/login, all admission races, durable results/inbox, policy and approval enforcement, operator visibility and recovery, full UI/runtime journeys and relevant A/R scenarios. S08 owns operational restart/restore/cutover procedures. |
 | Optional product/deployment hardening | Restricted reads, named permission profiles, complete descendant containment and stronger host isolation require a separate explicit decision and evidence; they do not block minimum orchestration. |
