@@ -29,12 +29,9 @@ The stable identity of a task's corresponding item in an external system, indepe
 _Avoid_: Source configuration when referring to external task identity
 
 **Project lead**:
-The agent responsible for selecting and delegating work across a project.
-_Avoid_: Task owner when referring to project-wide responsibility
-
-**Task owner**:
-The agent responsible for coordinating a task's work and bringing it to an outcome.
-_Avoid_: Project lead when referring to responsibility for one task
+The agent accountable for task outcomes across a project, including coordination,
+planning and allocation exceptions. Delegating work does not transfer that accountability.
+_Avoid_: Task owner as a separate accountability role
 
 **Agent profile**:
 A reusable, operator-defined identity and instructions, selected for project leads and task assignments. Its execution settings are validated for the selected runtime.
@@ -43,6 +40,10 @@ _Avoid_: Bot identity or assignment when referring to reusable configuration
 **Assignment**:
 A durable unit of work delegated to an agent within a task that can continue across agent conversations.
 _Avoid_: Step when referring to delegated work
+
+**Assignment assignee**:
+The agent tasked with carrying out an assignment and returning its result.
+_Avoid_: Task owner when referring to the agent executing an assignment
 
 **Agent conversation**:
 The interaction history used by an agent to carry out work. An assignment can continue across replacement conversations.

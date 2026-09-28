@@ -1,8 +1,14 @@
 ---
 status: accepted
+partially_superseded_by: ADR-1005
 ---
 
 # Build Ensemble as a standalone service without BB
+
+The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
+separate task-owner accountability and lead-only initial allocation where described
+here. Project leads retain accountability; the service may route assignments
+directly. Existing admission, execution and recovery obligations remain.
 
 On 27 September 2026 Chris decided to remove BB and build Ensemble's own service.
 Ensemble owns scheduling, execution admission, process supervision, task workspaces,
@@ -33,7 +39,8 @@ the BB prototype separately rather than importing its records. The original
 The approved 28 September amendments below supersede those guarantees; none
 claims an implemented service or a passing S01 result.
 Other platforms are deferred. Codex is the first harness, using the existing operator login; Claude and API-key
-billing support are deferred. Codex App Server is the selected integration
+billing for agent execution are deferred. ADR-1005 separately permits opt-in
+TypeSafe API access for assignment routing. Codex App Server is the selected integration
 surface, with installed-version qualification still required. Ensemble
 must prove admission, cancellation requests, conservative recovery and cooperative
 workspace ownership; wrapping another queue does not satisfy that requirement. Runtime and deployment
@@ -61,7 +68,8 @@ is at `e87ed326182b602c412606d1e88d6ae481188eb2`. See the
    cannot admit queued work. Preserve ownership/capacity and uncertain submissions;
    never blindly resubmit or automatically release them.
 2. **Best-effort Stop (revision 4):** persist Stop, request cancellation for active
-   assignments and observe for a bounded interval. Continued effects are possible.
+   task execution, including lead turns and assignments, and observe for a bounded
+   interval. Continued effects are possible.
    Unresolved Stop/writer/capacity holds remain until independently resolved; time,
    acknowledgements, empty terminal lists or operator acknowledgement do not unlock.
 3. **Cooperative normal-success handoff (revision 5):** an identified successful

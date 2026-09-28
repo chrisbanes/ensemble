@@ -1,6 +1,6 @@
 ---
 status: accepted
-partially_superseded_by: ADR-1004
+partially_superseded_by: [ADR-1004, ADR-1005]
 ---
 
 # Build Ensemble around agent coordination
@@ -18,6 +18,11 @@ and runtime tools. Agents decide how to plan, implement, review, and revise work
 Ensemble owns durable coordination and its recovery; BB provides agent execution. This
 allows the process to adapt to each task, at the cost of a predetermined sequence
 of steps.
+
+The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
+separate task-owner accountability and lead-only initial allocation where described
+here. Project leads retain accountability; the service may route assignments
+directly. Existing admission, execution and recovery obligations remain.
 
 ## Product shape
 

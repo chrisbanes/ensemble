@@ -1,6 +1,8 @@
 # Standalone delivery plan
 
 **Direction and delivery sequence reviewed and confirmed by Chris on 27 September 2026.**
+Routing and accountability were amended on 28 September under
+[ADR-1005](adr/1005-service-assignment-routing.md).
 S01 runtime qualification is the next gate; detailed dependent contracts remain open.
 [ADR-1004](adr/1004-standalone-service.md) replaces the BB delivery path. Chris
 approved the minimum S01 integration contract on 28 September 2026; the current
@@ -15,8 +17,8 @@ This reset does not pass S01 or authorize dependent work; Multica CB-35 is uncha
 | S01 — Prove minimum Codex integration | Existing-login execution, events/results, follow-up or supported resume and cancellation requests; bounded admission, trusted identity, durable-state and ambiguous-submission probes. Record access/runtime limits and operator recovery. No product scheduler/UI claim; R01. | Confirmed product scope; bounded proof below |
 | S02 — Replace BB bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. Remove BB manifest, adapter, dependencies and mandatory BB CI. Test with BB absent, SQLite reopen, runtime failure and preserved uncertain state; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
 | S03 — Own dispatch and workspaces | Durable eligible-turn queue, global/project caps (defaults 4/2), active-work sleep assertion, holds, worktree provisioning, cooperative writer admission, restart reconciliation and bounded retries. Capacity-one delegation cannot deadlock; pause/stop races and uncertain/orphan executions retain holds. | S02; A07–A09, A14–A18, A27, R02/R03 |
-| S04 — Deliver local work and operator UI | Web UI with separate operator login over Tailscale, project/profile setup, tasks, conversations/history, owner/worker tools, transactional results/inbox, durable operator messages (no live steering), questions/approvals, instruction revisions and task dependencies. Integrate UI with each command as it lands. | S03; A02–A13, A25, local A28/A30, R04/R05 |
-| S05 — Qualify complete local journey | Automated UI/service/runtime journey with a disposable repo and repository-free work; stop/restart/recovery variants, preservation and exact evidence. No GitHub integration required. | S04; local-task acceptance gate |
+| S04 — Deliver local work and operator UI | Web UI with separate operator login over Tailscale, project/profile setup, tasks, conversations/history, lead/assignee tools, direct TypeSafe routing with project opt-in and lead fallback, transactional results/inbox, durable operator messages (no live steering), questions/approvals, instruction revisions and task dependencies. Integrate UI with each command as it lands. | S03; A02–A13, A25, local A28/A30, R04/R05/R07–R10 |
+| S05 — Qualify complete local journey | Automated UI/service/runtime journey with a disposable repo and repository-free work; routing-enabled and disabled paths, nested returns, lead completion, routing failures, stop/restart/recovery variants, preservation and exact evidence. No GitHub integration required. | S04; local-task acceptance gate |
 | S06 — Add GitHub discovery | Explicit credential access, native search/Project queries, source deduplication, readiness, full dependency reads, overlap placement and outage recovery. | S05; A19–A23, imported A28–A30 |
 | S07 — Qualify external delivery | Authorized writes, uncertain-effect reconciliation, feedback wakeups and both PR completion modes, with project-specific merge requirements. | S06; A24–A26 and complete A01–A30 |
 | S08 — Cut over deliberately | Verify backup/restore and service operations; preserve the prototype separately and explicitly settle or retire old active work. Review one bounded project cutover with no competing scheduler or writer. | S07 release candidate; R06 restore/cutover; explicit cutover review |
@@ -94,7 +96,14 @@ assertion. These must work together before UI or autonomous release claims.
 S04 owns the web authentication/session boundary as well as coordination tools,
 operator messages and views. Deliver it in coherent increments with their automated
 UI/service tests, rather than treating its single plan ID as one oversized patch.
-S05 exercises the assembled local journey. S08 owns backup/restore qualification,
+S04 also owns routing settings and the direct TypeSafe integration, durable
+routing decisions, explicit-assignee bypass, task-scoped lead conversations and
+result destinations. S03 supplies admission/capacity boundaries; S04 must not
+route around them. S05 exercises the assembled local journey including R07–R10,
+using deterministic routing failures and representative, bounded live routing
+validation with explicitly enabled credentials and project access. Model calls
+are not authorized by this documentation change. Measure errors, fallback,
+latency and cost; do not assume savings or select thresholds without evidence. S08 owns backup/restore qualification,
 operator service procedures and the separately reviewed cutover. Every slice
 records implementation evidence and explicitly retains unresolved capabilities.
 
@@ -145,7 +154,8 @@ No automatic migration or resumption of unfinished BB assignments is promised.
 
 The user has accepted removing BB and building Ensemble's own service. The detailed
 [specification](SPEC.md), [design](design/standalone.md), and [acceptance plan](acceptance.md)
-form the reviewed replacement plan. Codex protocol, macOS supervision, operator access
+form the reviewed replacement plan, including the confirmed 28 September
+assignment-routing and accountability amendment. Codex protocol, macOS supervision, operator access
 and admission/recovery contracts remain explicit technical decisions, not silently
 selected dependencies. The product-scope review checkpoint is satisfied; capability proofs still gate
 dependent implementation. This confirmation does not claim any proof has passed.
