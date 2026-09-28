@@ -17,8 +17,12 @@ configuration schema, and persisted runs are not compatibility requirements.
 The current code is a feasibility prototype. Chris reviewed and confirmed the
 standalone specification, design choices, acceptance scope and delivery sequence
 on 27 September 2026. Do not request that product review again for unchanged scope.
-S01 in `docs/delivery.md` is the next capability gate; resolve its execution-control
-proofs before dependent implementation. Settle detailed contracts using that evidence,
+Chris approved the minimum S01 integration reset on 28 September 2026. S01 in
+`docs/delivery.md` remains the next capability gate; qualify its bounded protocol
+and coordination probes before dependent implementation. Do not restore strict
+outside-read denial, complete descendant containment or universal live reattachment
+as inherent S01 gates. Preserve unresolved ownership holds and the documented
+recovery boundary. Settle detailed contracts using evidence,
 and return material scope or guarantee changes for review. Delivery includes
 automated service/runtime/UI integration and bounded live validation run by the
 implementation agent; do not hand incremental testing to the user. Preserve the

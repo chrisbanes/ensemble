@@ -16,10 +16,12 @@ assignment-routing and project-lead accountability decisions.
 - Deliver the first deployment on Chris's Mac; Linux qualification follows later.
 - Serve a web operator interface with private remote access from Chris's own devices
   over Tailscale, with a separate authenticated Ensemble operator session.
-- Require active execution to stop when the service fails. Prove macOS supervision
-  and relevant descendant termination before claiming this behavior.
-- New projects default to Codex workspace-limited execution; broader execution
-  requires operator approval and the actual controls must be qualified.
+- The 28 September amendment permits admitted execution to survive crashes and
+  makes Stop best-effort. Uncertain ownership remains held until independently resolved.
+- Normal successful final turns permit cooperative handoff under the specification;
+  detached-child overlap is an accepted limit, not physical writer exclusion.
+- Use the explicit default execution policy below. Strict outside-read denial and
+  complete descendant containment are separate product/deployment decisions.
 - Enforce both an installation-wide active-turn cap and per-project caps. Waiting
   assignments yield slots. Defaults are four active turns globally and two per
   project, editable by the operator.
@@ -86,14 +88,13 @@ revisions. Define the exact point that separates an active turn from queued work
 and prove pause/stop races on either side. Checking an enabled flag and then
 asynchronously spawning is not sufficient proof.
 
-The chosen crash policy requires active execution to stop with service failure.
-This is a runtime qualification requirement, not a property of ordinary child
-processes. S01 must exercise abrupt service death and relevant tool descendants.
-Until termination is confirmed, preserve writer ownership and display uncertainty;
-do not admit a replacement. Persist enough identity to detect surviving processes,
-including PID reuse. If execution can escape the chosen supervision boundary, hold
-that capability for a new decision rather than silently allowing turns to finish.
-Queued work must never start independently while Ensemble is unavailable.
+Already-admitted execution may survive coordinator or App Server death. Persist
+runtime/thread/turn and generation identities; preserve writer/capacity holds when
+observations or submission acceptance are uncertain. Reattach only when the same
+live execution is uniquely identified. Stored history and conversation resume do
+not prove that capability. Unsupported live reattachment leads to visible uncertainty
+and operator recovery, not a universal S01 failure or blind replay. No queued work
+may gain admission while Ensemble is unavailable.
 
 On startup, restore holds and reconcile execution/writer ownership before enabling
 dispatch. Automatically resume previously enabled, now-eligible standalone work
@@ -106,9 +107,10 @@ remain historical and cannot complete a newer assignment revision.
 
 Persist workspace provisioning intent before creating worktrees; reconcile partial
 creation and concurrent requests to one task binding. Keep writer ownership across
-uncertain termination. A database lease prevents cooperating dispatches, not an old
-process's filesystem writes; release requires confirmed termination or demonstrated
-execution isolation. Retention is independent of conversation lifetime.
+uncertain execution. A database lease coordinates admissions, not an old process's
+filesystem writes. Normal success uses the specification's cooperative handoff;
+all other holds require independent resolution. Retention is independent of
+conversation lifetime.
 
 Commit a result and its recipient's inbox event together. Deliver one logical
 continuation for pending events, preserving individual acknowledgement and work
@@ -122,6 +124,62 @@ by Ensemble, not authority inferred from their payload. Define operator access,
 secret handling and the selected runtime's filesystem/network controls before remote
 exposure or execution-access claims. Single-operator does not mean unauthenticated
 network access. No new project security sandbox is implied by service ownership.
+
+## Default execution policy
+
+Select supported App Server `workspaceWrite` controls with task working directory
+and explicit task writable roots, `networkAccess: false`, and `approvalPolicy: never`.
+Retain full read access: use `readOnlyAccess: { type: "fullAccess" }` where supported,
+or the verified broad-read default on versions without that field. Do not send an
+unsupported field or require a named profile for equivalent default read behavior.
+Verify installed field names and effective settings on start, follow-up and resume;
+pin any experimental surface used. Deny
+broader command access rather than auto-approving escalation. A policy change needs
+separate operator approval and fresh admission. Do not inherit `dangerFullAccess`
+as a fallback or change shared configuration/login to make a probe pass.
+
+This limits command writes, not reads outside the workspace. Inventory effective
+temporary write roots and protected paths; do not advertise task-root-only writes
+without checking them. Host-readable files, inherited environment and credentials
+may remain accessible. Command network controls do not establish a boundary for
+Ensemble integrations, MCP/app tools, model transport or web tools; inventory those
+surfaces and their permissions separately. Ensemble enforces policy in its own
+tools, without claiming to sandbox all ambient shell/API access.
+
+The [App Server protocol](https://learn.chatgpt.com/docs/app-server) documents these
+controls, events, stored-thread resume and cancellation requests. The
+[security guide](https://learn.chatgpt.com/docs/agent-approvals-security) distinguishes
+sandbox, approval and network controls. [Named permission profiles](https://learn.chatgpt.com/docs/permissions)
+are an optional beta surface, not required by S01. Restricted reads or stronger OS
+containment require a separate decision and qualification. Documentation support is
+not evidence that the installed authenticated configuration applied a policy.
+
+## Operator recovery of uncertain execution
+
+1. Keep affected dispatch held. Show the assignment/generation, submission receipt,
+   last known thread/turn and process identities, last observations, pending effects
+   and the reason for uncertainty. Preserve files and evidence; independent work can
+   proceed only after independence is established.
+2. Attempt read-only reconciliation of the uniquely identified execution and its
+   effects. If live reattachment is unsupported or inconclusive, retain the hold.
+   A historical successful turn cannot erase a crash or Stop hold.
+3. Request cancellation of identified owned execution, observe for a recorded bounded
+   interval and have the operator terminate identified survivors using host controls.
+   Release requires independent evidence that the old execution and relevant
+   descendants can no longer write, not a missing PID or empty terminal list. When
+   process cleanup cannot establish that boundary, the fallback is an operator host
+   restart with dispatch held: verify a new host boot and that old execution is not
+   restarted before reconciliation. This is a recovery procedure to qualify, not
+   authorization to reboot during S01 or this documentation change.
+4. Reconcile partial workspace changes and uncertain external effects separately;
+   host restart does not undo or settle remote actions. Persist the resolution
+   evidence and reconcile writer/capacity ownership atomically. Explicit resume
+   clears an operator Stop only; every other admission check still applies.
+
+If resolution cannot be established, ownership and capacity remain held indefinitely.
+There is no force unlock, timer-only release or operator-acknowledgement waiver.
+S01 records this route and probes durable holds; S03/S05 qualify the implemented
+recovery controls. Any different release guarantee requires a concrete new decision.
 
 ## Reuse and transition
 
@@ -146,7 +204,8 @@ reviewed cutover; never run competing writers against the same task workspace.
 
 - Codex App Server launch/tool identity, transcript, resume and stop contracts;
   existing-login behavior under the macOS service account and restart.
-- macOS service lifecycle, process containment and execution access.
+- macOS service lifecycle, effective execution policy and operator recovery controls;
+  stronger process/read isolation only if separately selected.
 - Effective-admission transaction/supervisor protocol and restart reconciliation.
 - Web API/UI technology and a separate authenticated operator session over the
   private Tailscale transport, including CSRF/origin checks for control requests.

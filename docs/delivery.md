@@ -2,19 +2,21 @@
 
 **Direction and delivery sequence reviewed and confirmed by Chris on 27 September 2026.**
 Routing and accountability were amended on 28 September under
-[ADR-1005](adr/1005-service-assignment-routing.md). S01 runtime qualification is the next gate; detailed dependent contracts remain open.
-[ADR-1004](adr/1004-standalone-service.md) replaces the BB delivery path. S01–S08
-below are local plan identifiers, not published issues or an authorized work queue.
+[ADR-1005](adr/1005-service-assignment-routing.md).
+S01 runtime qualification is the next gate; detailed dependent contracts remain open.
+[ADR-1004](adr/1004-standalone-service.md) replaces the BB delivery path. Chris
+approved the minimum S01 integration contract on 28 September 2026; the current
+S01 issue is [#688](https://github.com/chrisbanes/ensemble/issues/688).
 The [previous T01–T12 briefs and decision register](delivery-bb.md) remain historical.
-Linked GitHub and Multica issues have not been changed by this planning update.
+This reset does not pass S01 or authorize dependent work; Multica CB-35 is unchanged.
 
 ## Delivery sequence
 
 | Slice | Outcome and acceptance | Dependencies |
 | --- | --- | --- |
-| S01 — Prove runtime control | Qualify Codex App Server on macOS with the existing operator login; prove initialization failure holds queued work, effective admission, lost-response reconciliation, cancellation and writer termination. Document tool caller identity, transcripts, resume and access limits. No product scheduler/UI claim; R01. | Confirmed product scope; bounded proof below |
+| S01 — Prove minimum Codex integration | Existing-login execution, events/results, follow-up or supported resume and cancellation requests; bounded admission, trusted identity, durable-state and ambiguous-submission probes. Record access/runtime limits and operator recovery. No product scheduler/UI claim; R01. | Confirmed product scope; bounded proof below |
 | S02 — Replace BB bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. Remove BB manifest, adapter, dependencies and mandatory BB CI. Test with BB absent, SQLite reopen, runtime failure and preserved uncertain state; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
-| S03 — Own dispatch and workspaces | Durable eligible-turn queue, global/project caps (defaults 4/2), active-work sleep assertion, holds, worktree provisioning, one writer, restart reconciliation and bounded retries. Capacity-one delegation cannot deadlock; pause/stop races and orphan writers remain safe. | S02; A07–A09, A14–A18, A27, R02/R03 |
+| S03 — Own dispatch and workspaces | Durable eligible-turn queue, global/project caps (defaults 4/2), active-work sleep assertion, holds, worktree provisioning, cooperative writer admission, restart reconciliation and bounded retries. Capacity-one delegation cannot deadlock; pause/stop races and uncertain/orphan executions retain holds. | S02; A07–A09, A14–A18, A27, R02/R03 |
 | S04 — Deliver local work and operator UI | Web UI with separate operator login over Tailscale, project/profile setup, tasks, conversations/history, lead/assignee tools, direct TypeSafe routing with project opt-in and lead fallback, transactional results/inbox, durable operator messages (no live steering), questions/approvals, instruction revisions and task dependencies. Integrate UI with each command as it lands. | S03; A02–A13, A25, local A28/A30, R04/R05/R07–R10 |
 | S05 — Qualify complete local journey | Automated UI/service/runtime journey with a disposable repo and repository-free work; routing-enabled and disabled paths, nested returns, lead completion, routing failures, stop/restart/recovery variants, preservation and exact evidence. No GitHub integration required. | S04; local-task acceptance gate |
 | S06 — Add GitHub discovery | Explicit credential access, native search/Project queries, source deduplication, readiness, full dependency reads, overlap placement and outage recovery. | S05; A19–A23, imported A28–A30 |
@@ -27,35 +29,64 @@ Do not add multiple runtime implementations merely to demonstrate abstraction.
 
 ## S01 — Bounded Codex/macOS proof
 
-**Outcome:** determine whether the selected runtime and supervision design can
-satisfy the reviewed execution contract. Produce the narrow proposed integration
-contract, reproducible evidence and any failed capability; do not build the full
-scheduler, UI, multi-runtime layer or operational deployment in this slice.
+**Outcome:** qualify the minimum Codex App Server orchestration contract and the
+feasibility of Ensemble-owned coordination. Use supported protocol operations;
+record their limits rather than demanding an independent Ensemble sandbox. Produce
+one concise integration contract/evidence matrix, not a scheduler, UI or deployment.
 
-Use a disposable directory/database/repository and an isolated Codex App Server
-process with the existing login. Do not log credentials, change account configuration,
-operate on the installed Haze prototype or target existing agent sessions. Identify
-the installed runtime and supported protocol before choosing integration details.
-Use deterministic process/tool fixtures for fault injection and a bounded real
-Codex turn to establish actual runtime behavior; doubles cannot qualify Codex.
+Use disposable fixtures and an isolated App Server process with the existing
+operator login. Identify installed version/schema and effective policy first; do
+not change shared config/login, copy/link credentials, switch to `dangerFullAccess`,
+add a runtime or touch Haze/existing sessions. Reuse valid evidence before proposing
+bounded calls; do not repeat unchanged failed probes. This documentation reset runs
+no new model experiments and does not authorize a new login or deployment.
 
-| Probe | Required evidence |
+| Required S01 probe | Bounded evidence and limit |
 | --- | --- |
-| Login and conversation lifecycle | Existing login works in the intended service-user context; start, observe, resume and unavailable-login handling are recorded without exposing credentials. |
-| Coordination tool identity | A callback is bound to the admitted assignment/session by Ensemble-controlled context; payload-supplied IDs cannot impersonate another assignment. |
-| Admission and unavailable service | Define the effective-admission point; pause/stop races hold pending work. Initialization failure or service absence cannot cause queued turns to start. |
-| Lost response and recovery | Crash/drop responses around submission and binding. Recover the unique execution or retain uncertainty without blind duplicate submission; include stale work revisions. |
-| Stop and abrupt death | Stop before launch, during admission and during a writing tool. Abruptly kill the supervising service and test relevant tool descendants; prove termination and preservation of partial work. |
-| Writer replacement | No replacement writes until old execution is confirmed unable to write. Missing observations, PID reuse and acknowledged-but-unconfirmed stop cannot release ownership. |
-| Access and transcripts | Workspace restrictions, broader-access requests, history and event delivery behave as required; document actual access limits and experimental protocol dependencies. |
+| Authenticated lifecycle — R01/A18 | Existing login in the intended operator context supports a real turn, events/result, stored history and follow-up or supported conversation resume. Record unavailable-login behavior, process restart behavior and authentication limits. A future installed-service launch/login test belongs to S02/S05. |
+| Trusted caller — A25 | Bind a real coordination callback to Ensemble-controlled session context; reject payload identity spoofing. Probe stale/unbound generations in the fixture and pin any experimental dynamic-tool API. Full product authorization/approval tests belong to S04/S05. |
+| Admission and durable state — A14/A16 | Define admission relative to submission; SQLite fixtures serialize contenders, preserve intent/holds across reopen and fail closed on initialization/storage/policy failure, pause/Stop races and service absence. No independent runtime queue of unadmitted turns. Full scheduler races/caps belong to S03/S05. |
+| Ambiguous submission — A08/A09 | Drop response/crash around submission/binding, include stale revisions, and retain one durable operation with no accidental duplicate dispatch. Reattach only if the same live execution is uniquely identified; otherwise retain uncertainty with the recovery path. Historical resume is not live reattachment; a positive reattachment result is not a universal gate. |
+| Cancellation and survival — A15 | Persist Stop before a supported cancellation request, observe for a predeclared bounded interval, record any continued effects and retain unresolved Stop/writer/capacity holds across restart. Crash survival is a documented limit, not a demand to kill every descendant. |
+| Cooperative handoff — A16/A18 | Identified successful final turn, ended registered tools, complete observations and no known survivor permit one serialized successor. Preserve the existing detached-child overlap counterexample and negative crash/Stop/failure/missing-observation/survivor cases. All other holds need independent resolution. |
+| Effective policy and observations — A25/R01 | Apply the design's explicit `workspaceWrite`/`never` policy through supported App Server controls. Record attributable inside-write and outside-write behavior, effective command-network controls, rejected broader access, broad reads and ambient limits. Preserve real streamed/stored turn evidence; standalone `command/exec` cannot prove model-turn history. Named restricted profiles and outside-read denial are not required. |
 
-Retain exact commands, source/runtime versions, identifiers, provider/tool effects,
-crash timing and fixture cleanup. State what the supervisor owns and how it outlives
-or detects service failure. A disconnected client or an interrupt acknowledgement
-alone is insufficient evidence. If termination or admission cannot be enforced,
-record the failed gate and return the concrete tradeoff for decision; do not switch
-platforms, harnesses or safety semantics silently. Successful S01 informs S02/S03
-contracts; it does not claim the operational product scenarios already pass.
+Retain exact versions, commands, identities, effects and fixture cleanup. Separate
+protocol/runtime observations from deterministic coordination fixtures and from
+unrun service tests. An unsupported or ineffective selected write/network/approval
+policy still blocks that capability: raise the concrete configuration decision,
+never silently broaden access. Document the
+[operator recovery route](design/standalone.md#operator-recovery-of-uncertain-execution)
+and limitations, including indefinite holds if evidence cannot settle ownership.
+
+### Evidence and remaining-work mapping
+
+The [durable existing-evidence matrix](evidence/s01-existing-evidence-2026-09-28.md)
+records each bounded observation, provenance and remaining gap in this repository.
+It can be read in a fresh checkout; underlying local fixtures/traces are not included
+and the summary alone cannot qualify uncovered cases.
+
+The S01 checkout `cb/35-s01-proof` was inspected read-only at
+`e87ed326182b602c412606d1e88d6ae481188eb2`. Its
+`docs/evidence/s01-consolidated-discovery-2026-09-28.md` indexes the traces; approved
+revisions 3–5 are integrated at `56976c0cea82d4dadfac73ab60979e0cfed69c30` there.
+These are local evidence references, not published links or implemented-service
+results. Preserve that checkout and the [issue history](https://github.com/chrisbanes/ensemble/issues/688).
+Do not import raw traces/configuration or change prior findings to passes.
+
+| Disposition | Evidence and remaining work |
+| --- | --- |
+| Reuse within S01 | Real existing-login turn/stored resume, trusted callback, crash survival, best-effort Stop holds and cooperative handoff have bounded evidence. SQLite probes cover admission, state reopen and negative holds. Reconcile their exact coverage against the required rows above; none proves the service. |
+| Still required for S01 | Close gaps in the selected authenticated write/network/approval policy and real streamed/persisted turn evidence; map restart/authentication, stale-generation and ambiguous-submission cases to exact evidence. Record each uncovered case as unproved, and the recovery route as a contract to implement. No new pass is asserted here. |
+| Documented runtime limits | Admitted work can survive failure/Stop; untracked children can overlap a normal-success successor; stored resume is not live reattachment. Existing sibling-read success is still a failure of the former read-denial contract and now documents an accepted broad-read limit. Process/cleanup failures remain failures of stronger containment. |
+| Later service/integration | S02–S05 implement and qualify service startup/login, all admission races, durable results/inbox, policy and approval enforcement, operator visibility and recovery, full UI/runtime journeys and relevant A/R scenarios. S08 owns operational restart/restore/cutover procedures. |
+| Optional product/deployment hardening | Restricted reads, named permission profiles, complete descendant containment and stronger host isolation require a separate explicit decision and evidence; they do not block minimum orchestration. |
+
+The prior named-profile `allowed:false` result remains valid with unknown cause;
+the presence of legacy full-access configuration did not establish causation.
+Removing the strict-read requirement neither proves the revised effective policy
+nor authorizes configuration/login changes. S01 stays unpassed and #688 stays open;
+only actual qualification evidence can release dependent work.
 
 ## Feature integration and operational ownership
 
@@ -107,7 +138,7 @@ remote issues, dependencies and PRs before editing or publishing them.
 | T10 #659, local milestone | S05 replaces BB qualification with complete standalone service/UI/runtime evidence. |
 | T11 #660, GitHub discovery | S06 retains source/admission/dependency semantics with independent integration access. |
 | T12 #661, writes/release | S07 retains write and delivery guarantees; S08 adds standalone operational qualification. |
-| #665 / CB-19 and #676 | Preserve BB failures and useful isolated core repairs. Re-express admission/termination obligations in S01/S03, without claiming the BB defects were fixed. |
+| #665 / CB-19 and #676 | Preserve BB failures and useful isolated core repairs. Re-express admission/recovery obligations in S01/S03, without claiming the BB defects were fixed. |
 
 S02 removes production/build dependency on BB as one coherent change: package
 identity/engines/manifest, SDK/runtime lockfile entries, adapter/server entry,
@@ -125,6 +156,6 @@ The user has accepted removing BB and building Ensemble's own service. The detai
 [specification](SPEC.md), [design](design/standalone.md), and [acceptance plan](acceptance.md)
 form the reviewed replacement plan, including the confirmed 28 September
 assignment-routing and accountability amendment. Codex protocol, macOS supervision, operator access
-and admission/termination contracts remain explicit technical decisions, not silently
+and admission/recovery contracts remain explicit technical decisions, not silently
 selected dependencies. The product-scope review checkpoint is satisfied; capability proofs still gate
 dependent implementation. This confirmation does not claim any proof has passed.

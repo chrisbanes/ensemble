@@ -36,10 +36,15 @@ First prove a real execution runtime's admission, cancellation and recovery boun
 then build the complete local-task journey, followed by GitHub integration.
 The reviewed choices are Codex with the existing login, macOS first, and a web
 interface over Tailscale with a separate Ensemble login. Start with a fresh database.
-The 28 September amendment adds optional TypeSafe assignment routing to the first
-release and defers a separate task-owner role. TypeSafe uses separately configured
-API credentials and explicit project opt-in. Codex App Server and macOS crash termination still need qualification; the service
-reuses the harness for model execution and agent tools.
+Chris approved the minimum S01 Codex App Server contract on 28 September: qualify
+authenticated execution and durable coordination feasibility, with best-effort
+cancellation, cooperative successful handoff and conservative uncertainty holds.
+Strict outside-read denial and complete descendant containment are separate choices;
+the [default policy](docs/design/standalone.md#default-execution-policy) discloses broad
+reads and runtime limits. S01 remains unpassed; the service reuses Codex for execution.
+The same-day routing amendment adds optional TypeSafe assignment routing to the
+first release and defers a separate task-owner role. TypeSafe uses separately
+configured API credentials and explicit project opt-in.
 
 ## Development
 
