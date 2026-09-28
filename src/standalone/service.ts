@@ -88,6 +88,25 @@ export class StandaloneService {
                   item.turnId === request.turnId,
               )
             : [];
+        if (bound.length === 0 && request.threadId && request.turnId) {
+          const awaiting = active.filter(
+            (item) =>
+              item.state === "submitting" &&
+              item.threadId === request.threadId &&
+              item.turnId === null,
+          );
+          const pending = awaiting.length === 1 ? awaiting[0] : undefined;
+          if (
+            pending &&
+            state.holdPendingTurn(
+              pending.id,
+              request.threadId,
+              request.turnId,
+              `Unexpected App Server request denied: ${request.method}`,
+            )
+          )
+            return;
+        }
         const affected = bound.length === 1 ? bound : active;
         for (const item of affected)
           state.hold(

@@ -110,12 +110,44 @@ export class ExecutionState {
   }
 
   bindTurn(id: string, turnId: string): boolean {
-    return (
+    if (
       this.db
         .prepare(
           "UPDATE execution_intents SET state = 'running', turnId = ? WHERE id = ? AND state = 'submitting' AND turnId IS NULL RETURNING id",
         )
         .get(turnId, id) !== undefined
+    )
+      return true;
+    // The server may return after a callback has held this submission. Record
+    // the server turn identity without reviving the writer or admitting work.
+    if (
+      this.db
+        .prepare(
+          "UPDATE execution_intents SET turnId = ? WHERE id = ? AND state = 'held' AND threadId IS NOT NULL AND turnId IS NULL RETURNING id",
+        )
+        .get(turnId, id) !== undefined
+    )
+      return false;
+    this.db
+      .prepare(
+        "UPDATE execution_intents SET reason = COALESCE(reason, '') || '; conflicting turn/start response: ' || ? WHERE id = ? AND state = 'held' AND turnId IS NOT NULL AND turnId != ?",
+      )
+      .run(turnId, id, turnId);
+    return false;
+  }
+
+  holdPendingTurn(
+    id: string,
+    threadId: string,
+    turnId: string,
+    reason: string,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE execution_intents SET state = 'held', reason = ?, turnId = ? WHERE id = ? AND state = 'submitting' AND threadId = ? AND turnId IS NULL RETURNING id",
+        )
+        .get(reason, turnId, id, threadId) !== undefined
     );
   }
 

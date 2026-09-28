@@ -131,6 +131,9 @@ export class CodexRuntime implements Runtime {
     this.child = child;
     child.on("error", (error) => this.fail(error));
     child.on("exit", () => this.fail(new Error("Codex App Server exited")));
+    // Diagnostics may contain sensitive data. Drain without retaining or logging
+    // them so a full stderr pipe cannot stall JSON-RPC on stdout.
+    child.stderr.resume();
     createInterface({ input: child.stdout }).on("line", (line) =>
       this.receive(line),
     );
@@ -152,10 +155,17 @@ export class CodexRuntime implements Runtime {
     this.child = undefined;
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
-      await Promise.race([
-        new Promise<void>((resolve) => child.once("exit", () => resolve())),
-        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
-      ]);
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, 3000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
       if (child.exitCode === null && child.signalCode === null)
         child.kill("SIGKILL");
     }

@@ -30,6 +30,8 @@ class FakeRuntime implements Runtime {
   failStop = false;
   threadGate: Promise<void> | undefined;
   onThreadEntered: (() => void) | undefined;
+  turnGate: Promise<void> | undefined;
+  onTurnEntered: (() => void) | undefined;
   async start() {
     if (this.failAt === "start") throw new Error("login unavailable");
   }
@@ -51,6 +53,8 @@ class FakeRuntime implements Runtime {
   }
   async startTurn() {
     this.turnStarts++;
+    this.onTurnEntered?.();
+    await this.turnGate;
     if (this.failAt === "turn") throw new Error("lost turn response");
     return "turn-1";
   }
@@ -238,6 +242,79 @@ test("unbound approval callback during delayed thread start prevents turn submis
     release();
     await service.stop();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("callback during turn submission preserves server turn identity and hold across reopen", async () => {
+  for (const request of [
+    {
+      method: "item/commandExecution/requestApproval",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    },
+    { method: "execCommandApproval" },
+    {
+      method: "item/fileChange/requestApproval",
+      threadId: "thread-1",
+      turnId: "callback-turn",
+    },
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+    const data = join(root, "data");
+    const workspace = join(root, "work");
+    mkdirSync(workspace);
+    let runtime = new FakeRuntime();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    runtime.turnGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    runtime.onTurnEntered = entered;
+    let service = new StandaloneService(data, () => runtime);
+    try {
+      await service.start();
+      const pending = service.submit("turn-race", "test", workspace);
+      await started;
+      runtime.onRequest?.(request);
+      release();
+      const held = await pending;
+      assert.equal(held.state, "held");
+      assert.equal(held.threadId, "thread-1");
+      const expectedTurnId = request.turnId ?? "turn-1";
+      assert.equal(held.turnId, expectedTurnId);
+      assert.match(held.reason ?? "", /Unexpected App Server request denied/);
+      if (expectedTurnId !== "turn-1")
+        assert.match(
+          held.reason ?? "",
+          /conflicting turn\/start response: turn-1/,
+        );
+      assert.equal(runtime.turnStarts, 1);
+      assert.equal(
+        (await service.submit("next", "test", workspace)).state,
+        "held",
+      );
+      assert.equal(runtime.turnStarts, 1);
+      await service.stop();
+      runtime = new FakeRuntime();
+      service = new StandaloneService(data, () => runtime);
+      await service.start();
+      assert.equal(
+        service.list().find((item) => item.workId === "turn-race")?.turnId,
+        expectedTurnId,
+      );
+      assert.equal(
+        (await service.submit("after-reopen", "test", workspace)).state,
+        "held",
+      );
+      assert.equal(runtime.turnStarts, 0);
+    } finally {
+      release();
+      await service.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
