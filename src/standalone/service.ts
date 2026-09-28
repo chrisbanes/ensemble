@@ -50,6 +50,9 @@ export class StandaloneService {
     // SQLite owns the OS file lock for this transaction. A process crash releases
     // it without consulting stale PID files or a clock.
     const canonical = realpathSync(directory);
+    const mark = join(canonical, ".ensemble-standalone");
+    if (!existsSync(mark))
+      writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
     const ownerPath = join(canonical, ".ensemble-owner.sqlite");
     if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
       throw new Error("Service ownership file must not be a symlink");
@@ -61,9 +64,6 @@ export class StandaloneService {
         throw new Error("Data directory is already owned", { cause: error });
       }
       this.owner = owner;
-      const mark = join(canonical, ".ensemble-standalone");
-      if (!existsSync(mark))
-        writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
       const database = join(canonical, "standalone.sqlite");
       if (existsSync(database) && lstatSync(database).isSymbolicLink())
         throw new Error("Standalone database must not be a symlink");

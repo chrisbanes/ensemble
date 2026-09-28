@@ -6,6 +6,7 @@ import {
 } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -185,6 +186,38 @@ test("canonical directory has one process owner; crash and failed startup releas
     await next.stop();
   } finally {
     child?.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("interruption before ownership-file creation leaves a restartable marked directory", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-marker-restart-"));
+  const data = join(root, "data");
+  mkdirSync(data);
+  writeFileSync(join(data, ".ensemble-standalone"), "ensemble-standalone-v1\n");
+  assert.equal(existsSync(join(data, ".ensemble-owner.sqlite")), false);
+  const first = new StandaloneService(data, () => new FakeRuntime());
+  const second = new StandaloneService(data, () => new FakeRuntime());
+  try {
+    const starts = await Promise.allSettled([first.start(), second.start()]);
+    assert.equal(
+      starts.filter((result) => result.status === "fulfilled").length,
+      1,
+    );
+    const rejected = starts.find((result) => result.status === "rejected");
+    assert.equal(rejected?.status, "rejected");
+    if (rejected?.status === "rejected")
+      assert.match(String(rejected.reason), /already owned/);
+    assert.equal(existsSync(join(data, "standalone.sqlite")), true);
+    await first.stop();
+    await second.stop();
+    const recovered = new StandaloneService(data, () => new FakeRuntime());
+    await recovered.start();
+    assert.deepEqual(recovered.list(), []);
+    await recovered.stop();
+  } finally {
+    await first.stop();
+    await second.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });
