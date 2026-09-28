@@ -99,6 +99,48 @@ test("lost spawn response is reconciled after restart without a second worker", 
   }
 });
 
+test("proven pre-submission refusal returns to pending but a thrown response stays uncertain", async () => {
+  const f = fixture();
+  try {
+    f.store.createTask("task", f.projectId, "Investigate");
+    f.store.assign("assignment", "task", f.projectId, "Find the cause");
+    const refused = new Coordinator(
+      f.store,
+      {
+        spawn: async () => ({
+          kind: "not-submitted" as const,
+          reason: "local policy refused",
+        }),
+        find: async () => [],
+      },
+      f.hostKey,
+    );
+    await assert.rejects(
+      refused.launch("assignment", "lead"),
+      /local policy refused/,
+    );
+    assert.equal(f.store.get("assignment").state, "pending");
+    assert.equal(f.store.getConversationBinding("assignment"), undefined);
+    const uncertain = new Coordinator(
+      f.store,
+      {
+        spawn: async () => {
+          throw new Error("response lost");
+        },
+        find: async () => [],
+      },
+      f.hostKey,
+    );
+    await assert.rejects(
+      uncertain.launch("assignment", "lead"),
+      /response lost/,
+    );
+    assert.equal(f.store.get("assignment").state, "launching");
+  } finally {
+    f.close();
+  }
+});
+
 test("an ambiguous launch with no match is held; duplicate matches require intervention", async () => {
   const f = fixture();
   try {

@@ -16,10 +16,12 @@ graph or separate persistent-bot model.
 ## Current status
 
 The repository contains a reusable TypeScript/SQLite coordination core in
-`src/core` and its tests. The BB plugin, packaging and integration harness have
-been removed. There is no standalone service, runtime adapter, scheduler, workspace
-manager, assignment router or operator UI yet. The installed Haze prototype stays
-in place until the reviewed operational cutover.
+`src/core`, plus the S02 standalone bootstrap and Codex App Server adapter in
+`src/standalone`. The bootstrap owns a marked fresh data directory, persists
+execution intent and binding, and holds uncertain work across restart. The BB
+plugin, packaging and integration harness have been removed. Scheduler, workspace
+manager, assignment router and operator UI are still pending. The installed Haze
+prototype stays in place until the reviewed operational cutover.
 
 ## Planning checkpoint
 
@@ -34,7 +36,7 @@ authenticated execution and durable coordination feasibility, with best-effort
 cancellation, cooperative successful handoff and conservative uncertainty holds.
 Strict outside-read denial and complete descendant containment are separate choices;
 the [default policy](docs/design/standalone.md#default-execution-policy) discloses broad
-reads and runtime limits. S01 remains unpassed; the service reuses Codex for execution.
+reads and runtime limits. S01 was accepted with recorded limits; the service reuses Codex for execution.
 The same-day routing amendment adds optional TypeSafe assignment routing to the
 first release and defers a separate task-owner role. TypeSafe uses separately
 configured API credentials and explicit project opt-in.
@@ -49,8 +51,17 @@ npm run check
 ```
 
 `check` runs strict type checking, lint, formatting, compilation and tests. The
-checks cover the retained core. They do not qualify the planned standalone service
-or its runtime and UI.
+checks cover the retained core and S02 bootstrap fixtures. They do not qualify
+the later scheduler or UI integration.
+
+The S02 command surface is `npm run service -- <serve|run|list> ABSOLUTE_DATA_DIR`.
+`run` also takes `workId`, `prompt`, an existing absolute workspace directory,
+and optionally `previousWorkId` for a follow-up in a completed conversation.
+`serve` initializes the database and App Server, then waits for SIGINT or SIGTERM;
+it does not schedule work. Reusing a work ID never resubmits it. A held result
+requires independent reconciliation; there is no automatic retry or force unlock.
+The directory must be empty on first use or carry Ensemble's standalone marker.
+The only database filename opened is `standalone.sqlite` in that directory.
 
 ## Design documents
 

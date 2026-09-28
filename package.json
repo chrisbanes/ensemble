@@ -9,6 +9,7 @@
   },
   "packageManager": "npm@12.1.0",
   "scripts": {
+    "service": "node dist/src/standalone/cli.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
