@@ -19,7 +19,7 @@ Original scripts/raw traces remain local; independent replay is not provided her
 Chris subsequently approved the [runtime trust boundary](../design/standalone.md#runtime-trust-boundary).
 The later report's requirement for exhaustive method observations is superseded;
 its unexplained file effect remains a diagnostic finding. Reconcile evidence using
-the [finite S01 completion rule](../delivery.md#s01-completion-rule). The older
+the [finite S01 completion rule](https://github.com/chrisbanes/ensemble/issues/688). The older
 "unproved" rows below describe this snapshot, not an instruction to rerun evidence
 qualified later. Neither this note nor the contract amendment accepts S01.
 
@@ -79,7 +79,7 @@ Their older requirements are superseded by the
 [approved reset](https://github.com/chrisbanes/ensemble/issues/688#issuecomment-5871919157);
 the observations remain historical evidence.
 
-Use the [required S01 probes](../delivery.md#s01--bounded-codexmacos-proof) for current
+Use the [required S01 probes](https://github.com/chrisbanes/ensemble/issues/688) for current
 scope. Record uncovered cases explicitly before claiming qualification. This matrix
 makes prior coverage inspectable; it does not release S01, dependent work or any
 uncertain ownership hold.

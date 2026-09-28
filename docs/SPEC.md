@@ -272,7 +272,9 @@ remove a workspace.
 ## Review checkpoint
 
 The [standalone design](design/standalone.md), [acceptance plan](acceptance.md)
-and [delivery plan](delivery.md) were reviewed with Chris on 27 September 2026.
+and delivery sequence were reviewed with Chris on 27 September 2026.
+[GitHub issues](https://github.com/chrisbanes/ensemble/issues/649) now own delivery scope,
+sequencing, dependencies and slice completion criteria.
 The shared product understanding, including the 28 September S01 reset and
 routing/accountability amendment, is confirmed.
 Codex protocol qualification, service lifecycle, authentication, scheduling

@@ -5,7 +5,9 @@ requirements against live GitHub state before execution. The TypeScript implemen
 required checks must still be verified from the target branch's live protection
 rules and rulesets.
 
-The standalone plan in `docs/delivery.md` supersedes the BB delivery architecture.
+The [standalone delivery issues](https://github.com/chrisbanes/ensemble/issues/649) own current
+scope, sequencing and slice completion criteria; native dependencies govern dispatch.
+They supersede the BB delivery architecture. Do not maintain a parallel repo delivery plan.
 Before dispatching a historical T01–T12 ticket, reconcile its live scope and
 capability dependencies with S01–S08. A stale ready label does not authorize
 implementing the retired BB path. This note does not change remote Project state.
