@@ -15,6 +15,44 @@ import { CodexRuntime, type Runtime } from "./codex.js";
 import { ExecutionState, type ExecutionIntent } from "./state.js";
 
 const marker = "ensemble-standalone-v1\n";
+const markerName = ".ensemble-standalone";
+const ownerName = ".ensemble-owner.sqlite";
+
+/** Only the owner's empty SQLite file can identify an interrupted first start. */
+function markerReady(directory: string): boolean {
+  const entries = readdirSync(directory);
+  const mark = join(directory, markerName);
+  const hasMarker = entries.includes(markerName);
+  if (hasMarker) {
+    const state = lstatSync(mark);
+    if (!state.isFile() || state.isSymbolicLink())
+      throw new Error("Data directory marker must be a regular file");
+    const contents = readFileSync(mark, "utf8");
+    if (contents === marker) return true;
+    if (!marker.startsWith(contents))
+      throw new Error("Data directory marker mismatch");
+  }
+  const expected = [
+    ownerName,
+    `${ownerName}-journal`,
+    ...(hasMarker ? [markerName] : []),
+  ];
+  if (entries.length === 0) return false;
+  if (
+    !entries.includes(ownerName) ||
+    !entries.every((entry) => expected.includes(entry))
+  )
+    throw new Error("Unmarked data directory must be empty");
+  const owner = lstatSync(join(directory, ownerName));
+  if (!owner.isFile() || owner.isSymbolicLink() || owner.size !== 0)
+    throw new Error("Interrupted owner file is not a fresh installation");
+  if (entries.includes(`${ownerName}-journal`)) {
+    const journal = lstatSync(join(directory, `${ownerName}-journal`));
+    if (!journal.isFile() || journal.isSymbolicLink())
+      throw new Error("Interrupted owner journal is not a regular file");
+  }
+  return false;
+}
 
 /** Owns only standalone.sqlite in a marked data directory. No import or attach path exists. */
 export class StandaloneService {
@@ -28,6 +66,10 @@ export class StandaloneService {
   constructor(
     private readonly dataDir: string,
     private readonly runtimeFactory: () => Runtime = () => new CodexRuntime(),
+    private readonly markerWriter: (path: string, flag: "wx" | "w") => void = (
+      path,
+      flag,
+    ) => writeFileSync(path, marker, { flag, mode: 0o600 }),
   ) {}
 
   async start(): Promise<void> {
@@ -41,18 +83,12 @@ export class StandaloneService {
         !lstatSync(directory).isDirectory()
       )
         throw new Error("Data directory must be a real directory");
-      const mark = join(directory, ".ensemble-standalone");
-      if (!existsSync(mark) && readdirSync(directory).length !== 0)
-        throw new Error("Unmarked data directory must be empty");
-      if (existsSync(mark) && lstatSync(mark).isSymbolicLink())
-        throw new Error("Data directory marker must not be a symlink");
-      if (existsSync(mark) && readFileSync(mark, "utf8") !== marker)
-        throw new Error("Data directory marker mismatch");
+      markerReady(directory);
     } else mkdirSync(directory, { recursive: true, mode: 0o700 });
     // SQLite owns the OS file lock for this transaction. A process crash releases
     // it without consulting stale PID files or a clock.
     const canonical = realpathSync(directory);
-    const ownerPath = join(canonical, ".ensemble-owner.sqlite");
+    const ownerPath = join(canonical, ownerName);
     if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
       throw new Error("Service ownership file must not be a symlink");
     const owner = new DatabaseSync(ownerPath, { timeout: 0 });
@@ -63,9 +99,12 @@ export class StandaloneService {
         throw new Error("Data directory is already owned", { cause: error });
       }
       this.owner = owner;
-      const mark = join(canonical, ".ensemble-standalone");
-      if (!existsSync(mark))
-        writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
+      if (!markerReady(canonical)) {
+        const mark = join(canonical, markerName);
+        this.markerWriter(mark, existsSync(mark) ? "w" : "wx");
+        if (!markerReady(canonical))
+          throw new Error("Data directory marker write incomplete");
+      }
       const database = join(canonical, "standalone.sqlite");
       if (existsSync(database) && lstatSync(database).isSymbolicLink())
         throw new Error("Standalone database must not be a symlink");

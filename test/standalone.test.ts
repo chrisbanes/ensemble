@@ -6,8 +6,10 @@ import {
 } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -185,6 +187,74 @@ test("canonical directory has one process owner; crash and failed startup releas
     await next.stop();
   } finally {
     child?.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("interrupted first-start owner and partial marker recover under the lock", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-first-start-"));
+  const crashed = join(root, "crashed");
+  const partial = join(root, "partial");
+  const unrelated = join(root, "unrelated");
+  mkdirSync(crashed);
+  mkdirSync(unrelated);
+  writeFileSync(join(unrelated, "prototype.db"), "preserve");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
+      const { DatabaseSync } = require('node:sqlite');
+      const { join } = require('node:path');
+      const owner = new DatabaseSync(join(process.argv[1], '.ensemble-owner.sqlite'));
+      owner.exec('BEGIN IMMEDIATE');
+      process.kill(process.pid, 'SIGKILL');
+    `,
+        crashed,
+      ],
+      { encoding: "utf8", timeout: 5000 },
+    );
+    assert.equal(result.signal, "SIGKILL", result.stderr);
+    assert.equal(existsSync(join(crashed, ".ensemble-standalone")), false);
+    const recovered = new StandaloneService(crashed, () => new FakeRuntime());
+    await recovered.start();
+    await recovered.stop();
+    assert.equal(
+      readFileSync(join(crashed, ".ensemble-standalone"), "utf8"),
+      "ensemble-standalone-v1\n",
+    );
+
+    const failed = new StandaloneService(
+      partial,
+      () => new FakeRuntime(),
+      (path, flag) => {
+        writeFileSync(path, "ensemble-", { flag });
+        throw new Error("injected marker write failure");
+      },
+    );
+    await assert.rejects(failed.start(), /injected marker write failure/);
+    const afterFailure = new StandaloneService(
+      partial,
+      () => new FakeRuntime(),
+    );
+    await afterFailure.start();
+    await afterFailure.stop();
+    assert.equal(
+      readFileSync(join(partial, ".ensemble-standalone"), "utf8"),
+      "ensemble-standalone-v1\n",
+    );
+
+    await assert.rejects(
+      new StandaloneService(unrelated, () => new FakeRuntime()).start(),
+      /Unmarked data directory/,
+    );
+    assert.equal(
+      readFileSync(join(unrelated, "prototype.db"), "utf8"),
+      "preserve",
+    );
+    assert.equal(existsSync(join(unrelated, ".ensemble-owner.sqlite")), false);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
