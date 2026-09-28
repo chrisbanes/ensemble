@@ -323,8 +323,11 @@ try:
         second_pass = qualify("second", second_turn_id, second_status, second_effects, second_history)
         emit(result="both_turns_passed_with_limits" if second_pass else "followup_unproved_or_failed",
              second_turn_ran=True)
+        if not second_pass:
+            failure = RuntimeError("follow-up policy qualification failed or was unproved")
     else:
         emit(result="first_turn_unproved_or_failed", second_turn_ran=False)
+        failure = RuntimeError("first-turn policy qualification failed or was unproved")
 except Exception as error:
     failure = error
     emit(result="probe_error", error=repr(error), thread_id=thread_id,

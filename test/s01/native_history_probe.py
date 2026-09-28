@@ -216,6 +216,8 @@ try:
     emit(correlated_native_history=correlated, live_count=len(live),
          stored_count=len(stored), restart_count=len(restarted),
          result="native_history_passed" if correlated else "native_history_unproved")
+    if not correlated:
+        failure = RuntimeError("native command history did not correlate across restart")
 except Exception as error:
     failure = error
     emit(result="probe_error", error=repr(error), thread_id=thread_id, turn_id=turn_id)
