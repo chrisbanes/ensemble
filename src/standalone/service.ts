@@ -10,6 +10,7 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { isAbsolute, join, resolve } from "node:path";
 import { Store } from "../core/store.js";
+import { DomainStore } from "../core/domain.js";
 import { CodexRuntime, type Runtime } from "./codex.js";
 import { ExecutionState, type ExecutionIntent } from "./state.js";
 
@@ -20,6 +21,7 @@ export class StandaloneService {
   private owner: DatabaseSync | undefined;
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
+  private domainState: DomainStore | undefined;
   private runtime: Runtime | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
 
@@ -73,6 +75,9 @@ export class StandaloneService {
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL",
       );
       new Store(db).ensureHost("standalone-codex");
+      const domain = new DomainStore(db);
+      domain.migrate();
+      this.domainState = domain;
       const state = new ExecutionState(db);
       for (const item of state.list()) {
         let workspaceKey: string;
@@ -143,6 +148,7 @@ export class StandaloneService {
           await this.runtime?.stop().catch(() => {});
         } finally {
           this.runtime = undefined;
+          this.domainState = undefined;
           this.state = undefined;
           try {
             this.db?.close();
@@ -170,6 +176,7 @@ export class StandaloneService {
     const db = this.db;
     this.db = undefined;
     this.state = undefined;
+    this.domainState = undefined;
     try {
       db?.close();
     } catch (error) {
@@ -187,6 +194,11 @@ export class StandaloneService {
 
   list(): ExecutionIntent[] {
     return this.requireState().list();
+  }
+
+  domain(): DomainStore {
+    if (!this.domainState) throw new Error("Service is not started");
+    return this.domainState;
   }
 
   /** One explicit dispatch; same work ID never submits twice, including after errors. */

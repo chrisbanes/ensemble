@@ -1,9 +1,10 @@
 import { StandaloneService } from "./service.js";
+import { LocalOperatorHttp, LocalOperatorUi } from "./operator.js";
 
 const [command, dataDir, ...args] = process.argv.slice(2);
 if (!command || !dataDir)
   throw new Error(
-    "Usage: ensemble <serve|run|list> ABSOLUTE_DATA_DIR [workId prompt workspace previousWorkId]",
+    "Usage: ensemble <serve|operator|run|list> ABSOLUTE_DATA_DIR [workId prompt workspace previousWorkId]",
   );
 const service = new StandaloneService(dataDir);
 await service.start();
@@ -27,6 +28,18 @@ try {
       process.once("SIGINT", resolve);
       process.once("SIGTERM", resolve);
     });
+  } else if (command === "operator") {
+    const ui = new LocalOperatorHttp(new LocalOperatorUi(service.domain()));
+    const port = await ui.start(args[0] ? Number(args[0]) : 8787);
+    process.stdout.write(`http://127.0.0.1:${port}/\n`);
+    try {
+      await new Promise<void>((resolve) => {
+        process.once("SIGINT", resolve);
+        process.once("SIGTERM", resolve);
+      });
+    } finally {
+      await ui.stop();
+    }
   } else throw new Error(`Unknown command ${command}`);
 } finally {
   await service.stop();
