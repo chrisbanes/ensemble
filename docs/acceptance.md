@@ -43,7 +43,7 @@ that successfully detects an unsafe effect still records a failed capability.
 | A13 | Approval denied or reviewed material changes | Action cannot execute using denied/stale approval; reason visible | Service + access integration |
 | A14 | Pause project A while B has work | Current turns in A may finish; no new turns or follow-ups in A; B continues; results retained; resume revalidates | Service + UI |
 | A15 | Stop a task with active lead and worker turns; supervisor loses contact or reports a writer still active | All active task execution, including its lead turn, receives best-effort cancellation requests; bounded observation never releases holds; effects may continue; Stop/writer/capacity holds survive restart until independently resolved; explicit resume alone cannot release ownership; files/history retained and uncertainty visible | Runtime fault injection |
-| A16 | Two writers target one task workspace | One admission succeeds; others wait. Normal-success cooperative handoff admits one successor; untracked detached-child overlap is accepted. Crash, Stop, failure, missing observations and known survivors retain holds; independent tasks may proceed | Service + Git |
+| A16 | Two writers target one task workspace | One admission succeeds; others wait. Bound successful terminal status, ended Ensemble callbacks and no other hold/known unfinished execution permit one successor. Incomplete tool observation and unobserved-writer overlap are accepted. Crash, Stop, failure, missing/conflicting terminal identity/status and known survivors retain holds; independent tasks may proceed | Service + Git |
 | A17 | Complete/archive work in each cleanup mode | Retain until archive by default; automatic cleanup waits for confirmed delivery and preservation checks; conversations cannot silently delete workspaces; missing workspace holds execution | Service + Git |
 | A18 | Runtime cannot resume a conversation | Resolve old ownership independently or use qualified normal-success handoff before replacement; reconstruct context in a new generation; late result cannot override; historical resume is not live reattachment | Service + runtime |
 | A19 | Repository and Project sources return same issue | One task with two memberships; deleting one membership preserves other and history | Adapter + SQLite |
@@ -80,9 +80,12 @@ or pass these complete product scenarios.
 - **Stop and writer replacement:** stop before start, during launch and during a
   writing tool/process. Persist Stop, request cancellation and observe for a bounded
   interval. Unresolved Stop/writer/capacity holds survive late effects and restart.
-  Normal successful final turns may hand off after all registered tools end, complete
-  observations and no known survivor; serialize exactly one successor. Test negative
-  hold cases and disclose accepted detached-child overlap. Never infer physical
+  Normal successful bound terminal turns may hand off after all Ensemble callbacks
+  end and no other hold or known unfinished execution remains; serialize exactly one
+  successor. A missing diagnostic tool item alone does not hold normal completion;
+  missing/conflicting terminal identity/status does. Test both and the other negative
+  hold cases, and disclose accepted unobserved-effect/detached-child overlap. Never
+  infer physical
   exclusion from acknowledgement, timeout, lease expiry or normal handoff.
 - **Capacity and results:** at capacity one, lead or parent delegation yields and worker
   results resume the recorded recipient. Duplicate/reordered results and restart produce one
@@ -97,7 +100,9 @@ or pass these complete product scenarios.
   explicit write/network/approval policy with attributable command evidence and
   disclose broad reads, temporary roots and ambient-access limits. A standalone
   command result cannot prove persisted model-turn history; test that separately.
-  Strict outside-read denial is not part of default acceptance.
+  Strict outside-read denial is not part of default acceptance. S02–S05 also test
+  ordinary file edits and the broader enabled tool policy. S01 does not certify
+  every tool class or require a general model-tool allowlist.
 
 A failure blocks the dependent claim. Only an explicit product decision changes a
 requirement; the 28 September reset is such a decision, not a retroactive probe pass.

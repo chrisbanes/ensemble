@@ -21,8 +21,13 @@ Chris approved the minimum S01 integration reset on 28 September 2026. S01 in
 `docs/delivery.md` remains the next capability gate; qualify its bounded protocol
 and coordination probes before dependent implementation. Do not restore strict
 outside-read denial, complete descendant containment or universal live reattachment
-as inherent S01 gates. Preserve unresolved ownership holds and the documented
-recovery boundary. Settle detailed contracts using evidence,
+as inherent S01 gates. Chris also approved the runtime trust boundary: normal
+handoff trusts the bound successful Codex terminal status, ended Ensemble callbacks
+and no other hold/known unfinished execution. Tool-history completeness and a
+general model-tool allowlist are not S01 gates. Use the finite completion rule in
+`docs/delivery.md`; distinguish demonstrated failures, untested surfaces and accepted
+limits instead of expanding the gate after each probe. Preserve unresolved ownership
+holds and the documented recovery boundary. Settle detailed contracts using evidence,
 and return material scope or guarantee changes for review. Delivery includes
 automated service/runtime/UI integration and bounded live validation run by the
 implementation agent; do not hand incremental testing to the user. Preserve the

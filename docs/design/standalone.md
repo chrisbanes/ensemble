@@ -125,6 +125,40 @@ secret handling and the selected runtime's filesystem/network controls before re
 exposure or execution-access claims. Single-operator does not mean unauthenticated
 network access. No new project security sandbox is implied by service ownership.
 
+## Runtime trust boundary
+
+Chris approved this boundary on 28 September 2026 after the S01 investigation
+expanded from bounded integration into exhaustive execution-observation proof.
+
+Ensemble trusts Codex's successful terminal turn status for its bound thread/turn
+as the runtime's normal-completion report. Ensemble persists that report, waits
+for its own registered callbacks to end, checks other holds and known unfinished
+execution, and serializes writer/capacity release with successor admission.
+An existing crash, Stop or uncertainty hold cannot be cleared by a late terminal
+report; the separate recovery procedure still applies.
+
+Ensemble owns durable admission, identity/generation checks, callback authorization,
+results, cancellation requests and uncertainty holds. Codex owns its built-in
+tool execution and reports its lifecycle. Runtime/deployment controls provide
+execution restrictions; Ensemble must select the approved policy and enforce
+permissions on its own tools and integrations. It must not call the unsandboxed
+`thread/shellCommand` route for task execution.
+
+Detailed tool items and stored history are diagnostic evidence, not an exhaustive
+ledger of all effects or an independent termination proof. Missing diagnostic
+items alone do not block normal handoff; a known unfinished action, conflicting
+terminal report, missing terminal identity/status or unfinished Ensemble callback
+does. This explicitly accepts incomplete observation, possible unobserved effects
+and overlapping writers after normal success, including detached children. It
+does not establish the policy or audit trail of an unobserved action.
+
+S01 does not require a general model-tool allowlist or qualification of every
+tool class. An untested surface is a recorded coverage gap; a demonstrated breach
+of the selected policy blocks the affected capability. Ordinary file-edit and
+broader enabled-tool policy checks belong to S02–S05 integration. Keep the earlier
+unexplained file effect as a diagnostic finding, without relabelling it a pass or
+making its explanation a prerequisite for all implementation.
+
 ## Default execution policy
 
 Select supported App Server `workspaceWrite` controls with task working directory
