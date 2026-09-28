@@ -38,7 +38,8 @@ function fixture(
         assignment,
         coordinatorConversationId,
       );
-      conversationIds.set(assignment.id, conversationId);
+      if (typeof conversationId === "string")
+        conversationIds.set(assignment.id, conversationId);
       return conversationId;
     },
     async find(assignment) {

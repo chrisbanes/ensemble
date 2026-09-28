@@ -13,7 +13,7 @@ export interface Database {
   };
 }
 
-const schemaVersion = 2;
+const schemaVersion = 3;
 const taskSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -68,7 +68,7 @@ export class Store {
         throw new Error(
           `Database schema ${version} is newer than supported schema ${schemaVersion}`,
         );
-      if (version !== 0 && version !== schemaVersion)
+      if (version !== 0 && version !== 2 && version !== schemaVersion)
         throw new Error(`Database schema ${version} requires a fresh database`);
 
       if (version === 0) {
@@ -84,6 +84,7 @@ export class Store {
           );
         this.createTables();
         this.createCoreTables();
+        this.createExecutionTables();
         const host = { hostKind, hostKey: randomUUID() };
         this.db
           .prepare(
@@ -106,6 +107,10 @@ export class Store {
         throw new Error(
           `Database is bound to execution host ${host.hostKind}, not ${hostKind}`,
         );
+      if (version === 2) {
+        this.createExecutionTables();
+        this.db.exec(`PRAGMA user_version = ${schemaVersion}`);
+      }
       return host.hostKey;
     });
     this.hostKey = hostKey;
@@ -296,6 +301,17 @@ export class Store {
     );
   }
 
+  restoreUnsubmittedLaunch(id: string): boolean {
+    this.requireInitialized();
+    return (
+      this.db
+        .prepare(
+          "UPDATE assignments SET state = 'pending' WHERE id = ? AND state = 'launching' AND NOT EXISTS (SELECT 1 FROM conversation_bindings WHERE assignmentId = ?) RETURNING id",
+        )
+        .get(id, id) !== undefined
+    );
+  }
+
   attachConversation(
     assignmentId: string,
     hostKey: string,
@@ -461,6 +477,22 @@ export class Store {
       hostKey TEXT NOT NULL REFERENCES host_installation(hostKey),
       externalConversationId TEXT NOT NULL,
       UNIQUE(hostKey, externalConversationId)
+    );`);
+  }
+
+  private createExecutionTables(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS execution_intents (
+      id TEXT PRIMARY KEY,
+      workId TEXT NOT NULL UNIQUE,
+      prompt TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('ready','held','submitting','running','completed')),
+      reason TEXT,
+      threadId TEXT,
+      turnId TEXT,
+      accountType TEXT NOT NULL,
+      sandbox TEXT NOT NULL CHECK(sandbox = 'workspaceWrite'),
+      approval TEXT NOT NULL CHECK(approval = 'never')
     );`);
   }
 
