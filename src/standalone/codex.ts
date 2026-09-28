@@ -108,6 +108,7 @@ export class CodexRuntime implements Runtime {
   private readonly events = new EventEmitter();
   private readonly terminals = new Map<string, "completed" | "failed">();
   private unexpected?: (request: UnexpectedRequest) => void;
+  private failure: Error | undefined;
 
   constructor(private readonly executable = "codex") {}
 
@@ -117,6 +118,7 @@ export class CodexRuntime implements Runtime {
 
   async start(): Promise<void> {
     if (this.child) throw new Error("Runtime already started");
+    this.failure = undefined;
     const child = spawn(
       this.executable,
       [
@@ -131,6 +133,10 @@ export class CodexRuntime implements Runtime {
     this.child = child;
     child.on("error", (error) => this.fail(error));
     child.on("exit", () => this.fail(new Error("Codex App Server exited")));
+    child.stdin.on("error", (error) => this.fail(error));
+    child.stdin.on("close", () =>
+      this.fail(new Error("Codex App Server stdin closed")),
+    );
     // Diagnostics may contain sensitive data. Drain without retaining or logging
     // them so a full stderr pipe cannot stall JSON-RPC on stdout.
     child.stderr.resume();
@@ -141,7 +147,7 @@ export class CodexRuntime implements Runtime {
       await this.request("initialize", {
         clientInfo: { name: "ensemble", version: "0.1.0" },
       });
-      child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+      await this.send(`${JSON.stringify({ method: "initialized" })}\n`);
       await this.verifyLoginAndPolicy();
     } catch (error) {
       await this.stop();
@@ -220,6 +226,7 @@ export class CodexRuntime implements Runtime {
     threadId: string,
     turnId: string,
   ): Promise<"completed" | "failed"> {
+    if (this.failure) throw this.failure;
     const key = `${threadId}:${turnId}`;
     const observed = this.terminals.get(key);
     if (observed) {
@@ -267,6 +274,7 @@ export class CodexRuntime implements Runtime {
   private request(method: string, params: unknown): Promise<unknown> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("Runtime unavailable"));
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -274,16 +282,30 @@ export class CodexRuntime implements Runtime {
         reject(new Error(`${method} timed out`));
       }, 15000);
       this.pending.set(id, { resolve, reject, timer });
-      child.stdin.write(
-        `${JSON.stringify({ id, method, params })}\n`,
-        (error) => {
-          if (error) {
-            clearTimeout(timer);
-            this.pending.delete(id);
-            reject(error);
-          }
-        },
+      void this.send(`${JSON.stringify({ id, method, params })}\n`).catch(
+        (error: Error) => this.fail(error),
       );
+    });
+  }
+
+  private send(line: string): Promise<void> {
+    const child = this.child;
+    if (!child || this.failure)
+      return Promise.reject(this.failure ?? new Error("Runtime unavailable"));
+    return new Promise((resolve, reject) => {
+      try {
+        child.stdin.write(line, (error) => {
+          if (error) {
+            this.fail(error);
+            reject(error);
+          } else resolve();
+        });
+      } catch (error) {
+        const failure =
+          error instanceof Error ? error : new Error(String(error));
+        this.fail(failure);
+        reject(failure);
+      }
     });
   }
 
@@ -309,12 +331,15 @@ export class CodexRuntime implements Runtime {
         );
       }
       const child = this.child;
-      child?.stdin.write(
-        `${JSON.stringify(deniedServerRequest(message.id, method))}\n`,
-        () => {
-          if (holdFailed) child.kill("SIGTERM");
-        },
-      );
+      if (child)
+        void this.send(
+          `${JSON.stringify(deniedServerRequest(message.id, method))}\n`,
+        ).then(
+          () => {
+            if (holdFailed) child.kill("SIGTERM");
+          },
+          (error: Error) => this.fail(error),
+        );
       return;
     }
     if (message.id !== undefined) {
@@ -344,11 +369,15 @@ export class CodexRuntime implements Runtime {
   }
 
   private fail(error: Error): void {
+    if (this.failure) return;
+    this.failure = error;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
     this.events.emit("failure", error);
+    if (this.child?.exitCode === null && this.child.signalCode === null)
+      this.child.kill("SIGTERM");
   }
 }

@@ -17,6 +17,7 @@ const marker = "ensemble-standalone-v1\n";
 
 /** Owns only standalone.sqlite in a marked data directory. No import or attach path exists. */
 export class StandaloneService {
+  private owner: DatabaseSync | undefined;
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
   private runtime: Runtime | undefined;
@@ -46,14 +47,28 @@ export class StandaloneService {
       if (existsSync(mark) && readFileSync(mark, "utf8") !== marker)
         throw new Error("Data directory marker mismatch");
     } else mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const mark = join(directory, ".ensemble-standalone");
-    if (!existsSync(mark))
-      writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
-    const database = join(realpathSync(directory), "standalone.sqlite");
-    if (existsSync(database) && lstatSync(database).isSymbolicLink())
-      throw new Error("Standalone database must not be a symlink");
-    const db = new DatabaseSync(database);
+    // SQLite owns the OS file lock for this transaction. A process crash releases
+    // it without consulting stale PID files or a clock.
+    const canonical = realpathSync(directory);
+    const ownerPath = join(canonical, ".ensemble-owner.sqlite");
+    if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
+      throw new Error("Service ownership file must not be a symlink");
+    const owner = new DatabaseSync(ownerPath, { timeout: 0 });
     try {
+      try {
+        owner.exec("BEGIN IMMEDIATE");
+      } catch (error) {
+        throw new Error("Data directory is already owned", { cause: error });
+      }
+      this.owner = owner;
+      const mark = join(canonical, ".ensemble-standalone");
+      if (!existsSync(mark))
+        writeFileSync(mark, marker, { flag: "wx", mode: 0o600 });
+      const database = join(canonical, "standalone.sqlite");
+      if (existsSync(database) && lstatSync(database).isSymbolicLink())
+        throw new Error("Standalone database must not be a symlink");
+      const db = new DatabaseSync(database);
+      this.db = db;
       db.exec(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL",
       );
@@ -70,7 +85,6 @@ export class StandaloneService {
           state.setWorkspaceKey(item.id, workspaceKey);
       }
       state.holdUnfinishedOnOpen();
-      this.db = db;
       this.state = state;
       const runtime = this.runtimeFactory();
       this.runtime = runtime;
@@ -116,18 +130,29 @@ export class StandaloneService {
       });
       await runtime.start();
     } catch (error) {
-      if (this.state)
-        for (const item of this.state.list())
-          if (item.state === "ready")
-            this.state.hold(
-              item.id,
-              "Runtime or login unavailable during startup",
-            );
-      await this.runtime?.stop().catch(() => {});
-      this.runtime = undefined;
-      this.state = undefined;
-      this.db = undefined;
-      db.close();
+      try {
+        if (this.state)
+          for (const item of this.state.list())
+            if (item.state === "ready")
+              this.state.hold(
+                item.id,
+                "Runtime or login unavailable during startup",
+              );
+      } finally {
+        try {
+          await this.runtime?.stop().catch(() => {});
+        } finally {
+          this.runtime = undefined;
+          this.state = undefined;
+          try {
+            this.db?.close();
+          } finally {
+            this.db = undefined;
+            owner.close();
+            this.owner = undefined;
+          }
+        }
+      }
       throw error;
     }
   }
@@ -149,6 +174,13 @@ export class StandaloneService {
       db?.close();
     } catch (error) {
       if (failure === undefined) failure = error;
+    }
+    try {
+      this.owner?.close();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+    } finally {
+      this.owner = undefined;
     }
     if (failure !== undefined) throw failure;
   }

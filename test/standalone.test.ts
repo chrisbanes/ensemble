@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -15,6 +21,7 @@ import { StandaloneService } from "../src/standalone/service.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import type { Runtime } from "../src/standalone/codex.js";
 import {
+  CodexRuntime,
   deniedServerRequest,
   executionPolicy,
   unexpectedRequest,
@@ -68,6 +75,238 @@ class FakeRuntime implements Runtime {
     this.onRequest = listener;
   }
 }
+
+const ownerScript = `
+import { StandaloneService } from process.argv[1];
+const service = new StandaloneService(process.argv[2], () => ({
+  async start() {}, async stop() {}, onUnexpectedRequest() {}
+}));
+await service.start();
+process.stdout.write('ready\\n');
+process.stdin.once('data', async () => { await service.stop(); process.exit(0); });
+`;
+
+async function ownerProcess(
+  data: string,
+): Promise<ChildProcessWithoutNullStreams> {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      ownerScript.replace(
+        "import { StandaloneService } from process.argv[1];",
+        "const { StandaloneService } = await import(process.argv[1]);",
+      ),
+      new URL("../src/standalone/service.js", import.meta.url).href,
+      data,
+    ],
+    { stdio: "pipe" },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+      if (output.includes("ready\n")) resolve();
+    });
+    child.once("exit", (code) => reject(new Error(`Owner exited ${code}`)));
+    setTimeout(
+      () => reject(new Error("Owner startup timed out")),
+      5000,
+    ).unref();
+  });
+  return child;
+}
+
+test("canonical directory has one process owner; crash and failed startup release ownership", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-owner-"));
+  const data = join(root, "data");
+  const alias = join(root, "alias");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  let child: ChildProcessWithoutNullStreams | undefined;
+  try {
+    child = await ownerProcess(data);
+    symlinkSync(root, alias);
+    const second = new StandaloneService(
+      join(alias, "data"),
+      () => new FakeRuntime(),
+    );
+    await assert.rejects(second.start(), /already owned/);
+    const db = new DatabaseSync(join(data, "standalone.sqlite"));
+    const state = new ExecutionState(db);
+    const row = state.create("live", "test", workspace);
+    assert.equal(state.begin(row.id), true);
+    assert.equal(state.bindThread(row.id, "thread-live"), true);
+    assert.equal(state.bindTurn(row.id, "turn-live"), true);
+    for (const args of [
+      ["list", data],
+      ["run", join(alias, "data"), "second", "test", workspace],
+    ]) {
+      const attempt = spawnSync(
+        process.execPath,
+        [
+          new URL("../src/standalone/cli.js", import.meta.url).pathname,
+          ...args,
+        ],
+        { encoding: "utf8", timeout: 5000 },
+      );
+      assert.notEqual(attempt.status, 0);
+      assert.match(attempt.stderr, /already owned/);
+    }
+    await assert.rejects(
+      new StandaloneService(data, () => new FakeRuntime()).start(),
+      /already owned/,
+    );
+    assert.equal(state.get(row.id).state, "running");
+    db.close();
+    child.kill("SIGKILL");
+    await new Promise<void>((resolve) => child?.once("exit", () => resolve()));
+    child = undefined;
+    const recovered = new StandaloneService(data, () => new FakeRuntime());
+    await recovered.start();
+    assert.equal(
+      recovered.list().find((item) => item.workId === "live")?.state,
+      "held",
+    );
+    assert.equal(
+      (await recovered.submit("live", "test", workspace)).state,
+      "held",
+    );
+    await recovered.stop();
+    const failed = new FakeRuntime();
+    failed.failAt = "start";
+    await assert.rejects(
+      new StandaloneService(data, () => failed).start(),
+      /login unavailable/,
+    );
+    const next = new StandaloneService(data, () => new FakeRuntime());
+    await next.start();
+    await next.stop();
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("injected turn/start EPIPE settles submission and holds it across reopen", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-turn-pipe-"));
+  const executable = join(root, "fake-codex.mjs");
+  const data = join(root, "data");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (!message.id) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  if (message.method === "thread/start") result = {thread: {id: "thread-1"}, approvalPolicy: "never", sandbox: {type: "workspaceWrite"}};
+  if (message.method === "turn/start") continue;
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable);
+  let service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    const child = (
+      runtime as unknown as { child: ChildProcessWithoutNullStreams }
+    ).child;
+    const startTurn = runtime.startTurn.bind(runtime);
+    runtime.startTurn = async (...args) => {
+      child.stdin.destroy(
+        Object.assign(new Error("injected EPIPE"), { code: "EPIPE" }),
+      );
+      return startTurn(...args);
+    };
+    const held = await service.submit("pipe-turn", "test", workspace);
+    assert.equal(held.state, "held");
+    assert.equal(held.threadId, "thread-1");
+    assert.equal(held.turnId, null);
+    assert.match(held.reason ?? "", /EPIPE/);
+    await service.stop();
+    service = new StandaloneService(data, () => new FakeRuntime());
+    await service.start();
+    assert.equal(
+      (await service.submit("pipe-turn", "test", workspace)).state,
+      "held",
+    );
+    assert.equal(
+      (await service.submit("other", "test", workspace)).state,
+      "held",
+    );
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("approval denial pipe failure preserves a durable hold without granting access", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-approval-pipe-"));
+  const executable = join(root, "fake-codex.mjs");
+  const data = join(root, "data");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (!message.id) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  if (message.method === "thread/start") result = {thread: {id: "thread-1"}, approvalPolicy: "never", sandbox: {type: "workspaceWrite"}};
+  if (message.method === "turn/start") result = {turn: {id: "turn-1"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+  if (message.method === "turn/start")
+    process.stdout.write(JSON.stringify({id: 999, method: "item/commandExecution/requestApproval", params: {threadId: "thread-1", turnId: "turn-1"}}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable);
+  let service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    const internals = runtime as unknown as {
+      child: ChildProcessWithoutNullStreams;
+      unexpected: (request: UnexpectedRequest) => void;
+    };
+    const hold = internals.unexpected;
+    runtime.onUnexpectedRequest((request) => {
+      hold(request);
+      internals.child.stdin.destroy(
+        Object.assign(new Error("injected EPIPE"), { code: "EPIPE" }),
+      );
+    });
+    const held = await service.submit("approval-pipe", "test", workspace);
+    assert.equal(held.state, "held");
+    assert.match(held.reason ?? "", /Unexpected App Server request denied/);
+    await service.stop();
+    service = new StandaloneService(data, () => new FakeRuntime());
+    await service.start();
+    assert.equal(
+      (await service.submit("approval-pipe", "test", workspace)).state,
+      "held",
+    );
+    assert.equal(
+      (await service.submit("next", "test", workspace)).state,
+      "held",
+    );
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("all installed approval callback forms deny without policy expansion", () => {
   for (const method of [
