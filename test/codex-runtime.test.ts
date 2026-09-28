@@ -70,3 +70,35 @@ for await (const line of lines) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("stdin closure during initialization rejects promptly", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-init-pipe-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+import { closeSync } from "node:fs";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({id: message.id, result: {}}) + "\n", () => closeSync(0));
+    setInterval(() => {}, 1000);
+  }
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable);
+  try {
+    await assert.rejects(
+      bounded(runtime.start(), 3000),
+      /stdin closed|EPIPE|Runtime stopped/,
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
