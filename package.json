@@ -1,23 +1,13 @@
 {
-  "name": "bb-plugin-ensemble",
+  "name": "ensemble",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=24 <25",
-    "bb": ">=0.43.4",
-    "bbPluginSdk": ">=0.5.9"
+    "node": ">=24 <25"
   },
   "packageManager": "npm@12.1.0",
-  "bb": {
-    "name": "Ensemble",
-    "branding": {
-      "icon": "Workflow"
-    },
-    "description": "Experimental durable task delegation using BB conversations.",
-    "server": "./src/server.ts"
-  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -25,20 +15,14 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "check:bb": "node scripts/check-bb-integration.mjs",
-    "test:bb-integration": "node --test test/bb-integration/report.test.mjs test/bb-integration/package-tree.test.mjs test/bb-integration/process-group.test.mjs test/bb-integration/git-fixture.test.mjs && node scripts/test-bb-integration.mjs",
-    "test:bb-prototype": "node --test test/bb-integration/tool-arguments.test.mjs test/bb-integration/prototype.test.mjs",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "0.5.30",
     "zod": "4.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@types/node": "26.6.3",
-    "bb-app": "0.44.0",
-    "playwright": "1.63.0",
     "typescript": "7.0.2"
   }
 }

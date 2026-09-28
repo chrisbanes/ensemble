@@ -15,7 +15,7 @@ This reset does not pass S01 or authorize dependent work; Multica CB-35 is uncha
 | Slice | Outcome and acceptance | Dependencies |
 | --- | --- | --- |
 | S01 — Prove minimum Codex integration | Existing-login execution, events/results, follow-up or supported resume and cancellation requests; bounded admission, trusted identity, durable-state and ambiguous-submission probes. Record access/runtime limits and operator recovery. No product scheduler/UI claim; R01. | Confirmed product scope; bounded proof below |
-| S02 — Replace BB bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. Remove BB manifest, adapter, dependencies and mandatory BB CI. Test with BB absent, SQLite reopen, runtime failure and preserved uncertain state; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
+| S02 — Build standalone bootstrap | Standalone service/bootstrap, fresh-database schema/migrations and runtime integration; preserve reusable core behavior. BB source cleanup is complete. Test SQLite reopen, runtime failure and preserved uncertain state; R01 and R06 fresh-database separation. | S01 and reviewed runtime/schema contracts |
 | S03 — Own dispatch and workspaces | Durable eligible-turn queue, global/project caps (defaults 4/2), active-work sleep assertion, holds, worktree provisioning, cooperative writer admission, restart reconciliation and bounded retries. Capacity-one delegation cannot deadlock; pause/stop races and uncertain/orphan executions retain holds. | S02; A07–A09, A14–A18, A27, R02/R03 |
 | S04 — Deliver local work and operator UI | Web UI with separate operator login over Tailscale, project/profile setup, tasks, conversations/history, lead/assignee tools, direct TypeSafe routing with project opt-in and lead fallback, transactional results/inbox, durable operator messages (no live steering), questions/approvals, instruction revisions and task dependencies. Integrate UI with each command as it lands. | S03; A02–A13, A25, local A28/A30, R04/R05/R07–R10 |
 | S05 — Qualify complete local journey | Automated UI/service/runtime journey with a disposable repo and repository-free work; routing-enabled and disabled paths, nested returns, lead completion, routing failures, stop/restart/recovery variants, preservation and exact evidence. No GitHub integration required. | S04; local-task acceptance gate |
@@ -140,11 +140,9 @@ remote issues, dependencies and PRs before editing or publishing them.
 | T12 #661, writes/release | S07 retains write and delivery guarantees; S08 adds standalone operational qualification. |
 | #665 / CB-19 and #676 | Preserve BB failures and useful isolated core repairs. Re-express admission/recovery obligations in S01/S03, without claiming the BB defects were fixed. |
 
-S02 removes production/build dependency on BB as one coherent change: package
-identity/engines/manifest, SDK/runtime lockfile entries, adapter/server entry,
-BB-only scripts, fixtures and CI jobs. Retain or translate meaningful core tests;
-replace removed runtime assertions with the S01 standalone proofs. Preserve
-historical evidence in docs/Git instead of leaving a hidden production BB path.
+The BB package, adapter, scripts, fixtures and CI jobs were removed before S02.
+S02 still needs a standalone bootstrap and runtime integration qualified by S01.
+The retained core tests do not provide standalone service or UI evidence.
 
 Do not alter the installed Haze prototype, its data, conversations or live work
 as part of a source-code cleanup. S08 establishes the reviewed operational boundary.

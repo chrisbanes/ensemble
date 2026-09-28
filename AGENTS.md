@@ -1,7 +1,7 @@
 # Ensemble
 
 Ensemble is moving to a standalone TypeScript service without BB (ADR-1004).
-The current code remains a BB feasibility prototype with a reusable core.
+The current code contains a reusable core; the standalone service is not implemented.
 Read `CONTEXT.md` and `docs/adr/` before making architectural changes. `README.md`
 distinguishes current implementation from the accepted target design.
 Read `docs/SPEC.md` for the reviewed operating behaviour and `docs/acceptance.md`
@@ -63,8 +63,8 @@ installed Haze prototype until a reviewed cutover.
 
 Use Node.js from `.node-version` and the package manager pinned in `package.json`.
 Run `npm ci` then `npm run check` (type checking, lint, formatting, build, tests).
-CI runs the same check. Existing tests use real SQLite and a fake host; the BB
-suites remain transitional evidence until S02 retires them. Standalone release
+CI runs the same check. Existing tests use real SQLite and a fake host.
+Standalone release
 evidence must exercise the chosen real runtime and operator UI; see
 `docs/acceptance.md`. Do not claim
 project isolation, autonomous scheduling, or result delivery is implemented.

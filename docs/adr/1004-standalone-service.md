@@ -46,9 +46,9 @@ must prove admission, cancellation requests, conservative recovery and cooperati
 workspace ownership; wrapping another queue does not satisfy that requirement. Runtime and deployment
 controls enforce execution access; an in-process service is not a security sandbox.
 
-The existing BB prototype is transitional code, not a standalone implementation.
-Preserve useful core code and historical evidence; remove BB packaging, adapters
-and mandatory BB CI in the reviewed replacement work. Do not mutate the installed
+The BB prototype source has been retired from this repository; the reusable core
+remains and is not a standalone implementation. Historical evidence stays in the
+design record. Do not mutate the installed
 Haze prototype or assume its unfinished work can migrate. Chris confirmed the shared understanding after reviewing the design, acceptance
 scope and delivery sequence on 27 September 2026. Runtime-specific contracts
 and dependent implementation remain gated on S01 capability evidence. This decision does not by itself publish tickets or change remote issue state.

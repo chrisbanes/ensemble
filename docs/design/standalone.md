@@ -3,7 +3,7 @@
 **Product decisions reviewed and confirmed by Chris on 27 September 2026.**
 The ownership decision is accepted in [ADR-1004](../adr/1004-standalone-service.md).
 Runtime-specific contracts below require the bounded S01 proof before dependent implementation.
-The existing implementation remains the BB prototype with a reusable SQLite core.
+The existing implementation is a reusable SQLite core; the standalone service is not implemented.
 [ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
 assignment-routing and project-lead accountability decisions.
 
@@ -189,9 +189,9 @@ coordinator models only spawn/find. Those seams require deliberate replacement;
 compiling without BB is not standalone product delivery. Preserve task/assignment
 identity, captured instructions, results and conservative uncertainty handling.
 
-S02 removes the BB adapter/entry, manifest fields, package dependencies, BB-only
-scripts and mandatory BB CI together. Retain historical documentation and Git
-history rather than relabeling BB tests as standalone proof. Reconcile against the
+The BB adapter, manifest, dependencies, scripts and CI jobs have been removed.
+S02 still needs the standalone bootstrap and runtime integration. Retain historical
+documentation and Git history rather than relabeling BB tests as standalone proof. Reconcile against the
 latest main, including CB-19's local-refusal repair if it lands; do not overwrite
 concurrent work from this planning checkout.
 

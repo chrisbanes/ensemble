@@ -73,7 +73,7 @@ test("lost spawn response is reconciled after restart without a second worker", 
   const host: WorkerHost = {
     async spawn() {
       spawns++;
-      throw new Error("response lost after BB created worker");
+      throw new Error("response lost after runtime created worker");
     },
     async find() {
       return ["existing-worker"];

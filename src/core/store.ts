@@ -3,7 +3,7 @@ import { z } from "zod";
 
 type SqlValue = string | number | null;
 
-// Both BB's better-sqlite3 handle and node:sqlite implement this small surface.
+// The storage contract is deliberately limited to the SQLite operations used here.
 export interface Database {
   exec(sql: string): unknown;
   prepare(sql: string): {
@@ -13,7 +13,7 @@ export interface Database {
   };
 }
 
-const schemaVersion = 1;
+const schemaVersion = 2;
 const taskSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -68,30 +68,28 @@ export class Store {
         throw new Error(
           `Database schema ${version} is newer than supported schema ${schemaVersion}`,
         );
+      if (version !== 0 && version !== schemaVersion)
+        throw new Error(`Database schema ${version} requires a fresh database`);
 
       if (version === 0) {
-        this.createLegacyTables();
-        this.createCoreTables();
-        this.addInstructionsColumn();
-        const installed = this.db
-          .prepare(
-            "SELECT hostKind, hostKey FROM host_installation WHERE singleton = 1",
-          )
-          .get();
-        const host = installed
-          ? hostInstallationSchema.parse(installed)
-          : { hostKind, hostKey: randomUUID() };
-        if (host.hostKind !== hostKind)
-          throw new Error(
-            `Database is bound to execution host ${host.hostKind}, not ${hostKind}`,
-          );
-        if (!installed)
+        if (
           this.db
             .prepare(
-              "INSERT INTO host_installation (singleton, hostKind, hostKey) VALUES (1, ?, ?)",
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
             )
-            .run(host.hostKind, host.hostKey);
-        this.migrateLegacyBindings(host.hostKey);
+            .get()
+        )
+          throw new Error(
+            "Existing unversioned database requires a fresh database",
+          );
+        this.createTables();
+        this.createCoreTables();
+        const host = { hostKind, hostKey: randomUUID() };
+        this.db
+          .prepare(
+            "INSERT INTO host_installation (singleton, hostKind, hostKey) VALUES (1, ?, ?)",
+          )
+          .run(host.hostKind, host.hostKey);
         this.validatePersistedRows();
         this.db.exec(`PRAGMA user_version = ${schemaVersion}`);
         return host.hostKey;
@@ -253,7 +251,7 @@ export class Store {
     if (instructions === undefined) throw new Error("Unknown Ensemble project");
     this.db
       .prepare(
-        "INSERT INTO assignments (id, taskId, projectId, brief, state, threadId, result, instructions) VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?)",
+        "INSERT INTO assignments (id, taskId, projectId, brief, state, result, instructions) VALUES (?, ?, ?, ?, 'pending', NULL, ?)",
       )
       .run(id, taskId, projectId, brief, instructions);
     return this.get(id);
@@ -427,7 +425,7 @@ export class Store {
     }
   }
 
-  private createLegacyTables(): void {
+  private createTables(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY, projectId TEXT NOT NULL, title TEXT NOT NULL
     );
@@ -435,7 +433,7 @@ export class Store {
       id TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id),
       projectId TEXT NOT NULL, brief TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('pending','launching','running','completed')),
-      threadId TEXT UNIQUE, result TEXT,
+      result TEXT, instructions TEXT,
       UNIQUE(taskId)
     );`);
   }
@@ -464,59 +462,6 @@ export class Store {
       externalConversationId TEXT NOT NULL,
       UNIQUE(hostKey, externalConversationId)
     );`);
-  }
-
-  private addInstructionsColumn(): void {
-    const columns = this.db.prepare("PRAGMA table_info(assignments)").all();
-    const hasInstructions = columns.some(
-      (column) =>
-        z.object({ name: z.string() }).parse(column).name === "instructions",
-    );
-    if (!hasInstructions)
-      this.db.exec("ALTER TABLE assignments ADD COLUMN instructions TEXT");
-  }
-
-  private migrateLegacyBindings(hostKey: string): void {
-    const invalidAssignments = this.db
-      .prepare(
-        "SELECT a.id FROM assignments a JOIN tasks t ON t.id = a.taskId WHERE a.projectId <> t.projectId",
-      )
-      .all();
-    if (invalidAssignments.length)
-      throw new Error("Legacy assignments contain mismatched task projects");
-
-    const projects = this.db
-      .prepare(
-        "SELECT projectId FROM tasks UNION SELECT projectId FROM assignments",
-      )
-      .all()
-      .map((row) => z.object({ projectId: z.string() }).parse(row).projectId);
-    const insertProject = this.db.prepare(
-      "INSERT INTO projects (id, instructions) VALUES (?, NULL)",
-    );
-    const insertBinding = this.db.prepare(
-      "INSERT INTO project_host_bindings (projectId, hostKey, externalProjectId, coordinatorConversationId) VALUES (?, ?, ?, NULL)",
-    );
-    for (const projectId of projects) {
-      insertProject.run(projectId);
-      insertBinding.run(projectId, hostKey, projectId);
-    }
-
-    const legacyConversations = this.db
-      .prepare(
-        "SELECT id, projectId, threadId FROM assignments WHERE threadId IS NOT NULL",
-      )
-      .all();
-    for (const row of legacyConversations) {
-      const legacy = z
-        .object({ id: z.string(), projectId: z.string(), threadId: z.string() })
-        .parse(row);
-      this.db
-        .prepare(
-          "INSERT INTO conversation_bindings (assignmentId, hostKey, externalConversationId) VALUES (?, ?, ?)",
-        )
-        .run(legacy.id, hostKey, legacy.threadId);
-    }
   }
 
   private validatePersistedRows(): void {

@@ -15,18 +15,11 @@ graph or separate persistent-bot model.
 
 ## Current status
 
-The repository still contains the bounded BB prototype: a reusable TypeScript/
-SQLite core in `src/core`, a BB adapter in `src/adapters/bb`, and its packaging and
-integration suites. It supports local task creation, one worker assignment per task,
-instruction snapshots, results and conservative uncertain-launch reconciliation.
-It is not a standalone service or autonomous coordinator. The standalone scheduler,
-workspace manager, assignment router and operator UI are not implemented.
-
-The [accepted direction](docs/adr/1004-standalone-service.md) removes BB rather than
-retaining it as an optional backend. The [delivery plan](docs/delivery.md) retires
-its packages, adapter and CI during replacement bootstrap. Existing core behavior
-and historical failure evidence remain useful. The installed Haze prototype is
-preserved until a reviewed operational cutover.
+The repository contains a reusable TypeScript/SQLite coordination core in
+`src/core` and its tests. The BB plugin, packaging and integration harness have
+been removed. There is no standalone service, runtime adapter, scheduler, workspace
+manager, assignment router or operator UI yet. The installed Haze prototype stays
+in place until the reviewed operational cutover.
 
 ## Planning checkpoint
 
@@ -55,19 +48,16 @@ npm ci
 npm run check
 ```
 
-`check` runs strict type checking, lint, formatting, compilation and tests. Current
-package metadata and BB suites describe the transitional prototype; they do not
-establish standalone compatibility. This direction change makes no runtime/package
-changes and has no effect on an installed instance.
+`check` runs strict type checking, lint, formatting, compilation and tests. The
+checks cover the retained core. They do not qualify the planned standalone service
+or its runtime and UI.
 
 ## Design documents
-
 
 The specification owns product behaviour, the design owns component boundaries,
 and the acceptance plan owns required evidence. The delivery plan maps that work
 into slices; ADRs explain decisions. Current confirmed choices take precedence
-over historical BB documents. A reviewed requirement is not an implemented capability.
-
+over historical documents. A reviewed requirement is not an implemented capability.
 
 - [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
 - [ADR-1005](docs/adr/1005-service-assignment-routing.md): service routing and project-lead accountability.
@@ -75,7 +65,7 @@ over historical BB documents. A reviewed requirement is not an implemented capab
 - [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
 - [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
 - [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.
-- [Delivery plan](docs/delivery.md): reviewed sequence, S01 proof scope and BB ticket reconciliation.
+- [Delivery plan](docs/delivery.md): reviewed sequence and S01 proof scope.
 - [Glossary](CONTEXT.md): canonical language.
 - [Agent workflows](docs/agents/): contribution conventions.
 
@@ -92,6 +82,5 @@ Its configuration and persisted runs are not compatibility requirements. Finish 
 explicitly retire existing work before operational cutover; retained records do not
 prove safe resumption on another runtime.
 
-Apache-2.0. See [LICENSE](LICENSE). Taskboard informs the UI design; no Taskboard or
-BB implementation source has been copied into this repository. Dependencies retain
-their own licenses.
+Apache-2.0. See [LICENSE](LICENSE). Taskboard informs the UI design. Dependencies
+retain their own licenses.
