@@ -17,16 +17,23 @@ configuration schema, and persisted runs are not compatibility requirements.
 The current code is a feasibility prototype. Chris reviewed and confirmed the
 standalone specification, design choices, acceptance scope and delivery sequence
 on 27 September 2026. Do not request that product review again for unchanged scope.
-Chris approved the minimum S01 integration reset on 28 September 2026. S01 in
-`docs/delivery.md` remains the next capability gate; qualify its bounded protocol
+GitHub issues are authoritative for delivery scope, sequencing, native dependencies,
+status and slice completion criteria; start from [epic #649](https://github.com/chrisbanes/ensemble/issues/649).
+Keep product contracts, ADRs and evidence in the repo, without a parallel delivery plan.
+Chris approved the minimum S01 integration reset on 28 September 2026.
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) remains the next capability gate; qualify its bounded protocol
 and coordination probes before dependent implementation. Do not restore strict
 outside-read denial, complete descendant containment or universal live reattachment
 as inherent S01 gates. Chris also approved the runtime trust boundary: normal
 handoff trusts the bound successful Codex terminal status, ended Ensemble callbacks
 and no other hold/known unfinished execution. Tool-history completeness and a
 general model-tool allowlist are not S01 gates. Use the finite completion rule in
-`docs/delivery.md`; distinguish demonstrated failures, untested surfaces and accepted
-limits instead of expanding the gate after each probe. Preserve unresolved ownership
+#688; distinguish demonstrated failures, untested surfaces and accepted
+limits instead of expanding the gate after each probe. The approved S01-only
+approval-evidence amendment retains model-originated escalation rejection as an
+unproved limitation; S02 #689 owns deterministic unexpected-approval callback
+rejection and S05 #695 owns integrated approval-flow testing. Preserve unresolved
+ownership
 holds and the documented recovery boundary. Settle detailed contracts using evidence,
 and return material scope or guarantee changes for review. Delivery includes
 automated service/runtime/UI integration and bounded live validation run by the

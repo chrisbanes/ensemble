@@ -1,6 +1,10 @@
 # Issue tracker: GitHub
 
 Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+GitHub issues own delivery scope, sequencing, status and slice completion criteria;
+native blocking dependencies are authoritative. Start from [epic #649](https://github.com/chrisbanes/ensemble/issues/649).
+Keep product contracts, ADRs and evidence in the repo; do not duplicate the live
+delivery plan or task briefs in repository documents.
 
 ## Conventions
 
