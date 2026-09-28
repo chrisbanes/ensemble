@@ -60,3 +60,27 @@ separation. The core tests retain the #686 distinction: only an explicit
 pre-submission refusal restores pending work; an ambiguous launch stays held.
 No Haze, prototype database, shared Codex login/config, TypeSafe credential,
 deployment or cutover state was changed.
+
+## Integrated first-start correction — 29 September 2026
+
+Watson's integrated CB-39 review found that a crash after creating
+`.ensemble-owner.sqlite` and before writing `.ensemble-standalone` could strand
+an unmarked directory. The separable CB-39 repair source and fixture commit is
+`6fb3b384d7ce6091d8f78ebb31a4c5641084996e`. The service now recognizes
+only an empty owner SQLite file and optional journal, with an optional marker
+whose bytes prefix the expected value, as recoverable first-start state. It
+revalidates after acquiring the OS-backed ownership lock and completes the
+marker before opening or migrating `standalone.sqlite` or touching recovery
+rows. Other unmarked contents, prototype data, symlinks and mismatched markers
+remain refused.
+
+A separate process took the owner lock and died by `SIGKILL` before marker
+creation; the next service started successfully. An injected partial marker
+write failure also released ownership and recovered on restart. The fixture
+checked that an unrelated prototype directory was unchanged. The earlier
+competing-owner, alias, crash-hold and stdin fixtures remain in the full run.
+Focused ownership/startup tests passed 2/2 immediately after the repair; the
+later integrated source `fe571ca68d66c53b325cbf6dedf1617191a74eb2`
+passed pinned Node 24.21.0/npm 12.1.0 `npm ci` and `npm run check`, including
+48/48 tests. This is deterministic local filesystem/SQLite evidence, without
+a new Codex model call.
