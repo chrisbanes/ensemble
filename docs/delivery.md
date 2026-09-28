@@ -59,6 +59,11 @@ and limitations, including indefinite holds if evidence cannot settle ownership.
 
 ### Evidence and remaining-work mapping
 
+The [durable existing-evidence matrix](evidence/s01-existing-evidence-2026-09-28.md)
+records each bounded observation, provenance and remaining gap in this repository.
+It can be read in a fresh checkout; underlying local fixtures/traces are not included
+and the summary alone cannot qualify uncovered cases.
+
 The S01 checkout `cb/35-s01-proof` was inspected read-only at
 `e87ed326182b602c412606d1e88d6ae481188eb2`. Its
 `docs/evidence/s01-consolidated-discovery-2026-09-28.md` indexes the traces; approved

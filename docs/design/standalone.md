@@ -104,9 +104,12 @@ network access. No new project security sandbox is implied by service ownership.
 ## Default execution policy
 
 Select supported App Server `workspaceWrite` controls with task working directory
-and explicit task writable roots, `networkAccess: false`, `readOnlyAccess` set to
-`fullAccess`, and `approvalPolicy: never`. Verify installed field names and effective
-settings on start, follow-up and resume; pin any experimental surface used. Deny
+and explicit task writable roots, `networkAccess: false`, and `approvalPolicy: never`.
+Retain full read access: use `readOnlyAccess: { type: "fullAccess" }` where supported,
+or the verified broad-read default on versions without that field. Do not send an
+unsupported field or require a named profile for equivalent default read behavior.
+Verify installed field names and effective settings on start, follow-up and resume;
+pin any experimental surface used. Deny
 broader command access rather than auto-approving escalation. A policy change needs
 separate operator approval and fresh admission. Do not inherit `dangerFullAccess`
 as a fallback or change shared configuration/login to make a probe pass.
