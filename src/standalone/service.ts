@@ -8,11 +8,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { Store } from "../core/store.js";
 import { DomainStore } from "../core/domain.js";
 import { CodexRuntime, type Runtime } from "./codex.js";
 import { ExecutionState, type ExecutionIntent } from "./state.js";
+import type { TaskExecutionContext } from "./state.js";
+import {
+  SqliteWorkspaceBindingStore,
+  WorkspaceManager,
+  type TaskWorkspaceRepositoryInput,
+  type WorkspaceCleanupEvidence,
+} from "./workspaces.js";
 
 const marker = "ensemble-standalone-v1\n";
 const markerName = ".ensemble-standalone";
@@ -60,8 +67,10 @@ export class StandaloneService {
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
   private domainState: DomainStore | undefined;
+  private workspaces: WorkspaceManager | undefined;
   private runtime: Runtime | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
+  private readonly callbacks = new Map<string, Set<Promise<unknown>>>();
 
   constructor(
     private readonly dataDir: string,
@@ -117,6 +126,12 @@ export class StandaloneService {
       const domain = new DomainStore(db);
       domain.migrate();
       this.domainState = domain;
+      const workspaces = new WorkspaceManager(
+        new SqliteWorkspaceBindingStore(db),
+        join(canonical, "workspaces"),
+      );
+      await workspaces.recover();
+      this.workspaces = workspaces;
       const state = new ExecutionState(db);
       for (const item of state.list()) {
         let workspaceKey: string;
@@ -172,6 +187,30 @@ export class StandaloneService {
             `Unexpected App Server request denied: ${request.method}`,
           );
       });
+      runtime.onTerminalAnomaly?.((anomaly) => {
+        const items = state.list();
+        const matched =
+          anomaly.threadId && anomaly.turnId
+            ? items.filter(
+                (item) =>
+                  item.threadId === anomaly.threadId &&
+                  item.turnId === anomaly.turnId,
+              )
+            : items.filter(
+                (item) =>
+                  item.state === "submitting" || item.state === "running",
+              );
+        for (const item of matched) {
+          state.holdTerminalConflict(item.id, anomaly.reason);
+          for (const successor of items)
+            if (
+              successor.workspace === item.workspace &&
+              (successor.state === "submitting" ||
+                successor.state === "running")
+            )
+              state.hold(successor.id, anomaly.reason);
+        }
+      });
       await runtime.start();
     } catch (error) {
       try {
@@ -188,6 +227,7 @@ export class StandaloneService {
         } finally {
           this.runtime = undefined;
           this.domainState = undefined;
+          this.workspaces = undefined;
           this.state = undefined;
           try {
             this.db?.close();
@@ -216,6 +256,7 @@ export class StandaloneService {
     this.db = undefined;
     this.state = undefined;
     this.domainState = undefined;
+    this.workspaces = undefined;
     try {
       db?.close();
     } catch (error) {
@@ -240,6 +281,136 @@ export class StandaloneService {
     return this.domainState;
   }
 
+  /** The task command owns identity; provisioning never follows a conversation ID. */
+  provisionTask(
+    taskId: string,
+    repositories: TaskWorkspaceRepositoryInput[] = [],
+  ) {
+    this.domain().task(taskId);
+    return this.requireWorkspaces().provision(taskId, repositories);
+  }
+
+  taskWorkspace(taskId: string) {
+    this.domain().task(taskId);
+    return this.requireWorkspaces().get(taskId);
+  }
+
+  archiveTask(taskId: string, evidence: WorkspaceCleanupEvidence) {
+    this.domain().task(taskId);
+    const writerOwnershipResolved =
+      evidence.writerOwnershipResolved &&
+      !this.requireState().hasUnresolvedTask(taskId);
+    return this.requireWorkspaces().archiveAndCleanup(taskId, {
+      ...evidence,
+      writerOwnershipResolved,
+    });
+  }
+
+  /** A replacement keeps the durable assignment and its captured revisions. */
+  replaceConversation(assignmentId: string): number {
+    this.domain().assignment(assignmentId);
+    return this.requireState().replaceConversation(assignmentId);
+  }
+
+  isCurrentResult(workId: string): boolean {
+    return this.requireState().isCurrentResult(workId);
+  }
+
+  recordTaskResult(workId: string, payload: string): boolean {
+    return this.requireState().recordResult(workId, payload);
+  }
+
+  stopTask(taskId: string): void {
+    this.domain().task(taskId);
+    this.requireState().stopTask(taskId);
+  }
+
+  resumeTask(taskId: string): void {
+    this.domain().task(taskId);
+    this.requireState().resumeTask(taskId);
+  }
+
+  taskHold(taskId: string): string | undefined {
+    return this.requireState().taskHold(taskId);
+  }
+
+  /** A known survivor or unfinished tool callback keeps ownership held. */
+  holdKnownSurvivor(workId: string, reason: string): void {
+    const state = this.requireState();
+    const intent = state.byWorkId(workId);
+    if (!intent || intent.state === "ready")
+      throw new Error("No active execution to hold");
+    const holdReason = `Known unfinished execution: ${reason}`;
+    state.holdTerminalConflict(intent.id, holdReason);
+    for (const other of state.list())
+      if (
+        other.workspace === intent.workspace &&
+        (other.state === "submitting" || other.state === "running")
+      )
+        state.hold(other.id, holdReason);
+  }
+
+  registerExecutionCallback(workId: string, callback: Promise<unknown>): void {
+    if (this.requireState().byWorkId(workId)?.state === "completed")
+      this.holdKnownSurvivor(workId, "late Ensemble callback");
+    const set = this.callbacks.get(workId) ?? new Set<Promise<unknown>>();
+    set.add(callback);
+    this.callbacks.set(workId, set);
+    void callback
+      .finally(() => {
+        set.delete(callback);
+        if (set.size === 0) this.callbacks.delete(workId);
+      })
+      .catch(() => {});
+  }
+
+  submitTask(
+    workId: string,
+    assignmentId: string,
+    prompt: string,
+    previousWorkId?: string,
+  ): Promise<ExecutionIntent> {
+    const action = this.dispatchTask(
+      workId,
+      assignmentId,
+      prompt,
+      previousWorkId,
+    );
+    this.active.add(action);
+    void action.finally(() => this.active.delete(action)).catch(() => {});
+    return action;
+  }
+
+  private async dispatchTask(
+    workId: string,
+    assignmentId: string,
+    prompt: string,
+    previousWorkId?: string,
+  ): Promise<ExecutionIntent> {
+    const domain = this.domain();
+    const assignment = domain.assignment(assignmentId);
+    const admission = domain.assignmentAdmission(assignmentId);
+    if (!admission.eligible)
+      throw new Error(
+        `Assignment is not eligible: ${admission.reasons.join(", ")}`,
+      );
+    const taskId = String(assignment.taskId);
+    const binding = await this.requireWorkspaces().forExecution(taskId);
+    if (
+      Number(domain.assignment(assignmentId).version) !==
+      Number(assignment.version)
+    )
+      throw new Error("Assignment revision changed during workspace admission");
+    const context: TaskExecutionContext = {
+      taskId,
+      assignmentId,
+      assignmentVersion: Number(assignment.version),
+      instructionsRevision: Number(assignment.instructionsRevision),
+      profileRevision: Number(assignment.profileRevision),
+    };
+    return this.dispatch(workId, prompt, binding.path, previousWorkId, context);
+  }
+
   /** One explicit dispatch; same work ID never submits twice, including after errors. */
   submit(
     workId: string,
@@ -258,6 +429,7 @@ export class StandaloneService {
     prompt: string,
     workspace: string,
     previousWorkId?: string,
+    context?: TaskExecutionContext,
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
@@ -267,7 +439,16 @@ export class StandaloneService {
     } catch {
       workspaceKey = resolve(workspace);
     }
+    if (!context) {
+      const managedRoot = join(realpathSync(this.dataDir), "workspaces");
+      if (
+        workspaceKey === managedRoot ||
+        workspaceKey.startsWith(`${managedRoot}${sep}`)
+      )
+        throw new Error("Task workspaces require a durable assignment binding");
+    }
     const intent = state.create(workId, prompt, workspaceKey);
+    if (context) state.bindTask(workId, context);
     if (intent.state !== "ready" || intent.reason) return intent;
     let previous: ExecutionIntent | undefined;
     try {
@@ -275,10 +456,23 @@ export class StandaloneService {
         throw new Error("Workspace must be an existing real directory");
       if (previousWorkId) {
         previous = state.byWorkId(previousWorkId);
+        const priorBinding = state.taskBinding(previousWorkId);
+        if (
+          context &&
+          previous &&
+          previous.state !== "completed" &&
+          previous.workspace === workspaceKey &&
+          priorBinding?.taskId === context.taskId &&
+          priorBinding.assignmentId === context.assignmentId
+        )
+          return intent;
         if (
           previous?.state !== "completed" ||
           !previous.threadId ||
-          previous.workspace !== workspaceKey
+          previous.workspace !== workspaceKey ||
+          (context &&
+            (priorBinding?.taskId !== context.taskId ||
+              priorBinding.assignmentId !== context.assignmentId))
         )
           throw new Error(
             "Previous work is not a completed binding in this workspace",
@@ -290,7 +484,10 @@ export class StandaloneService {
     }
     try {
       if (!state.begin(intent.id)) {
-        if (state.get(intent.id).state === "ready")
+        // A queued turn has no writer reservation. It can be retried after the
+        // current writer has qualified completion or independent resolution.
+        // The S02 direct-work API retains its established refusal semantics.
+        if (!context && state.get(intent.id).state === "ready")
           state.hold(intent.id, "Workspace has unresolved execution");
         return state.get(intent.id);
       }
@@ -321,7 +518,16 @@ export class StandaloneService {
       if (!state.bindTurn(intent.id, turnId))
         throw new Error("Turn binding was held or changed");
       const outcome = await runtime.waitForTurn(threadId, turnId);
-      if (outcome === "completed") state.complete(intent.id, threadId, turnId);
+      if (
+        outcome === "completed" &&
+        (this.callbacks.get(workId)?.size ?? 0) > 0
+      )
+        state.hold(
+          intent.id,
+          "Ensemble callback is unfinished at terminal status",
+        );
+      else if (outcome === "completed")
+        state.complete(intent.id, threadId, turnId);
       else state.hold(intent.id, "Bound turn failed or was interrupted");
     } catch (error) {
       if (state.get(intent.id).state !== "held")
@@ -341,5 +547,10 @@ export class StandaloneService {
   private requireRuntime(): Runtime {
     if (!this.runtime) throw new Error("Runtime unavailable");
     return this.runtime;
+  }
+
+  private requireWorkspaces(): WorkspaceManager {
+    if (!this.workspaces) throw new Error("Service is not started");
+    return this.workspaces;
   }
 }

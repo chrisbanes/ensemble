@@ -17,9 +17,200 @@ const intentSchema = z.object({
 });
 export type ExecutionIntent = z.infer<typeof intentSchema>;
 
+export interface TaskExecutionContext {
+  taskId: string;
+  assignmentId: string;
+  assignmentVersion: number;
+  instructionsRevision: number;
+  profileRevision: number;
+}
+
+export interface TaskExecutionBinding extends TaskExecutionContext {
+  workId: string;
+  conversationRevision: number;
+}
+
 /** No method retries an uncertain submission. Callers must create a new work ID. */
 export class ExecutionState {
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database) {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS assignment_conversations (
+      assignmentId TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision > 0)
+    );
+    CREATE TABLE IF NOT EXISTS task_execution_bindings (
+      workId TEXT PRIMARY KEY REFERENCES execution_intents(workId),
+      taskId TEXT NOT NULL, assignmentId TEXT NOT NULL,
+      assignmentVersion INTEGER NOT NULL, instructionsRevision INTEGER NOT NULL,
+      profileRevision INTEGER NOT NULL, conversationRevision INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_writer_holds (
+      taskId TEXT PRIMARY KEY, reason TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_execution_results (
+      workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
+      payload TEXT NOT NULL
+    )`);
+  }
+
+  stopTask(taskId: string): void {
+    const id = z.string().uuid().parse(taskId);
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO task_writer_holds (taskId, reason) VALUES (?, 'Task stopped')",
+      )
+      .run(id);
+    this.db
+      .prepare(`UPDATE execution_intents SET state = 'held', reason = 'Task stopped'
+      WHERE workId IN (SELECT workId FROM task_execution_bindings WHERE taskId = ?)
+      AND state IN ('submitting','running')`)
+      .run(id);
+  }
+
+  resumeTask(taskId: string): void {
+    this.db
+      .prepare("DELETE FROM task_writer_holds WHERE taskId = ?")
+      .run(z.string().uuid().parse(taskId));
+  }
+
+  taskHold(taskId: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT reason FROM task_writer_holds WHERE taskId = ?")
+      .get(taskId) as { reason: string } | undefined;
+    return row?.reason;
+  }
+
+  bindTask(
+    workId: string,
+    context: TaskExecutionContext,
+  ): TaskExecutionBinding {
+    const input = z
+      .object({
+        taskId: z.string().uuid(),
+        assignmentId: z.string().uuid(),
+        assignmentVersion: z.number().int().positive(),
+        instructionsRevision: z.number().int().positive(),
+        profileRevision: z.number().int().positive(),
+      })
+      .parse(context);
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO assignment_conversations (assignmentId, revision) VALUES (?, 1)",
+      )
+      .run(input.assignmentId);
+    const revision = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT revision FROM assignment_conversations WHERE assignmentId = ?",
+          )
+          .get(input.assignmentId) as { revision: number }
+      ).revision,
+    );
+    this.db
+      .prepare(`INSERT OR IGNORE INTO task_execution_bindings
+      (workId, taskId, assignmentId, assignmentVersion, instructionsRevision, profileRevision, conversationRevision)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        workId,
+        input.taskId,
+        input.assignmentId,
+        input.assignmentVersion,
+        input.instructionsRevision,
+        input.profileRevision,
+        revision,
+      );
+    const binding = this.taskBinding(workId);
+    if (
+      !binding ||
+      Object.entries({ ...input, workId, conversationRevision: revision }).some(
+        ([key, value]) => binding[key as keyof TaskExecutionBinding] !== value,
+      )
+    )
+      throw new Error(
+        "Work ID already bound to another task or assignment revision",
+      );
+    return binding;
+  }
+
+  taskBinding(workId: string): TaskExecutionBinding | undefined {
+    return this.db
+      .prepare("SELECT * FROM task_execution_bindings WHERE workId = ?")
+      .get(workId) as TaskExecutionBinding | undefined;
+  }
+
+  replaceConversation(assignmentId: string): number {
+    const id = z.string().uuid().parse(assignmentId);
+    const unresolved = this.db
+      .prepare(`SELECT 1 FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      WHERE b.assignmentId = ? AND e.state IN ('held','submitting','running') LIMIT 1`)
+      .get(id);
+    if (unresolved) throw new Error("Assignment has unresolved execution");
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO assignment_conversations (assignmentId, revision) VALUES (?, 1)",
+      )
+      .run(id);
+    this.db
+      .prepare(
+        "UPDATE assignment_conversations SET revision = revision + 1 WHERE assignmentId = ?",
+      )
+      .run(id);
+    return Number(
+      (
+        this.db
+          .prepare(
+            "SELECT revision FROM assignment_conversations WHERE assignmentId = ?",
+          )
+          .get(id) as { revision: number }
+      ).revision,
+    );
+  }
+
+  isCurrentResult(workId: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      JOIN assignment_conversations c ON c.assignmentId = b.assignmentId
+      JOIN domain_assignments a ON a.id = b.assignmentId
+      WHERE b.workId = ? AND e.state = 'completed' AND
+        c.revision = b.conversationRevision AND a.version = b.assignmentVersion
+      LIMIT 1`)
+        .get(workId) !== undefined
+    );
+  }
+
+  recordResult(workId: string, payload: string): boolean {
+    const value = z.string().max(16000).parse(payload);
+    const inserted = this.db
+      .prepare(`INSERT OR IGNORE INTO task_execution_results (workId, payload)
+      SELECT b.workId, ? FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      JOIN assignment_conversations c ON c.assignmentId = b.assignmentId
+      JOIN domain_assignments a ON a.id = b.assignmentId
+      WHERE b.workId = ? AND e.state = 'completed'
+      AND c.revision = b.conversationRevision AND a.version = b.assignmentVersion
+      RETURNING workId`)
+      .get(value, workId);
+    if (inserted) return true;
+    const existing = this.db
+      .prepare("SELECT payload FROM task_execution_results WHERE workId = ?")
+      .get(workId) as { payload: string } | undefined;
+    if (existing && existing.payload !== value)
+      throw new Error("Result already recorded with different content");
+    return existing !== undefined && this.isCurrentResult(workId);
+  }
+
+  hasUnresolvedTask(taskId: string): boolean {
+    return (
+      this.taskHold(taskId) !== undefined ||
+      this.db
+        .prepare(`SELECT 1 FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      WHERE b.taskId = ? AND e.state IN ('ready','held','submitting','running') LIMIT 1`)
+        .get(taskId) !== undefined
+    );
+  }
 
   create(workId: string, prompt: string, workspace: string): ExecutionIntent {
     const input = z
@@ -89,6 +280,10 @@ export class ExecutionState {
           `UPDATE execution_intents SET state = 'submitting', reason = NULL
            WHERE id = ? AND state = 'ready'
            AND NOT EXISTS (
+             SELECT 1 FROM task_execution_bindings b JOIN task_writer_holds h ON h.taskId = b.taskId
+             WHERE b.workId = execution_intents.workId
+           )
+           AND NOT EXISTS (
              SELECT 1 FROM execution_intents AS other
              WHERE other.workspace = execution_intents.workspace
              AND other.id != execution_intents.id
@@ -155,6 +350,14 @@ export class ExecutionState {
     this.db
       .prepare(
         "UPDATE execution_intents SET state = 'held', reason = ? WHERE id = ? AND state != 'completed'",
+      )
+      .run(reason, id);
+  }
+
+  holdTerminalConflict(id: string, reason: string): void {
+    this.db
+      .prepare(
+        "UPDATE execution_intents SET state = 'held', reason = ? WHERE id = ? AND state IN ('submitting','running','completed')",
       )
       .run(reason, id);
   }

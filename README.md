@@ -19,8 +19,9 @@ The repository contains a reusable TypeScript/SQLite coordination core in
 `src/core`, plus the S02 standalone bootstrap and Codex App Server adapter in
 `src/standalone`. The bootstrap owns a marked fresh data directory, persists
 execution intent and binding, and holds uncertain work across restart. The BB
-plugin, packaging and integration harness have been removed. Scheduler, workspace
-manager, assignment router and authenticated remote operator UI are still pending.
+plugin, packaging and integration harness have been removed. The task workspace
+lifecycle and task-bound writer admission are implemented as service interfaces.
+The scheduler, assignment router and authenticated remote operator UI are still pending.
 S04a adds versioned local domain commands and a minimal loopback operator interface;
 it does not dispatch assignments. The installed Haze
 prototype stays in place until the reviewed operational cutover.
@@ -73,6 +74,20 @@ cross-process ownership of the marked directory.
 runs. It has no remote access or separate login; #703 owns that foundation.
 The [S04a boundary](docs/design/s04a-command-boundary.md) describes the command,
 read-view and admission records available to dependent slices.
+
+`StandaloneService.provisionTask` durably binds a domain task to one retained
+workspace, including repository-free and multiple-repository tasks.
+`submitTask` resolves that binding and the captured assignment revisions before
+attempting writer admission. A waiting task turn stays ready without reserving a
+writer; a bound successful terminal report admits a successor only after registered
+Ensemble callbacks finish and no hold or known survivor remains. `stopTask` and
+uncertain execution retain holds across restart; `resumeTask` clears only the Stop
+hold. `replaceConversation` keeps the assignment snapshots while advancing its
+conversation revision, and `recordTaskResult` rejects early or stale results.
+`archiveTask` requires delivery and preservation evidence and refuses unresolved
+task work. These are caller interfaces for later scheduler and result-delivery
+integration, not automatic scheduling or physical containment. An untracked
+detached child may overlap a later writer after qualified normal success.
 
 ## Design documents
 

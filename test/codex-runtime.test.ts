@@ -5,6 +5,33 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CodexRuntime } from "../src/standalone/codex.js";
 
+test("conflicting and identity-free terminal reports are surfaced as anomalies", async () => {
+  const runtime = new CodexRuntime();
+  const anomalies: string[] = [];
+  runtime.onTerminalAnomaly((event) => anomalies.push(event.reason));
+  const receive = (message: unknown) =>
+    (runtime as unknown as { receive(line: string): void }).receive(
+      JSON.stringify(message),
+    );
+  receive({
+    method: "turn/completed",
+    params: { threadId: "thread", turn: { id: "turn", status: "completed" } },
+  });
+  receive({
+    method: "turn/completed",
+    params: { threadId: "thread", turn: { id: "turn", status: "failed" } },
+  });
+  receive({
+    method: "turn/completed",
+    params: { turn: { status: "completed" } },
+  });
+  assert.deepEqual(anomalies, [
+    "Conflicting terminal status",
+    "Missing terminal identity or status",
+  ]);
+  assert.equal(await runtime.waitForTurn("thread", "turn"), "failed");
+});
+
 function bounded<T>(action: Promise<T>, milliseconds: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
@@ -71,7 +98,7 @@ for await (const line of lines) {
   }
 });
 
-test("stdin closure during initialization rejects promptly", {
+test("App Server exit during initialization rejects promptly", {
   timeout: 7000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-init-pipe-"));
@@ -80,12 +107,10 @@ test("stdin closure during initialization rejects promptly", {
     executable,
     String.raw`#!/usr/bin/env node
 import { createInterface } from "node:readline";
-import { closeSync } from "node:fs";
 for await (const line of createInterface({input: process.stdin})) {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
-    process.stdout.write(JSON.stringify({id: message.id, result: {}}) + "\n", () => closeSync(0));
-    setInterval(() => {}, 1000);
+    process.stdout.write(JSON.stringify({id: message.id, result: {}}) + "\n", () => process.exit(0));
   }
 }
 `,
@@ -95,7 +120,7 @@ for await (const line of createInterface({input: process.stdin})) {
   try {
     await assert.rejects(
       bounded(runtime.start(), 3000),
-      /stdin closed|EPIPE|Runtime stopped/,
+      /App Server exited|Runtime stopped/,
     );
   } finally {
     await runtime.stop();
