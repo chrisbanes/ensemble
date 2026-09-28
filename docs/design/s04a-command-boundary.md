@@ -23,12 +23,15 @@ scoped agent, but its task and project identities must match and its profile mus
 be the project lead or an operator-configured permitted candidate. Local tasks
 start unready, projects start paused, and neither routing opt-in nor an assignment
 record grants execution admission. Profile revocation is checked against current
-profile state even when an assignment retains older revision snapshots.
+profile state even when an assignment retains older revision snapshots. A draft
+project may have no lead, but it cannot admit work until its configured lead
+profile exists and is active; the existing-project form can set or replace it.
 
 For #691, `admission(taskId)` returns a structured eligibility result with
-project pause, task readiness/state, imported-blocker state, and unfinished local
-dependencies. `assignmentAdmission(assignmentId)` adds current profile revocation
-and assignment hold state. These are read-side inputs to the later scheduler;
+project pause, active project lead, task readiness/state, imported-blocker state,
+and unfinished local dependencies. `assignmentAdmission(assignmentId)` adds
+current profile revocation and assignment hold state. These are read-side inputs
+to the later scheduler;
 the scheduler must also check its own writer, runtime, capacity, and permission
 holds at effective admission. Imported-blocker `unknown` is persisted and holds
 execution after restart. Live GitHub blocker observations belong to S06.
@@ -38,11 +41,16 @@ The identity, candidate/profile revisions, guidance revision, model/question,
 judgment, disposition, assignment identity, and result destination remain
 readable after restart. Same-payload retries replay; competing operation IDs or
 changed payloads conflict. An `assigned` disposition requires assignment details;
-`recordRouting` checks current task, guidance, candidate and admission state and
+`recordRouting` checks current task, guidance, candidate, opt-in and admission
+state for every new disposition. A delayed fallback after a task, routing or hold
+change is refused rather than recorded as actionable; a matching retry of an
+already committed operation still replays its receipt. An assigned disposition
 creates the pending assignment in the same transaction as the operation. A stale
 or held decision creates neither record. This slice does not call TypeSafe or
 consume model responses. Downstream routing rechecks admission before launch.
-A routing operation is not an execution intent.
+A routing operation is not an execution intent. When routing is disabled, an
+explicit lead allocation can still use the scoped `assignment.create` command
+without a routing operation.
 
 For #703, `LocalOperatorUi` supplies project, task, profile, assignment, routing,
 and dependency forms plus HTML read views over the same commands. `LocalOperatorHttp`

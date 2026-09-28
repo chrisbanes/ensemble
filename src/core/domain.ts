@@ -397,6 +397,14 @@ export class DomainStore {
     const project = this.project(String(task.projectId));
     const reasons: string[] = [];
     if (project.paused) reasons.push("project-paused");
+    const lead = project.leadProfileId
+      ? this.one(
+          "SELECT revoked FROM profiles WHERE id = ?",
+          String(project.leadProfileId),
+        )
+      : undefined;
+    if (!lead) reasons.push("project-lead-unconfigured");
+    else if (lead.revoked) reasons.push("project-lead-revoked");
     if (!task.ready) reasons.push("task-unready");
     if (task.state !== "open") reasons.push("task-not-open");
     if (task.importedBlockers !== "clear")
@@ -474,32 +482,33 @@ export class DomainStore {
       const task = this.task(data.taskId);
       if (task.projectId !== data.projectId)
         throw new Error("Task belongs to another project");
+      const routing = this.routing(data.projectId);
+      if (
+        task.version !== data.taskVersion ||
+        routing.version !== data.guidanceRevision ||
+        !routing.enabled ||
+        !this.admission(data.taskId).eligible
+      )
+        throw new Error("Routing decision is stale or task is held");
+      const candidateIds = JSON.parse(
+        String(routing.candidateProfileIds),
+      ) as string[];
+      if (
+        canonical(candidateIds) !==
+        canonical(Object.keys(data.candidateRevisions).sort())
+      )
+        throw new Error("Routing candidate set changed");
+      for (const profileId of candidateIds)
+        if (
+          this.activeProfile(profileId).version !==
+          data.candidateRevisions[profileId]
+        )
+          throw new Error("Candidate profile revision changed");
       if (data.disposition === "assigned") {
         if (!data.assignmentId || !data.assignment)
           throw new Error("Assigned routing requires an assignment");
-        const routing = this.routing(data.projectId);
-        if (
-          task.version !== data.taskVersion ||
-          routing.version !== data.guidanceRevision ||
-          !routing.enabled ||
-          !routing.credentialAvailable ||
-          !this.admission(data.taskId).eligible
-        )
-          throw new Error("Routing decision is stale or task is held");
-        const candidateIds = JSON.parse(
-          String(routing.candidateProfileIds),
-        ) as string[];
-        if (
-          canonical(candidateIds) !==
-          canonical(Object.keys(data.candidateRevisions).sort())
-        )
-          throw new Error("Routing candidate set changed");
-        for (const profileId of candidateIds)
-          if (
-            this.activeProfile(profileId).version !==
-            data.candidateRevisions[profileId]
-          )
-            throw new Error("Candidate profile revision changed");
+        if (!routing.credentialAvailable)
+          throw new Error("Routing credentials unavailable");
         if (!candidateIds.includes(data.assignment.profileId))
           throw new Error("Selected profile is not a candidate");
         this.apply({

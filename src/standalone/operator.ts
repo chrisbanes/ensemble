@@ -69,7 +69,7 @@ export class LocalOperatorUi {
           `<li><a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)})</li>`,
       )
       .join("");
-    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + field("outcome") + field("ready", "1", "checkbox"))}${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("name", String(project.name)) + field("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)))}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; credential ${routing.credentialAvailable ? "configured" : "unavailable"}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + field("guidance", String(routing.guidance)) + field("credentialRef") + field("candidateProfileIds", String(routing.candidateProfileIds)))}</main>`;
+    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + field("outcome") + field("ready", "1", "checkbox"))}${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("name", String(project.name)) + field("leadProfileId", String(project.leadProfileId ?? "")) + field("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)))}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; credential ${routing.credentialAvailable ? "configured" : "unavailable"}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + field("guidance", String(routing.guidance)) + field("credentialRef") + field("candidateProfileIds", String(routing.candidateProfileIds)))}</main>`;
   }
 
   task(taskId: string): string {
@@ -128,6 +128,10 @@ export class LocalOperatorUi {
           projectId: required("projectId"),
           expectedVersion: version(),
           name: required("name"),
+          leadProfileId:
+            fields.leadProfileId === undefined
+              ? undefined
+              : fields.leadProfileId || null,
           instructions: fields.instructions ?? "",
           paused: fields.paused === "1",
         };

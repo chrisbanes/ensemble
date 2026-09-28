@@ -127,6 +127,89 @@ test("loopback HTTP serves and accepts local operator forms", async () => {
   }
 });
 
+test("draft project stays held until an active lead is selected in its form", async () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    new Store(db).ensureHost("test");
+    const domain = new DomainStore(db);
+    domain.migrate();
+    const ui = new LocalOperatorUi(domain);
+    const draft = (await ui.submit({
+      type: "project.create",
+      name: "Draft",
+    })) as { id: string };
+    const task = (await ui.submit({
+      type: "task.create",
+      projectId: draft.id,
+      title: "Ready work",
+      outcome: "Ship",
+      ready: "1",
+    })) as { id: string };
+    await ui.submit({
+      type: "project.configure",
+      projectId: draft.id,
+      expectedVersion: "1",
+      name: "Draft",
+      paused: "",
+    });
+    assert.deepEqual(domain.admission(task.id).reasons, [
+      "project-lead-unconfigured",
+    ]);
+    assert.match(ui.project(draft.id), /name="leadProfileId"/);
+    const lead = (await ui.submit({
+      type: "profile.create",
+      name: "Lead",
+      instructions: "Own outcomes",
+      capabilities: "coordinate",
+    })) as { id: string };
+    await ui.submit({
+      type: "project.configure",
+      projectId: draft.id,
+      expectedVersion: "2",
+      name: "Draft",
+      leadProfileId: lead.id,
+      paused: "",
+    });
+    assert.deepEqual(domain.admission(task.id), {
+      eligible: true,
+      reasons: [],
+    });
+    await ui.submit({
+      type: "profile.configure",
+      profileId: lead.id,
+      expectedVersion: "1",
+      name: "Lead",
+      instructions: "Own outcomes",
+      capabilities: "coordinate",
+      revoked: "1",
+    });
+    assert.deepEqual(domain.admission(task.id).reasons, [
+      "project-lead-revoked",
+    ]);
+    const replacement = (await ui.submit({
+      type: "profile.create",
+      name: "Replacement",
+      instructions: "Own outcomes",
+      capabilities: "coordinate",
+    })) as { id: string };
+    await ui.submit({
+      type: "project.configure",
+      projectId: draft.id,
+      expectedVersion: "3",
+      name: "Draft",
+      leadProfileId: replacement.id,
+      paused: "",
+    });
+    assert.deepEqual(domain.admission(task.id), {
+      eligible: true,
+      reasons: [],
+    });
+  } finally {
+    db.close();
+  }
+});
+
 test("standalone startup migrates and exposes the same local operator boundary", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-operator-service-"));
   const runtime = () => ({

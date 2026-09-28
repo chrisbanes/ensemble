@@ -240,7 +240,7 @@ test("routing settings, provenance and destinations persist without credential v
       taskId: a,
       title: "Task",
       outcome: "Ship",
-      ready: false,
+      ready: true,
     });
     assert.equal(f.domain.routing(p).enabled, 0);
     const routing = run(f.domain, {
@@ -258,6 +258,13 @@ test("routing settings, provenance and destinations persist without credential v
       1,
     );
     assert.doesNotMatch(JSON.stringify(routing), /TYPESAFE_KEY/);
+    run(f.domain, {
+      type: "project.configure",
+      actor: "operator",
+      projectId: p,
+      expectedVersion: 1,
+      paused: false,
+    });
     assert.throws(
       () =>
         run(f.domain, {
@@ -387,6 +394,249 @@ test("routing assignment and operation commit together after revision and admiss
   }
 });
 
+test("delayed fallback cannot become actionable after routing or admission changes", () => {
+  for (const change of [
+    "task",
+    "opt-out",
+    "pause",
+    "guidance",
+    "candidates",
+    "blocker",
+    "profile",
+  ] as const) {
+    const f = fixture();
+    try {
+      run(f.domain, {
+        type: "profile.create",
+        actor: "operator",
+        profileId: profile,
+        name: "Lead",
+        instructions: "Own",
+        capabilities: "coordinate",
+      });
+      run(f.domain, {
+        type: "project.create",
+        actor: "operator",
+        projectId: p,
+        name: "Alpha",
+        leadProfileId: profile,
+      });
+      run(f.domain, {
+        type: "task.create",
+        actor: "operator",
+        projectId: p,
+        taskId: a,
+        title: "Task",
+        outcome: "Ship",
+        ready: true,
+      });
+      run(f.domain, {
+        type: "project.configure",
+        actor: "operator",
+        projectId: p,
+        expectedVersion: 1,
+        paused: false,
+      });
+      run(f.domain, {
+        type: "routing.configure",
+        actor: "operator",
+        projectId: p,
+        expectedVersion: 1,
+        enabled: true,
+        guidance: "Fit",
+        credentialRef: null,
+        candidateProfileIds: [profile],
+      });
+      const input = {
+        id: key(),
+        projectId: p,
+        taskId: a,
+        taskVersion: 1,
+        assignmentId: null,
+        candidateRevisions: { [profile]: 1 },
+        guidanceRevision: 2,
+        model: "deterministic",
+        question: "Who fits?",
+        judgment: null,
+        disposition: "lead-fallback",
+        resultDestination: "lead:task",
+      };
+      switch (change) {
+        case "task":
+          run(f.domain, {
+            type: "task.configure",
+            actor: "operator",
+            projectId: p,
+            taskId: a,
+            expectedVersion: 1,
+            outcome: "Changed",
+          });
+          break;
+        case "opt-out":
+          run(f.domain, {
+            type: "routing.configure",
+            actor: "operator",
+            projectId: p,
+            expectedVersion: 2,
+            enabled: false,
+            guidance: "Fit",
+            credentialRef: null,
+            candidateProfileIds: [profile],
+          });
+          break;
+        case "pause":
+          run(f.domain, {
+            type: "project.configure",
+            actor: "operator",
+            projectId: p,
+            expectedVersion: 2,
+            paused: true,
+          });
+          break;
+        case "guidance":
+          run(f.domain, {
+            type: "routing.configure",
+            actor: "operator",
+            projectId: p,
+            expectedVersion: 2,
+            enabled: true,
+            guidance: "New fit",
+            credentialRef: null,
+            candidateProfileIds: [profile],
+          });
+          break;
+        case "candidates":
+          run(f.domain, {
+            type: "routing.configure",
+            actor: "operator",
+            projectId: p,
+            expectedVersion: 2,
+            enabled: true,
+            guidance: "Fit",
+            credentialRef: null,
+            candidateProfileIds: [],
+          });
+          break;
+        case "blocker":
+          run(f.domain, {
+            type: "imported-blockers.set",
+            actor: "operator",
+            projectId: p,
+            taskId: a,
+            expectedVersion: 1,
+            state: "unknown",
+          });
+          break;
+        case "profile":
+          run(f.domain, {
+            type: "profile.configure",
+            actor: "operator",
+            profileId: profile,
+            expectedVersion: 1,
+            capabilities: "new",
+          });
+          break;
+      }
+      assert.throws(
+        () => f.domain.recordRouting(input),
+        /stale|changed|revision/,
+        change,
+      );
+      assert.throws(() => f.domain.routingOperation(input.id), /Unknown/);
+      if (change === "opt-out") {
+        const explicit = run(f.domain, {
+          type: "assignment.create",
+          actor: "agent",
+          projectId: p,
+          taskId: a,
+          assignmentId: assignment,
+          profileId: profile,
+          brief: "Lead allocates",
+          resultDestination: "lead:task",
+          requesterAssignmentId: null,
+        }) as { state: string };
+        assert.equal(explicit.state, "pending");
+      }
+    } finally {
+      f.close();
+    }
+  }
+});
+
+test("matching fallback retry replays after later state changes", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Lead",
+      instructions: "Own",
+      capabilities: "coordinate",
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Alpha",
+      leadProfileId: profile,
+    });
+    run(f.domain, {
+      type: "task.create",
+      actor: "operator",
+      projectId: p,
+      taskId: a,
+      title: "Task",
+      outcome: "Ship",
+      ready: true,
+    });
+    run(f.domain, {
+      type: "project.configure",
+      actor: "operator",
+      projectId: p,
+      expectedVersion: 1,
+      paused: false,
+    });
+    run(f.domain, {
+      type: "routing.configure",
+      actor: "operator",
+      projectId: p,
+      expectedVersion: 1,
+      enabled: true,
+      guidance: "Fit",
+      credentialRef: null,
+      candidateProfileIds: [profile],
+    });
+    const input = {
+      id: key(),
+      projectId: p,
+      taskId: a,
+      taskVersion: 1,
+      assignmentId: null,
+      candidateRevisions: { [profile]: 1 },
+      guidanceRevision: 2,
+      model: "deterministic",
+      question: "Who fits?",
+      judgment: null,
+      disposition: "lead-fallback",
+      resultDestination: "lead:task",
+    };
+    const first = f.domain.recordRouting(input);
+    run(f.domain, {
+      type: "task.configure",
+      actor: "operator",
+      projectId: p,
+      taskId: a,
+      expectedVersion: 1,
+      outcome: "Changed",
+    });
+    f.reopen();
+    assert.deepEqual(f.domain.recordRouting(input), first);
+  } finally {
+    f.close();
+  }
+});
+
 test("dependency authority, cycle and unknown imported-blocker holds survive restart", () => {
   const f = fixture();
   try {
@@ -486,6 +736,7 @@ test("dependency authority, cycle and unknown imported-blocker holds survive res
     assert.deepEqual(f.domain.dependencies(a), [b]);
     assert.deepEqual(f.domain.admission(a).reasons, [
       "project-paused",
+      "project-lead-unconfigured",
       "imported-blockers-unknown",
       "local-dependency",
     ]);
