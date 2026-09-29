@@ -20,7 +20,9 @@ The repository contains a reusable TypeScript/SQLite coordination core in
 `src/standalone`. The bootstrap owns a marked fresh data directory, persists
 execution intent and binding, and holds uncertain work across restart. The BB
 plugin, packaging and integration harness have been removed. Scheduler, workspace
-manager, assignment router and operator UI are still pending. The installed Haze
+manager, assignment router and authenticated remote operator UI are still pending.
+S04a adds versioned local domain commands and a minimal loopback operator interface;
+it does not dispatch assignments. The installed Haze
 prototype stays in place until the reviewed operational cutover.
 
 ## Planning checkpoint
@@ -54,7 +56,7 @@ npm run check
 checks cover the retained core and S02 bootstrap fixtures. They do not qualify
 the later scheduler or UI integration.
 
-The S02 command surface is `npm run service -- <serve|run|list> ABSOLUTE_DATA_DIR`.
+The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
 and optionally `previousWorkId` for a follow-up in a completed conversation.
 `serve` initializes the database and App Server, then waits for SIGINT or SIGTERM;
@@ -67,6 +69,10 @@ partial marker whose contents match the beginning of the expected marker.
 Unrelated unmarked contents, including prototype data, remain refused.
 `standalone.sqlite` stores service data; `.ensemble-owner.sqlite` holds the
 SQLite ownership transaction that excludes a second service process.
+`operator` serves the local forms at `http://127.0.0.1:8787/` while the service
+runs. It has no remote access or separate login; #703 owns that foundation.
+The [S04a boundary](docs/design/s04a-command-boundary.md) describes the command,
+read-view and admission records available to dependent slices.
 
 ## Design documents
 
