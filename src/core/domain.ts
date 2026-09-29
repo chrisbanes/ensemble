@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./store.js";
 
@@ -6,6 +6,7 @@ const id = z.string().uuid();
 const label = z.string().trim().min(1).max(512);
 const prose = z.string().max(16000);
 const actor = z.enum(["operator", "agent"]);
+const defaultProjectLimit = 2 as const;
 const commandBase = { key: id, actor };
 
 const commandSchema = z.discriminatedUnion("type", [
@@ -144,9 +145,30 @@ const commandSchema = z.discriminatedUnion("type", [
       state: z.enum(["clear", "blocked", "unknown"]),
     })
     .strict(),
+  z
+    .object({
+      ...commandBase,
+      type: z.literal("capacity.configure"),
+      globalLimit: z.number().int().positive(),
+      projectOverrides: z
+        .record(id, z.number().int().positive().nullable())
+        .default({}),
+    })
+    .strict(),
 ]);
 
 export type DomainCommand = z.input<typeof commandSchema>;
+export type CapacityConfigureCommand = Extract<
+  DomainCommand,
+  { type: "capacity.configure" }
+>;
+export interface CapacityLimits {
+  globalLimit: number;
+  defaultProjectLimit: 2;
+  projectOverrides: Record<string, number>;
+  currentUsage: { global: number; projects: Record<string, number> };
+  effectiveProjectLimits: Record<string, number>;
+}
 type ParsedCommand = z.output<typeof commandSchema>;
 type Row = Record<string, string | number | null>;
 
@@ -168,7 +190,10 @@ function canonical(value: unknown): string {
 
 /** Durable S04a command and read boundary. All commands use one SQLite transaction. */
 export class DomainStore {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly onChange?: () => void,
+  ) {}
 
   migrate(): void {
     this.db.exec("BEGIN IMMEDIATE");
@@ -212,6 +237,14 @@ export class DomainStore {
           resultDestination TEXT NOT NULL, requesterAssignmentId TEXT,
           state TEXT NOT NULL CHECK(state IN ('pending','running','completed','held'))
         );
+        CREATE TABLE IF NOT EXISTS task_lead_bindings (
+          taskId TEXT PRIMARY KEY REFERENCES domain_tasks(id),
+          projectId TEXT NOT NULL REFERENCES domain_projects(id),
+          profileId TEXT NOT NULL REFERENCES profiles(id),
+          profileRevision INTEGER NOT NULL,
+          instructionsRevision INTEGER NOT NULL,
+          assignmentId TEXT NOT NULL UNIQUE
+        );
         CREATE TABLE IF NOT EXISTS local_dependencies (
           taskId TEXT NOT NULL REFERENCES domain_tasks(id), blockerTaskId TEXT NOT NULL REFERENCES domain_tasks(id),
           PRIMARY KEY(taskId, blockerTaskId), CHECK(taskId != blockerTaskId)
@@ -219,6 +252,14 @@ export class DomainStore {
         CREATE TABLE IF NOT EXISTS command_receipts (
           scope TEXT NOT NULL, key TEXT NOT NULL, payloadHash TEXT NOT NULL,
           result TEXT NOT NULL, PRIMARY KEY(scope, key)
+        );
+        CREATE TABLE IF NOT EXISTS scheduler_capacity_limits (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          globalLimit INTEGER NOT NULL CHECK(globalLimit > 0)
+        );
+        CREATE TABLE IF NOT EXISTS scheduler_project_capacity_limits (
+          projectId TEXT PRIMARY KEY REFERENCES domain_projects(id),
+          projectLimit INTEGER NOT NULL CHECK(projectLimit > 0)
         );
         CREATE TABLE IF NOT EXISTS routing_operations (
           id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES domain_projects(id),
@@ -236,6 +277,11 @@ export class DomainStore {
         throw new Error("Unsupported domain schema version");
       if (!version)
         this.db.prepare("INSERT INTO domain_schema (version) VALUES (1)").run();
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO scheduler_capacity_limits (singleton, globalLimit) VALUES (1, 4)",
+        )
+        .run();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -248,7 +294,9 @@ export class DomainStore {
     const scope =
       "projectId" in command
         ? command.projectId
-        : `profile:${command.profileId}`;
+        : "profileId" in command
+          ? `profile:${command.profileId}`
+          : "system:capacity";
     const hash = createHash("sha256").update(canonical(command)).digest("hex");
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -270,6 +318,7 @@ export class DomainStore {
         )
         .run(scope, command.key, hash, JSON.stringify(result));
       this.db.exec("COMMIT");
+      this.onChange?.();
       return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -282,6 +331,55 @@ export class DomainStore {
       "SELECT p.id, p.name, p.version, p.paused, p.leadProfileId, p.instructionsRevision, i.instructions FROM domain_projects p JOIN project_instruction_revisions i ON i.projectId = p.id AND i.revision = p.instructionsRevision WHERE p.id = ?",
       id.parse(projectId),
     );
+  }
+
+  capacityLimits(projectIds: string[] = []): CapacityLimits {
+    const config = this.required(
+      "SELECT globalLimit FROM scheduler_capacity_limits WHERE singleton = 1",
+    );
+    const projectOverrides: Record<string, number> = Object.fromEntries(
+      (
+        this.db
+          .prepare(
+            "SELECT projectId, projectLimit FROM scheduler_project_capacity_limits ORDER BY projectId",
+          )
+          .all() as Row[]
+      ).map((row) => [String(row.projectId), Number(row.projectLimit)]),
+    );
+    const effectiveProjectLimits: Record<string, number> = {};
+    for (const projectId of new Set(
+      projectIds.map((value) => id.parse(value)),
+    )) {
+      this.project(projectId);
+      effectiveProjectLimits[projectId] =
+        projectOverrides[projectId] ?? defaultProjectLimit;
+    }
+
+    const currentUsage = { global: 0, projects: {} as Record<string, number> };
+    if (
+      this.one(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'execution_capacity_reservations'",
+      )
+    ) {
+      const reservations = this.db
+        .prepare(
+          "SELECT projectId, COUNT(*) AS count FROM execution_capacity_reservations GROUP BY projectId",
+        )
+        .all() as Row[];
+      for (const row of reservations) {
+        const count = Number(row.count);
+        currentUsage.global += count;
+        if (row.projectId !== null)
+          currentUsage.projects[String(row.projectId)] = count;
+      }
+    }
+    return {
+      globalLimit: Number(config.globalLimit),
+      defaultProjectLimit,
+      projectOverrides,
+      currentUsage,
+      effectiveProjectLimits,
+    };
   }
 
   projects(): Row[] {
@@ -314,6 +412,99 @@ export class DomainStore {
         "SELECT id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, state FROM domain_assignments WHERE taskId = ? ORDER BY rowid",
       )
       .all(id.parse(taskId)) as Row[];
+  }
+
+  pendingAssignments(): Row[] {
+    return this.db
+      .prepare(`SELECT id, taskId, projectId, version, profileId,
+        profileRevision, instructionsRevision, brief, resultDestination,
+        requesterAssignmentId, state
+        FROM domain_assignments WHERE state = 'pending' ORDER BY rowid`)
+      .all() as Row[];
+  }
+
+  readyTasksWithLead(): Row[] {
+    return this.db
+      .prepare(`SELECT t.id, t.projectId, t.version, p.leadProfileId
+        FROM domain_tasks t JOIN domain_projects p ON p.id = t.projectId
+        WHERE t.ready = 1 AND t.state = 'open' AND p.leadProfileId IS NOT NULL
+        ORDER BY t.rowid`)
+      .all() as Row[];
+  }
+
+  leadBindings(): Row[] {
+    return this.db
+      .prepare(`SELECT taskId, projectId, profileId, profileRevision,
+        instructionsRevision, assignmentId FROM task_lead_bindings ORDER BY rowid`)
+      .all() as Row[];
+  }
+
+  ensureLeadBinding(taskId: string): Row | undefined {
+    const key = id.parse(taskId);
+    const existing = this.db
+      .prepare("SELECT * FROM task_lead_bindings WHERE taskId = ?")
+      .get(key) as Row | undefined;
+    if (existing) return existing;
+    const task = this.task(key);
+    const project = this.project(String(task.projectId));
+    const leadProfileId = present(project, "leadProfileId");
+    if (!leadProfileId) return undefined;
+    const profile = this.activeProfile(String(leadProfileId));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`INSERT OR IGNORE INTO task_lead_bindings
+          (taskId, projectId, profileId, profileRevision, instructionsRevision, assignmentId)
+          VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(
+          key,
+          present(task, "projectId"),
+          leadProfileId,
+          present(profile, "version"),
+          present(project, "instructionsRevision"),
+          randomUUID(),
+        );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.db
+      .prepare("SELECT * FROM task_lead_bindings WHERE taskId = ?")
+      .get(key) as Row;
+  }
+
+  ensureLeadAssignment(taskId: string): Row | undefined {
+    const binding = this.ensureLeadBinding(taskId);
+    if (!binding) return undefined;
+    const assignmentId = present(binding, "assignmentId");
+    const existing = this.db
+      .prepare("SELECT * FROM domain_assignments WHERE id = ?")
+      .get(assignmentId) as Row | undefined;
+    if (existing) return existing;
+    const task = this.task(taskId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`INSERT OR IGNORE INTO domain_assignments
+          (id, taskId, projectId, version, profileId, profileRevision,
+            instructionsRevision, brief, resultDestination, requesterAssignmentId, state)
+          VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'lead', NULL, 'pending')`)
+        .run(
+          assignmentId,
+          taskId,
+          present(binding, "projectId"),
+          present(binding, "profileId"),
+          present(binding, "profileRevision"),
+          present(binding, "instructionsRevision"),
+          `Task: ${task.title}\nOutcome: ${task.outcome}`,
+        );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.assignment(String(assignmentId));
   }
 
   task(taskId: string): Row {
@@ -358,13 +549,70 @@ export class DomainStore {
   assignmentAdmission(assignmentId: string): {
     eligible: boolean;
     reasons: string[];
+  };
+  assignmentAdmission(
+    assignmentId: string,
+    expected: {
+      taskVersion: number;
+      assignmentVersion: number;
+      instructionsRevision: number;
+      profileRevision: number;
+    },
+  ): {
+    eligible: boolean;
+    reasons: string[];
+  };
+  assignmentAdmission(
+    assignmentId: string,
+    expected?: {
+      taskVersion: number;
+      assignmentVersion: number;
+      instructionsRevision: number;
+      profileRevision: number;
+    },
+  ): {
+    eligible: boolean;
+    reasons: string[];
   } {
     const assignment = this.assignment(assignmentId);
     const admission = this.admission(String(assignment.taskId));
     const reasons = [...admission.reasons];
-    if (this.profile(String(assignment.profileId)).revoked)
-      reasons.push("profile-revoked");
+    const profile = this.profile(String(assignment.profileId));
+    const project = this.project(String(assignment.projectId));
+    const routing = this.routing(String(assignment.projectId));
+    const permitted = z
+      .array(id)
+      .parse(JSON.parse(String(routing.candidateProfileIds))) as string[];
+    if (profile.revoked) reasons.push("profile-revoked");
+    if (Number(assignment.profileRevision) !== Number(profile.version))
+      reasons.push("assignment-profile-revision-stale");
+    if (
+      Number(assignment.instructionsRevision) !==
+      Number(project.instructionsRevision)
+    )
+      reasons.push("assignment-instructions-revision-stale");
+    if (
+      project.leadProfileId !== assignment.profileId &&
+      !permitted.includes(String(assignment.profileId))
+    )
+      reasons.push("profile-not-permitted");
     if (assignment.state === "held") reasons.push("assignment-held");
+    if (expected) {
+      if (Number(assignment.version) !== expected.assignmentVersion)
+        reasons.push("assignment-revision-changed");
+      if (
+        Number(assignment.instructionsRevision) !==
+        expected.instructionsRevision
+      )
+        reasons.push("assignment-instructions-changed");
+      if (Number(assignment.profileRevision) !== expected.profileRevision)
+        reasons.push("assignment-profile-changed");
+      if (
+        Number(this.task(String(assignment.taskId)).version) !==
+        expected.taskVersion
+      )
+        reasons.push("task-revision-changed");
+    }
     return { eligible: reasons.length === 0, reasons };
   }
 
@@ -545,6 +793,7 @@ export class DomainStore {
           hash,
         );
       this.db.exec("COMMIT");
+      this.onChange?.();
       return this.routingOperation(data.id);
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -559,7 +808,7 @@ export class DomainStore {
     );
   }
 
-  private apply(command: ParsedCommand): Row {
+  private apply(command: ParsedCommand): unknown {
     switch (command.type) {
       case "project.create": {
         this.operator(command);
@@ -816,6 +1065,32 @@ export class DomainStore {
           .run(command.state, command.taskId);
         return this.task(command.taskId);
       }
+      case "capacity.configure": {
+        this.operator(command);
+        this.db
+          .prepare(
+            "UPDATE scheduler_capacity_limits SET globalLimit = ? WHERE singleton = 1",
+          )
+          .run(command.globalLimit);
+        for (const [projectId, projectLimit] of Object.entries(
+          command.projectOverrides,
+        )) {
+          this.project(projectId);
+          if (projectLimit === null)
+            this.db
+              .prepare(
+                "DELETE FROM scheduler_project_capacity_limits WHERE projectId = ?",
+              )
+              .run(projectId);
+          else
+            this.db
+              .prepare(`INSERT INTO scheduler_project_capacity_limits
+                (projectId, projectLimit) VALUES (?, ?)
+                ON CONFLICT(projectId) DO UPDATE SET projectLimit = excluded.projectLimit`)
+              .run(projectId, projectLimit);
+        }
+        return this.capacityLimits(Object.keys(command.projectOverrides));
+      }
     }
   }
 
@@ -887,7 +1162,9 @@ export class DomainCommands {
     const scope =
       "projectId" in command
         ? command.projectId
-        : `profile:${command.profileId}`;
+        : "profileId" in command
+          ? `profile:${command.profileId}`
+          : "system:capacity";
     const key = `${scope}:${command.key}`;
     const hash = createHash("sha256").update(canonical(command)).digest("hex");
     const existing = this.inFlight.get(key);

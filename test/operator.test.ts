@@ -41,6 +41,7 @@ function fakeRuntime() {
     async startTurn() {
       return "turn";
     },
+    async interruptTurn() {},
     async waitForTurn() {
       return "completed" as const;
     },

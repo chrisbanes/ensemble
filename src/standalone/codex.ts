@@ -2,6 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { z } from "zod";
+import type {
+  ExactExecutionIdentity,
+  ExecutionInspection,
+  RuntimeProcessIdentity,
+} from "./recovery-types.js";
+import { captureProcessIdentity } from "./termination.js";
 
 const rpc = z.object({
   id: z.union([z.string(), z.number()]).optional(),
@@ -25,6 +31,101 @@ const thread = z.object({
   sandbox: z.object({ type: z.literal("workspaceWrite") }),
 });
 const turn = z.object({ turn: z.object({ id: z.string() }) });
+const codexErrorInfoSchema = z.enum([
+  "contextWindowExceeded",
+  "sessionBudgetExceeded",
+  "usageLimitExceeded",
+  "rateLimitExceeded",
+  "flexUnavailable",
+  "serverOverloaded",
+  "cyberPolicy",
+  "misalignmentPolicyViolation",
+  "internalServerError",
+  "unauthorized",
+  "badRequest",
+  "threadRollbackFailed",
+  "sandboxError",
+  "other",
+]);
+const completedTurn = z.object({
+  threadId: z.string().min(1),
+  turn: z.object({
+    id: z.string().min(1),
+    status: z.string(),
+    error: z
+      .object({ codexErrorInfo: z.string().optional() })
+      .nullable()
+      .optional(),
+  }),
+});
+
+export type CodexErrorInfo = z.infer<typeof codexErrorInfoSchema>;
+
+export interface FailureEvidence {
+  threadId: string;
+  turnId: string;
+  status: "failed";
+  classification: "transient" | "permanent" | "unknown";
+  reasonCode: CodexErrorInfo | "unknown";
+  source: "codexErrorInfo" | "missing";
+  codexRetries: number | null;
+  retryAfterMs?: number;
+}
+
+const failureEvidenceSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    status: z.literal("failed"),
+    classification: z.enum(["transient", "permanent", "unknown"]),
+    reasonCode: codexErrorInfoSchema.or(z.literal("unknown")),
+    source: z.enum(["codexErrorInfo", "missing"]),
+    codexRetries: z.number().int().nonnegative().safe().nullable(),
+    retryAfterMs: z
+      .number()
+      .int()
+      .nonnegative()
+      .safe()
+      .max(86_400_000)
+      .optional(),
+  })
+  .strict();
+
+export function parseFailureEvidence(
+  input: unknown,
+): FailureEvidence | undefined {
+  const parsed = failureEvidenceSchema.safeParse(input);
+  if (!parsed.success) return undefined;
+  const { retryAfterMs, ...evidence } = parsed.data;
+  return retryAfterMs === undefined ? evidence : { ...evidence, retryAfterMs };
+}
+
+function makeFailureEvidence(
+  threadId: string,
+  turnId: string,
+  rawCode: string | undefined,
+): FailureEvidence {
+  const parsed =
+    rawCode === undefined ? undefined : codexErrorInfoSchema.safeParse(rawCode);
+  const code = parsed?.success ? parsed.data : undefined;
+  const classification =
+    code === "serverOverloaded" || code === "rateLimitExceeded"
+      ? "transient"
+      : code === "badRequest" || code === "unauthorized"
+        ? "permanent"
+        : "unknown";
+  return {
+    threadId,
+    turnId,
+    status: "failed",
+    classification,
+    reasonCode: code ?? "unknown",
+    source: code ? "codexErrorInfo" : "missing",
+    // App Server's terminal TurnError exposes no per-turn retry count. Null is
+    // deliberately non-retryable under the shared Ensemble/Codex budget.
+    codexRetries: null,
+  };
+}
 
 export const executionPolicy = (workspace: string) => ({
   type: "workspaceWrite" as const,
@@ -86,6 +187,7 @@ export interface Runtime {
     workspace: string,
     prompt: string,
   ): Promise<string>;
+  interruptTurn(threadId: string, turnId: string): Promise<void>;
   waitForTurn(
     threadId: string,
     turnId: string,
@@ -98,11 +200,23 @@ export interface Runtime {
       reason: string;
     }) => void,
   ): void;
+  processIdentity?():
+    | RuntimeProcessIdentity
+    | null
+    | Promise<RuntimeProcessIdentity | null>;
+  inspectExecution?(
+    identity: ExactExecutionIdentity,
+  ): Promise<ExecutionInspection>;
+  failureEvidence?(
+    threadId: string,
+    turnId: string,
+  ): FailureEvidence | undefined;
 }
 
 /** One private stdio App Server process. It never sends an approval grant. */
 export class CodexRuntime implements Runtime {
   private child: ChildProcessWithoutNullStreams | undefined;
+  private processIdentityValue: RuntimeProcessIdentity | null = null;
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -115,6 +229,7 @@ export class CodexRuntime implements Runtime {
   private readonly events = new EventEmitter();
   private readonly terminals = new Map<string, "completed" | "failed">();
   private readonly terminalHistory = new Map<string, "completed" | "failed">();
+  private readonly failures = new Map<string, FailureEvidence>();
   private unexpected?: (request: UnexpectedRequest) => void;
   private terminalAnomaly?: (anomaly: {
     threadId?: string;
@@ -142,6 +257,7 @@ export class CodexRuntime implements Runtime {
   async start(): Promise<void> {
     if (this.child) throw new Error("Runtime already started");
     this.failure = undefined;
+    this.failures.clear();
     const child = spawn(
       this.executable,
       [
@@ -154,6 +270,7 @@ export class CodexRuntime implements Runtime {
       { stdio: "pipe" },
     );
     this.child = child;
+    this.processIdentityValue = null;
     child.on("error", (error) => this.failChild(child, error));
     child.on("exit", () =>
       this.failChild(child, new Error("Codex App Server exited")),
@@ -169,6 +286,8 @@ export class CodexRuntime implements Runtime {
       this.receive(child, line),
     );
     try {
+      this.processIdentityValue = await captureProcessIdentity(child.pid);
+      if (this.child !== child) throw new Error("Runtime stopped");
       await this.request("initialize", {
         clientInfo: { name: "ensemble", version: "0.1.0" },
       });
@@ -186,8 +305,10 @@ export class CodexRuntime implements Runtime {
     const child = this.child;
     if (!child) return;
     this.child = undefined;
+    this.processIdentityValue = null;
     this.fail(new Error("Runtime stopped"));
     this.terminals.clear();
+    this.failures.clear();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       let timeout: NodeJS.Timeout | undefined;
@@ -252,6 +373,36 @@ export class CodexRuntime implements Runtime {
       }),
     );
     return response.turn.id;
+  }
+
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    z.object({})
+      .strict()
+      .parse(await this.request("turn/interrupt", { threadId, turnId }));
+  }
+
+  processIdentity(): RuntimeProcessIdentity | null {
+    return this.processIdentityValue;
+  }
+
+  async inspectExecution(
+    _identity: ExactExecutionIdentity,
+  ): Promise<ExecutionInspection> {
+    // thread/read and thread/resume expose history, not proof of this exact
+    // process's current execution state. Do not turn either into a recovery fact.
+    return {
+      kind: "unknown",
+      reason: "Codex App Server cannot prove exact historical execution state",
+    };
+  }
+
+  failureEvidence(
+    threadId: string,
+    turnId: string,
+  ): FailureEvidence | undefined {
+    if (!threadId || !turnId) return undefined;
+    const evidence = this.failures.get(`${threadId}:${turnId}`);
+    return evidence ? { ...evidence } : undefined;
   }
 
   async waitForTurn(
@@ -390,18 +541,22 @@ export class CodexRuntime implements Runtime {
       return;
     }
     if (message.method === "turn/completed") {
-      const terminal = z
-        .object({
-          threadId: z.string(),
-          turn: z.object({ id: z.string(), status: z.string() }),
-        })
-        .safeParse(message.params);
+      const terminal = completedTurn.safeParse(message.params);
       if (!terminal.success) {
         this.terminalAnomaly?.({
           reason: "Missing terminal identity or status",
         });
       } else {
         const key = `${terminal.data.threadId}:${terminal.data.turn.id}`;
+        if (terminal.data.turn.status === "failed")
+          this.failures.set(
+            key,
+            makeFailureEvidence(
+              terminal.data.threadId,
+              terminal.data.turn.id,
+              terminal.data.turn.error?.codexErrorInfo,
+            ),
+          );
         const status =
           terminal.data.turn.status === "completed" ? "completed" : "failed";
         const prior = this.terminalHistory.get(key);

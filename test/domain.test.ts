@@ -816,3 +816,109 @@ test("dependency authority, cycle and unknown imported-blocker holds survive res
     f.close();
   }
 });
+
+test("capacity limits default, configure sparsely, replay and persist", () => {
+  const f = fixture();
+  const otherProject = "10000000-0000-4000-8000-000000000003";
+  const limits = (projectIds: string[] = []) =>
+    (
+      f.domain as unknown as {
+        capacityLimits(ids: string[]): {
+          globalLimit: number;
+          defaultProjectLimit: number;
+          projectOverrides: Record<string, number>;
+          currentUsage: { global: number; projects: Record<string, number> };
+          effectiveProjectLimits: Record<string, number>;
+        };
+      }
+    ).capacityLimits(projectIds);
+  try {
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Project",
+      leadProfileId: null,
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: q,
+      name: "Other project",
+      leadProfileId: null,
+    });
+    assert.equal(limits([p, q]).globalLimit, 4);
+    assert.equal(limits([p, q]).defaultProjectLimit, 2);
+    assert.deepEqual(limits([p, q]).effectiveProjectLimits, { [p]: 2, [q]: 2 });
+
+    const initial = {
+      type: "capacity.configure" as const,
+      actor: "operator" as const,
+      globalLimit: 6,
+      projectOverrides: { [p]: 3, [q]: 1 },
+      key: key(),
+    };
+    const first = f.domain.execute(initial as never);
+    assert.deepEqual(f.domain.execute(initial as never), first);
+    const configured = limits([p, q]);
+    assert.equal(configured.globalLimit, 6);
+    assert.deepEqual(configured.projectOverrides, { [p]: 3, [q]: 1 });
+    assert.deepEqual(configured.effectiveProjectLimits, { [p]: 3, [q]: 1 });
+    assert.deepEqual(configured.currentUsage, { global: 0, projects: {} });
+
+    assert.throws(
+      () =>
+        f.domain.execute({
+          ...initial,
+          globalLimit: 5,
+        } as never),
+      /Command key already used with different payload/,
+    );
+    assert.throws(
+      () =>
+        run(f.domain, {
+          type: "capacity.configure",
+          actor: "agent",
+          globalLimit: 5,
+          projectOverrides: {},
+        } as never),
+      /Operator authority required/,
+    );
+    assert.throws(
+      () =>
+        run(f.domain, {
+          type: "capacity.configure",
+          actor: "operator",
+          globalLimit: 0,
+          projectOverrides: {},
+        } as never),
+      /expected number to be >0/,
+    );
+    assert.throws(
+      () =>
+        run(f.domain, {
+          type: "capacity.configure",
+          actor: "operator",
+          globalLimit: 5,
+          projectOverrides: { [otherProject]: 1 },
+        } as never),
+      /Unknown domain record/,
+    );
+    assert.equal(limits([p, q]).globalLimit, 6, "invalid changes roll back");
+
+    run(f.domain, {
+      type: "capacity.configure",
+      actor: "operator",
+      globalLimit: 5,
+      projectOverrides: { [p]: null },
+    } as never);
+    assert.deepEqual(limits([p, q]).projectOverrides, { [q]: 1 });
+    assert.deepEqual(limits([p, q]).effectiveProjectLimits, { [p]: 2, [q]: 1 });
+    f.reopen();
+    assert.equal(limits([p, q]).globalLimit, 5);
+    assert.deepEqual(limits([p, q]).projectOverrides, { [q]: 1 });
+    assert.deepEqual(limits([p, q]).effectiveProjectLimits, { [p]: 2, [q]: 1 });
+  } finally {
+    f.close();
+  }
+});

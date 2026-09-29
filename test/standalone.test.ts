@@ -67,6 +67,7 @@ class FakeRuntime implements Runtime {
     if (this.failAt === "turn") throw new Error("lost turn response");
     return "turn-1";
   }
+  async interruptTurn() {}
   async waitForTurn() {
     if (this.approveDuringWait)
       this.onRequest?.({ method: "item/permissions/requestApproval" });
@@ -315,7 +316,9 @@ for await (const line of createInterface({input: process.stdin})) {
   );
   chmodSync(executable, 0o700);
   const runtime = new CodexRuntime(executable);
-  let service = new StandaloneService(data, () => runtime);
+  let service = new StandaloneService(data, () => runtime, undefined, {
+    power: { enabled: false },
+  });
   try {
     await service.start();
     const child = (
@@ -342,7 +345,15 @@ for await (const line of createInterface({input: process.stdin})) {
     );
     assert.equal(
       (await service.submit("other", "test", workspace)).state,
-      "held",
+      "ready",
+    );
+    assert.match(
+      service.list().find((item) => item.workId === "other")?.reason ?? "",
+      /Workspace has unresolved execution/,
+    );
+    assert.equal(
+      service.turnRequests().find((item) => item.workId === "other")?.state,
+      "queued",
     );
   } finally {
     await service.stop();
@@ -376,7 +387,9 @@ for await (const line of createInterface({input: process.stdin})) {
   );
   chmodSync(executable, 0o700);
   const runtime = new CodexRuntime(executable);
-  let service = new StandaloneService(data, () => runtime);
+  let service = new StandaloneService(data, () => runtime, undefined, {
+    power: { enabled: false },
+  });
   try {
     await service.start();
     const internals = runtime as unknown as {
@@ -402,7 +415,11 @@ for await (const line of createInterface({input: process.stdin})) {
     );
     assert.equal(
       (await service.submit("next", "test", workspace)).state,
-      "held",
+      "ready",
+    );
+    assert.equal(
+      service.turnRequests().find((item) => item.workId === "next")?.state,
+      "queued",
     );
   } finally {
     await service.stop();
@@ -481,7 +498,7 @@ test("fresh schema, restart, completed binding and no duplicate dispatch", async
     assert.equal(
       (db.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      3,
+      6,
     );
     assert.equal(
       (
@@ -517,7 +534,7 @@ test("lost submission blocks a second work ID before and after reopen", async ()
       "test",
       `${workspace}/../work`,
     );
-    assert.equal(second.state, "held");
+    assert.equal(second.state, "ready");
     assert.match(second.reason ?? "", /Workspace has unresolved execution/);
     assert.equal(runtime.starts, 1);
     assert.equal(runtime.turnStarts, 1);
@@ -535,7 +552,7 @@ test("lost submission blocks a second work ID before and after reopen", async ()
       "test",
       `${workspace}/../work`,
     );
-    assert.equal(pending.state, "held");
+    assert.equal(pending.state, "ready");
     assert.match(pending.reason ?? "", /Workspace has unresolved execution/);
     assert.equal(runtime.starts, 0);
     assert.equal(runtime.turnStarts, 0);
@@ -663,7 +680,7 @@ test("callback during turn submission preserves server turn identity and hold ac
       assert.equal(runtime.turnStarts, 1);
       assert.equal(
         (await service.submit("next", "test", workspace)).state,
-        "held",
+        "ready",
       );
       assert.equal(runtime.turnStarts, 1);
       await service.stop();
@@ -676,7 +693,7 @@ test("callback during turn submission preserves server turn identity and hold ac
       );
       assert.equal(
         (await service.submit("after-reopen", "test", workspace)).state,
-        "held",
+        "ready",
       );
       assert.equal(runtime.turnStarts, 0);
     } finally {
@@ -789,9 +806,14 @@ test("startup login failure holds ready work; unmarked prototype directory is re
   let service = new StandaloneService(data, () => new FakeRuntime());
   try {
     await service.start();
-    const refused = await service.submit("bad", "test", join(root, "missing"));
-    assert.equal(refused.state, "held");
-    assert.match(refused.reason ?? "", /Pre-submission refusal/);
+    await assert.rejects(
+      service.submit("bad", "test", join(root, "missing")),
+      /Workspace must be an existing real directory/,
+    );
+    assert.equal(
+      service.turnRequests().some((item) => item.workId === "bad"),
+      false,
+    );
     await service.stop();
     const queuedDb = new DatabaseSync(join(data, "standalone.sqlite"));
     new ExecutionState(queuedDb).create("queued", "test", workspace);
@@ -885,7 +907,7 @@ test("version 2 core schema migrates transactionally to standalone schema", () =
     assert.equal(
       (db.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      3,
+      6,
     );
     assert.ok(
       db
@@ -897,5 +919,119 @@ test("version 2 core schema migrates transactionally to standalone schema", () =
   } finally {
     db.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("version 3 execution state migration preserves writer bindings and admits capacity waits", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE host_installation (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        hostKind TEXT NOT NULL,
+        hostKey TEXT NOT NULL UNIQUE
+      );
+      INSERT INTO host_installation VALUES (1, 'standalone-codex', '10000000-0000-4000-8000-000000000001');
+      CREATE TABLE execution_intents (
+        id TEXT PRIMARY KEY,
+        workId TEXT NOT NULL UNIQUE,
+        prompt TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('ready','held','submitting','running','completed')),
+        reason TEXT,
+        threadId TEXT,
+        turnId TEXT,
+        accountType TEXT NOT NULL,
+        sandbox TEXT NOT NULL CHECK(sandbox = 'workspaceWrite'),
+        approval TEXT NOT NULL CHECK(approval = 'never')
+      );
+      INSERT INTO execution_intents VALUES (
+        '10000000-0000-4000-8000-000000000002', 'work-1', 'Prompt', '/workspace',
+        'ready', NULL, NULL, NULL, 'chatgpt', 'workspaceWrite', 'never'
+      );
+      CREATE TABLE task_writer_admissions (
+        workId TEXT PRIMARY KEY REFERENCES execution_intents(workId),
+        workspace TEXT NOT NULL
+      );
+      INSERT INTO task_writer_admissions VALUES ('work-1', '/workspace');
+      PRAGMA user_version = 3;`);
+
+    const key = new Store(db).ensureHost("standalone-codex");
+    assert.equal(key, "10000000-0000-4000-8000-000000000001");
+    assert.equal(
+      (db.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+      6,
+    );
+    assert.equal(
+      (
+        db
+          .prepare(
+            "SELECT workspace FROM task_writer_admissions WHERE workId = ?",
+          )
+          .get("work-1") as { workspace: string }
+      ).workspace,
+      "/workspace",
+    );
+    db.prepare(
+      "UPDATE execution_intents SET state = 'capacity-waiting' WHERE workId = ?",
+    ).run("work-1");
+    db.prepare(
+      "UPDATE execution_intents SET state = 'reconciled' WHERE workId = ?",
+    ).run("work-1");
+    assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("version 4 execution state migration accepts reconciled as terminal", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`PRAGMA foreign_keys = ON;
+      CREATE TABLE host_installation (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        hostKind TEXT NOT NULL,
+        hostKey TEXT NOT NULL UNIQUE
+      );
+      INSERT INTO host_installation VALUES (1, 'standalone-codex', '10000000-0000-4000-8000-000000000001');
+      CREATE TABLE execution_intents (
+        id TEXT PRIMARY KEY,
+        workId TEXT NOT NULL UNIQUE,
+        prompt TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('ready','capacity-waiting','held','submitting','running','completed')),
+        reason TEXT,
+        threadId TEXT,
+        turnId TEXT,
+        accountType TEXT NOT NULL,
+        sandbox TEXT NOT NULL CHECK(sandbox = 'workspaceWrite'),
+        approval TEXT NOT NULL CHECK(approval = 'never')
+      );
+      INSERT INTO execution_intents VALUES (
+        '10000000-0000-4000-8000-000000000002', 'work-1', 'Prompt', '/workspace',
+        'held', NULL, 'thread-1', 'turn-1', 'chatgpt', 'workspaceWrite', 'never'
+      );
+      PRAGMA user_version = 4;`);
+
+    new Store(db).ensureHost("standalone-codex");
+    assert.equal(
+      (db.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+      6,
+    );
+    db.prepare(
+      "UPDATE execution_intents SET state = 'reconciled' WHERE workId = ?",
+    ).run("work-1");
+    assert.equal(
+      (
+        db
+          .prepare("SELECT state FROM execution_intents WHERE workId = ?")
+          .get("work-1") as { state: string }
+      ).state,
+      "reconciled",
+    );
+  } finally {
+    db.close();
   }
 });

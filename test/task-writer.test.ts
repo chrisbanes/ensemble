@@ -17,6 +17,8 @@ class RuntimeFixture implements Runtime {
   starts = 0;
   resumes = 0;
   turns = 0;
+  interrupts: Array<{ threadId: string; turnId: string }> = [];
+  beforeInterrupt?: () => void;
   outcome: "completed" | "failed" = "completed";
   entered?: () => void;
   gate?: Promise<void>;
@@ -41,6 +43,10 @@ class RuntimeFixture implements Runtime {
     await this.gate;
     return this.outcome;
   }
+  async interruptTurn(threadId: string, turnId: string) {
+    this.beforeInterrupt?.();
+    this.interrupts.push({ threadId, turnId });
+  }
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
   onTerminalAnomaly(
     listener: (event: {
@@ -53,6 +59,15 @@ class RuntimeFixture implements Runtime {
   }
 }
 
+interface SupervisorTestClock {
+  monotonicNow(): number;
+  sleep(milliseconds: number, signal: AbortSignal): Promise<void>;
+}
+
+interface SupervisorTestOptions {
+  supervisor?: { clock: SupervisorTestClock; observationMs: number };
+}
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -61,10 +76,21 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture() {
+async function fixture(options?: SupervisorTestOptions) {
   const root = mkdtempSync(join(tmpdir(), "ensemble-task-writer-"));
   const runtime = new RuntimeFixture();
-  const service = new StandaloneService(join(root, "data"), () => runtime);
+  const ServiceWithOptions = StandaloneService as unknown as new (
+    dataDir: string,
+    createRuntime: () => Runtime,
+    markerWriter?: (path: string, flag: "wx" | "w") => void,
+    options?: SupervisorTestOptions,
+  ) => StandaloneService;
+  const service = new ServiceWithOptions(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    options,
+  );
   await service.start();
   const projectId = randomUUID();
   const taskId = randomUUID();
@@ -116,6 +142,21 @@ async function fixture() {
   });
   const workspace = await service.provisionTask(taskId);
   assert.equal(workspace.state, "ready");
+  const firstIntent = `assignment:${assignmentId}:initial`;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (
+      service.list().find((item) => item.workId === firstIntent)?.state ===
+      "completed"
+    )
+      break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(
+    service.list().find((item) => item.workId === firstIntent)?.state,
+    "completed",
+  );
+  runtime.starts = 0;
+  runtime.turns = 0;
   return {
     root,
     service,
@@ -192,9 +233,54 @@ test("eligibility changes during workspace admission prevent execution", async (
         });
       }
       release.resolve();
-      await assert.rejects(action, /Assignment is not eligible/);
+      const refused = await action;
+      const request = f.service
+        .turnRequests()
+        .find((item) => item.workId === changed);
+      if (changed === "pause") {
+        assert.equal(refused.state, "ready");
+        assert.match(refused.reason ?? "", /Admission waiting: /);
+        assert.equal(request?.state, "queued");
+        assert.match(request?.reason ?? "", /Admission waiting: /);
+      } else {
+        assert.equal(refused.state, "held");
+        assert.match(
+          refused.reason ?? "",
+          /Request refused: captured revisions/,
+        );
+        assert.equal(request?.state, "held");
+        assert.match(
+          request?.reason ?? "",
+          /Request refused: captured revisions/,
+        );
+      }
       assert.equal(f.runtime.starts, 0);
-      assert.equal(f.service.list().length, 0);
+      assert.equal(
+        f.service.list().filter((item) => item.workId === changed).length,
+        1,
+      );
+      const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
+      assert.equal(
+        (
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_writer_admissions WHERE workId = ?",
+            )
+            .get(changed) as { count: number }
+        ).count,
+        0,
+      );
+      assert.equal(
+        (
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM execution_capacity_reservations WHERE workId = ?",
+            )
+            .get(changed) as { count: number }
+        ).count,
+        0,
+      );
+      db.close();
     } finally {
       release.resolve();
       await f.close();
@@ -370,10 +456,14 @@ test("replacement retains assignment snapshots and rejects stale results", async
     assert.equal(after.version, before.version);
     assert.equal(after.instructionsRevision, before.instructionsRevision);
     assert.equal(after.profileRevision, before.profileRevision);
-    await assert.rejects(
-      f.service.submitTask("first", f.assignmentId, "write"),
-      /another task or assignment revision/,
+    const duplicate = await f.service.submitTask(
+      "first",
+      f.assignmentId,
+      "write",
     );
+    assert.equal(duplicate.id, first.id);
+    assert.equal(duplicate.state, "completed");
+    assert.equal(f.runtime.starts, 1);
     assert.equal(
       (
         await f.service.submitTask(
@@ -420,14 +510,18 @@ test("newer work revisions reject predecessor results across restart and idempot
     const db = new DatabaseSync(path);
     const revisions = db
       .prepare(
-        "SELECT workId, workRevision FROM task_work_revisions ORDER BY workRevision",
+        "SELECT workId, workRevision FROM task_work_revisions WHERE assignmentId = ? ORDER BY workRevision",
       )
-      .all() as { workId: string; workRevision: number }[];
+      .all(f.assignmentId) as { workId: string; workRevision: number }[];
     assert.deepEqual(
       revisions.map((row) => ({ ...row })),
       [
-        { workId: "predecessor", workRevision: 1 },
-        { workId: "successor", workRevision: 2 },
+        {
+          workId: `assignment:${f.assignmentId}:initial`,
+          workRevision: 1,
+        },
+        { workId: "predecessor", workRevision: 2 },
+        { workId: "successor", workRevision: 3 },
       ],
     );
     db.close();
@@ -457,7 +551,7 @@ test("newer work revisions reject predecessor results across restart and idempot
           )
           .get(f.assignmentId) as { count: number }
       ).count,
-      2,
+      3,
     );
     assert.equal(
       (
@@ -467,7 +561,7 @@ test("newer work revisions reject predecessor results across restart and idempot
           )
           .get() as { workRevision: number }
       ).workRevision,
-      2,
+      3,
     );
     verified.close();
   } finally {
@@ -499,22 +593,26 @@ test("legacy work revisions preserve only provable result ordering", async () =>
       () => new RuntimeFixture(),
     );
     await recoveredSingle.start();
-    assert.equal(recoveredSingle.isCurrentResult("only"), true);
-    assert.equal(recoveredSingle.recordTaskResult("only", "result"), true);
+    assert.equal(recoveredSingle.isCurrentResult("only"), false);
+    assert.equal(recoveredSingle.recordTaskResult("only", "result"), false);
     assert.equal(
       recoveredSingle.list().find((item) => item.workId === "only")?.state,
-      "completed",
+      "held",
+    );
+    assert.match(
+      recoveredSingle.taskHold(single.taskId) ?? "",
+      /revision order is ambiguous/,
     );
     const disposition = new DatabaseSync(path);
     assert.equal(
       (
         disposition
           .prepare(
-            "SELECT workRevision FROM task_work_revisions WHERE workId = 'only'",
+            "SELECT COUNT(*) AS count FROM task_work_revision_ambiguities WHERE assignmentId = ?",
           )
-          .get() as { workRevision: number }
-      ).workRevision,
-      1,
+          .get(single.assignmentId) as { count: number }
+      ).count,
+      2,
     );
     disposition.close();
   } finally {
@@ -570,7 +668,7 @@ test("legacy work revisions preserve only provable result ordering", async () =>
           )
           .get() as { count: number }
       ).count,
-      2,
+      3,
     );
     dispositions.close();
   } finally {
@@ -742,6 +840,11 @@ test("predecessor identity is immutable across restart", async () => {
     const runtime = new RuntimeFixture();
     recovered = new StandaloneService(join(f.root, "data"), () => runtime);
     await recovered.start();
+    const startsBeforeConflicts = runtime.starts;
+    await assert.rejects(
+      recovered.submitTask("null-request", f.assignmentId, "changed prompt"),
+      /different prompt/,
+    );
     await assert.rejects(
       recovered.submitTask("null-request", f.assignmentId, "null", "first"),
       /different predecessor/,
@@ -755,7 +858,7 @@ test("predecessor identity is immutable across restart", async () => {
       ),
       /different predecessor/,
     );
-    assert.equal(runtime.starts, 0);
+    assert.equal(runtime.starts, startsBeforeConflicts);
 
     const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
     const saved = db
@@ -831,15 +934,14 @@ test("legacy ready work with unknown predecessor is held and refused", async () 
       .find((item) => item.workId === "legacy-ready");
     assert.equal(held?.state, "held");
     assert.match(held?.reason ?? "", /predecessor identity is unknown/);
-    await assert.rejects(
-      recovered.submitTask(
-        "legacy-ready",
-        f.assignmentId,
-        "follow-up",
-        "active",
-      ),
-      /unknown legacy predecessor identity/,
+    const refused = await recovered.submitTask(
+      "legacy-ready",
+      f.assignmentId,
+      "follow-up",
+      "active",
     );
+    assert.equal(refused.state, "held");
+    assert.match(refused.reason ?? "", /predecessor identity is unknown/);
     assert.equal(runtime.starts, 0);
     const disposition = new DatabaseSync(
       join(f.root, "data", "standalone.sqlite"),
@@ -951,7 +1053,7 @@ test("ready work prevents conversation replacement and remains retryable", async
   }
 });
 
-test("ready work adopts a newer assignment revision before retry", async () => {
+test("stale queued assignment work is refused without admission and needs a fresh generation", async () => {
   const f = await fixture();
   try {
     const gate = deferred();
@@ -981,13 +1083,51 @@ test("ready work adopts a newer assignment revision before retry", async () => {
     });
     gate.resolve();
     assert.equal((await first).state, "completed");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (
+        f.service.list().find((item) => item.workId === "ready")?.state ===
+        "held"
+      )
+        break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    const stale = f.service.list().find((item) => item.workId === "ready");
+    assert.equal(stale?.state, "held");
+    assert.match(stale?.reason ?? "", /assignment-revision-changed/);
+    const staleRequest = f.service
+      .turnRequests()
+      .find((item) => item.workId === "ready");
+    assert.equal(staleRequest?.state, "held");
+    assert.match(staleRequest?.reason ?? "", /assignment-revision-changed/);
+    const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
+    assert.equal(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_writer_admissions WHERE workId = 'ready'",
+          )
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM execution_capacity_reservations WHERE workId = 'ready'",
+          )
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    db.close();
     f.runtime.gate = Promise.resolve();
     assert.equal(
       (
         await f.service.submitTask(
-          "ready",
+          "fresh",
           f.assignmentId,
-          "follow-up",
+          "new material",
           "active",
         )
       ).state,
@@ -999,6 +1139,14 @@ test("ready work adopts a newer assignment revision before retry", async () => {
           state: ExecutionState;
         }
       ).state.taskBinding("ready")?.assignmentVersion,
+      1,
+    );
+    assert.equal(
+      (
+        f.service as unknown as {
+          state: ExecutionState;
+        }
+      ).state.taskBinding("fresh")?.assignmentVersion,
       2,
     );
     assert.equal(f.runtime.starts, 1);
@@ -1031,14 +1179,17 @@ test("archival hold prevents writer admission after workspace validation", async
     });
     await cleanupEntered.promise;
 
-    await assert.rejects(
-      f.service.submitTask("racing-writer", f.assignmentId, "write"),
-      /archival is in progress/,
+    const queued = await f.service.submitTask(
+      "racing-writer",
+      f.assignmentId,
+      "write",
     );
+    assert.equal(queued.state, "ready");
+    assert.match(queued.reason ?? "", /Task archival in progress/);
     assert.equal(f.runtime.starts, 0);
     assert.equal(
-      f.service.list().some((item) => item.workId === "racing-writer"),
-      false,
+      f.service.list().find((item) => item.workId === "racing-writer")?.state,
+      "ready",
     );
 
     const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
@@ -1053,9 +1204,46 @@ test("archival hold prevents writer admission after workspace validation", async
       1,
     );
     db.close();
+    const notAdmitted = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    assert.equal(
+      (
+        notAdmitted
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_writer_admissions WHERE workId = 'racing-writer'",
+          )
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        notAdmitted
+          .prepare(
+            "SELECT COUNT(*) AS count FROM execution_capacity_reservations WHERE workId = 'racing-writer'",
+          )
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    notAdmitted.close();
 
     cleanupGate.resolve();
-    assert.equal((await archival).outcome, "cleaned");
+    assert.equal((await archival).outcome, "retained");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (
+        f.service.turnRequests().find((item) => item.workId === "racing-writer")
+          ?.state === "completed"
+      )
+        break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    const afterArchive = f.service
+      .turnRequests()
+      .find((item) => item.workId === "racing-writer");
+    assert.equal(afterArchive?.state, "completed");
+    assert.equal(f.runtime.starts, 1);
 
     const released = new DatabaseSync(
       join(f.root, "data", "standalone.sqlite"),
@@ -1151,7 +1339,7 @@ test("a completed successor loses its result after predecessor release is retrac
   }
 });
 
-test("writer retraction follows admission order when an older contender runs later", async () => {
+test("writer retraction follows admission order for a queued successor", async () => {
   const f = await fixture();
   let recovered: StandaloneService | undefined;
   try {
@@ -1168,6 +1356,18 @@ test("writer retraction follows admission order when an older contender runs lat
     );
     firstGate.resolve();
     assert.equal((await first).state, "completed");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (
+        f.service.list().find((item) => item.workId === "contender-c")
+          ?.state === "completed"
+      )
+        break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(
+      f.service.list().find((item) => item.workId === "contender-c")?.state,
+      "completed",
+    );
 
     f.runtime.gate = Promise.resolve();
     assert.equal(
@@ -1179,7 +1379,11 @@ test("writer retraction follows admission order when an older contender runs lat
         .state,
       "completed",
     );
-    assert.equal(f.service.recordTaskResult("contender-c", "delivered"), true);
+    assert.equal(f.service.recordTaskResult("contender-c", "delivered"), false);
+    assert.equal(
+      f.service.recordTaskResult("writer-b", "newer delivery"),
+      true,
+    );
 
     await f.service.stop();
     const runtime = new RuntimeFixture();
@@ -1200,6 +1404,10 @@ test("writer retraction follows admission order when an older contender runs lat
     );
     assert.equal(recovered.isCurrentResult("contender-c"), false);
     assert.equal(recovered.recordTaskResult("contender-c", "delivered"), false);
+    assert.equal(
+      recovered.recordTaskResult("writer-b", "newer delivery"),
+      false,
+    );
   } finally {
     await recovered?.stop();
     await f.close();
@@ -1239,6 +1447,153 @@ test("Stop persists across restart and resume does not clear an unresolved write
     await recovered.stop();
     assert.equal(f.runtime.starts, 1);
   } finally {
+    await f.close();
+  }
+});
+
+test("Stop persists bound execution identity before interrupt and keeps ownership after acknowledgement", async () => {
+  let now = 0;
+  const sleeps: number[] = [];
+  let advanceObservation: (() => void) | undefined;
+  const f = await fixture({
+    supervisor: {
+      observationMs: 3000,
+      clock: {
+        monotonicNow: () => now,
+        sleep(milliseconds, signal) {
+          sleeps.push(milliseconds);
+          return new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              now += milliseconds;
+              signal.removeEventListener("abort", finish);
+              resolve();
+            };
+            if (signal.aborted) finish();
+            else signal.addEventListener("abort", finish, { once: true });
+            advanceObservation = finish;
+          });
+        },
+      },
+    },
+  });
+  const gate = deferred();
+  try {
+    const entered = deferred();
+    f.runtime.gate = gate.promise;
+    f.runtime.entered = entered.resolve;
+    let observedBeforeInterrupt:
+      | {
+          stop: string | undefined;
+          state: string;
+          threadId: string | null;
+          turnId: string | null;
+        }
+      | undefined;
+    f.runtime.beforeInterrupt = () => {
+      const active = f.service
+        .list()
+        .find((item) => item.workId === "stoppable");
+      observedBeforeInterrupt = {
+        stop: f.service.taskHold(f.taskId),
+        state: active?.state ?? "missing",
+        threadId: active?.threadId ?? null,
+        turnId: active?.turnId ?? null,
+      };
+    };
+    const run = f.service.submitTask("stoppable", f.assignmentId, "write");
+    await entered.promise;
+    const active = f.service.list().find((item) => item.workId === "stoppable");
+    assert.ok(active?.threadId);
+    assert.ok(active?.turnId);
+
+    const stopping = f.service.stopTask(f.taskId) as unknown as Promise<{
+      taskId: string;
+      observationMs: number;
+      outcomes: Array<{
+        workId: string;
+        threadId: string | null;
+        turnId: string | null;
+        interrupt: string;
+        terminal: string;
+        reason?: string;
+      }>;
+    }>;
+    for (
+      let attempt = 0;
+      attempt < 100 && f.runtime.interrupts.length === 0;
+      attempt++
+    )
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    for (let attempt = 0; attempt < 100 && sleeps.length === 0; attempt++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(f.runtime.interrupts, [
+      { threadId: active.threadId, turnId: active.turnId },
+    ]);
+    assert.deepEqual(observedBeforeInterrupt, {
+      stop: "Task stopped",
+      state: "held",
+      threadId: active.threadId,
+      turnId: active.turnId,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    advanceObservation?.();
+    const observation = await stopping;
+    assert.equal(observation.taskId, f.taskId);
+    assert.equal(observation.observationMs, 3000);
+    assert.deepEqual(sleeps, [3000]);
+    assert.deepEqual(observation.outcomes, [
+      {
+        workId: "stoppable",
+        threadId: active.threadId,
+        turnId: active.turnId,
+        interrupt: "acknowledged",
+        terminal: "unknown",
+        reason: "No terminal status observed during the bounded window",
+      },
+    ]);
+    assert.equal(
+      f.service.list().find((item) => item.workId === "stoppable")?.state,
+      "held",
+    );
+    assert.equal(
+      f.service.capacityLimits([f.projectId]).currentUsage.global,
+      1,
+    );
+    assert.equal(
+      f.service.recordTaskResult("stoppable", "too early"),
+      false,
+      "interrupt acknowledgement must not release the active writer",
+    );
+
+    gate.resolve();
+    assert.equal((await run).state, "held");
+    await f.service.stop();
+    const recovered = new StandaloneService(
+      join(f.root, "data"),
+      () => new RuntimeFixture(),
+    );
+    await recovered.start();
+    assert.equal(recovered.taskHold(f.taskId), "Task stopped");
+    assert.equal(
+      recovered.capacityLimits([f.projectId]).currentUsage.global,
+      1,
+    );
+    recovered.resumeTask(f.taskId);
+    assert.equal(recovered.taskHold(f.taskId), undefined);
+    assert.equal(
+      recovered.list().find((item) => item.workId === "stoppable")?.state,
+      "held",
+    );
+    assert.equal(
+      recovered.capacityLimits([f.projectId]).currentUsage.global,
+      1,
+    );
+    await recovered.stop();
+  } finally {
+    gate.resolve();
     await f.close();
   }
 });

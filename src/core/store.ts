@@ -13,7 +13,7 @@ export interface Database {
   };
 }
 
-const schemaVersion = 3;
+const schemaVersion = 6;
 const taskSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -60,18 +60,41 @@ export class Store {
 
   ensureHost(kind: string): string {
     const hostKind = hostKindSchema.parse(kind);
+    const version = schemaVersionSchema.parse(
+      this.db.prepare("PRAGMA user_version").get(),
+    ).user_version;
+    if (version === 3 || version === 4 || version === 5) {
+      const existingHost = hostInstallationSchema.parse(
+        this.db
+          .prepare(
+            "SELECT hostKind, hostKey FROM host_installation WHERE singleton = 1",
+          )
+          .get(),
+      );
+      if (existingHost.hostKind !== hostKind)
+        throw new Error(
+          `Database is bound to execution host ${existingHost.hostKind}, not ${hostKind}`,
+        );
+      this.migrateExecutionStateToV6();
+    }
     const hostKey = this.transaction(() => {
-      const version = schemaVersionSchema.parse(
+      const currentVersion = schemaVersionSchema.parse(
         this.db.prepare("PRAGMA user_version").get(),
       ).user_version;
-      if (version > schemaVersion)
+      if (currentVersion > schemaVersion)
         throw new Error(
-          `Database schema ${version} is newer than supported schema ${schemaVersion}`,
+          `Database schema ${currentVersion} is newer than supported schema ${schemaVersion}`,
         );
-      if (version !== 0 && version !== 2 && version !== schemaVersion)
-        throw new Error(`Database schema ${version} requires a fresh database`);
+      if (
+        currentVersion !== 0 &&
+        currentVersion !== 2 &&
+        currentVersion !== schemaVersion
+      )
+        throw new Error(
+          `Database schema ${currentVersion} requires a fresh database`,
+        );
 
-      if (version === 0) {
+      if (currentVersion === 0) {
         if (
           this.db
             .prepare(
@@ -107,7 +130,7 @@ export class Store {
         throw new Error(
           `Database is bound to execution host ${host.hostKind}, not ${hostKind}`,
         );
-      if (version === 2) {
+      if (currentVersion === 2) {
         this.createExecutionTables();
         this.db.exec(`PRAGMA user_version = ${schemaVersion}`);
       }
@@ -486,7 +509,7 @@ export class Store {
       workId TEXT NOT NULL UNIQUE,
       prompt TEXT NOT NULL,
       workspace TEXT NOT NULL,
-      state TEXT NOT NULL CHECK(state IN ('ready','held','submitting','running','completed')),
+      state TEXT NOT NULL CHECK(state IN ('ready','capacity-waiting','held','submitting','running','completed','reconciled','resolved-failed')),
       reason TEXT,
       threadId TEXT,
       turnId TEXT,
@@ -494,6 +517,35 @@ export class Store {
       sandbox TEXT NOT NULL CHECK(sandbox = 'workspaceWrite'),
       approval TEXT NOT NULL CHECK(approval = 'never')
     );`);
+  }
+
+  private migrateExecutionStateToV6(): void {
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      this.transaction(() => {
+        this.db.exec(`CREATE TABLE execution_intents_v6 (
+          id TEXT PRIMARY KEY,
+          workId TEXT NOT NULL UNIQUE,
+          prompt TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('ready','capacity-waiting','held','submitting','running','completed','reconciled','resolved-failed')),
+          reason TEXT,
+          threadId TEXT,
+          turnId TEXT,
+          accountType TEXT NOT NULL,
+          sandbox TEXT NOT NULL CHECK(sandbox = 'workspaceWrite'),
+          approval TEXT NOT NULL CHECK(approval = 'never')
+        );
+        INSERT INTO execution_intents_v6 SELECT * FROM execution_intents;
+        DROP TABLE execution_intents;
+        ALTER TABLE execution_intents_v6 RENAME TO execution_intents;
+        PRAGMA user_version = ${schemaVersion}`);
+        if (this.db.prepare("PRAGMA foreign_key_check").all().length > 0)
+          throw new Error("Execution state migration broke a foreign key");
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
   }
 
   private validatePersistedRows(): void {
