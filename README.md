@@ -15,15 +15,15 @@ graph or separate persistent-bot model.
 
 ## Current status
 
-The repository contains a reusable TypeScript/SQLite coordination core in
-`src/core`, plus the S02 standalone bootstrap and Codex App Server adapter in
-`src/standalone`. The bootstrap owns a marked fresh data directory, persists
-execution intent and binding, and holds uncertain work across restart. The BB
-plugin, packaging and integration harness have been removed. The task workspace
-lifecycle and task-bound writer admission are implemented as service interfaces.
-The scheduler, assignment router and authenticated remote operator UI are still pending.
-S04a adds versioned local domain commands and a minimal loopback operator interface;
-it does not dispatch assignments. The installed Haze
+The repository contains a TypeScript/SQLite coordination core in `src/core` and
+a standalone service with a durable turn scheduler and execution supervisor in
+`src/standalone`. The S03b service slice implements shared writer/capacity
+admission, capacity-waiting, bounded Stop observation, conservative restart
+reconciliation, exact recovery receipts, narrow retry accounting and a macOS
+sleep/wake admission gate. The BB plugin, packaging and integration harness have
+been removed. The full assignment router, #694 operator scheduling/capacity
+controls and recovery presentation, #703 authenticated remote operator UI, and
+S05 physical sleep/wake qualification remain pending. The installed Haze
 prototype stays in place until the reviewed operational cutover.
 
 ## Planning checkpoint
@@ -53,16 +53,23 @@ npm ci
 npm run check
 ```
 
-`check` runs strict type checking, lint, formatting, compilation and tests. The
-checks cover the retained core and S02 bootstrap fixtures. They do not qualify
-the later scheduler or UI integration.
+`check` runs strict type checking, lint, formatting, compilation and tests,
+including deterministic S03b scheduler, supervision, recovery, power and
+service-integration fixtures. Real App Server qualification is separate and
+must be run explicitly with `npm run s03b:live`; the harness refuses to run
+without its `--live` opt-in. These checks do not
+prove physical sleep/wake behavior or operational host-restart recovery.
 
 The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
 and optionally `previousWorkId` for a follow-up in a completed conversation.
-`serve` initializes the database and App Server, then waits for SIGINT or SIGTERM;
-it does not schedule work. Reusing a work ID never resubmits it. A held result
-requires independent reconciliation; there is no automatic retry or force unlock.
+`serve` initializes the database and App Server, then waits for SIGINT or SIGTERM.
+Reusing a work ID never resubmits it. A held result requires independent
+reconciliation; there is no force unlock. Automatic retry is limited to an exact
+terminal `serverOverloaded` or `rateLimitExceeded` failure with known retry
+telemetry, settled effects, ended callbacks, and no Stop or known survivor. Codex
+and Ensemble retries share a two-retry limit; uncertain or other failures remain
+held.
 On first use, the directory must be empty or carry Ensemble's standalone marker.
 Startup can also recover an interrupted first start when the only files are an
 empty `.ensemble-owner.sqlite`, its SQLite journal if present, and an absent or
@@ -77,16 +84,18 @@ read-view and admission records available to dependent slices.
 
 `StandaloneService.provisionTask` durably binds a domain task to one retained
 workspace, including repository-free and multiple-repository tasks.
-`submitTask` resolves that binding and the captured assignment revisions before
-attempting writer admission. A waiting task turn stays ready without reserving a
-writer; a bound successful terminal report admits a successor only after registered
-Ensemble callbacks finish and no hold or known survivor remains. `stopTask` and
-uncertain execution retain holds across restart; `resumeTask` clears only the Stop
-hold. `replaceConversation` keeps the assignment snapshots while advancing its
-conversation revision, and `recordTaskResult` rejects early or stale results.
-`archiveTask` requires delivery and preservation evidence and refuses unresolved
-task work. These are caller interfaces for later scheduler and result-delivery
-integration, not automatic scheduling or physical containment. An untracked
+`submitTask` resolves that binding and captured assignment revisions before
+writer admission. Capacity-waiting turns own neither a writer nor a reservation.
+A bound successful terminal report admits a successor only after registered
+Ensemble callbacks finish and no hold or known survivor remains. `stopTask`
+synchronously persists the Stop hold and returns a bounded observation; only
+`resumeTask` clears the independent Stop hold. Startup reconciliation observes
+exact execution identities and never replays an ambiguous generation. A validated
+recovery receipt releases only the exact generation's writer and capacity holds.
+`replaceConversation` keeps assignment snapshots while advancing its conversation
+revision, and `recordTaskResult` rejects early or stale results. `archiveTask`
+requires delivery and preservation evidence and refuses unresolved task work.
+These service contracts do not provide physical process containment. An untracked
 detached child may overlap a later writer after qualified normal success.
 
 ## Design documents

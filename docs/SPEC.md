@@ -8,7 +8,10 @@ implementation contracts remain subject to S01 evidence.
 [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
 ADR-1003 with that ownership change. The [BB specification](SPEC-bb.md) is history.
-No standalone service, scheduler or UI is implemented yet.
+The standalone service now has durable scheduling, capacity admission,
+supervision and conservative recovery primitives. The full operator journey,
+assignment routing and authenticated remote UI are not implemented; requirements
+below remain product obligations rather than passing acceptance claims.
 
 ## Purpose and scope
 

@@ -1,0 +1,694 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { DomainStore } from "../src/core/domain.js";
+import { Store } from "../src/core/store.js";
+import { ExecutionState } from "../src/standalone/state.js";
+
+interface PowerEventCursor {
+  version: 1;
+  value: string;
+}
+
+interface TestPowerEvent {
+  cursor: PowerEventCursor;
+  previousCursor: PowerEventCursor | null;
+  transition: "sleep" | "wake";
+}
+
+interface PowerEventSource {
+  readSince(cursor: PowerEventCursor | null): Promise<{
+    complete: boolean;
+    fromCursor: PowerEventCursor | null;
+    cursor: PowerEventCursor | null;
+    events: TestPowerEvent[];
+  }>;
+}
+
+interface CaffeinateAssertionPort {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+
+interface ExecutionPowerPort {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  poll(): Promise<void>;
+  executionStarted(workId: string): Promise<void>;
+  executionEnded(workId: string): Promise<void>;
+  admissionHeld(): boolean;
+  status(): { assertionFailure: string | null };
+}
+
+// These runtime imports deliberately fail against the pre-T6 baseline.
+const powerModulePath: string = "../src/standalone/power.js";
+const powerModule = await import(powerModulePath);
+const CaffeinateAssertion = powerModule.CaffeinateAssertion as unknown as new (
+  spawn: (command: string, args: string[]) => FakeChild,
+) => CaffeinateAssertionPort;
+const ExecutionPower = powerModule.ExecutionPower as unknown as new (
+  state: ExecutionState,
+  events: PowerEventSource,
+  assertion: CaffeinateAssertionPort,
+  reconcile: () => Promise<void>,
+) => ExecutionPowerPort;
+const parsePmsetPowerLog = powerModule.parsePmsetPowerLog as (
+  output: string,
+  cursor: PowerEventCursor | null,
+) => Awaited<ReturnType<PowerEventSource["readSince"]>>;
+const MacPowerEventSource = powerModule.MacPowerEventSource as unknown as new (
+  readLog: (
+    command: string,
+    args: string[],
+    options: { timeoutMs: number; maxBufferBytes: number },
+  ) => Promise<string>,
+  timeoutMs: number,
+  maxBufferBytes: number,
+  now: () => number,
+) => PowerEventSource;
+
+class FakePowerEvents implements PowerEventSource {
+  cursor: PowerEventCursor | null = null;
+  complete = true;
+  events: TestPowerEvent[] = [];
+
+  async readSince(cursor: PowerEventCursor | null) {
+    const requested = cursor;
+    const first = this.events.findIndex((event) =>
+      sameCursor(event.previousCursor, requested),
+    );
+    return {
+      complete: this.complete,
+      fromCursor: requested,
+      cursor: this.cursor,
+      events: first < 0 ? [] : this.events.slice(first),
+    };
+  }
+}
+
+function powerCursor(value: string): PowerEventCursor {
+  return { version: 1, value };
+}
+
+function sameCursor(
+  left: PowerEventCursor | null,
+  right: PowerEventCursor | null,
+): boolean {
+  return left === null
+    ? right === null
+    : right !== null &&
+        left.version === right.version &&
+        left.value === right.value;
+}
+
+class FakeChild extends EventEmitter {
+  killed = 0;
+
+  constructor(private readonly automaticClose = true) {
+    super();
+  }
+
+  kill() {
+    this.killed++;
+    if (this.automaticClose)
+      queueMicrotask(() => this.emit("close", 0, "SIGTERM"));
+    return true;
+  }
+}
+
+function powerStore(path: string) {
+  const db = new DatabaseSync(path);
+  new Store(db).ensureHost("standalone-codex");
+  new DomainStore(db).migrate();
+  return { db, state: new ExecutionState(db) };
+}
+
+function begin(state: ExecutionState, workId: string, workspace: string) {
+  const intent = state.create(workId, `prompt:${workId}`, workspace);
+  assert.equal(state.begin(intent.id), true);
+  return intent;
+}
+
+function hasWriterOrCapacity(db: DatabaseSync, workId: string) {
+  const writer = db
+    .prepare("SELECT 1 FROM task_writer_admissions WHERE workId = ?")
+    .get(workId);
+  const capacity = db
+    .prepare("SELECT 1 FROM execution_capacity_reservations WHERE workId = ?")
+    .get(workId);
+  return writer !== undefined || capacity !== undefined;
+}
+
+function waitUntil(predicate: () => boolean): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 1000;
+    const check = () => {
+      if (predicate()) resolve();
+      else if (Date.now() >= deadline) reject(new Error("condition timed out"));
+      else setTimeout(check, 0);
+    };
+    check();
+  });
+}
+
+test("caffeinate holds exactly one idle-sleep assertion only while execution is active", async () => {
+  const children: FakeChild[] = [];
+  const invocations: Array<{ command: string; args: string[] }> = [];
+  const assertion = new CaffeinateAssertion(
+    (command: string, args: string[]) => {
+      invocations.push({ command, args });
+      const child = new FakeChild();
+      children.push(child);
+      return child;
+    },
+  );
+  const events = new FakePowerEvents();
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-"));
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const power = new ExecutionPower(state, events, assertion, async () => {});
+  try {
+    await power.start();
+    assert.equal(
+      invocations.length,
+      0,
+      "idle supervision must not prevent sleep",
+    );
+    await power.executionStarted("work-a");
+    await power.executionStarted("work-b");
+    assert.deepEqual(invocations, [
+      { command: "/usr/bin/caffeinate", args: ["-i"] },
+    ]);
+    await power.executionEnded("work-a");
+    assert.equal(
+      children[0]?.killed,
+      0,
+      "one remaining execution retains the assertion",
+    );
+    await power.executionEnded("work-b");
+    assert.equal(
+      children[0]?.killed,
+      1,
+      "last execution releases the assertion",
+    );
+    await power.executionStarted("work-c");
+    assert.equal(invocations.length, 2);
+    await power.stop();
+    assert.equal(
+      children[1]?.killed,
+      1,
+      "supervisor shutdown releases its assertion",
+    );
+  } finally {
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assertion child failure is visible without releasing execution state", async () => {
+  const children: FakeChild[] = [];
+  const assertion = new CaffeinateAssertion(
+    (command: string, args: string[]) => {
+      assert.equal(command, "/usr/bin/caffeinate");
+      assert.deepEqual(args, ["-i"]);
+      const child = new FakeChild();
+      children.push(child);
+      return child;
+    },
+  );
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-failure-"));
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const power = new ExecutionPower(
+    state,
+    new FakePowerEvents(),
+    assertion,
+    async () => {},
+  );
+  try {
+    const active = begin(
+      state,
+      "active-before-assertion-failure",
+      "/workspace/a",
+    );
+    assert.equal(state.bindThread(active.id, "thread-a"), true);
+    assert.equal(state.bindTurn(active.id, "turn-a"), true);
+    await power.start();
+    await power.executionStarted(active.workId);
+    children[0]?.emit("close", 1, null);
+    await waitUntil(() => power.status().assertionFailure !== null);
+    assert.match(power.status().assertionFailure ?? "", /caffeinate.*exited/i);
+    assert.equal(hasWriterOrCapacity(db, active.workId), true);
+  } finally {
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a new execution racing final assertion release reacquires before its first turn", async () => {
+  const children: FakeChild[] = [];
+  const invocations: string[] = [];
+  const assertion = new CaffeinateAssertion((command: string) => {
+    invocations.push(command);
+    const child = new FakeChild(false);
+    children.push(child);
+    return child;
+  });
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-race-"));
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const power = new ExecutionPower(
+    state,
+    new FakePowerEvents(),
+    assertion,
+    async () => {},
+  );
+  try {
+    await power.start();
+    await power.executionStarted("work-before-idle");
+    const ending = power.executionEnded("work-before-idle");
+    await waitUntil(() => children[0]?.killed === 1);
+    const starting = power.executionStarted("work-after-idle");
+    children[0]?.emit("close", 0, "SIGTERM");
+    await Promise.all([ending, starting]);
+    assert.deepEqual(invocations, [
+      "/usr/bin/caffeinate",
+      "/usr/bin/caffeinate",
+    ]);
+    assert.equal(
+      children.length,
+      2,
+      "the newly active turn needs its own live assertion",
+    );
+  } finally {
+    const stopping = power.stop();
+    children[1]?.emit("close", 0, "SIGTERM");
+    await stopping;
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sleep/wake installs the durable admission gate before reconciling active generations", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-wake-"));
+  const path = join(root, "power.sqlite");
+  const { db, state } = powerStore(path);
+  const active = state.create(
+    "active-before-wake",
+    "prompt:active-before-wake",
+    "/workspace/active",
+  );
+  assert.equal(
+    state.begin(active.id, { projectId: null, requestSequence: 1 }),
+    true,
+  );
+  assert.equal(state.bindThread(active.id, "thread-active"), true);
+  assert.equal(state.bindTurn(active.id, "turn-active"), true);
+  const queued = state.create(
+    "queued-during-wake",
+    "queued",
+    "/workspace/queued",
+  );
+  const events = new FakePowerEvents();
+  events.cursor = powerCursor("wake-2");
+  events.events = [
+    {
+      cursor: powerCursor("sleep-1"),
+      previousCursor: null,
+      transition: "sleep",
+    },
+    {
+      cursor: powerCursor("wake-2"),
+      previousCursor: powerCursor("sleep-1"),
+      transition: "wake",
+    },
+  ];
+  let reconciliations = 0;
+  let releaseReconciliation!: () => void;
+  const reconciliation = new Promise<void>(
+    (resolve) => (releaseReconciliation = resolve),
+  );
+  const power = new ExecutionPower(
+    state,
+    events,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {
+      reconciliations++;
+      assert.equal(
+        power.admissionHeld(),
+        true,
+        "persist wake gate before T4 reconciliation starts",
+      );
+      state.recordRecoveryObservation(active.workId, "no-proof");
+      await reconciliation;
+    },
+  );
+  try {
+    await power.start();
+    const polling = power.poll();
+    await waitUntil(() => reconciliations > 0);
+    assert.equal(
+      state.begin(queued.id),
+      false,
+      "new turn cannot enter admission during wake reconciliation",
+    );
+    assert.equal(state.get(queued.id).state, "capacity-waiting");
+    assert.equal(hasWriterOrCapacity(db, queued.workId), false);
+    assert.equal(
+      hasWriterOrCapacity(db, active.workId),
+      true,
+      "wake never releases admitted ownership",
+    );
+    releaseReconciliation();
+    await polling;
+    assert.equal(power.admissionHeld(), false);
+    assert.equal(
+      state.begin(queued.id),
+      true,
+      "reconciled wake permits current admission checks to resume",
+    );
+    await power.poll();
+    assert.equal(
+      reconciliations,
+      1,
+      "duplicate wake reads do not reconcile or dispatch twice",
+    );
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM execution_capacity_reservations WHERE workId = ?",
+        )
+        .get(queued.workId)?.count,
+      1,
+    );
+  } finally {
+    releaseReconciliation();
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an incomplete or ambiguous power-event cursor persists a global hold across reopen", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-cursor-"));
+  const path = join(root, "power.sqlite");
+  const opened = powerStore(path);
+  const events = new FakePowerEvents();
+  events.complete = false;
+  const power = new ExecutionPower(
+    opened.state,
+    events,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {},
+  );
+  try {
+    await power.start();
+    await power.poll();
+    assert.equal(power.admissionHeld(), true);
+    await power.stop();
+    opened.db.close();
+    const reopened = powerStore(path);
+    try {
+      const queued = reopened.state.create(
+        "after-incomplete-cursor",
+        "queued",
+        "/workspace/next",
+      );
+      assert.equal(reopened.state.begin(queued.id), false);
+      assert.equal(hasWriterOrCapacity(reopened.db, queued.workId), false);
+    } finally {
+      reopened.db.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a repeated or out-of-order power cursor holds admission instead of guessing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-ambiguous-"));
+  const path = join(root, "power.sqlite");
+  const { db, state } = powerStore(path);
+  const events = new FakePowerEvents();
+  events.cursor = powerCursor("duplicate-2");
+  events.events = [
+    {
+      cursor: powerCursor("duplicate-2"),
+      previousCursor: null,
+      transition: "sleep",
+    },
+    {
+      cursor: powerCursor("duplicate-2"),
+      previousCursor: powerCursor("duplicate-2"),
+      transition: "wake",
+    },
+  ];
+  const power = new ExecutionPower(
+    state,
+    events,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {},
+  );
+  try {
+    await power.start();
+    await power.poll();
+    assert.equal(power.admissionHeld(), true);
+    const queued = state.create(
+      "after-ambiguous-cursor",
+      "queued",
+      "/workspace/next",
+    );
+    assert.equal(state.begin(queued.id), false);
+    assert.equal(hasWriterOrCapacity(db, queued.workId), false);
+  } finally {
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("wake cursor survives restart and an already reconciled wake is not replayed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-restart-"));
+  const path = join(root, "power.sqlite");
+  const opened = powerStore(path);
+  const events = new FakePowerEvents();
+  events.cursor = powerCursor("wake-2");
+  events.events = [
+    {
+      cursor: powerCursor("sleep-1"),
+      previousCursor: null,
+      transition: "sleep",
+    },
+    {
+      cursor: powerCursor("wake-2"),
+      previousCursor: powerCursor("sleep-1"),
+      transition: "wake",
+    },
+  ];
+  let reconciliations = 0;
+  const power = new ExecutionPower(
+    opened.state,
+    events,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {
+      reconciliations++;
+    },
+  );
+  try {
+    await power.start();
+    await power.poll();
+    assert.equal(reconciliations, 1);
+    await power.stop();
+    opened.db.close();
+    const reopened = powerStore(path);
+    const afterRestart = new ExecutionPower(
+      reopened.state,
+      events,
+      new CaffeinateAssertion(() => new FakeChild()),
+      async () => {
+        reconciliations++;
+      },
+    );
+    try {
+      await afterRestart.start();
+      await afterRestart.poll();
+      assert.equal(
+        reconciliations,
+        1,
+        "durable cursor suppresses duplicate wake reconciliation",
+      );
+      const queued = reopened.state.create(
+        "dispatch-after-restart",
+        "queued",
+        "/workspace/restarted",
+      );
+      assert.equal(reopened.state.begin(queued.id), true);
+    } finally {
+      await afterRestart.stop();
+      reopened.db.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("wake admission stays held until every admitted generation is reconciled", async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-power-pending-reconciliation-"),
+  );
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const active = state.create(
+    "active-needs-reconciliation",
+    "prompt:active-needs-reconciliation",
+    "/workspace/active",
+  );
+  assert.equal(
+    state.begin(active.id, { projectId: null, requestSequence: 1 }),
+    true,
+  );
+  assert.equal(state.bindThread(active.id, "thread-active"), true);
+  assert.equal(state.bindTurn(active.id, "turn-active"), true);
+  const events = new FakePowerEvents();
+  events.cursor = powerCursor("wake-1");
+  events.events = [
+    { cursor: powerCursor("wake-1"), previousCursor: null, transition: "wake" },
+  ];
+  const power = new ExecutionPower(
+    state,
+    events,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {},
+  );
+  try {
+    await power.start();
+    await power.poll();
+    assert.equal(
+      power.admissionHeld(),
+      true,
+      "a callback without T4 observations cannot clear the gate",
+    );
+    const queued = state.create(
+      "queued-behind-unreconciled-wake",
+      "queued",
+      "/workspace/next",
+    );
+    assert.equal(state.begin(queued.id), false);
+    assert.equal(hasWriterOrCapacity(db, queued.workId), false);
+  } finally {
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a complete cursor can establish an idle baseline but not bypass active recovery", async () => {
+  const idleRoot = mkdtempSync(join(tmpdir(), "ensemble-power-idle-baseline-"));
+  const idle = powerStore(join(idleRoot, "power.sqlite"));
+  const idleEvents = new FakePowerEvents();
+  idleEvents.cursor = powerCursor("baseline-1");
+  const idlePower = new ExecutionPower(
+    idle.state,
+    idleEvents,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {},
+  );
+  try {
+    await idlePower.start();
+    await idlePower.poll();
+    assert.equal(idlePower.admissionHeld(), false);
+  } finally {
+    await idlePower.stop();
+    idle.db.close();
+    rmSync(idleRoot, { recursive: true, force: true });
+  }
+
+  const activeRoot = mkdtempSync(
+    join(tmpdir(), "ensemble-power-active-baseline-"),
+  );
+  const active = powerStore(join(activeRoot, "power.sqlite"));
+  const intent = active.state.create(
+    "active-without-history",
+    "prompt",
+    "/workspace/active",
+  );
+  assert.equal(
+    active.state.begin(intent.id, { projectId: null, requestSequence: 1 }),
+    true,
+  );
+  const activeEvents = new FakePowerEvents();
+  activeEvents.cursor = powerCursor("baseline-1");
+  const activePower = new ExecutionPower(
+    active.state,
+    activeEvents,
+    new CaffeinateAssertion(() => new FakeChild()),
+    async () => {
+      active.state.recordRecoveryObservation(intent.workId, "no-proof");
+    },
+  );
+  try {
+    await activePower.start();
+    await activePower.poll();
+    assert.equal(
+      activePower.admissionHeld(),
+      true,
+      "unknown pre-cursor history with active work must remain quarantined",
+    );
+  } finally {
+    await activePower.stop();
+    active.db.close();
+    rmSync(activeRoot, { recursive: true, force: true });
+  }
+});
+
+test("macOS pmset source accepts ordered sleep/wake rows and rejects gaps or ambiguous rows", async () => {
+  const fixture = [
+    "PM ASL data store: /var/log/powermanagement",
+    "2026-09-29 09:50:00 +0100 Assertions\tPID 10(app) Created PreventUserIdleSystemSleep",
+    "2026-09-29 10:00:00 +0100 Sleep\tEntering Sleep state due to 'Clamshell Sleep'",
+    "2026-09-29 10:05:00 +0100 Wake\tWake from Deep Idle due to EC.LidOpen",
+    "2026-09-29 10:06:00 +0100 Assertions\tPID 10(app) Created PreventUserIdleSystemSleep",
+    "2026-09-29 10:07:00 +0100 : Showing all currently held IOKit power assertions",
+    "Assertion status system-wide:",
+    "   PreventSystemSleep             0",
+    "Listed by owning process:",
+    "Kernel Assertions: 0x0=NONE",
+  ].join("\n");
+  const readLog = async (
+    command: string,
+    args: string[],
+    options: { timeoutMs: number; maxBufferBytes: number },
+  ) => {
+    assert.equal(command, "/usr/bin/pmset");
+    assert.deepEqual(args, ["-g", "log"]);
+    assert.equal(options.timeoutMs, 2500);
+    assert.equal(options.maxBufferBytes, 4096);
+    return fixture;
+  };
+  const baselineMs = Date.parse("2026-09-29T08:59:00Z");
+  const source = new MacPowerEventSource(readLog, 2500, 4096, () => baselineMs);
+  const baseline = await source.readSince(null);
+  assert.equal(baseline.complete, true);
+  assert.deepEqual(baseline.cursor, powerCursor(`pmset-time:${baselineMs}`));
+  const batch = await source.readSince(baseline.cursor);
+  assert.equal(batch.complete, true);
+  assert.deepEqual(
+    batch.events.map((event) => event.transition),
+    ["sleep", "wake"],
+  );
+  assert.deepEqual(batch.events[0]?.previousCursor, baseline.cursor);
+  assert.deepEqual(batch.events[1]?.previousCursor, batch.events[0]?.cursor);
+  assert.deepEqual(batch.cursor, batch.events[1]?.cursor);
+  assert.equal(
+    parsePmsetPowerLog(fixture, powerCursor("pmset-event:1:2:0123456789abcdef"))
+      .complete,
+    false,
+  );
+
+  const ambiguous = fixture.replace(
+    "2026-09-29 10:06:00 +0100 Assertions",
+    "2026-09-29 10:06:00 +0100 UnknownWakeSummary",
+  );
+  assert.equal(parsePmsetPowerLog(ambiguous, baseline.cursor).complete, false);
+});

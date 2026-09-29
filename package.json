@@ -13,6 +13,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "s03b:live": "node test/s03b/live-runtime.mjs --live",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",

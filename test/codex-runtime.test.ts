@@ -38,6 +38,79 @@ test("conflicting and identity-free terminal reports are surfaced as anomalies",
   assert.equal(await runtime.waitForTurn("thread", "turn"), "failed");
 });
 
+test("failure evidence is exact-turn-bound and only classifies the retry allowlist", () => {
+  const runtime = new CodexRuntime();
+  const child = {} as ChildProcessWithoutNullStreams;
+  (runtime as unknown as { child: ChildProcessWithoutNullStreams }).child =
+    child;
+  const receive = (
+    threadId: string,
+    turnId: string,
+    error: unknown,
+    status = "failed",
+  ) =>
+    (
+      runtime as unknown as {
+        receive(child: ChildProcessWithoutNullStreams, line: string): void;
+      }
+    ).receive(
+      child,
+      JSON.stringify({
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status, error } },
+      }),
+    );
+
+  receive("thread", "overloaded", { codexErrorInfo: "serverOverloaded" });
+  receive("thread", "rate-limit", { codexErrorInfo: "rateLimitExceeded" });
+  receive("thread", "permanent", { codexErrorInfo: "badRequest" });
+  receive("thread", "other", { codexErrorInfo: "internalServerError" });
+  receive(
+    "thread",
+    "interrupted",
+    { codexErrorInfo: "serverOverloaded" },
+    "interrupted",
+  );
+  receive("thread", "missing", null);
+
+  const evidence = (threadId: string, turnId: string) =>
+    (
+      runtime as unknown as {
+        failureEvidence(threadId: string, turnId: string): unknown;
+      }
+    ).failureEvidence(threadId, turnId);
+  assert.deepEqual(evidence("thread", "overloaded"), {
+    threadId: "thread",
+    turnId: "overloaded",
+    status: "failed",
+    classification: "transient",
+    reasonCode: "serverOverloaded",
+    source: "codexErrorInfo",
+    codexRetries: null,
+  });
+  assert.equal(
+    (evidence("thread", "rate-limit") as { classification: string })
+      .classification,
+    "transient",
+  );
+  assert.equal(
+    (evidence("thread", "permanent") as { classification: string })
+      .classification,
+    "permanent",
+  );
+  assert.equal(
+    (evidence("thread", "other") as { classification: string }).classification,
+    "unknown",
+  );
+  assert.equal(evidence("thread", "interrupted"), undefined);
+  assert.equal(
+    (evidence("thread", "missing") as { classification: string })
+      .classification,
+    "unknown",
+  );
+  assert.equal(evidence("another-thread", "overloaded"), undefined);
+});
+
 function bounded<T>(action: Promise<T>, milliseconds: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
@@ -100,6 +173,52 @@ for await (const line of lines) {
   } finally {
     await runtime.stop();
     await Promise.allSettled([started]);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn interrupt uses the bound App Server identities and validates its response", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-interrupt-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.id === undefined) continue;
+  if (message.method === "account/read") {
+    process.stdout.write(JSON.stringify({id: message.id, result: {account: {type: "chatgpt"}}}) + "\n");
+    continue;
+  }
+  if (message.method === "config/read") {
+    process.stdout.write(JSON.stringify({id: message.id, result: {config: {approval_policy: "never", sandbox_mode: "workspace-write"}}}) + "\n");
+    continue;
+  }
+  if (message.method === "turn/interrupt" && (message.params.threadId !== "thread-7" || message.params.turnId !== "turn-9")) {
+    process.stdout.write(JSON.stringify({id: message.id, error: {message: "Unexpected interrupt identity"}}) + "\n");
+    continue;
+  }
+  process.stdout.write(JSON.stringify({id: message.id, result: {}}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable);
+  try {
+    await bounded(runtime.start(), 3000);
+    await bounded(
+      (
+        runtime as unknown as {
+          interruptTurn(threadId: string, turnId: string): Promise<void>;
+        }
+      ).interruptTurn("thread-7", "turn-9"),
+      3000,
+    );
+  } finally {
+    await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -2,8 +2,13 @@
 
 **Product decisions reviewed and confirmed by Chris on 27 September 2026.**
 The ownership decision is accepted in [ADR-1004](../adr/1004-standalone-service.md).
-Runtime-specific contracts below require the bounded S01 proof before dependent implementation.
-The existing implementation is a reusable SQLite core; the standalone service is not implemented.
+Runtime-specific contracts below require bounded evidence before dependent
+implementation. The service now implements the S03b scheduler/supervisor slice:
+durable request admission, shared writer/capacity limits, bounded Stop, exact
+restart-recovery receipts, constrained retries and macOS power-event admission
+quarantine. The #694 operator scheduling/capacity controls and recovery
+presentation, authenticated remote UI, physical sleep/wake qualification and
+operational host-restart qualification remain separate work.
 [ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
 assignment-routing and project-lead accountability decisions.
 
@@ -31,6 +36,15 @@ assignment-routing and project-lead accountability decisions.
   visible in the web UI. Live steering is deferred; stop remains separate.
 - Start with a fresh standalone database. Preserve the prototype separately;
   no historical import or automatic old-assignment resumption is required.
+
+The S03b service applies global and per-project caps when admitting direct,
+command-line and managed task turns through the same transaction. Capacity waits
+do not retain writer ownership. A lower configured limit blocks new admission
+without interrupting active work. Retry is narrower than ordinary failure
+handling: only positively identified transient terminal failures with known
+shared retry usage and settled effects can release an exact old generation and
+queue a bounded, newly admitted turn. All unresolved or unsupported evidence
+retains its holds.
 
 ## Components and ownership
 
