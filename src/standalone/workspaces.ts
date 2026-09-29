@@ -85,6 +85,7 @@ export interface TaskWorkspaceLifecycle {
   archiveAndCleanup(
     taskId: string,
     evidence: WorkspaceCleanupEvidence,
+    finalWriterCheck?: () => boolean,
   ): Promise<WorkspaceCleanupResult>;
 }
 
@@ -318,6 +319,7 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   archiveAndCleanup(
     taskId: string,
     evidence: WorkspaceCleanupEvidence,
+    finalWriterCheck?: () => boolean,
   ): Promise<WorkspaceCleanupResult> {
     const id = z.string().trim().min(1).max(512).parse(taskId);
     const approval = z
@@ -368,6 +370,12 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
             `Uncommitted or ignored work remains in ${repository.repositoryId}`,
           );
       }
+
+      if (finalWriterCheck && !finalWriterCheck())
+        return this.retained(
+          checked,
+          "Workspace retained because writer ownership changed during cleanup validation",
+        );
 
       const archiving = this.store.update(
         id,

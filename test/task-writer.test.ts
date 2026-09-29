@@ -11,6 +11,7 @@ import {
   type ExecutionIntent,
 } from "../src/standalone/state.js";
 import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type { WorkspaceManager } from "../src/standalone/workspaces.js";
 
 class RuntimeFixture implements Runtime {
   starts = 0;
@@ -1012,15 +1013,8 @@ test("archival hold prevents writer admission after workspace validation", async
   try {
     const cleanupGate = deferred();
     const cleanupEntered = deferred();
-    const manager = (
-      f.service as unknown as {
-        workspaces: {
-          archiveAndCleanup: (
-            ...args: Parameters<NonNullable<(typeof f.service)["archiveTask"]>>
-          ) => ReturnType<(typeof f.service)["archiveTask"]>;
-        };
-      }
-    ).workspaces;
+    const manager = (f.service as unknown as { workspaces: WorkspaceManager })
+      .workspaces;
     const archiveAndCleanup = manager.archiveAndCleanup.bind(manager);
     manager.archiveAndCleanup = async (...args) => {
       cleanupEntered.resolve();
@@ -1078,6 +1072,43 @@ test("archival hold prevents writer admission after workspace validation", async
     );
     released.close();
   } finally {
+    await f.close();
+  }
+});
+
+test("archival rechecks writer ownership after cleanup validation", async () => {
+  const f = await fixture();
+  const callback = deferred();
+  try {
+    assert.equal(
+      (await f.service.submitTask("completed", f.assignmentId, "write")).state,
+      "completed",
+    );
+    const manager = (f.service as unknown as { workspaces: WorkspaceManager })
+      .workspaces;
+    const archiveAndCleanup = manager.archiveAndCleanup.bind(manager);
+    manager.archiveAndCleanup = async (...args) => {
+      f.service.registerExecutionCallback("completed", callback.promise);
+      return archiveAndCleanup(...args);
+    };
+
+    const result = await f.service.archiveTask(f.taskId, {
+      deliveryConfirmed: true,
+      writerOwnershipResolved: true,
+      handoffsPreserved: true,
+      reconciliationEvidencePreserved: true,
+      workspaceContentsPreserved: true,
+    });
+    assert.equal(result.outcome, "retained");
+    if (result.outcome === "retained")
+      assert.match(result.reason, /writer ownership changed/);
+    assert.equal(result.binding.state, "ready");
+    assert.equal(
+      f.service.list().find((item) => item.workId === "completed")?.state,
+      "held",
+    );
+  } finally {
+    callback.resolve();
     await f.close();
   }
 });

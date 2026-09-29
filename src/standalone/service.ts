@@ -12,8 +12,12 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { Store } from "../core/store.js";
 import { DomainStore } from "../core/domain.js";
 import { CodexRuntime, type Runtime } from "./codex.js";
-import { ExecutionState, type ExecutionIntent } from "./state.js";
-import type { TaskExecutionContext } from "./state.js";
+import {
+  ExecutionState,
+  type ExecutionIntent,
+  type TaskExecutionBinding,
+  type TaskExecutionContext,
+} from "./state.js";
 import {
   SqliteWorkspaceBindingStore,
   WorkspaceManager,
@@ -301,7 +305,11 @@ export class StandaloneService {
         writerOwnershipResolved: false,
       });
     try {
-      return await this.requireWorkspaces().archiveAndCleanup(taskId, evidence);
+      return await this.requireWorkspaces().archiveAndCleanup(
+        taskId,
+        evidence,
+        () => state.confirmArchive(taskId),
+      );
     } finally {
       state.endArchive(taskId);
     }
@@ -463,36 +471,41 @@ export class StandaloneService {
       )
         throw new Error("Task workspaces require a durable assignment binding");
     }
-    const intent = state.create(workId, prompt, workspaceKey, previousWorkId);
-    const binding = context ? state.bindTask(workId, context) : undefined;
-    if (intent.state !== "ready" || intent.reason) return intent;
     let previous: ExecutionIntent | undefined;
-    try {
-      if (!isAbsolute(workspace) || !lstatSync(workspace).isDirectory())
-        throw new Error("Workspace must be an existing real directory");
-      if (previousWorkId) {
-        previous = state.byWorkId(previousWorkId);
-        const priorBinding = state.taskBinding(previousWorkId);
-        if (
-          context &&
+    let priorBinding: TaskExecutionBinding | undefined;
+    let waitsForPredecessor = false;
+    if (previousWorkId) {
+      previous = state.byWorkId(previousWorkId);
+      priorBinding = state.taskBinding(previousWorkId);
+      waitsForPredecessor = Boolean(
+        context &&
           previous &&
           previous.state !== "completed" &&
           previous.workspace === workspaceKey &&
           priorBinding?.taskId === context.taskId &&
-          priorBinding.assignmentId === context.assignmentId
-        )
-          return intent;
-        if (
-          previous?.state !== "completed" ||
+          priorBinding.assignmentId === context.assignmentId,
+      );
+      if (
+        !waitsForPredecessor &&
+        (previous?.state !== "completed" ||
           !previous.threadId ||
           previous.workspace !== workspaceKey ||
           (context &&
             (priorBinding?.taskId !== context.taskId ||
-              priorBinding.assignmentId !== context.assignmentId))
-        )
-          throw new Error(
-            "Previous work is not a completed binding in this workspace",
-          );
+              priorBinding.assignmentId !== context.assignmentId)))
+      )
+        throw new Error(
+          "Previous work is not a completed binding in this workspace",
+        );
+    }
+    const intent = state.create(workId, prompt, workspaceKey, previousWorkId);
+    const binding = context ? state.bindTask(workId, context) : undefined;
+    if (intent.state !== "ready" || intent.reason || waitsForPredecessor)
+      return intent;
+    try {
+      if (!isAbsolute(workspace) || !lstatSync(workspace).isDirectory())
+        throw new Error("Workspace must be an existing real directory");
+      if (previousWorkId) {
         if (
           binding &&
           priorBinding?.conversationRevision !== binding.conversationRevision

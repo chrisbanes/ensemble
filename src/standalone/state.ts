@@ -226,6 +226,33 @@ export class ExecutionState {
     );
   }
 
+  confirmArchive(taskId: string): boolean {
+    const id = z.string().uuid().parse(taskId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const confirmed =
+        this.db
+          .prepare(`SELECT 1 FROM task_archival_holds archival
+          WHERE archival.taskId = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM task_writer_ambiguity_holds WHERE taskId = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM task_writer_holds WHERE taskId = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM task_execution_bindings b
+            JOIN execution_intents e ON e.workId = b.workId
+            WHERE b.taskId = ?
+            AND e.state IN ('ready','held','submitting','running')
+          )`)
+          .get(id, id, id, id) !== undefined;
+      this.db.exec("COMMIT");
+      return confirmed;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   endArchive(taskId: string): void {
     this.db
       .prepare("DELETE FROM task_archival_holds WHERE taskId = ?")
