@@ -486,6 +486,64 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
       assert.equal(response.status, attempt.status);
     }
     assert.equal(extensionWrites, 0);
+    const profileCount = domain.profiles().length;
+    const malformedPayload = "NEVER-ECHO-MALFORMED-FORM-SECRET";
+    for (const [description, component] of [
+      ["invalid single-byte value", "name=%FF"],
+      ["invalid multi-byte value", "name=%E2%82"],
+      ["invalid UTF-8 key", `name=Safe&%FF=${malformedPayload}`],
+      ["invalid percent escape", "name=%ZZ"],
+      ["duplicate decoded key", "name=First&%6Eame=Second"],
+    ] as const) {
+      const response = await fetch(`${origin}/command`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie: sessionCookie,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: [
+          "type=profile.create",
+          `key=${randomUUID()}`,
+          `profileId=${randomUUID()}`,
+          `instructions=${encodeURIComponent(malformedPayload)}`,
+          "capabilities=test",
+          component,
+          `csrfToken=${encodeURIComponent(protectedCsrf)}`,
+        ].join("&"),
+        redirect: "manual",
+      });
+      assert.equal(response.status, 400, description);
+      const responseBody = await response.text();
+      assert.doesNotMatch(
+        responseBody,
+        /NEVER-ECHO-MALFORMED-FORM-SECRET|%FF|%E2%82|%ZZ|\uFFFD/i,
+        description,
+      );
+      assert.equal(domain.profiles().length, profileCount, description);
+    }
+
+    const oversizedForm = await fetch(`${origin}/command`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie: sessionCookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: [
+        "type=profile.create",
+        `key=${randomUUID()}`,
+        `profileId=${randomUUID()}`,
+        "name=Too+large",
+        `instructions=${"x".repeat(70 * 1024)}`,
+        "capabilities=test",
+        `csrfToken=${encodeURIComponent(protectedCsrf)}`,
+      ].join("&"),
+      redirect: "manual",
+    });
+    assert.equal(oversizedForm.status, 413);
+    assert.equal(domain.profiles().length, profileCount);
+
     for (const [path, target] of [
       ["/runtime/control", "runtime"],
       ["/coordination/control/start", "coordination"],

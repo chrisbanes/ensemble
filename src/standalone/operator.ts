@@ -429,13 +429,20 @@ async function readForm(
   } catch {
     throw new OperatorHttpError(400);
   }
-  if (/%(?![\dA-Fa-f]{2})/.test(encoded)) throw new OperatorHttpError(400);
   const fields: Record<string, string> = Object.create(null) as Record<
     string,
     string
   >;
   let count = 0;
-  for (const [key, value] of new URLSearchParams(encoded)) {
+  for (const pair of encoded.split("&")) {
+    if (!pair) continue;
+    const separator = pair.indexOf("=");
+    const key = decodeFormComponent(
+      separator < 0 ? pair : pair.slice(0, separator),
+    );
+    const value = decodeFormComponent(
+      separator < 0 ? "" : pair.slice(separator + 1),
+    );
     count += 1;
     if (
       count > MAX_FORM_FIELDS ||
@@ -448,6 +455,14 @@ async function readForm(
     fields[key] = value;
   }
   return fields;
+}
+
+function decodeFormComponent(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    throw new OperatorHttpError(400);
+  }
 }
 
 function cleanQuery(searchParams: URLSearchParams): Record<string, string> {
