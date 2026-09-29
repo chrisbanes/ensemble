@@ -730,11 +730,12 @@ export class DomainStore {
           !permitted.includes(command.profileId)
         )
           throw new Error("Profile is not permitted for this project");
-        if (command.requesterAssignmentId)
-          this.projectMatch(
-            this.assignment(command.requesterAssignmentId),
-            command.projectId,
-          );
+        if (command.requesterAssignmentId) {
+          const requester = this.assignment(command.requesterAssignmentId);
+          this.projectMatch(requester, command.projectId);
+          if (requester.taskId !== command.taskId)
+            throw new Error("Requester assignment belongs to another task");
+        }
         this.db
           .prepare(
             "INSERT INTO domain_assignments (id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, state) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'pending')",

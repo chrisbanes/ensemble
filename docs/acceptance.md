@@ -156,7 +156,7 @@ These extend A01–A30; they are required alongside the product scenarios.
 | R03 | Sleep assertion exists only during active execution and releases when idle or supervision ends. Forced sleep/wake reconciles execution before more dispatch, without duplicates. | S03 |
 | R04 | Web UI is privately reachable over Tailscale and independently requires an Ensemble login. Unauthenticated requests cannot read private data or mutate controls; authenticated browser actions have session and origin/CSRF protection. | S04; verified in S05 |
 | R05 | Conversation history and durable operator messages survive restart. Duplicate submission does not duplicate delivery; the next eligible turn receives the message without bypassing holds. No live steering is exposed. | S04; verified in S05 |
-| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08 restore/cutover |
+| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08a backup/restore preparation; S08b final recovery/cutover |
 | R07 | Routing-enabled eligible task supplies its initial brief without a lead turn. Explicit permitted assignee bypasses TypeSafe; disabled projects allocate through the lead without API calls. Profile capabilities and project routing guidance are used; ineligible profiles cannot be selected and full transcripts/credentials are excluded. | S04; verified in S05 |
 | R08 | Uncertain/no-fit/missing-context/API-failure outcomes wake the lead once with the brief and evidence. Lead can allocate without TypeSafe. Busy selected profile waits for capacity; repairs retain assignee. All dispatch rechecks current permissions and holds. | S03/S04; verified in S05 |
 | R09 | Nested results resume their delegator, initial results resume the task-scoped lead, including restart and capacity-one cases. Two tasks using the lead profile keep separate histories. Worker success alone cannot complete a task; lead completion requests satisfy service gates. | S04; verified in S05 |
@@ -168,7 +168,9 @@ S01 is a disposable runtime feasibility proof of A08/A09/A14–A16/A18/A25 and
 R01 boundaries, not full product acceptance of those scenarios. S02–S04 implement
 the contracts and their tests; S05 qualifies A01–A18, A25, A27, local A28/A30 and
 R01–R05, R07–R10 plus R06 fresh-database separation. S06–S07 complete GitHub portions and
-all A01–A30. S08 verifies R06 backup/restore and operational cutover. The operational
+all A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
+qualification. S08b verifies final-schema and external-effect recovery and operational
+cutover against the S07 release candidate, reusing valid S08a evidence. The operational
 release gate requires both the S07 release candidate and S08 operational evidence;
 a cutover is not a prerequisite for building or testing the release candidate.
 

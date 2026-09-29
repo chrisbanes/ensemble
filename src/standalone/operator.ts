@@ -29,8 +29,12 @@ function field(
   return `<label>${escapeHtml(name)} <input name="${escapeHtml(name)}" type="${kind}" value="${escapeHtml(value)}"${checked ? " checked" : ""}></label>`;
 }
 
-function form(type: string, fields: string): string {
-  return `<form method="post" action="/command" data-command="${escapeHtml(type)}"><input type="hidden" name="type" value="${escapeHtml(type)}">${fields}<button type="submit">Save</button></form>`;
+function hidden(name: string, value: string): string {
+  return `<input name="${name}" type="hidden" value="${escapeHtml(value)}">`;
+}
+
+function form(type: string, fields: string, createId?: string): string {
+  return `<form method="post" action="/command" data-command="${escapeHtml(type)}">${hidden("type", type)}${hidden("key", randomUUID())}${createId ? hidden(createId, randomUUID()) : ""}${fields}<button type="submit">Save</button></form>`;
 }
 
 /** Local operator surface for the authenticated UI foundation to mount. */
@@ -56,7 +60,7 @@ export class LocalOperatorUi {
           `<li><a href="/profile/${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</a> (${profile.revoked ? "revoked" : "active"})</li>`,
       )
       .join("");
-    return `<main><h1>Ensemble</h1><h2>Projects</h2><ul>${projects}</ul>${form("project.create", field("name") + field("leadProfileId"))}<h2>Profiles</h2><ul>${profiles}</ul>${form("profile.create", field("name") + field("instructions") + field("capabilities"))}</main>`;
+    return `<main><h1>Ensemble</h1><h2>Projects</h2><ul>${projects}</ul>${form("project.create", field("name") + field("leadProfileId"), "projectId")}<h2>Profiles</h2><ul>${profiles}</ul>${form("profile.create", field("name") + field("instructions") + field("capabilities"), "profileId")}</main>`;
   }
 
   project(projectId: string): string {
@@ -69,7 +73,7 @@ export class LocalOperatorUi {
           `<li><a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)})</li>`,
       )
       .join("");
-    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + field("outcome") + field("ready", "1", "checkbox"))}${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("name", String(project.name)) + field("leadProfileId", String(project.leadProfileId ?? "")) + field("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)))}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; credential ${routing.credentialAvailable ? "configured" : "unavailable"}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + field("guidance", String(routing.guidance)) + field("credentialRef") + field("candidateProfileIds", String(routing.candidateProfileIds)))}</main>`;
+    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + field("outcome") + field("ready", "1", "checkbox"), "taskId")}${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("name", String(project.name)) + field("leadProfileId", String(project.leadProfileId ?? "")) + field("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)))}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; credential ${routing.credentialAvailable ? "configured" : "unavailable"}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + field("guidance", String(routing.guidance)) + field("credentialRef") + field("candidateProfileIds", String(routing.candidateProfileIds)))}</main>`;
   }
 
   task(taskId: string): string {
@@ -86,7 +90,7 @@ export class LocalOperatorUi {
       .map((blocker) => `<li>${escapeHtml(blocker)}</li>`)
       .join("");
     const admission = this.store.admission(taskId);
-    return `<main><h1>${escapeHtml(task.title)}</h1><p>${admission.eligible ? "Eligible" : `Held: ${escapeHtml(admission.reasons.join(", "))}`}</p><h2>Assignments</h2><ul>${assignments}</ul>${form("assignment.create", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("profileId") + field("brief") + field("resultDestination"))}<h2>Dependencies</h2><ul>${dependencies}</ul>${form("dependency.add", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("blockerTaskId"))}${form("dependency.remove", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("blockerTaskId"))}${form("imported-blockers.set", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("state", String(task.importedBlockers)))}${form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + field("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)))}</main>`;
+    return `<main><h1>${escapeHtml(task.title)}</h1><p>${admission.eligible ? "Eligible" : `Held: ${escapeHtml(admission.reasons.join(", "))}`}</p><h2>Assignments</h2><ul>${assignments}</ul>${form("assignment.create", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("profileId") + field("brief") + field("resultDestination"), "assignmentId")}<h2>Dependencies</h2><ul>${dependencies}</ul>${form("dependency.add", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("blockerTaskId"))}${form("dependency.remove", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("blockerTaskId"))}${form("imported-blockers.set", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("state", String(task.importedBlockers)))}${form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + field("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)))}</main>`;
   }
 
   profile(profileId: string): string {

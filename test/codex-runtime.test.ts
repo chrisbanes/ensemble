@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,10 +10,15 @@ test("conflicting and identity-free terminal reports are surfaced as anomalies",
   const runtime = new CodexRuntime();
   const anomalies: string[] = [];
   runtime.onTerminalAnomaly((event) => anomalies.push(event.reason));
+  const child = {} as ChildProcessWithoutNullStreams;
+  (runtime as unknown as { child: ChildProcessWithoutNullStreams }).child =
+    child;
   const receive = (message: unknown) =>
-    (runtime as unknown as { receive(line: string): void }).receive(
-      JSON.stringify(message),
-    );
+    (
+      runtime as unknown as {
+        receive(child: ChildProcessWithoutNullStreams, line: string): void;
+      }
+    ).receive(child, JSON.stringify(message));
   receive({
     method: "turn/completed",
     params: { threadId: "thread", turn: { id: "turn", status: "completed" } },
@@ -125,32 +131,53 @@ exec sleep 10
   }
 });
 
-test("App Server exit during initialization rejects promptly", {
+test("late events from a stopped child cannot fail a restarted runtime", {
   timeout: 7000,
 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), "ensemble-init-exit-"));
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-restart-"));
   const executable = join(root, "fake-codex.mjs");
   writeFileSync(
     executable,
     String.raw`#!/usr/bin/env node
 import { createInterface } from "node:readline";
+process.on("SIGTERM", () => {});
 for await (const line of createInterface({input: process.stdin})) {
   const message = JSON.parse(line);
-  if (message.method === "initialize") {
-    process.stdout.write(JSON.stringify({id: message.id, result: {}}) + "\n", () => process.exit(0));
-  }
+  if (message.id === undefined) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  if (message.method === "thread/start") result = {thread: {id: "new-thread"}, approvalPolicy: "never", sandbox: {type: "workspaceWrite"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
 }
 `,
   );
   chmodSync(executable, 0o700);
   const runtime = new CodexRuntime(executable);
+  const processRef = runtime as unknown as {
+    child?: ChildProcessWithoutNullStreams;
+  };
+  let stopping: Promise<void> | undefined;
   try {
-    await assert.rejects(
-      bounded(runtime.start(), 3000),
-      /App Server exited|Runtime stopped/,
-    );
+    await bounded(runtime.start(), 3000);
+    const old = processRef.child;
+    assert.ok(old);
+    stopping = runtime.stop();
+    await bounded(runtime.start(), 3000);
+    old.stdout.emit("data", Buffer.from("invalid old message\n"));
+    old.kill("SIGKILL");
+    await bounded(stopping, 3000);
+    old.stdin.emit("error", new Error("late old stdin error"));
+    assert.equal(await bounded(runtime.startThread(root), 3000), "new-thread");
+    const pending = runtime.startThread(root);
+    const current = processRef.child;
+    assert.ok(current);
+    current.stdin.emit("close");
+    await assert.rejects(bounded(pending, 1000), /stdin closed/);
   } finally {
+    processRef.child?.kill("SIGKILL");
     await runtime.stop();
+    if (stopping) await Promise.allSettled([stopping]);
     rmSync(root, { recursive: true, force: true });
   }
 });
