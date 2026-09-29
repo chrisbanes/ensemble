@@ -341,15 +341,11 @@ export class StandaloneService {
     reason: string,
   ): void {
     const state = this.requireState();
-    const items = state.list();
-    const index = items.findIndex((item) => item.id === writer.id);
-    if (index < 0) return;
-    for (const item of items.slice(index))
+    for (const item of state.writerAndSuccessors(writer.workId))
       if (
-        item.workspace === writer.workspace &&
-        (item.state === "completed" ||
-          item.state === "submitting" ||
-          item.state === "running")
+        item.state === "completed" ||
+        item.state === "submitting" ||
+        item.state === "running"
       )
         state.holdTerminalConflict(item.id, reason);
   }

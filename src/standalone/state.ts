@@ -48,6 +48,11 @@ export class ExecutionState {
     CREATE TABLE IF NOT EXISTS task_execution_results (
       workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
       payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_writer_admissions (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      workspace TEXT NOT NULL
     )`);
   }
 
@@ -258,6 +263,32 @@ export class ExecutionState {
       .map((row) => intentSchema.parse(row));
   }
 
+  writerAndSuccessors(workId: string): ExecutionIntent[] {
+    const admission = this.db
+      .prepare(
+        "SELECT sequence, workspace FROM task_writer_admissions WHERE workId = ?",
+      )
+      .get(workId) as { sequence: number; workspace: string } | undefined;
+    if (!admission) {
+      const writer = this.byWorkId(workId);
+      return writer
+        ? this.list().filter(
+            (item) =>
+              item.workspace === writer.workspace &&
+              (item.state === "completed" ||
+                item.state === "submitting" ||
+                item.state === "running"),
+          )
+        : [];
+    }
+    return this.db
+      .prepare(`SELECT e.* FROM task_writer_admissions a
+      JOIN execution_intents e ON e.workId = a.workId
+      WHERE a.workspace = ? AND a.sequence >= ? ORDER BY a.sequence`)
+      .all(admission.workspace, admission.sequence)
+      .map((row) => intentSchema.parse(row));
+  }
+
   setWorkspaceKey(id: string, workspace: string): void {
     this.db
       .prepare("UPDATE execution_intents SET workspace = ? WHERE id = ?")
@@ -274,10 +305,12 @@ export class ExecutionState {
   }
 
   begin(id: string): boolean {
-    return (
-      this.db
-        .prepare(
-          `UPDATE execution_intents SET state = 'submitting', reason = NULL
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const admitted =
+        this.db
+          .prepare(
+            `UPDATE execution_intents SET state = 'submitting', reason = NULL
            WHERE id = ? AND state = 'ready'
            AND NOT EXISTS (
              SELECT 1 FROM task_execution_bindings b JOIN task_writer_holds h ON h.taskId = b.taskId
@@ -289,9 +322,19 @@ export class ExecutionState {
              AND other.id != execution_intents.id
              AND other.state IN ('held','submitting','running')
            ) RETURNING id`,
-        )
-        .get(id) !== undefined
-    );
+          )
+          .get(id) !== undefined;
+      if (admitted)
+        this.db
+          .prepare(`INSERT INTO task_writer_admissions (workId, workspace)
+          SELECT workId, workspace FROM execution_intents WHERE id = ?`)
+          .run(id);
+      this.db.exec("COMMIT");
+      return admitted;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   bindThread(id: string, threadId: string): boolean {

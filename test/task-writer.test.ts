@@ -435,6 +435,61 @@ test("a completed successor loses its result after predecessor release is retrac
   }
 });
 
+test("writer retraction follows admission order when an older contender runs later", async () => {
+  const f = await fixture();
+  let recovered: StandaloneService | undefined;
+  try {
+    const firstGate = deferred();
+    const firstEntered = deferred();
+    f.runtime.gate = firstGate.promise;
+    f.runtime.entered = firstEntered.resolve;
+    const first = f.service.submitTask("first", f.assignmentId, "write");
+    await firstEntered.promise;
+    assert.equal(
+      (await f.service.submitTask("contender-c", f.assignmentId, "later"))
+        .state,
+      "ready",
+    );
+    firstGate.resolve();
+    assert.equal((await first).state, "completed");
+
+    f.runtime.gate = Promise.resolve();
+    assert.equal(
+      (await f.service.submitTask("writer-b", f.assignmentId, "next")).state,
+      "completed",
+    );
+    assert.equal(
+      (await f.service.submitTask("contender-c", f.assignmentId, "later"))
+        .state,
+      "completed",
+    );
+    assert.equal(f.service.recordTaskResult("contender-c", "delivered"), true);
+
+    await f.service.stop();
+    const runtime = new RuntimeFixture();
+    recovered = new StandaloneService(join(f.root, "data"), () => runtime);
+    await recovered.start();
+    runtime.anomaly?.({
+      threadId: "thread-2",
+      turnId: "turn-2",
+      reason: "Conflicting terminal status",
+    });
+    assert.equal(
+      recovered.list().find((item) => item.workId === "writer-b")?.state,
+      "held",
+    );
+    assert.equal(
+      recovered.list().find((item) => item.workId === "contender-c")?.state,
+      "held",
+    );
+    assert.equal(recovered.isCurrentResult("contender-c"), false);
+    assert.equal(recovered.recordTaskResult("contender-c", "delivered"), false);
+  } finally {
+    await recovered?.stop();
+    await f.close();
+  }
+});
+
 test("Stop persists across restart and resume does not clear an unresolved writer", async () => {
   const f = await fixture();
   try {
