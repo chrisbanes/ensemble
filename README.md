@@ -60,8 +60,13 @@ and optionally `previousWorkId` for a follow-up in a completed conversation.
 `serve` initializes the database and App Server, then waits for SIGINT or SIGTERM;
 it does not schedule work. Reusing a work ID never resubmits it. A held result
 requires independent reconciliation; there is no automatic retry or force unlock.
-The directory must be empty on first use or carry Ensemble's standalone marker.
-The only database filename opened is `standalone.sqlite` in that directory.
+On first use, the directory must be empty or carry Ensemble's standalone marker.
+Startup can also recover an interrupted first start when the only files are an
+empty `.ensemble-owner.sqlite`, its SQLite journal if present, and an absent or
+partial marker whose contents match the beginning of the expected marker.
+Unrelated unmarked contents, including prototype data, remain refused.
+`standalone.sqlite` stores service data; `.ensemble-owner.sqlite` holds the
+SQLite ownership transaction that excludes a second service process.
 
 ## Design documents
 
