@@ -950,6 +950,79 @@ test("ready work prevents conversation replacement and remains retryable", async
   }
 });
 
+test("archival hold prevents writer admission after workspace validation", async () => {
+  const f = await fixture();
+  try {
+    const cleanupGate = deferred();
+    const cleanupEntered = deferred();
+    const manager = (
+      f.service as unknown as {
+        workspaces: {
+          archiveAndCleanup: (
+            ...args: Parameters<NonNullable<(typeof f.service)["archiveTask"]>>
+          ) => ReturnType<(typeof f.service)["archiveTask"]>;
+        };
+      }
+    ).workspaces;
+    const archiveAndCleanup = manager.archiveAndCleanup.bind(manager);
+    manager.archiveAndCleanup = async (...args) => {
+      cleanupEntered.resolve();
+      await cleanupGate.promise;
+      return archiveAndCleanup(...args);
+    };
+
+    const archival = f.service.archiveTask(f.taskId, {
+      deliveryConfirmed: true,
+      writerOwnershipResolved: true,
+      handoffsPreserved: true,
+      reconciliationEvidencePreserved: true,
+      workspaceContentsPreserved: true,
+    });
+    await cleanupEntered.promise;
+
+    const submission = await f.service.submitTask(
+      "racing-writer",
+      f.assignmentId,
+      "write",
+    );
+    assert.equal(submission.state, "ready");
+    assert.equal(f.runtime.starts, 0);
+
+    const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
+    assert.equal(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      1,
+    );
+    db.close();
+
+    cleanupGate.resolve();
+    assert.equal((await archival).outcome, "cleaned");
+
+    const released = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    assert.equal(
+      (
+        released
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      0,
+    );
+    released.close();
+  } finally {
+    await f.close();
+  }
+});
+
 test("a completed successor loses its result after predecessor release is retracted", async () => {
   for (const cause of ["conflict", "survivor"] as const) {
     const f = await fixture();

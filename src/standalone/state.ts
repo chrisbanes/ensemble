@@ -48,6 +48,9 @@ export class ExecutionState {
     CREATE TABLE IF NOT EXISTS task_writer_ambiguity_holds (
       taskId TEXT PRIMARY KEY, reason TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_archival_holds (
+      taskId TEXT PRIMARY KEY, reason TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS task_execution_results (
       workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
       payload TEXT NOT NULL
@@ -78,6 +81,10 @@ export class ExecutionState {
       previousWorkId TEXT,
       predecessorKnown INTEGER NOT NULL CHECK(predecessorKnown IN (0, 1))
     )`);
+    // Workspace recovery runs before this state is opened. Any remaining hold
+    // belonged to an interrupted process; the recovered workspace state now
+    // decides whether execution or another cleanup attempt is possible.
+    this.db.exec("DELETE FROM task_archival_holds");
     this.db.exec(`INSERT OR IGNORE INTO task_writer_ambiguity_holds (taskId, reason)
       SELECT taskId, reason FROM task_writer_holds
       WHERE reason = 'Legacy work revision order is ambiguous';
@@ -176,9 +183,45 @@ export class ExecutionState {
   taskHold(taskId: string): string | undefined {
     const row = this.db
       .prepare(`SELECT reason FROM task_writer_ambiguity_holds WHERE taskId = ?
-        UNION ALL SELECT reason FROM task_writer_holds WHERE taskId = ? LIMIT 1`)
-      .get(taskId, taskId) as { reason: string } | undefined;
+        UNION ALL SELECT reason FROM task_writer_holds WHERE taskId = ?
+        UNION ALL SELECT reason FROM task_archival_holds WHERE taskId = ? LIMIT 1`)
+      .get(taskId, taskId, taskId) as { reason: string } | undefined;
     return row?.reason;
+  }
+
+  beginArchive(taskId: string): boolean {
+    const id = z.string().uuid().parse(taskId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const acquired =
+        this.db
+          .prepare(`INSERT INTO task_archival_holds (taskId, reason)
+          SELECT ?, 'Task archival in progress'
+          WHERE NOT EXISTS (
+            SELECT 1 FROM task_archival_holds WHERE taskId = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM task_writer_ambiguity_holds WHERE taskId = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM task_writer_holds WHERE taskId = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM task_execution_bindings b
+            JOIN execution_intents e ON e.workId = b.workId
+            WHERE b.taskId = ?
+            AND e.state IN ('ready','held','submitting','running')
+          ) RETURNING taskId`)
+          .get(id, id, id, id, id) !== undefined;
+      this.db.exec("COMMIT");
+      return acquired;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  endArchive(taskId: string): void {
+    this.db
+      .prepare("DELETE FROM task_archival_holds WHERE taskId = ?")
+      .run(z.string().uuid().parse(taskId));
   }
 
   bindTask(
@@ -337,17 +380,6 @@ export class ExecutionState {
     return existing !== undefined && this.isCurrentResult(workId);
   }
 
-  hasUnresolvedTask(taskId: string): boolean {
-    return (
-      this.taskHold(taskId) !== undefined ||
-      this.db
-        .prepare(`SELECT 1 FROM task_execution_bindings b
-      JOIN execution_intents e ON e.workId = b.workId
-      WHERE b.taskId = ? AND e.state IN ('ready','held','submitting','running') LIMIT 1`)
-        .get(taskId) !== undefined
-    );
-  }
-
   create(
     workId: string,
     prompt: string,
@@ -482,6 +514,11 @@ export class ExecutionState {
            AND NOT EXISTS (
              SELECT 1 FROM task_execution_bindings b
              JOIN task_writer_ambiguity_holds h ON h.taskId = b.taskId
+             WHERE b.workId = execution_intents.workId
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM task_execution_bindings b
+             JOIN task_archival_holds h ON h.taskId = b.taskId
              WHERE b.workId = execution_intents.workId
            )
            AND NOT EXISTS (

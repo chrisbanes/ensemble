@@ -287,15 +287,21 @@ export class StandaloneService {
     return this.requireWorkspaces().get(taskId);
   }
 
-  archiveTask(taskId: string, evidence: WorkspaceCleanupEvidence) {
+  async archiveTask(taskId: string, evidence: WorkspaceCleanupEvidence) {
     this.domain().task(taskId);
-    const writerOwnershipResolved =
-      evidence.writerOwnershipResolved &&
-      !this.requireState().hasUnresolvedTask(taskId);
-    return this.requireWorkspaces().archiveAndCleanup(taskId, {
-      ...evidence,
-      writerOwnershipResolved,
-    });
+    const state = this.requireState();
+    const acquired =
+      evidence.writerOwnershipResolved && state.beginArchive(taskId);
+    if (!acquired)
+      return this.requireWorkspaces().archiveAndCleanup(taskId, {
+        ...evidence,
+        writerOwnershipResolved: false,
+      });
+    try {
+      return await this.requireWorkspaces().archiveAndCleanup(taskId, evidence);
+    } finally {
+      state.endArchive(taskId);
+    }
   }
 
   /** A replacement keeps the durable assignment and its captured revisions. */
