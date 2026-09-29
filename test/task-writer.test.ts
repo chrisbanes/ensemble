@@ -1273,18 +1273,32 @@ test("late conflicting terminal report retracts completion and holds an active s
   }
 });
 
-test("identity-free terminal report holds the active task writer", async () => {
+test("identity-free terminal report retracts the recent writer and active successor", async () => {
   const f = await fixture();
   try {
+    assert.equal(
+      (await f.service.submitTask("first", f.assignmentId, "write")).state,
+      "completed",
+    );
     const gate = deferred();
     const entered = deferred();
     f.runtime.gate = gate.promise;
     f.runtime.entered = entered.resolve;
-    const action = f.service.submitTask("unknown", f.assignmentId, "write");
+    const action = f.service.submitTask(
+      "successor",
+      f.assignmentId,
+      "next",
+      "first",
+    );
     await entered.promise;
     f.runtime.anomaly?.({ reason: "Missing terminal identity or status" });
     gate.resolve();
     assert.equal((await action).state, "held");
+    assert.equal(
+      f.service.list().find((item) => item.workId === "first")?.state,
+      "held",
+    );
+    assert.equal(f.service.isCurrentResult("first"), false);
   } finally {
     await f.close();
   }

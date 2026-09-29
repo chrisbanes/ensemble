@@ -73,6 +73,7 @@ export class StandaloneService {
   private domainState: DomainStore | undefined;
   private workspaces: WorkspaceManager | undefined;
   private runtime: Runtime | undefined;
+  private lastCompletedWorkId: string | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
   private readonly callbacks = new Map<string, Set<Promise<unknown>>>();
 
@@ -87,6 +88,7 @@ export class StandaloneService {
 
   async start(): Promise<void> {
     if (this.db) throw new Error("Service already started");
+    this.lastCompletedWorkId = undefined;
     if (!isAbsolute(this.dataDir))
       throw new Error("Data directory must be absolute");
     const directory = resolve(this.dataDir);
@@ -213,7 +215,10 @@ export class StandaloneService {
               )
             : items.filter(
                 (item) =>
-                  item.state === "submitting" || item.state === "running",
+                  item.state === "submitting" ||
+                  item.state === "running" ||
+                  (item.state === "completed" &&
+                    item.workId === this.lastCompletedWorkId),
               );
         for (const item of matched)
           this.retractWriterAndSuccessors(item, anomaly.reason);
@@ -568,9 +573,10 @@ export class StandaloneService {
           intent.id,
           "Ensemble callback is unfinished at terminal status",
         );
-      else if (outcome === "completed")
+      else if (outcome === "completed") {
         state.complete(intent.id, threadId, turnId);
-      else state.hold(intent.id, "Bound turn failed or was interrupted");
+        this.lastCompletedWorkId = workId;
+      } else state.hold(intent.id, "Bound turn failed or was interrupted");
     } catch (error) {
       if (state.get(intent.id).state !== "held")
         state.hold(
