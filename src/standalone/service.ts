@@ -200,16 +200,8 @@ export class StandaloneService {
                 (item) =>
                   item.state === "submitting" || item.state === "running",
               );
-        for (const item of matched) {
-          state.holdTerminalConflict(item.id, anomaly.reason);
-          for (const successor of items)
-            if (
-              successor.workspace === item.workspace &&
-              (successor.state === "submitting" ||
-                successor.state === "running")
-            )
-              state.hold(successor.id, anomaly.reason);
-        }
+        for (const item of matched)
+          this.retractWriterAndSuccessors(item, anomaly.reason);
       });
       await runtime.start();
     } catch (error) {
@@ -341,13 +333,25 @@ export class StandaloneService {
     if (!intent || intent.state === "ready")
       throw new Error("No active execution to hold");
     const holdReason = `Known unfinished execution: ${reason}`;
-    state.holdTerminalConflict(intent.id, holdReason);
-    for (const other of state.list())
+    this.retractWriterAndSuccessors(intent, holdReason);
+  }
+
+  private retractWriterAndSuccessors(
+    writer: ExecutionIntent,
+    reason: string,
+  ): void {
+    const state = this.requireState();
+    const items = state.list();
+    const index = items.findIndex((item) => item.id === writer.id);
+    if (index < 0) return;
+    for (const item of items.slice(index))
       if (
-        other.workspace === intent.workspace &&
-        (other.state === "submitting" || other.state === "running")
+        item.workspace === writer.workspace &&
+        (item.state === "completed" ||
+          item.state === "submitting" ||
+          item.state === "running")
       )
-        state.hold(other.id, holdReason);
+        state.holdTerminalConflict(item.id, reason);
   }
 
   registerExecutionCallback(workId: string, callback: Promise<unknown>): void {
@@ -401,6 +405,11 @@ export class StandaloneService {
       Number(assignment.version)
     )
       throw new Error("Assignment revision changed during workspace admission");
+    const currentAdmission = domain.assignmentAdmission(assignmentId);
+    if (!currentAdmission.eligible)
+      throw new Error(
+        `Assignment is not eligible: ${currentAdmission.reasons.join(", ")}`,
+      );
     const context: TaskExecutionContext = {
       taskId,
       assignmentId,
@@ -448,7 +457,7 @@ export class StandaloneService {
         throw new Error("Task workspaces require a durable assignment binding");
     }
     const intent = state.create(workId, prompt, workspaceKey);
-    if (context) state.bindTask(workId, context);
+    const binding = context ? state.bindTask(workId, context) : undefined;
     if (intent.state !== "ready" || intent.reason) return intent;
     let previous: ExecutionIntent | undefined;
     try {
@@ -477,6 +486,11 @@ export class StandaloneService {
           throw new Error(
             "Previous work is not a completed binding in this workspace",
           );
+        if (
+          binding &&
+          priorBinding?.conversationRevision !== binding.conversationRevision
+        )
+          previous = undefined;
       }
     } catch (error) {
       state.hold(intent.id, `Pre-submission refusal: ${String(error)}`);

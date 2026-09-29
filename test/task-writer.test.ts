@@ -11,6 +11,7 @@ import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
 
 class RuntimeFixture implements Runtime {
   starts = 0;
+  resumes = 0;
   turns = 0;
   outcome: "completed" | "failed" = "completed";
   entered?: () => void;
@@ -25,7 +26,9 @@ class RuntimeFixture implements Runtime {
   async startThread() {
     return `thread-${++this.starts}`;
   }
-  async resumeThread() {}
+  async resumeThread() {
+    this.resumes++;
+  }
   async startTurn() {
     return `turn-${++this.turns}`;
   }
@@ -116,6 +119,7 @@ async function fixture() {
     taskId,
     assignmentId,
     projectId,
+    profileId,
     execute,
     async close() {
       await service.stop();
@@ -123,6 +127,76 @@ async function fixture() {
     },
   };
 }
+
+test("eligibility changes during workspace admission prevent execution", async () => {
+  for (const changed of ["pause", "profile", "dependency"] as const) {
+    const f = await fixture();
+    const release = deferred();
+    try {
+      const manager = (
+        f.service as unknown as {
+          workspaces: { forExecution(taskId: string): Promise<unknown> };
+        }
+      ).workspaces;
+      const original = manager.forExecution.bind(manager);
+      const entered = deferred();
+      manager.forExecution = async (taskId) => {
+        entered.resolve();
+        await release.promise;
+        return original(taskId);
+      };
+      const action = f.service.submitTask(changed, f.assignmentId, "write");
+      await entered.promise;
+      if (changed === "pause")
+        f.execute({
+          type: "project.configure",
+          actor: "operator",
+          projectId: f.projectId,
+          expectedVersion: Number(
+            f.service.domain().project(f.projectId).version,
+          ),
+          paused: true,
+        });
+      else if (changed === "profile")
+        f.execute({
+          type: "profile.configure",
+          actor: "operator",
+          profileId: f.profileId,
+          expectedVersion: Number(
+            f.service.domain().profile(f.profileId).version,
+          ),
+          revoked: true,
+        });
+      else {
+        const blockerTaskId = randomUUID();
+        f.execute({
+          type: "task.create",
+          actor: "operator",
+          projectId: f.projectId,
+          taskId: blockerTaskId,
+          title: "Blocker",
+          outcome: "Deliver",
+          ready: true,
+        });
+        f.execute({
+          type: "dependency.add",
+          actor: "operator",
+          projectId: f.projectId,
+          taskId: f.taskId,
+          blockerTaskId,
+          expectedVersion: Number(f.service.domain().task(f.taskId).version),
+        });
+      }
+      release.resolve();
+      await assert.rejects(action, /Assignment is not eligible/);
+      assert.equal(f.runtime.starts, 0);
+      assert.equal(f.service.list().length, 0);
+    } finally {
+      release.resolve();
+      await f.close();
+    }
+  }
+});
 
 test("task writer admits one successor; waiting turns hold no reservation", async () => {
   const f = await fixture();
@@ -199,6 +273,7 @@ test("a follow-up queued before its predecessor finishes stays unreserved", asyn
       "completed",
     );
     assert.equal(f.runtime.starts, 1);
+    assert.equal(f.runtime.resumes, 1);
     assert.equal(f.runtime.turns, 2);
   } finally {
     await f.close();
@@ -307,6 +382,8 @@ test("replacement retains assignment snapshots and rejects stale results", async
       "completed",
     );
     assert.equal(f.service.isCurrentResult("replacement"), true);
+    assert.equal(f.runtime.starts, 2);
+    assert.equal(f.runtime.resumes, 0);
     f.execute({
       type: "assignment.apply",
       actor: "operator",
@@ -317,6 +394,44 @@ test("replacement retains assignment snapshots and rejects stale results", async
     assert.equal(f.service.isCurrentResult("replacement"), false);
   } finally {
     await f.close();
+  }
+});
+
+test("a completed successor loses its result after predecessor release is retracted", async () => {
+  for (const cause of ["conflict", "survivor"] as const) {
+    const f = await fixture();
+    try {
+      assert.equal(
+        (await f.service.submitTask("first", f.assignmentId, "write")).state,
+        "completed",
+      );
+      assert.equal(
+        (await f.service.submitTask("successor", f.assignmentId, "next")).state,
+        "completed",
+      );
+      assert.equal(f.service.recordTaskResult("successor", "delivered"), true);
+      if (cause === "conflict")
+        f.runtime.anomaly?.({
+          threadId: "thread-1",
+          turnId: "turn-1",
+          reason: "Conflicting terminal status",
+        });
+      else f.service.holdKnownSurvivor("first", "detached child observed");
+      assert.equal(f.service.isCurrentResult("first"), false);
+      assert.equal(f.service.isCurrentResult("successor"), false);
+      assert.equal(f.service.recordTaskResult("successor", "delivered"), false);
+      assert.equal(
+        f.service.list().find((item) => item.workId === "successor")?.state,
+        "held",
+      );
+      assert.equal(
+        (await f.service.submitTask("later", f.assignmentId, "later")).state,
+        "ready",
+      );
+      assert.equal(f.runtime.starts, 2);
+    } finally {
+      await f.close();
+    }
   }
 });
 
