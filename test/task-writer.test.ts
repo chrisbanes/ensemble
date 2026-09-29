@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { StandaloneService } from "../src/standalone/service.js";
-import { ExecutionState } from "../src/standalone/state.js";
+import {
+  ExecutionState,
+  type ExecutionIntent,
+} from "../src/standalone/state.js";
 import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
 
 class RuntimeFixture implements Runtime {
@@ -472,6 +475,271 @@ test("newer work revisions reject predecessor results across restart and idempot
   }
 });
 
+test("legacy work revisions preserve only provable result ordering", async () => {
+  const single = await fixture();
+  let recoveredSingle: StandaloneService | undefined;
+  try {
+    assert.equal(
+      (await single.service.submitTask("only", single.assignmentId, "work"))
+        .state,
+      "completed",
+    );
+    assert.equal(single.service.recordTaskResult("only", "result"), true);
+    await single.service.stop();
+    const path = join(single.root, "data", "standalone.sqlite");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`DELETE FROM task_work_revisions;
+      DELETE FROM task_writer_admissions;
+      DELETE FROM execution_request_predecessors;`);
+    legacy.close();
+
+    recoveredSingle = new StandaloneService(
+      join(single.root, "data"),
+      () => new RuntimeFixture(),
+    );
+    await recoveredSingle.start();
+    assert.equal(recoveredSingle.isCurrentResult("only"), true);
+    assert.equal(recoveredSingle.recordTaskResult("only", "result"), true);
+    assert.equal(
+      recoveredSingle.list().find((item) => item.workId === "only")?.state,
+      "completed",
+    );
+    const disposition = new DatabaseSync(path);
+    assert.equal(
+      (
+        disposition
+          .prepare(
+            "SELECT workRevision FROM task_work_revisions WHERE workId = 'only'",
+          )
+          .get() as { workRevision: number }
+      ).workRevision,
+      1,
+    );
+    disposition.close();
+  } finally {
+    await recoveredSingle?.stop();
+    await single.close();
+  }
+
+  const mixed = await fixture();
+  let recoveredMixed: StandaloneService | undefined;
+  try {
+    assert.equal(
+      (await mixed.service.submitTask("legacy", mixed.assignmentId, "first"))
+        .state,
+      "completed",
+    );
+    assert.equal(
+      (await mixed.service.submitTask("known", mixed.assignmentId, "second"))
+        .state,
+      "completed",
+    );
+    assert.equal(mixed.service.recordTaskResult("known", "result"), true);
+    await mixed.service.stop();
+    const path = join(mixed.root, "data", "standalone.sqlite");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`DELETE FROM task_work_revisions WHERE workId = 'legacy';
+      DELETE FROM task_writer_admissions WHERE workId = 'legacy';`);
+    legacy.close();
+
+    recoveredMixed = new StandaloneService(
+      join(mixed.root, "data"),
+      () => new RuntimeFixture(),
+    );
+    await recoveredMixed.start();
+    for (const workId of ["legacy", "known"]) {
+      const matched: ExecutionIntent | undefined = recoveredMixed
+        .list()
+        .find((item) => item.workId === workId);
+      assert.equal(matched?.state, "held");
+      assert.match(matched?.reason ?? "", /revision order is ambiguous/);
+      assert.equal(recoveredMixed.isCurrentResult(workId), false);
+    }
+    assert.equal(recoveredMixed.recordTaskResult("known", "result"), false);
+    assert.match(
+      recoveredMixed.taskHold(mixed.taskId) ?? "",
+      /revision order is ambiguous/,
+    );
+    const dispositions = new DatabaseSync(path);
+    assert.equal(
+      (
+        dispositions
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_work_revision_ambiguities",
+          )
+          .get() as { count: number }
+      ).count,
+      2,
+    );
+    dispositions.close();
+  } finally {
+    await recoveredMixed?.stop();
+    await mixed.close();
+  }
+});
+
+test("predecessor identity is immutable across restart", async () => {
+  const f = await fixture();
+  let recovered: StandaloneService | undefined;
+  try {
+    assert.equal(
+      (await f.service.submitTask("first", f.assignmentId, "first")).state,
+      "completed",
+    );
+    assert.equal(
+      (await f.service.submitTask("second", f.assignmentId, "second")).state,
+      "completed",
+    );
+    const gate = deferred();
+    const entered = deferred();
+    f.runtime.gate = gate.promise;
+    f.runtime.entered = entered.resolve;
+    const blocker = f.service.submitTask("blocker", f.assignmentId, "block");
+    await entered.promise;
+    assert.equal(
+      (await f.service.submitTask("null-request", f.assignmentId, "null"))
+        .state,
+      "ready",
+    );
+    assert.equal(
+      (
+        await f.service.submitTask(
+          "id-request",
+          f.assignmentId,
+          "identified",
+          "first",
+        )
+      ).state,
+      "ready",
+    );
+    gate.resolve();
+    assert.equal((await blocker).state, "completed");
+    await f.service.stop();
+
+    const runtime = new RuntimeFixture();
+    recovered = new StandaloneService(join(f.root, "data"), () => runtime);
+    await recovered.start();
+    await assert.rejects(
+      recovered.submitTask("null-request", f.assignmentId, "null", "first"),
+      /different predecessor/,
+    );
+    await assert.rejects(
+      recovered.submitTask(
+        "id-request",
+        f.assignmentId,
+        "identified",
+        "second",
+      ),
+      /different predecessor/,
+    );
+    assert.equal(runtime.starts, 0);
+
+    const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
+    const saved = db
+      .prepare(`SELECT workId, previousWorkId FROM execution_request_predecessors
+      WHERE workId IN ('null-request','id-request') ORDER BY workId`)
+      .all() as { workId: string; previousWorkId: string | null }[];
+    assert.deepEqual(
+      saved.map((row) => ({ ...row })),
+      [
+        { workId: "id-request", previousWorkId: "first" },
+        { workId: "null-request", previousWorkId: null },
+      ],
+    );
+    db.close();
+
+    assert.equal(
+      (await recovered.submitTask("null-request", f.assignmentId, "null"))
+        .state,
+      "completed",
+    );
+    assert.equal(
+      (
+        await recovered.submitTask(
+          "id-request",
+          f.assignmentId,
+          "identified",
+          "first",
+        )
+      ).state,
+      "completed",
+    );
+  } finally {
+    await recovered?.stop();
+    await f.close();
+  }
+});
+
+test("legacy ready work with unknown predecessor is held and refused", async () => {
+  const f = await fixture();
+  let recovered: StandaloneService | undefined;
+  try {
+    const gate = deferred();
+    const entered = deferred();
+    f.runtime.gate = gate.promise;
+    f.runtime.entered = entered.resolve;
+    const active = f.service.submitTask("active", f.assignmentId, "first");
+    await entered.promise;
+    assert.equal(
+      (
+        await f.service.submitTask(
+          "legacy-ready",
+          f.assignmentId,
+          "follow-up",
+          "active",
+        )
+      ).state,
+      "ready",
+    );
+    gate.resolve();
+    assert.equal((await active).state, "completed");
+    await f.service.stop();
+    const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
+    db.prepare(
+      "DELETE FROM execution_request_predecessors WHERE workId = 'legacy-ready'",
+    ).run();
+    db.close();
+
+    const runtime = new RuntimeFixture();
+    recovered = new StandaloneService(join(f.root, "data"), () => runtime);
+    await recovered.start();
+    const held = recovered
+      .list()
+      .find((item) => item.workId === "legacy-ready");
+    assert.equal(held?.state, "held");
+    assert.match(held?.reason ?? "", /predecessor identity is unknown/);
+    await assert.rejects(
+      recovered.submitTask(
+        "legacy-ready",
+        f.assignmentId,
+        "follow-up",
+        "active",
+      ),
+      /unknown legacy predecessor identity/,
+    );
+    assert.equal(runtime.starts, 0);
+    const disposition = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    assert.deepEqual(
+      {
+        ...(disposition
+          .prepare(`SELECT p.predecessorKnown,
+            CASE WHEN pending.workId IS NULL THEN 0 ELSE 1 END AS pending
+            FROM execution_request_predecessors p
+            LEFT JOIN task_work_revision_pending pending ON pending.workId = p.workId
+            WHERE p.workId = 'legacy-ready'`)
+          .get() as { predecessorKnown: number; pending: number }),
+      },
+      { predecessorKnown: 0, pending: 1 },
+    );
+    disposition.close();
+  } finally {
+    await recovered?.stop();
+    await f.close();
+  }
+});
+
 test("ready work prevents conversation replacement and remains retryable", async () => {
   const f = await fixture();
   try {
@@ -482,7 +750,14 @@ test("ready work prevents conversation replacement and remains retryable", async
     const first = f.service.submitTask("active", f.assignmentId, "first");
     await entered.promise;
     assert.equal(
-      (await f.service.submitTask("ready", f.assignmentId, "follow-up")).state,
+      (
+        await f.service.submitTask(
+          "ready",
+          f.assignmentId,
+          "follow-up",
+          "active",
+        )
+      ).state,
       "ready",
     );
 

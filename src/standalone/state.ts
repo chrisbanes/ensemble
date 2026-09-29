@@ -60,7 +60,24 @@ export class ExecutionState {
       conversationRevision INTEGER NOT NULL,
       workRevision INTEGER NOT NULL CHECK(workRevision > 0),
       UNIQUE(assignmentId, conversationRevision, workRevision)
+    );
+    CREATE TABLE IF NOT EXISTS task_work_revision_ambiguities (
+      workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
+      assignmentId TEXT NOT NULL,
+      conversationRevision INTEGER NOT NULL,
+      reason TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_work_revision_pending (
+      workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId)
+    );
+    CREATE TABLE IF NOT EXISTS execution_request_predecessors (
+      workId TEXT PRIMARY KEY REFERENCES execution_intents(workId),
+      previousWorkId TEXT,
+      predecessorKnown INTEGER NOT NULL CHECK(predecessorKnown IN (0, 1))
     )`);
+    this.db.exec(`INSERT OR IGNORE INTO execution_request_predecessors
+      (workId, previousWorkId, predecessorKnown)
+      SELECT workId, NULL, 0 FROM execution_intents`);
     this.db.exec(`INSERT OR IGNORE INTO task_work_revisions
       (workId, assignmentId, conversationRevision, workRevision)
       SELECT b.workId, b.assignmentId, b.conversationRevision,
@@ -69,14 +86,69 @@ export class ExecutionState {
           ORDER BY a.sequence
         )
       FROM task_writer_admissions a
-      JOIN task_execution_bindings b ON b.workId = a.workId`);
+      JOIN task_execution_bindings b ON b.workId = a.workId;
+    INSERT OR IGNORE INTO task_work_revision_pending (workId)
+      SELECT b.workId FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      WHERE e.state = 'ready' AND NOT EXISTS (
+        SELECT 1 FROM task_work_revisions disposition
+        WHERE disposition.workId = b.workId
+      )`);
+    this.db.exec(`INSERT OR IGNORE INTO task_work_revisions
+      (workId, assignmentId, conversationRevision, workRevision)
+      SELECT b.workId, b.assignmentId, b.conversationRevision, 1
+      FROM task_execution_bindings b
+      WHERE NOT EXISTS (
+        SELECT 1 FROM task_work_revisions existing
+        WHERE existing.workId = b.workId
+      ) AND NOT EXISTS (
+        SELECT 1 FROM task_work_revision_pending pending
+        WHERE pending.workId = b.workId
+      ) AND (
+        SELECT COUNT(*) FROM task_execution_bindings onlyBinding
+        WHERE onlyBinding.assignmentId = b.assignmentId
+        AND onlyBinding.conversationRevision = b.conversationRevision
+      ) = 1;
+    INSERT OR IGNORE INTO task_work_revision_ambiguities
+      (workId, assignmentId, conversationRevision, reason)
+      SELECT b.workId, b.assignmentId, b.conversationRevision,
+        'Legacy work revision order is ambiguous'
+      FROM task_execution_bindings b
+      WHERE EXISTS (
+        SELECT 1 FROM task_execution_bindings missing
+        WHERE missing.assignmentId = b.assignmentId
+        AND missing.conversationRevision = b.conversationRevision
+        AND NOT EXISTS (
+          SELECT 1 FROM task_work_revisions disposition
+          WHERE disposition.workId = missing.workId
+        ) AND NOT EXISTS (
+          SELECT 1 FROM task_work_revision_pending pending
+          WHERE pending.workId = missing.workId
+        )
+      );
+    UPDATE execution_intents SET state = 'held',
+      reason = 'Legacy work revision order is ambiguous'
+      WHERE workId IN (SELECT workId FROM task_work_revision_ambiguities);
+    INSERT INTO task_writer_holds (taskId, reason)
+      SELECT DISTINCT b.taskId, 'Legacy work revision order is ambiguous'
+      FROM task_execution_bindings b
+      JOIN task_work_revision_ambiguities a ON a.workId = b.workId
+      WHERE 1
+      ON CONFLICT(taskId) DO UPDATE SET reason = excluded.reason;
+    UPDATE execution_intents SET state = 'held',
+      reason = 'Legacy predecessor identity is unknown'
+      WHERE state = 'ready' AND workId IN (
+        SELECT b.workId FROM task_execution_bindings b
+        JOIN execution_request_predecessors p ON p.workId = b.workId
+        WHERE p.predecessorKnown = 0
+      )`);
   }
 
   stopTask(taskId: string): void {
     const id = z.string().uuid().parse(taskId);
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO task_writer_holds (taskId, reason) VALUES (?, 'Task stopped')",
+        "INSERT OR IGNORE INTO task_writer_holds (taskId, reason) VALUES (?, 'Task stopped')",
       )
       .run(id);
     this.db
@@ -88,7 +160,9 @@ export class ExecutionState {
 
   resumeTask(taskId: string): void {
     this.db
-      .prepare("DELETE FROM task_writer_holds WHERE taskId = ?")
+      .prepare(
+        "DELETE FROM task_writer_holds WHERE taskId = ? AND reason = 'Task stopped'",
+      )
       .run(z.string().uuid().parse(taskId));
   }
 
@@ -149,6 +223,15 @@ export class ExecutionState {
       throw new Error(
         "Work ID already bound to another task or assignment revision",
       );
+    this.db
+      .prepare(`INSERT OR IGNORE INTO task_work_revision_pending (workId)
+      SELECT b.workId FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
+      WHERE b.workId = ? AND e.state = 'ready' AND NOT EXISTS (
+        SELECT 1 FROM task_work_revisions disposition
+        WHERE disposition.workId = b.workId
+      )`)
+      .run(workId);
     return binding;
   }
 
@@ -198,6 +281,11 @@ export class ExecutionState {
       WHERE b.workId = ? AND e.state = 'completed' AND
         c.revision = b.conversationRevision AND a.version = b.assignmentVersion
         AND NOT EXISTS (
+          SELECT 1 FROM task_work_revision_ambiguities ambiguous
+          WHERE ambiguous.assignmentId = b.assignmentId
+          AND ambiguous.conversationRevision = b.conversationRevision
+        )
+        AND NOT EXISTS (
           SELECT 1 FROM task_work_revisions newer
           WHERE newer.assignmentId = w.assignmentId
           AND newer.conversationRevision = w.conversationRevision
@@ -219,6 +307,11 @@ export class ExecutionState {
       JOIN task_work_revisions w ON w.workId = b.workId
       WHERE b.workId = ? AND e.state = 'completed'
       AND c.revision = b.conversationRevision AND a.version = b.assignmentVersion
+      AND NOT EXISTS (
+        SELECT 1 FROM task_work_revision_ambiguities ambiguous
+        WHERE ambiguous.assignmentId = b.assignmentId
+        AND ambiguous.conversationRevision = b.conversationRevision
+      )
       AND NOT EXISTS (
         SELECT 1 FROM task_work_revisions newer
         WHERE newer.assignmentId = w.assignmentId
@@ -247,14 +340,25 @@ export class ExecutionState {
     );
   }
 
-  create(workId: string, prompt: string, workspace: string): ExecutionIntent {
+  create(
+    workId: string,
+    prompt: string,
+    workspace: string,
+    previousWorkId?: string,
+  ): ExecutionIntent {
     const input = z
       .object({
         workId: z.string().min(1),
         prompt: z.string().min(1),
         workspace: z.string().min(1),
+        previousWorkId: z.string().min(1).nullable(),
       })
-      .parse({ workId, prompt, workspace });
+      .parse({
+        workId,
+        prompt,
+        workspace,
+        previousWorkId: previousWorkId ?? null,
+      });
     const existing = this.byWorkId(input.workId);
     if (existing) {
       if (
@@ -262,14 +366,35 @@ export class ExecutionState {
         existing.workspace !== input.workspace
       )
         throw new Error("Work ID already used with different content");
+      const predecessor = this.db
+        .prepare(`SELECT previousWorkId, predecessorKnown
+        FROM execution_request_predecessors WHERE workId = ?`)
+        .get(input.workId) as
+        | { previousWorkId: string | null; predecessorKnown: number }
+        | undefined;
+      if (predecessor?.predecessorKnown !== 1)
+        throw new Error("Work ID has unknown legacy predecessor identity");
+      if (predecessor.previousWorkId !== input.previousWorkId)
+        throw new Error("Work ID already used with different predecessor");
       return existing;
     }
     const id = randomUUID();
-    this.db
-      .prepare(
-        "INSERT INTO execution_intents (id, workId, prompt, workspace, state, reason, threadId, turnId, accountType, sandbox, approval) VALUES (?, ?, ?, ?, 'ready', NULL, NULL, NULL, 'chatgpt', 'workspaceWrite', 'never')",
-      )
-      .run(id, input.workId, input.prompt, input.workspace);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO execution_intents (id, workId, prompt, workspace, state, reason, threadId, turnId, accountType, sandbox, approval) VALUES (?, ?, ?, ?, 'ready', NULL, NULL, NULL, 'chatgpt', 'workspaceWrite', 'never')",
+        )
+        .run(id, input.workId, input.prompt, input.workspace);
+      this.db
+        .prepare(`INSERT INTO execution_request_predecessors
+        (workId, previousWorkId, predecessorKnown) VALUES (?, ?, 1)`)
+        .run(input.workId, input.previousWorkId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.get(id);
   }
 
@@ -371,6 +496,10 @@ export class ExecutionState {
           FROM task_execution_bindings b
           JOIN execution_intents e ON e.workId = b.workId
           WHERE e.id = ?`)
+          .run(id);
+        this.db
+          .prepare(`DELETE FROM task_work_revision_pending
+          WHERE workId = (SELECT workId FROM execution_intents WHERE id = ?) `)
           .run(id);
       }
       this.db.exec("COMMIT");

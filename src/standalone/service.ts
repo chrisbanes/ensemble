@@ -452,7 +452,7 @@ export class StandaloneService {
       )
         throw new Error("Task workspaces require a durable assignment binding");
     }
-    const intent = state.create(workId, prompt, workspaceKey);
+    const intent = state.create(workId, prompt, workspaceKey, previousWorkId);
     const binding = context ? state.bindTask(workId, context) : undefined;
     if (intent.state !== "ready" || intent.reason) return intent;
     let previous: ExecutionIntent | undefined;
