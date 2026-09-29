@@ -148,25 +148,28 @@ export class StandaloneService {
       const runtime = this.runtimeFactory();
       this.runtime = runtime;
       runtime.onUnexpectedRequest((request) => {
-        const active = state
-          .list()
-          .filter(
-            (item) => item.state === "submitting" || item.state === "running",
-          );
+        const executions = state.list();
+        const active = executions.filter(
+          (item) => item.state === "submitting" || item.state === "running",
+        );
+        const attributable = executions.filter(
+          (item) =>
+            item.state === "held" ||
+            item.state === "submitting" ||
+            item.state === "running",
+        );
         const bound =
           request.threadId && request.turnId
-            ? active.filter(
+            ? attributable.filter(
                 (item) =>
                   item.threadId === request.threadId &&
                   item.turnId === request.turnId,
               )
             : [];
         if (bound.length === 0 && request.threadId && request.turnId) {
-          const awaiting = active.filter(
+          const awaiting = attributable.filter(
             (item) =>
-              item.state === "submitting" &&
-              item.threadId === request.threadId &&
-              item.turnId === null,
+              item.threadId === request.threadId && item.turnId === null,
           );
           const pending = awaiting.length === 1 ? awaiting[0] : undefined;
           if (
@@ -412,6 +415,8 @@ export class StandaloneService {
       throw new Error(
         `Assignment is not eligible: ${currentAdmission.reasons.join(", ")}`,
       );
+    if (this.requireState().isArchiveHeld(taskId))
+      throw new Error("Task archival is in progress");
     const context: TaskExecutionContext = {
       taskId,
       assignmentId,

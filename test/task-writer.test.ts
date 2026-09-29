@@ -1037,13 +1037,15 @@ test("archival hold prevents writer admission after workspace validation", async
     });
     await cleanupEntered.promise;
 
-    const submission = await f.service.submitTask(
-      "racing-writer",
-      f.assignmentId,
-      "write",
+    await assert.rejects(
+      f.service.submitTask("racing-writer", f.assignmentId, "write"),
+      /archival is in progress/,
     );
-    assert.equal(submission.state, "ready");
     assert.equal(f.runtime.starts, 0);
+    assert.equal(
+      f.service.list().some((item) => item.workId === "racing-writer"),
+      false,
+    );
 
     const db = new DatabaseSync(join(f.root, "data", "standalone.sqlite"));
     assert.equal(

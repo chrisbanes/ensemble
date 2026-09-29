@@ -705,6 +705,13 @@ test("trusted callback identity holds only its bound turn; unknown identity hold
     assert.equal(state.get(first.id).state, "held");
     assert.equal(state.get(second.id).state, "running");
     runtime.onRequest?.({
+      method: "item/fileChange/requestApproval",
+      threadId: "thread-a",
+      turnId: "turn-a",
+    });
+    assert.equal(state.get(first.id).state, "held");
+    assert.equal(state.get(second.id).state, "running");
+    runtime.onRequest?.({
       method: "item/permissions/requestApproval",
       threadId: "unknown",
       turnId: "unknown",

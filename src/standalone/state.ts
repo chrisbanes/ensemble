@@ -218,6 +218,14 @@ export class ExecutionState {
     }
   }
 
+  isArchiveHeld(taskId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM task_archival_holds WHERE taskId = ?")
+        .get(z.string().uuid().parse(taskId)) !== undefined
+    );
+  }
+
   endArchive(taskId: string): void {
     this.db
       .prepare("DELETE FROM task_archival_holds WHERE taskId = ?")
@@ -637,7 +645,7 @@ export class ExecutionState {
     return (
       this.db
         .prepare(
-          "UPDATE execution_intents SET state = 'held', reason = ?, turnId = ? WHERE id = ? AND state = 'submitting' AND threadId = ? AND turnId IS NULL RETURNING id",
+          "UPDATE execution_intents SET state = 'held', reason = ?, turnId = ? WHERE id = ? AND state IN ('submitting','held') AND threadId = ? AND turnId IS NULL RETURNING id",
         )
         .get(reason, turnId, id, threadId) !== undefined
     );
