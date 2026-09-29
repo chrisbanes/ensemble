@@ -3,12 +3,22 @@
 ## Source and automated checks
 
 - Integrated base: `8fdf0d80798419248995ac182336fbc08f92d642` (`origin/main`, including PR #716).
-- Verified implementation commit: `a4f8ae4218f46c6c873f4a001041dc38a8a6f2b3`; issue #703 plan revision 1.
+- Verified implementation commits: `a4f8ae4218f46c6c873f4a001041dc38a8a6f2b3`
+  for the authenticated operator foundation and review repairs, followed by
+  `d9ca92f2a8369ad6a279818885c702af1099850f` for strict form decoding; issue
+  #703 plan revision 1.
 - Runtime: Node `24.21.0`; npm `12.1.0`.
 - Browser test dependency: Playwright `1.63.0`; installed Chromium `153.0.8010.12`.
 - `npm ci --no-audit --no-fund`: passed.
-- `npm run check`: passed on implementation commit `a4f8ae4218f46c6c873f4a001041dc38a8a6f2b3` after repairs; typecheck, lint, formatting, build and 141/141 tests passed, including the Chromium operator journey.
-- Focused final operator checks: 9/9 passed across `operator-http`, `operator-hidden-password` and `operator-browser`.
+- `npm run check`: passed on implementation commit
+  `d9ca92f2a8369ad6a279818885c702af1099850f` after the strict-decoding
+  repair; typecheck, lint, formatting, build and 141/141 tests passed,
+  including the Chromium operator journey.
+- Focused final operator checks: 9/9 passed across `operator-http`,
+  `operator-hidden-password` and `operator-browser`; after the strict-decoding
+  repair, the focused `operator-http` suite passed 3/3, including invalid
+  percent-encoded UTF-8, malformed escapes, decoded duplicate keys, mutation
+  refusal and non-reflection.
 - `git diff --check`: passed for the complete integrated #703 diff.
 - The Chromium journey uses a marked `StandaloneService` fixture and real SQLite; it proves unauthenticated protected-URL login, independent login/session rotation, guarded origin/CSRF failures, shared-profile projects with separate instructions across service/SQLite restart, paused-project and unready-task defaults, Ready without pause bypass, secret-safe routing views, and browser logout/session invalidation.
 - `test/s04c/private-access.mjs` is opt-in (`--live`), requires a canonical HTTPS fixture origin plus a pre-seeded private project ID/marker, prompts for the fixture password without echo, suppresses response/error contents, refuses cross-origin navigation before typing a password, checks unauthenticated read/write denial, `Secure` cookie behavior and guarded writes, performs one same-origin configuration write, and attempts browser logout in `finally`.
