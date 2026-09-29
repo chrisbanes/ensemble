@@ -725,6 +725,7 @@ test("trusted callback identity holds only its bound turn; unknown identity hold
     assert.equal(state.begin(second.id), true);
     assert.equal(state.bindThread(second.id, "thread-b"), true);
     assert.equal(state.bindTurn(second.id, "turn-b"), true);
+    state.complete(first.id, "thread-a", "turn-a");
     runtime.onRequest?.({
       method: "item/commandExecution/requestApproval",
       threadId: "thread-a",

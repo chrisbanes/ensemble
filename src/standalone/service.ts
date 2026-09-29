@@ -158,6 +158,7 @@ export class StandaloneService {
         );
         const attributable = executions.filter(
           (item) =>
+            item.state === "completed" ||
             item.state === "held" ||
             item.state === "submitting" ||
             item.state === "running",
@@ -186,6 +187,13 @@ export class StandaloneService {
             )
           )
             return;
+        }
+        if (bound.length === 1 && bound[0]?.state === "completed") {
+          this.retractWriterAndSuccessors(
+            bound[0],
+            `Unexpected App Server request denied: ${request.method}`,
+          );
+          return;
         }
         const affected = bound.length === 1 ? bound : active;
         for (const item of affected)
