@@ -45,6 +45,9 @@ export class ExecutionState {
     CREATE TABLE IF NOT EXISTS task_writer_holds (
       taskId TEXT PRIMARY KEY, reason TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_writer_ambiguity_holds (
+      taskId TEXT PRIMARY KEY, reason TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS task_execution_results (
       workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
       payload TEXT NOT NULL
@@ -75,6 +78,11 @@ export class ExecutionState {
       previousWorkId TEXT,
       predecessorKnown INTEGER NOT NULL CHECK(predecessorKnown IN (0, 1))
     )`);
+    this.db.exec(`INSERT OR IGNORE INTO task_writer_ambiguity_holds (taskId, reason)
+      SELECT taskId, reason FROM task_writer_holds
+      WHERE reason = 'Legacy work revision order is ambiguous';
+    DELETE FROM task_writer_holds
+      WHERE reason = 'Legacy work revision order is ambiguous'`);
     this.db.exec(`INSERT OR IGNORE INTO execution_request_predecessors
       (workId, previousWorkId, predecessorKnown)
       SELECT workId, NULL, 0 FROM execution_intents`);
@@ -98,13 +106,14 @@ export class ExecutionState {
       (workId, assignmentId, conversationRevision, workRevision)
       SELECT b.workId, b.assignmentId, b.conversationRevision, 1
       FROM task_execution_bindings b
+      JOIN execution_intents e ON e.workId = b.workId
       WHERE NOT EXISTS (
         SELECT 1 FROM task_work_revisions existing
         WHERE existing.workId = b.workId
       ) AND NOT EXISTS (
         SELECT 1 FROM task_work_revision_pending pending
         WHERE pending.workId = b.workId
-      ) AND (
+      ) AND e.state IN ('submitting', 'running', 'completed') AND (
         SELECT COUNT(*) FROM task_execution_bindings onlyBinding
         WHERE onlyBinding.assignmentId = b.assignmentId
         AND onlyBinding.conversationRevision = b.conversationRevision
@@ -129,12 +138,10 @@ export class ExecutionState {
     UPDATE execution_intents SET state = 'held',
       reason = 'Legacy work revision order is ambiguous'
       WHERE workId IN (SELECT workId FROM task_work_revision_ambiguities);
-    INSERT INTO task_writer_holds (taskId, reason)
+    INSERT OR IGNORE INTO task_writer_ambiguity_holds (taskId, reason)
       SELECT DISTINCT b.taskId, 'Legacy work revision order is ambiguous'
       FROM task_execution_bindings b
-      JOIN task_work_revision_ambiguities a ON a.workId = b.workId
-      WHERE 1
-      ON CONFLICT(taskId) DO UPDATE SET reason = excluded.reason;
+      JOIN task_work_revision_ambiguities a ON a.workId = b.workId;
     UPDATE execution_intents SET state = 'held',
       reason = 'Legacy predecessor identity is unknown'
       WHERE state = 'ready' AND workId IN (
@@ -168,8 +175,9 @@ export class ExecutionState {
 
   taskHold(taskId: string): string | undefined {
     const row = this.db
-      .prepare("SELECT reason FROM task_writer_holds WHERE taskId = ?")
-      .get(taskId) as { reason: string } | undefined;
+      .prepare(`SELECT reason FROM task_writer_ambiguity_holds WHERE taskId = ?
+        UNION ALL SELECT reason FROM task_writer_holds WHERE taskId = ? LIMIT 1`)
+      .get(taskId, taskId) as { reason: string } | undefined;
     return row?.reason;
   }
 
@@ -469,6 +477,11 @@ export class ExecutionState {
            WHERE id = ? AND state = 'ready'
            AND NOT EXISTS (
              SELECT 1 FROM task_execution_bindings b JOIN task_writer_holds h ON h.taskId = b.taskId
+             WHERE b.workId = execution_intents.workId
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM task_execution_bindings b
+             JOIN task_writer_ambiguity_holds h ON h.taskId = b.taskId
              WHERE b.workId = execution_intents.workId
            )
            AND NOT EXISTS (

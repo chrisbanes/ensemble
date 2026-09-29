@@ -578,6 +578,128 @@ test("legacy work revisions preserve only provable result ordering", async () =>
   }
 });
 
+test("legacy held work is ambiguous and preserves Stop independently", async () => {
+  for (const ordering of ["stop-first", "ambiguity-first"] as const) {
+    const f = await fixture();
+    let recovered: StandaloneService | undefined;
+    let restarted: StandaloneService | undefined;
+    try {
+      assert.equal(
+        (await f.service.submitTask("legacy-held", f.assignmentId, "work"))
+          .state,
+        "completed",
+      );
+      assert.equal(
+        f.service.recordTaskResult("legacy-held", "legacy result"),
+        true,
+      );
+      if (ordering === "stop-first") f.service.stopTask(f.taskId);
+      await f.service.stop();
+
+      const path = join(f.root, "data", "standalone.sqlite");
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`UPDATE execution_intents SET state = 'held', reason = 'legacy hold'
+        WHERE workId = 'legacy-held';
+      DELETE FROM task_work_revisions WHERE workId = 'legacy-held';
+      DELETE FROM task_writer_admissions WHERE workId = 'legacy-held';
+      DELETE FROM task_work_revision_pending WHERE workId = 'legacy-held';`);
+      legacy.close();
+
+      recovered = new StandaloneService(
+        join(f.root, "data"),
+        () => new RuntimeFixture(),
+      );
+      await recovered.start();
+      if (ordering === "ambiguity-first") {
+        recovered.stopTask(f.taskId);
+        await recovered.stop();
+        recovered = undefined;
+        restarted = new StandaloneService(
+          join(f.root, "data"),
+          () => new RuntimeFixture(),
+        );
+        await restarted.start();
+      }
+      const active = restarted ?? recovered;
+      assert.ok(active);
+      assert.match(
+        active.taskHold(f.taskId) ?? "",
+        /revision order is ambiguous/,
+      );
+      assert.equal(active.isCurrentResult("legacy-held"), false);
+      assert.equal(
+        active.recordTaskResult("legacy-held", "legacy result"),
+        false,
+      );
+
+      const held = new DatabaseSync(path);
+      assert.equal(
+        (
+          held
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_writer_holds WHERE taskId = ? AND reason = 'Task stopped'",
+            )
+            .get(f.taskId) as { count: number }
+        ).count,
+        1,
+      );
+      assert.equal(
+        (
+          held
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_writer_ambiguity_holds WHERE taskId = ?",
+            )
+            .get(f.taskId) as { count: number }
+        ).count,
+        1,
+      );
+      assert.equal(
+        (
+          held
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_work_revisions WHERE workId = 'legacy-held'",
+            )
+            .get() as { count: number }
+        ).count,
+        0,
+      );
+      held.close();
+
+      active.resumeTask(f.taskId);
+      assert.match(
+        active.taskHold(f.taskId) ?? "",
+        /revision order is ambiguous/,
+      );
+      const resumed = new DatabaseSync(path);
+      assert.equal(
+        (
+          resumed
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_writer_holds WHERE taskId = ?",
+            )
+            .get(f.taskId) as { count: number }
+        ).count,
+        0,
+      );
+      assert.equal(
+        (
+          resumed
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_writer_ambiguity_holds WHERE taskId = ?",
+            )
+            .get(f.taskId) as { count: number }
+        ).count,
+        1,
+      );
+      resumed.close();
+    } finally {
+      await restarted?.stop();
+      await recovered?.stop();
+      await f.close();
+    }
+  }
+});
+
 test("predecessor identity is immutable across restart", async () => {
   const f = await fixture();
   let recovered: StandaloneService | undefined;
