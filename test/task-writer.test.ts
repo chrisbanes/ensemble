@@ -950,6 +950,63 @@ test("ready work prevents conversation replacement and remains retryable", async
   }
 });
 
+test("ready work adopts a newer assignment revision before retry", async () => {
+  const f = await fixture();
+  try {
+    const gate = deferred();
+    const entered = deferred();
+    f.runtime.gate = gate.promise;
+    f.runtime.entered = entered.resolve;
+    const first = f.service.submitTask("active", f.assignmentId, "first");
+    await entered.promise;
+    assert.equal(
+      (
+        await f.service.submitTask(
+          "ready",
+          f.assignmentId,
+          "follow-up",
+          "active",
+        )
+      ).state,
+      "ready",
+    );
+
+    f.execute({
+      type: "assignment.apply",
+      actor: "operator",
+      projectId: f.projectId,
+      assignmentId: f.assignmentId,
+      expectedVersion: 1,
+    });
+    gate.resolve();
+    assert.equal((await first).state, "completed");
+    f.runtime.gate = Promise.resolve();
+    assert.equal(
+      (
+        await f.service.submitTask(
+          "ready",
+          f.assignmentId,
+          "follow-up",
+          "active",
+        )
+      ).state,
+      "completed",
+    );
+    assert.equal(
+      (
+        f.service as unknown as {
+          state: ExecutionState;
+        }
+      ).state.taskBinding("ready")?.assignmentVersion,
+      2,
+    );
+    assert.equal(f.runtime.starts, 1);
+    assert.equal(f.runtime.resumes, 1);
+  } finally {
+    await f.close();
+  }
+});
+
 test("archival hold prevents writer admission after workspace validation", async () => {
   const f = await fixture();
   try {

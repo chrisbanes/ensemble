@@ -197,6 +197,36 @@ test("interrupted multi-repository creation retries with the same identity and k
   }
 });
 
+test("interrupted checkout remains provisioning when tracked files are incomplete", async () => {
+  const f = fixture();
+  try {
+    const firstSource = repository(f.root, "partial-first-source");
+    const laterSource = join(f.root, "partial-later-source");
+    const inputs = [
+      { repositoryId: "a-first", path: firstSource },
+      { repositoryId: "b-later", path: laterSource },
+    ];
+    const interrupted = await f.manager.provision("partial-checkout", inputs);
+    assert.equal(interrupted.state, "provisioning");
+    const firstRepository = interrupted.repositories[0];
+    assert.ok(firstRepository);
+    rmSync(join(firstRepository.workspacePath, "README.md"));
+
+    repository(f.root, "partial-later-source");
+    const reopened = f.reopen();
+    await reopened.recover();
+    const recovered = await reopened.get("partial-checkout");
+    assert.equal(recovered?.state, "provisioning");
+    assert.match(recovered?.reason ?? "", /checkout is incomplete/);
+    await assert.rejects(
+      reopened.forExecution("partial-checkout"),
+      /checkout is incomplete/,
+    );
+  } finally {
+    f.close();
+  }
+});
+
 test("cleanup retains delivered workspaces with uncommitted files and removes clean archived worktrees", async () => {
   const f = fixture();
   try {

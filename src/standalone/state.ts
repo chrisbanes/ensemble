@@ -266,9 +266,40 @@ export class ExecutionState {
       );
     const binding = this.taskBinding(workId);
     if (
-      !binding ||
+      binding?.taskId === input.taskId &&
+      binding.assignmentId === input.assignmentId &&
+      (binding.assignmentVersion !== input.assignmentVersion ||
+        binding.instructionsRevision !== input.instructionsRevision ||
+        binding.profileRevision !== input.profileRevision)
+    )
+      this.db
+        .prepare(`UPDATE task_execution_bindings
+        SET assignmentVersion = ?, instructionsRevision = ?,
+          profileRevision = ?
+        WHERE workId = ? AND taskId = ? AND assignmentId = ?
+        AND EXISTS (
+          SELECT 1 FROM execution_intents e
+          WHERE e.workId = task_execution_bindings.workId AND e.state = 'ready'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM task_writer_admissions a
+          WHERE a.workId = task_execution_bindings.workId
+        ) AND NOT EXISTS (
+          SELECT 1 FROM task_work_revisions revision
+          WHERE revision.workId = task_execution_bindings.workId
+        )`)
+        .run(
+          input.assignmentVersion,
+          input.instructionsRevision,
+          input.profileRevision,
+          workId,
+          input.taskId,
+          input.assignmentId,
+        );
+    const current = this.taskBinding(workId);
+    if (
+      !current ||
       Object.entries({ ...input, workId, conversationRevision: revision }).some(
-        ([key, value]) => binding[key as keyof TaskExecutionBinding] !== value,
+        ([key, value]) => current[key as keyof TaskExecutionBinding] !== value,
       )
     )
       throw new Error(
@@ -283,7 +314,7 @@ export class ExecutionState {
         WHERE disposition.workId = b.workId
       )`)
       .run(workId);
-    return binding;
+    return current;
   }
 
   taskBinding(workId: string): TaskExecutionBinding | undefined {

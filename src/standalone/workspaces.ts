@@ -436,7 +436,10 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
             `Repository identity is incomplete for ${repository.repositoryId}`,
           );
 
-        if (await this.isExistingWorktree(repository)) continue;
+        if (await this.isExistingWorktree(repository)) {
+          await this.assertProvisionedWorktree(repository);
+          continue;
+        }
         await this.ensureSourceStillMatches(repository);
         await git(
           repository.sourcePath,
@@ -452,6 +455,7 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
           throw new Error(
             `Git did not create the workspace for ${repository.repositoryId}`,
           );
+        await this.assertProvisionedWorktree(repository);
       }
       return this.store.update(binding.taskId, "ready", null);
     } catch (error) {
@@ -567,6 +571,31 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
         );
       return false;
     }
+  }
+
+  private async assertProvisionedWorktree(
+    repository: TaskWorkspaceRepository,
+  ): Promise<void> {
+    if (!repository.commit)
+      throw new Error(
+        `Repository commit is missing for ${repository.repositoryId}`,
+      );
+    const head = await git(
+      repository.workspacePath,
+      "rev-parse",
+      "--verify",
+      "HEAD^{commit}",
+    );
+    const trackedChanges = await git(
+      repository.workspacePath,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=no",
+    );
+    if (head !== repository.commit || trackedChanges.length > 0)
+      throw new Error(
+        `Workspace checkout is incomplete for ${repository.repositoryId}`,
+      );
   }
 
   private normalizeRepositories(
