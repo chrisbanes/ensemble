@@ -131,26 +131,30 @@ export class CodexRuntime implements Runtime {
       { stdio: "pipe" },
     );
     this.child = child;
-    child.on("error", (error) => this.fail(error));
-    child.on("exit", () => this.fail(new Error("Codex App Server exited")));
-    child.stdin.on("error", (error) => this.fail(error));
+    child.on("error", (error) => this.failChild(child, error));
+    child.on("exit", () =>
+      this.failChild(child, new Error("Codex App Server exited")),
+    );
+    child.stdin.on("error", (error) => this.failChild(child, error));
     child.stdin.on("close", () =>
-      this.fail(new Error("Codex App Server stdin closed")),
+      this.failChild(child, new Error("Codex App Server stdin closed")),
     );
     // Diagnostics may contain sensitive data. Drain without retaining or logging
     // them so a full stderr pipe cannot stall JSON-RPC on stdout.
     child.stderr.resume();
     createInterface({ input: child.stdout }).on("line", (line) =>
-      this.receive(line),
+      this.receive(child, line),
     );
     try {
       await this.request("initialize", {
         clientInfo: { name: "ensemble", version: "0.1.0" },
       });
+      if (this.child !== child) throw new Error("Runtime stopped");
       await this.send(`${JSON.stringify({ method: "initialized" })}\n`);
-      await this.verifyLoginAndPolicy();
+      if (this.child !== child) throw new Error("Runtime stopped");
+      await this.verifyLoginAndPolicy(child);
     } catch (error) {
-      await this.stop();
+      if (this.child === child) await this.stop();
       throw error;
     }
   }
@@ -159,6 +163,8 @@ export class CodexRuntime implements Runtime {
     const child = this.child;
     if (!child) return;
     this.child = undefined;
+    this.fail(new Error("Runtime stopped"));
+    this.terminals.clear();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       let timeout: NodeJS.Timeout | undefined;
@@ -175,12 +181,15 @@ export class CodexRuntime implements Runtime {
       if (child.exitCode === null && child.signalCode === null)
         child.kill("SIGKILL");
     }
-    this.fail(new Error("Runtime stopped"));
   }
 
-  async verifyLoginAndPolicy(): Promise<void> {
+  async verifyLoginAndPolicy(expectedChild = this.child): Promise<void> {
+    if (!expectedChild || this.child !== expectedChild)
+      throw new Error("Runtime stopped");
     account.parse(await this.request("account/read", { refreshToken: false }));
+    if (this.child !== expectedChild) throw new Error("Runtime stopped");
     configuration.parse(await this.request("config/read", {}));
+    if (this.child !== expectedChild) throw new Error("Runtime stopped");
   }
 
   async startThread(workspace: string): Promise<string> {
@@ -283,7 +292,7 @@ export class CodexRuntime implements Runtime {
       }, 15000);
       this.pending.set(id, { resolve, reject, timer });
       void this.send(`${JSON.stringify({ id, method, params })}\n`).catch(
-        (error: Error) => this.fail(error),
+        (error: Error) => this.failChild(child, error),
       );
     });
   }
@@ -295,26 +304,31 @@ export class CodexRuntime implements Runtime {
     return new Promise((resolve, reject) => {
       try {
         child.stdin.write(line, (error) => {
+          if (this.child !== child) {
+            reject(new Error("Runtime stopped"));
+            return;
+          }
           if (error) {
-            this.fail(error);
+            this.failChild(child, error);
             reject(error);
           } else resolve();
         });
       } catch (error) {
         const failure =
           error instanceof Error ? error : new Error(String(error));
-        this.fail(failure);
+        this.failChild(child, failure);
         reject(failure);
       }
     });
   }
 
-  private receive(line: string): void {
+  private receive(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.child !== child) return;
     let message: z.infer<typeof rpc>;
     try {
       message = rpc.parse(JSON.parse(line));
     } catch {
-      this.fail(new Error("Malformed App Server message"));
+      this.failChild(child, new Error("Malformed App Server message"));
       return;
     }
     if (message.method && message.id !== undefined) {
@@ -324,21 +338,21 @@ export class CodexRuntime implements Runtime {
         this.unexpected?.(unexpectedRequest(method, message.params));
       } catch (error) {
         holdFailed = true;
-        this.fail(
+        this.failChild(
+          child,
           new Error(
             `Could not persist unexpected request hold: ${String(error)}`,
           ),
         );
       }
-      const child = this.child;
-      if (child)
+      if (this.child === child)
         void this.send(
           `${JSON.stringify(deniedServerRequest(message.id, method))}\n`,
         ).then(
           () => {
             if (holdFailed) child.kill("SIGTERM");
           },
-          (error: Error) => this.fail(error),
+          (error: Error) => this.failChild(child, error),
         );
       return;
     }
@@ -379,5 +393,9 @@ export class CodexRuntime implements Runtime {
     this.events.emit("failure", error);
     if (this.child?.exitCode === null && this.child.signalCode === null)
       this.child.kill("SIGTERM");
+  }
+
+  private failChild(child: ChildProcessWithoutNullStreams, error: Error): void {
+    if (this.child === child) this.fail(error);
   }
 }
