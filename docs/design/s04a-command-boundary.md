@@ -20,9 +20,11 @@ Operator-only commands create and configure projects, tasks, and profiles; chang
 project routing settings; apply current instruction/profile revisions to an
 assignment; and edit local dependencies. Assignment creation may come from a
 scoped agent, but its task and project identities must match and its profile must
-be the project lead or an operator-configured permitted candidate. Local tasks
-start unready, projects start paused, and neither routing opt-in nor an assignment
-record grants execution admission. Profile revocation is checked against current
+be the project lead or an operator-configured permitted candidate. A nested
+assignment must remain on its requester's task; an explicit lead allocation may
+omit the requester. Local tasks start unready, projects start paused, and neither
+routing opt-in nor an assignment record grants execution admission. Profile
+revocation is checked against current
 profile state even when an assignment retains older revision snapshots. A draft
 project may have no lead, but it cannot admit work until its configured lead
 profile exists and is active; the existing-project form can set or replace it.
@@ -55,8 +57,12 @@ without a routing operation.
 For #703, `LocalOperatorUi` supplies project, task, profile, assignment, routing,
 and dependency forms plus HTML read views over the same commands. `LocalOperatorHttp`
 mounts these locally on `127.0.0.1` only; the `operator` CLI mode starts it while
-the standalone runtime is active. Its read view reports credential availability,
-never a credential value or environment-variable reference. The credential
-configuration accepts only `env:NAME` references; the later authenticated
+the standalone runtime is active.
+Each rendered form carries a command key, and create forms also carry their
+record ID. Reposting the same form payload replays one receipt after a lost
+redirect; a changed payload with that key conflicts. A fresh form gets a new key.
+The read view reports credential availability, never a credential value or
+environment-variable reference. Configuration accepts only `env:NAME`
+references; the later authenticated
 operator foundation owns remote access and login. The loopback interface is an
 integration surface, not the finished operator UI.

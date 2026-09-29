@@ -18,6 +18,8 @@ const a = "30000000-0000-4000-8000-000000000001";
 const b = "30000000-0000-4000-8000-000000000002";
 const c = "30000000-0000-4000-8000-000000000003";
 const assignment = "40000000-0000-4000-8000-000000000001";
+const nested = "40000000-0000-4000-8000-000000000002";
+const allocated = "40000000-0000-4000-8000-000000000003";
 let serial = 0;
 const key = () =>
   `50000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
@@ -54,6 +56,76 @@ type WithoutKey<T> = T extends unknown ? Omit<T, "key"> : never;
 function run(store: DomainStore, command: WithoutKey<DomainCommand>) {
   return store.execute({ ...command, key: key() } as DomainCommand);
 }
+
+test("nested assignments stay on the requester's task", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Lead",
+      instructions: "Coordinate",
+      capabilities: "assign",
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Project",
+      leadProfileId: profile,
+    });
+    for (const taskId of [a, b])
+      run(f.domain, {
+        type: "task.create",
+        actor: "operator",
+        projectId: p,
+        taskId,
+        title: "Task",
+        outcome: "Ship",
+        ready: true,
+      });
+    run(f.domain, {
+      type: "assignment.create",
+      actor: "agent",
+      projectId: p,
+      taskId: a,
+      assignmentId: assignment,
+      profileId: profile,
+      brief: "Own A",
+      resultDestination: "lead:A",
+      requesterAssignmentId: null,
+    });
+    const nestedCommand = {
+      type: "assignment.create" as const,
+      actor: "agent" as const,
+      projectId: p,
+      taskId: b,
+      assignmentId: nested,
+      profileId: profile,
+      brief: "Delegate",
+      resultDestination: "requester:A",
+      requesterAssignmentId: assignment,
+    };
+    assert.throws(() => run(f.domain, nestedCommand), /Requester.*task/);
+    assert.equal(f.domain.assignments(b).length, 0);
+    const sameTask = run(f.domain, { ...nestedCommand, taskId: a }) as {
+      taskId: string;
+      requesterAssignmentId: string;
+    };
+    assert.equal(sameTask.taskId, a);
+    assert.equal(sameTask.requesterAssignmentId, assignment);
+    const explicit = run(f.domain, {
+      ...nestedCommand,
+      taskId: b,
+      assignmentId: allocated,
+      requesterAssignmentId: null,
+    }) as { taskId: string };
+    assert.equal(explicit.taskId, b);
+  } finally {
+    f.close();
+  }
+});
 
 test("versioned commands retain revisions and replay matching stale retries", async () => {
   const f = fixture();

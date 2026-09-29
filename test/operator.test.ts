@@ -12,6 +12,41 @@ import {
 } from "../src/standalone/operator.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
+function renderedForm(html: string, type: string): string {
+  const opening = `<form method="post" action="/command" data-command="${type}">`;
+  const start = html.indexOf(opening);
+  assert.notEqual(start, -1, `Missing ${type} form`);
+  const end = html.indexOf("</form>", start);
+  assert.notEqual(end, -1);
+  return html.slice(start, end);
+}
+
+function formValue(html: string, name: string): string {
+  const value = html.match(
+    new RegExp(`name="${name}"[^>]*value="([^"]*)"`),
+  )?.[1];
+  assert.ok(value, `Missing ${name} value`);
+  return value;
+}
+
+function fakeRuntime() {
+  return {
+    async start() {},
+    async stop() {},
+    onUnexpectedRequest() {},
+    async startThread() {
+      return "thread";
+    },
+    async resumeThread() {},
+    async startTurn() {
+      return "turn";
+    },
+    async waitForTurn() {
+      return "completed" as const;
+    },
+  };
+}
+
 test("local forms submit versioned commands and render secret-safe views", async () => {
   const db = new DatabaseSync(":memory:");
   try {
@@ -127,6 +162,116 @@ test("loopback HTTP serves and accepts local operator forms", async () => {
   }
 });
 
+test("rendered form retries replay one receipt and retain create IDs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-form-retry-"));
+  const service = new StandaloneService(directory, fakeRuntime);
+  let http: LocalOperatorHttp | undefined;
+  try {
+    await service.start();
+    const domain = service.domain();
+    http = new LocalOperatorHttp(new LocalOperatorUi(domain));
+    const base = `http://127.0.0.1:${await http.start()}`;
+    const page = async (path: string) => (await fetch(`${base}${path}`)).text();
+    const post = async (fields: Record<string, string>) =>
+      fetch(`${base}/command`, {
+        method: "POST",
+        headers: { origin: base },
+        body: new URLSearchParams(fields),
+        redirect: "manual",
+      });
+
+    const profileForm = renderedForm(await page("/"), "profile.create");
+    const profileId = formValue(profileForm, "profileId");
+    const profile = {
+      type: "profile.create",
+      key: formValue(profileForm, "key"),
+      profileId,
+      name: "Lead",
+      instructions: "Own",
+      capabilities: "coordinate",
+    };
+    assert.equal((await post(profile)).status, 303);
+    assert.equal((await post(profile)).status, 303);
+    assert.equal(domain.profiles().length, 1);
+
+    const projectForm = renderedForm(await page("/"), "project.create");
+    const projectId = formValue(projectForm, "projectId");
+    const project = {
+      type: "project.create",
+      key: formValue(projectForm, "key"),
+      projectId,
+      name: "Retry project",
+      leadProfileId: profileId,
+    };
+    assert.equal((await post(project)).status, 303);
+    assert.equal((await post(project)).status, 303);
+    assert.equal(domain.projects().length, 1);
+    assert.equal(domain.project(projectId).id, projectId);
+    assert.equal((await post({ ...project, name: "Changed" })).status, 400);
+    assert.equal(domain.projects().length, 1);
+    assert.notEqual(
+      formValue(renderedForm(await page("/"), "project.create"), "key"),
+      project.key,
+    );
+
+    const taskForm = renderedForm(
+      await page(`/project/${projectId}`),
+      "task.create",
+    );
+    const taskId = formValue(taskForm, "taskId");
+    const task = {
+      type: "task.create",
+      key: formValue(taskForm, "key"),
+      projectId,
+      taskId,
+      title: "First",
+      outcome: "Ship",
+    };
+    assert.equal((await post(task)).status, 303);
+    assert.equal((await post(task)).status, 303);
+    assert.equal(domain.tasks(projectId).length, 1);
+
+    const assignmentForm = renderedForm(
+      await page(`/task/${taskId}`),
+      "assignment.create",
+    );
+    const assignmentId = formValue(assignmentForm, "assignmentId");
+    const assignment = {
+      type: "assignment.create",
+      key: formValue(assignmentForm, "key"),
+      projectId,
+      taskId,
+      assignmentId,
+      profileId,
+      brief: "Build",
+      resultDestination: "lead:task",
+    };
+    assert.equal((await post(assignment)).status, 303);
+    assert.equal((await post(assignment)).status, 303);
+    assert.equal(domain.assignments(taskId).length, 1);
+
+    const configureForm = renderedForm(
+      await page(`/project/${projectId}`),
+      "project.configure",
+    );
+    const configure = {
+      type: "project.configure",
+      key: formValue(configureForm, "key"),
+      projectId,
+      expectedVersion: formValue(configureForm, "expectedVersion"),
+      name: "Renamed",
+    };
+    assert.equal((await post(configure)).status, 303);
+    assert.equal((await post(configure)).status, 303);
+    assert.equal(domain.project(projectId).version, 2);
+    assert.equal((await post({ ...configure, name: "Changed" })).status, 400);
+  } finally {
+    await http?.stop();
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("draft project stays held until an active lead is selected in its form", async () => {
   const db = new DatabaseSync(":memory:");
   try {
@@ -212,22 +357,7 @@ test("draft project stays held until an active lead is selected in its form", as
 
 test("standalone startup migrates and exposes the same local operator boundary", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-operator-service-"));
-  const runtime = () => ({
-    async start() {},
-    async stop() {},
-    onUnexpectedRequest() {},
-    async startThread() {
-      return "thread";
-    },
-    async resumeThread() {},
-    async startTurn() {
-      return "turn";
-    },
-    async waitForTurn() {
-      return "completed" as const;
-    },
-  });
-  const service = new StandaloneService(directory, runtime);
+  const service = new StandaloneService(directory, fakeRuntime);
   try {
     await service.start();
     const ui = new LocalOperatorUi(service.domain());
@@ -236,7 +366,7 @@ test("standalone startup migrates and exposes the same local operator boundary",
       name: "Persistent",
     })) as { id: string };
     await service.stop();
-    const restarted = new StandaloneService(directory, runtime);
+    const restarted = new StandaloneService(directory, fakeRuntime);
     try {
       await restarted.start();
       assert.match(
