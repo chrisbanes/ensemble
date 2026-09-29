@@ -91,6 +91,13 @@ export interface Runtime {
     turnId: string,
   ): Promise<"completed" | "failed">;
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void;
+  onTerminalAnomaly?(
+    listener: (anomaly: {
+      threadId?: string;
+      turnId?: string;
+      reason: string;
+    }) => void,
+  ): void;
 }
 
 /** One private stdio App Server process. It never sends an approval grant. */
@@ -107,13 +114,29 @@ export class CodexRuntime implements Runtime {
   >();
   private readonly events = new EventEmitter();
   private readonly terminals = new Map<string, "completed" | "failed">();
+  private readonly terminalHistory = new Map<string, "completed" | "failed">();
   private unexpected?: (request: UnexpectedRequest) => void;
+  private terminalAnomaly?: (anomaly: {
+    threadId?: string;
+    turnId?: string;
+    reason: string;
+  }) => void;
   private failure: Error | undefined;
 
   constructor(private readonly executable = "codex") {}
 
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
     this.unexpected = listener;
+  }
+
+  onTerminalAnomaly(
+    listener: (anomaly: {
+      threadId?: string;
+      turnId?: string;
+      reason: string;
+    }) => void,
+  ): void {
+    this.terminalAnomaly = listener;
   }
 
   async start(): Promise<void> {
@@ -373,11 +396,24 @@ export class CodexRuntime implements Runtime {
           turn: z.object({ id: z.string(), status: z.string() }),
         })
         .safeParse(message.params);
-      if (terminal.success)
-        this.terminals.set(
-          `${terminal.data.threadId}:${terminal.data.turn.id}`,
-          terminal.data.turn.status === "completed" ? "completed" : "failed",
-        );
+      if (!terminal.success) {
+        this.terminalAnomaly?.({
+          reason: "Missing terminal identity or status",
+        });
+      } else {
+        const key = `${terminal.data.threadId}:${terminal.data.turn.id}`;
+        const status =
+          terminal.data.turn.status === "completed" ? "completed" : "failed";
+        const prior = this.terminalHistory.get(key);
+        if (prior && prior !== status)
+          this.terminalAnomaly?.({
+            threadId: terminal.data.threadId,
+            turnId: terminal.data.turn.id,
+            reason: "Conflicting terminal status",
+          });
+        this.terminalHistory.set(key, status);
+        this.terminals.set(key, prior && prior !== status ? "failed" : status);
+      }
     }
     if (message.method) this.events.emit(message.method, message.params);
   }

@@ -6,6 +6,38 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CodexRuntime } from "../src/standalone/codex.js";
 
+test("conflicting and identity-free terminal reports are surfaced as anomalies", async () => {
+  const runtime = new CodexRuntime();
+  const anomalies: string[] = [];
+  runtime.onTerminalAnomaly((event) => anomalies.push(event.reason));
+  const child = {} as ChildProcessWithoutNullStreams;
+  (runtime as unknown as { child: ChildProcessWithoutNullStreams }).child =
+    child;
+  const receive = (message: unknown) =>
+    (
+      runtime as unknown as {
+        receive(child: ChildProcessWithoutNullStreams, line: string): void;
+      }
+    ).receive(child, JSON.stringify(message));
+  receive({
+    method: "turn/completed",
+    params: { threadId: "thread", turn: { id: "turn", status: "completed" } },
+  });
+  receive({
+    method: "turn/completed",
+    params: { threadId: "thread", turn: { id: "turn", status: "failed" } },
+  });
+  receive({
+    method: "turn/completed",
+    params: { turn: { status: "completed" } },
+  });
+  assert.deepEqual(anomalies, [
+    "Conflicting terminal status",
+    "Missing terminal identity or status",
+  ]);
+  assert.equal(await runtime.waitForTurn("thread", "turn"), "failed");
+});
+
 function bounded<T>(action: Promise<T>, milliseconds: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(

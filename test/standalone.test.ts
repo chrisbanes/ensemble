@@ -545,6 +545,34 @@ test("lost submission blocks a second work ID before and after reopen", async ()
   }
 });
 
+test("deterministic predecessor refusal leaves no writer reservation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
+  const data = join(root, "data");
+  const workspace = join(root, "work");
+  mkdirSync(workspace);
+  const runtime = new FakeRuntime();
+  const service = new StandaloneService(data, () => runtime);
+  try {
+    await service.start();
+    await assert.rejects(
+      service.submit("bad", "test", workspace, "missing"),
+      /Previous work is not a completed binding/,
+    );
+    assert.equal(
+      service.list().some((item) => item.workId === "bad"),
+      false,
+    );
+    assert.equal(
+      (await service.submit("good", "test", workspace)).state,
+      "completed",
+    );
+    assert.equal(runtime.turnStarts, 1);
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("unbound approval callback during delayed thread start prevents turn submission", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-s02-"));
   const data = join(root, "data");
@@ -697,8 +725,16 @@ test("trusted callback identity holds only its bound turn; unknown identity hold
     assert.equal(state.begin(second.id), true);
     assert.equal(state.bindThread(second.id, "thread-b"), true);
     assert.equal(state.bindTurn(second.id, "turn-b"), true);
+    state.complete(first.id, "thread-a", "turn-a");
     runtime.onRequest?.({
       method: "item/commandExecution/requestApproval",
+      threadId: "thread-a",
+      turnId: "turn-a",
+    });
+    assert.equal(state.get(first.id).state, "held");
+    assert.equal(state.get(second.id).state, "running");
+    runtime.onRequest?.({
+      method: "item/fileChange/requestApproval",
       threadId: "thread-a",
       turnId: "turn-a",
     });
