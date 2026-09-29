@@ -67,8 +67,8 @@ Startup can also recover an interrupted first start when the only files are an
 empty `.ensemble-owner.sqlite`, its SQLite journal if present, and an absent or
 partial marker whose contents match the beginning of the expected marker.
 Unrelated unmarked contents, including prototype data, remain refused.
-The service database is `standalone.sqlite`; `.ensemble-owner.sqlite` provides
-cross-process ownership of the marked directory.
+`standalone.sqlite` stores service data; `.ensemble-owner.sqlite` holds the
+SQLite ownership transaction that excludes a second service process.
 `operator` serves the local forms at `http://127.0.0.1:8787/` while the service
 runs. It has no remote access or separate login; #703 owns that foundation.
 The [S04a boundary](docs/design/s04a-command-boundary.md) describes the command,

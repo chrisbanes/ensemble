@@ -2,16 +2,27 @@
 
 This supplements the [S02 bootstrap evidence](s02-bootstrap-2026-09-28.md)
 after merge commit `8eae34c6366358492ec093dbfb6035d192962c11`.
-The repaired runtime source and deterministic fixtures are commit
-`f3fdb9b98c2926f5d9142c9bbf6c7cb1dc283b88` on
-`cb/cb-52-s02-safety`. This report changes no runtime source. Verification
-used Node 24.21.0 and npm 12.1.0 on macOS arm64.
+The ownership/stdin repair began at source and fixture commit
+`f3fdb9b98c2926f5d9142c9bbf6c7cb1dc283b88`. Review found a first-start
+interruption window in that candidate: creating the ownership database before
+the marker could leave an unmarked nonempty directory after a crash. The
+previously reviewed repair was commit
+`7827fd7924afe1ab87a59d991de65956b942ff85`; the new first-start repair
+source and fixtures are `daf2c72685be3d0ed90e6e310166cccf50886ab7` on
+`cb/cb-52-s02-safety`. A subsequent report-only commit changes no runtime
+source. Verification used Node 24.21.0 and npm 12.1.0 on macOS arm64.
 
 ## Ownership and recovery
 
-`StandaloneService.start()` canonicalizes the real data directory and takes a
-SQLite `BEGIN IMMEDIATE` write transaction on `.ensemble-owner.sqlite` before
-opening or migrating `standalone.sqlite`, normalizing workspace keys, or holding
+`StandaloneService.start()` validates an empty, correctly marked, or narrowly
+recoverable interrupted-start directory. An unmarked directory may contain only
+an empty `.ensemble-owner.sqlite` and its SQLite journal; a partial marker is
+accepted only when its bytes prefix the expected marker and the same owner
+files are the only other entries. Unrelated unmarked contents, prototype data,
+symlinks and mismatched markers remain refused. It canonicalizes the real data
+directory and takes a SQLite `BEGIN IMMEDIATE` write transaction on the ownership
+database before repairing or writing the marker, opening or migrating
+`standalone.sqlite`, normalizing workspace keys, or holding
 unfinished rows. A concurrent `list` or `run` fails at ownership acquisition.
 The transaction remains open until service stop; closing its SQLite connection
 releases the OS lock on normal stop, failed startup, or process exit/crash. It
@@ -24,7 +35,12 @@ service process. Concurrent `list` and alias-path `run` CLI processes fail,
 and the row stays `running`. A forced owner `SIGKILL` permits reacquisition;
 the new service holds that unfinished row and never resubmits its work ID.
 An injected login startup failure then releases ownership, allowing another
-start. This proves coordination between processes that use this service and
+start. The earlier interrupted-start fixture begins with a complete marker and
+no ownership database, then excludes a concurrent second starter. The new
+fixture kills a process after acquiring the ownership lock but before writing
+the marker, then restarts successfully. It also injects a partial marker write
+failure, restarts from that state, and confirms an unrelated prototype directory
+remains untouched. This proves coordination between processes that use this service and
 the same canonical directory on the tested local filesystem. It does not
 claim protection from an external process that deliberately deletes or
 rewrites the ownership file or bypasses the service.
@@ -51,36 +67,11 @@ unchanged; no new model call was made.
 
 ## Verification
 
-Focused build and `node --test dist/test/standalone.test.js
-dist/test/codex-runtime.test.js`: 16/16 passed. Pinned `npm ci` and
+Focused build and four affected ownership/startup tests passed 4/4. Pinned `npm ci` and
 `npm run check` on the integrated candidate passed typecheck, lint, format,
-build and 36/36 tests. The retained S02 fixtures cover fresh database and
+build and 38/38 tests on source `daf2c72`. The retained S02 fixtures cover fresh database and
 migration, login/policy, callback denial, uncertain submission, and prototype
 separation. The core tests retain the #686 distinction: only an explicit
 pre-submission refusal restores pending work; an ambiguous launch stays held.
 No Haze, prototype database, shared Codex login/config, TypeSafe credential,
 deployment or cutover state was changed.
-
-## Integrated first-start correction — 29 September 2026
-
-Watson's integrated CB-39 review found that a crash after creating
-`.ensemble-owner.sqlite` and before writing `.ensemble-standalone` could strand
-an unmarked directory. The separable CB-39 repair source and fixture commit is
-`6fb3b384d7ce6091d8f78ebb31a4c5641084996e`. The service now recognizes
-only an empty owner SQLite file and optional journal, with an optional marker
-whose bytes prefix the expected value, as recoverable first-start state. It
-revalidates after acquiring the OS-backed ownership lock and completes the
-marker before opening or migrating `standalone.sqlite` or touching recovery
-rows. Other unmarked contents, prototype data, symlinks and mismatched markers
-remain refused.
-
-A separate process took the owner lock and died by `SIGKILL` before marker
-creation; the next service started successfully. An injected partial marker
-write failure also released ownership and recovered on restart. The fixture
-checked that an unrelated prototype directory was unchanged. The earlier
-competing-owner, alias, crash-hold and stdin fixtures remain in the full run.
-Focused ownership/startup tests passed 2/2 immediately after the repair; the
-later integrated source `fe571ca68d66c53b325cbf6dedf1617191a74eb2`
-passed pinned Node 24.21.0/npm 12.1.0 `npm ci` and `npm run check`, including
-48/48 tests. This is deterministic local filesystem/SQLite evidence, without
-a new Codex model call.
