@@ -9,9 +9,11 @@ implementation contracts remain subject to S01 evidence.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
 ADR-1003 with that ownership change. The [BB specification](SPEC-bb.md) is history.
 The standalone service now has durable scheduling, capacity admission,
-supervision and conservative recovery primitives. The full operator journey,
-assignment routing and authenticated remote UI are not implemented; requirements
-below remain product obligations rather than passing acceptance claims.
+supervision and conservative recovery primitives. The authenticated operator UI
+foundation is implemented; the full operator journey and assignment router are
+not. See the [S04c boundary](design/s04c-operator-ui.md) for the implemented
+scope and limits. Remaining requirements below are product obligations, not
+passing acceptance claims.
 
 ## Purpose and scope
 
@@ -19,9 +21,10 @@ Ensemble is one standalone service coordinating multiple projects for a trusted
 single operator. It owns tasks, scheduling, assignments, execution supervision,
 workspaces, durable conversations and an operator interface. Keep TypeScript,
 Node.js and SQLite. The first deployment runs on Chris's Mac and serves a web
-operator interface, using Codex with the existing operator login. Codex App Server qualification, web
-stack and authentication implementation require technical review; no BB installation is required
-by the target product. Private remote access uses Tailscale plus a separate
+operator interface, using Codex with the existing operator login. Codex App
+Server qualification remains a runtime gate; the initial web/authentication
+foundation is documented in S04c. No BB installation is required by the target
+product. Private remote access uses Tailscale plus a separate
 Ensemble operator login. The standalone installation starts with a fresh database;
 historical BB record import is outside the first release.
 
@@ -243,8 +246,9 @@ controls. Live steering is deferred; stop is a separate control. Exact transcrip
 and message transport is part of Codex App Server qualification.
 The durable attention inbox is the notification source of truth; suppress unchanged
 alerts. OS/push delivery is optional, not a release dependency. Credentials must not
-appear in UI payloads or exposed transcripts. Remote UI exposure requires a reviewed
-operator authentication and transport boundary.
+appear in UI payloads or exposed transcripts. The current #703 authentication
+boundary is defined in [S04c](design/s04c-operator-ui.md); complete remote access
+and release qualification remain separate acceptance work.
 
 ## GitHub and completion
 

@@ -158,6 +158,13 @@ const commandSchema = z.discriminatedUnion("type", [
 ]);
 
 export type DomainCommand = z.input<typeof commandSchema>;
+export class DomainConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DomainConflictError";
+  }
+}
+
 export type CapacityConfigureCommand = Extract<
   DomainCommand,
   { type: "capacity.configure" }
@@ -307,7 +314,9 @@ export class DomainStore {
       );
       if (receipt) {
         if (receipt.payloadHash !== hash)
-          throw new Error("Command key already used with different payload");
+          throw new DomainConflictError(
+            "Command key already used with different payload",
+          );
         this.db.exec("COMMIT");
         return JSON.parse(String(receipt.result));
       }
@@ -723,7 +732,7 @@ export class DomainStore {
       );
       if (existing) {
         if (existing.id !== data.id || existing.payloadHash !== hash)
-          throw new Error("Routing operation conflict");
+          throw new DomainConflictError("Routing operation conflict");
         this.db.exec("COMMIT");
         return this.routingOperation(data.id);
       }
@@ -1122,7 +1131,8 @@ export class DomainStore {
   }
 
   private version(row: Row, expected: number): void {
-    if (row.version !== expected) throw new Error("Version conflict");
+    if (row.version !== expected)
+      throw new DomainConflictError("Version conflict");
   }
 
   private projectMatch(row: Row, projectId: string): void {
@@ -1171,7 +1181,9 @@ export class DomainCommands {
     if (existing) {
       if (existing.hash !== hash)
         return Promise.reject(
-          new Error("Command key already used with different payload"),
+          new DomainConflictError(
+            "Command key already used with different payload",
+          ),
         );
       return existing.promise;
     }
