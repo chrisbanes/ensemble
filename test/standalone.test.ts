@@ -316,7 +316,9 @@ for await (const line of createInterface({input: process.stdin})) {
   );
   chmodSync(executable, 0o700);
   const runtime = new CodexRuntime(executable);
-  let service = new StandaloneService(data, () => runtime);
+  let service = new StandaloneService(data, () => runtime, undefined, {
+    power: { enabled: false },
+  });
   try {
     await service.start();
     const child = (
@@ -385,7 +387,9 @@ for await (const line of createInterface({input: process.stdin})) {
   );
   chmodSync(executable, 0o700);
   const runtime = new CodexRuntime(executable);
-  let service = new StandaloneService(data, () => runtime);
+  let service = new StandaloneService(data, () => runtime, undefined, {
+    power: { enabled: false },
+  });
   try {
     await service.start();
     const internals = runtime as unknown as {
