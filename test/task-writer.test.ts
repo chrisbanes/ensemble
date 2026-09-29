@@ -397,6 +397,162 @@ test("replacement retains assignment snapshots and rejects stale results", async
   }
 });
 
+test("newer work revisions reject predecessor results across restart and idempotent reuse", async () => {
+  const f = await fixture();
+  let recovered: StandaloneService | undefined;
+  try {
+    assert.equal(
+      (await f.service.submitTask("predecessor", f.assignmentId, "first"))
+        .state,
+      "completed",
+    );
+    assert.equal(
+      (await f.service.submitTask("successor", f.assignmentId, "second")).state,
+      "completed",
+    );
+    await f.service.stop();
+
+    const path = join(f.root, "data", "standalone.sqlite");
+    const db = new DatabaseSync(path);
+    const revisions = db
+      .prepare(
+        "SELECT workId, workRevision FROM task_work_revisions ORDER BY workRevision",
+      )
+      .all() as { workId: string; workRevision: number }[];
+    assert.deepEqual(
+      revisions.map((row) => ({ ...row })),
+      [
+        { workId: "predecessor", workRevision: 1 },
+        { workId: "successor", workRevision: 2 },
+      ],
+    );
+    db.close();
+
+    recovered = new StandaloneService(
+      join(f.root, "data"),
+      () => new RuntimeFixture(),
+    );
+    await recovered.start();
+    assert.equal(recovered.isCurrentResult("predecessor"), false);
+    assert.equal(recovered.recordTaskResult("predecessor", "late"), false);
+    assert.equal(recovered.isCurrentResult("successor"), true);
+    assert.equal(recovered.recordTaskResult("successor", "current"), true);
+    assert.equal(
+      (await recovered.submitTask("successor", f.assignmentId, "second")).state,
+      "completed",
+    );
+    await recovered.stop();
+    recovered = undefined;
+
+    const verified = new DatabaseSync(path);
+    assert.equal(
+      (
+        verified
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_work_revisions WHERE assignmentId = ?",
+          )
+          .get(f.assignmentId) as { count: number }
+      ).count,
+      2,
+    );
+    assert.equal(
+      (
+        verified
+          .prepare(
+            "SELECT workRevision FROM task_work_revisions WHERE workId = 'successor'",
+          )
+          .get() as { workRevision: number }
+      ).workRevision,
+      2,
+    );
+    verified.close();
+  } finally {
+    await recovered?.stop();
+    await f.close();
+  }
+});
+
+test("ready work prevents conversation replacement and remains retryable", async () => {
+  const f = await fixture();
+  try {
+    const gate = deferred();
+    const entered = deferred();
+    f.runtime.gate = gate.promise;
+    f.runtime.entered = entered.resolve;
+    const first = f.service.submitTask("active", f.assignmentId, "first");
+    await entered.promise;
+    assert.equal(
+      (await f.service.submitTask("ready", f.assignmentId, "follow-up")).state,
+      "ready",
+    );
+
+    const path = join(f.root, "data", "standalone.sqlite");
+    const revision = () => {
+      const db = new DatabaseSync(path);
+      try {
+        return Number(
+          (
+            db
+              .prepare(
+                "SELECT revision FROM assignment_conversations WHERE assignmentId = ?",
+              )
+              .get(f.assignmentId) as { revision: number }
+          ).revision,
+        );
+      } finally {
+        db.close();
+      }
+    };
+    assert.equal(revision(), 1);
+    assert.throws(
+      () => f.service.replaceConversation(f.assignmentId),
+      /unresolved execution/,
+    );
+    assert.equal(revision(), 1);
+    assert.equal(
+      (
+        await f.service.archiveTask(f.taskId, {
+          deliveryConfirmed: true,
+          writerOwnershipResolved: true,
+          handoffsPreserved: true,
+          reconciliationEvidencePreserved: true,
+          workspaceContentsPreserved: true,
+        })
+      ).outcome,
+      "retained",
+    );
+
+    gate.resolve();
+    assert.equal((await first).state, "completed");
+    assert.equal(
+      (
+        await f.service.submitTask(
+          "ready",
+          f.assignmentId,
+          "follow-up",
+          "active",
+        )
+      ).state,
+      "completed",
+    );
+    assert.equal(f.service.isCurrentResult("ready"), true);
+    assert.equal(
+      (
+        await f.service.archiveTask(f.taskId, {
+          deliveryConfirmed: true,
+          writerOwnershipResolved: true,
+          handoffsPreserved: true,
+          reconciliationEvidencePreserved: true,
+          workspaceContentsPreserved: true,
+        })
+      ).outcome,
+      "cleaned",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test("a completed successor loses its result after predecessor release is retracted", async () => {
   for (const cause of ["conflict", "survivor"] as const) {
     const f = await fixture();

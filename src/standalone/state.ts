@@ -53,7 +53,23 @@ export class ExecutionState {
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
       workspace TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_work_revisions (
+      workId TEXT PRIMARY KEY REFERENCES task_execution_bindings(workId),
+      assignmentId TEXT NOT NULL,
+      conversationRevision INTEGER NOT NULL,
+      workRevision INTEGER NOT NULL CHECK(workRevision > 0),
+      UNIQUE(assignmentId, conversationRevision, workRevision)
     )`);
+    this.db.exec(`INSERT OR IGNORE INTO task_work_revisions
+      (workId, assignmentId, conversationRevision, workRevision)
+      SELECT b.workId, b.assignmentId, b.conversationRevision,
+        ROW_NUMBER() OVER (
+          PARTITION BY b.assignmentId, b.conversationRevision
+          ORDER BY a.sequence
+        )
+      FROM task_writer_admissions a
+      JOIN task_execution_bindings b ON b.workId = a.workId`);
   }
 
   stopTask(taskId: string): void {
@@ -147,7 +163,7 @@ export class ExecutionState {
     const unresolved = this.db
       .prepare(`SELECT 1 FROM task_execution_bindings b
       JOIN execution_intents e ON e.workId = b.workId
-      WHERE b.assignmentId = ? AND e.state IN ('held','submitting','running') LIMIT 1`)
+      WHERE b.assignmentId = ? AND e.state IN ('ready','held','submitting','running') LIMIT 1`)
       .get(id);
     if (unresolved) throw new Error("Assignment has unresolved execution");
     this.db
@@ -178,8 +194,15 @@ export class ExecutionState {
       JOIN execution_intents e ON e.workId = b.workId
       JOIN assignment_conversations c ON c.assignmentId = b.assignmentId
       JOIN domain_assignments a ON a.id = b.assignmentId
+      JOIN task_work_revisions w ON w.workId = b.workId
       WHERE b.workId = ? AND e.state = 'completed' AND
         c.revision = b.conversationRevision AND a.version = b.assignmentVersion
+        AND NOT EXISTS (
+          SELECT 1 FROM task_work_revisions newer
+          WHERE newer.assignmentId = w.assignmentId
+          AND newer.conversationRevision = w.conversationRevision
+          AND newer.workRevision > w.workRevision
+        )
       LIMIT 1`)
         .get(workId) !== undefined
     );
@@ -193,8 +216,15 @@ export class ExecutionState {
       JOIN execution_intents e ON e.workId = b.workId
       JOIN assignment_conversations c ON c.assignmentId = b.assignmentId
       JOIN domain_assignments a ON a.id = b.assignmentId
+      JOIN task_work_revisions w ON w.workId = b.workId
       WHERE b.workId = ? AND e.state = 'completed'
       AND c.revision = b.conversationRevision AND a.version = b.assignmentVersion
+      AND NOT EXISTS (
+        SELECT 1 FROM task_work_revisions newer
+        WHERE newer.assignmentId = w.assignmentId
+        AND newer.conversationRevision = w.conversationRevision
+        AND newer.workRevision > w.workRevision
+      )
       RETURNING workId`)
       .get(value, workId);
     if (inserted) return true;
@@ -324,11 +354,25 @@ export class ExecutionState {
            ) RETURNING id`,
           )
           .get(id) !== undefined;
-      if (admitted)
+      if (admitted) {
         this.db
           .prepare(`INSERT INTO task_writer_admissions (workId, workspace)
           SELECT workId, workspace FROM execution_intents WHERE id = ?`)
           .run(id);
+        this.db
+          .prepare(`INSERT INTO task_work_revisions
+          (workId, assignmentId, conversationRevision, workRevision)
+          SELECT b.workId, b.assignmentId, b.conversationRevision,
+            COALESCE((
+              SELECT MAX(existing.workRevision) FROM task_work_revisions existing
+              WHERE existing.assignmentId = b.assignmentId
+              AND existing.conversationRevision = b.conversationRevision
+            ), 0) + 1
+          FROM task_execution_bindings b
+          JOIN execution_intents e ON e.workId = b.workId
+          WHERE e.id = ?`)
+          .run(id);
+      }
       this.db.exec("COMMIT");
       return admitted;
     } catch (error) {
