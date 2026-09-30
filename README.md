@@ -78,6 +78,14 @@ The same-day routing amendment adds optional TypeSafe assignment routing to the
 first release and defers a separate task-owner role. TypeSafe uses separately
 configured API credentials and explicit project opt-in.
 
+On 30 September Chris confirmed optional ChatGPT daily operations, subscribed
+attention/completion events and native Codex task visibility/handover as first-release
+scope for individual self-hosters. Ensemble remains independently usable. Native
+Codex integration first requires a disposable feasibility proof; failure returns
+evidence and scope for review. These capabilities are not implemented. See
+[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md) and the
+[integration design](docs/design/chatgpt-and-native-codex.md).
+
 ## Development
 
 Use Node **24.21.0** (`.node-version`) and npm **12.1.0** (`package.json`):
@@ -151,6 +159,7 @@ over historical documents. A reviewed requirement is not an implemented capabili
 
 - [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
 - [ADR-1005](docs/adr/1005-service-assignment-routing.md): service routing and project-lead accountability.
+- [ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md): optional ChatGPT operations and native Codex first-release scope.
 - [Assignment-routing design](docs/design/assignment-routing.md): selection, fallback and durable result destinations.
 - [S04b coordination boundary](docs/design/s04b-coordination-boundary.md): durable task coordination, completion and evidence boundaries.
 - [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.

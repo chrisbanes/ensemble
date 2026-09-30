@@ -40,6 +40,15 @@ automated service/runtime/UI integration and bounded live validation run by the
 implementation agent; do not hand incremental testing to the user. Preserve the
 installed Haze prototype until a reviewed cutover.
 
+Chris confirmed the 30 September first-release amendment in
+[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md): optional ChatGPT daily
+operations/events and native Codex task visibility/handover for individual
+self-hosters. Ensemble remains independently usable. Prove supported native project
+placement, visibility and handover before dependent implementation. Failed proof
+returns evidence and release scope for review; do not silently substitute managed
+threads. Existing recovery holds and runtime limits remain. These requirements do
+not establish a supported standalone API for Codex's host-mediated app tools.
+
 ## Working conventions
 
 - Use `rg --files` for discovery and `rg` for text searches.
