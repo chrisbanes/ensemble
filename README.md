@@ -44,9 +44,9 @@ the existing operator pages. See the [S04d integration boundary](docs/design/s04
 The bounded [real-runtime operator proof](docs/evidence/s04d-operator-2026-09-30.md)
 observed an actual Codex coordination callback through Chromium, then verified
 Stop/writer holds and retained history after service/App Server restart. The
-extended private HTTPS/second-peer proof remains unproved because its approved
-disposable fixture is not provisioned; issue #694 is not complete until that
-proof passes or its owner records the exact external prerequisite. The full
+bounded same-host private HTTPS proof through an approved disposable Tailscale
+route has passed; it verifies the private route and browser boundary from the
+fixture host, not independent-device reachability or S05 acceptance. The full
 assignment router and S05 physical sleep/wake qualification remain pending. The
 [S04c boundary](docs/design/s04c-operator-ui.md) records the earlier #703
 foundation and limits. The installed Haze prototype stays in place until the

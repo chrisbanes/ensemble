@@ -200,8 +200,9 @@ operator journey is recorded in
 observed journey only, not universal termination or reattachment.
 
 The private-access script extends the existing S04c proof to the new private
-views and capacity write. R04's private-transport portion remains unproved until
-the bounded proof runs against an approved disposable HTTPS fixture reachable
-from an approved second peer, with exact cleanup confirmed. Missing fixture
-configuration is a blocker, not a waived gate. This work does not authorize
-persistent Serve changes, deployment or cutover.
+views and capacity write. The bounded proof through an approved disposable
+Tailscale HTTPS route passed from the fixture host, confirming private HTTPS
+and the browser boundary from that host. It does not prove independent-device
+reachability or constitute S05 acceptance. Missing fixture configuration is a
+blocker, not a waived gate. This work does not authorize persistent Serve
+changes, deployment or cutover.

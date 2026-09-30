@@ -23,9 +23,11 @@ registered dynamic tools on resumed lead and worker threads after service/App
 Server restart. This qualifies that tested journey only, not universal
 reattachment. A bounded real-runtime operator journey observed a live question,
 best-effort Stop, persistent holds and retained history after restart; its
-evidence is [S04d](evidence/s04d-operator-2026-09-30.md). Private HTTPS access
-through an approved disposable second-peer fixture remains unproved, so #694 is
-not complete. The full assignment router is also outstanding. The
+evidence is [S04d](evidence/s04d-operator-2026-09-30.md). Same-host private
+HTTPS access through an approved disposable Tailscale route has passed, proving
+the private route and browser boundary from the fixture host only;
+independent-device reachability and S05 acceptance are not established. The
+full assignment router is also outstanding. The
 [S04c boundary](design/s04c-operator-ui.md) describes the earlier #703
 foundation; requirements below remain product obligations rather than passing
 acceptance claims.
