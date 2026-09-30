@@ -29,6 +29,14 @@ not complete. The full assignment router is also outstanding. The
 [S04c boundary](design/s04c-operator-ui.md) describes the earlier #703
 foundation; requirements below remain product obligations rather than passing
 acceptance claims.
+S08a provides a separate offline operations CLI for generic standalone SQLite
+snapshot/verification/restore and a generated per-user LaunchAgent. These
+preserve database state and use ordinary service-start reconciliation; they do
+not include workspace contents, settle external effects, or qualify a final
+operational cutover. The [macOS operations procedure](operations/standalone-macos.md)
+and [bounded evidence](evidence/s08a-operations-2026-09-30.md) distinguish the
+deterministic exact-receipt admission journey from the live launchd proof's
+paused/unready fixture.
 
 ## Purpose and scope
 

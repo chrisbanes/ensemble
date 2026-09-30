@@ -280,8 +280,51 @@ reviewed cutover; never run competing writers against the same task workspace.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
 - Routing persistence, task-scoped lead execution identities, candidate validation,
   confidence criteria and separate API timeout/retry budgets; see the routing design.
-- Versioned fresh-database schemas, backup/restore and explicit old-work retirement.
+- Final schema qualification and old-work retirement/cutover; S08a backup/restore
+  is bounded to the currently supported standalone database schema.
 
 Codex on macOS is the selected first combination. Additional platforms are separate
 qualification work, not an assumed first-release matrix. Resolve these through
 bounded proofs and review; no framework or dependency selection is implied here.
+
+## S08a operations and backup/restore boundary
+
+`StandaloneDataDirectory` owns the shared marker and exclusive SQLite owner
+lock used by both `StandaloneService` and offline operations. The separate
+`npm run operations` CLI never starts Codex, the scheduler or the operator HTTP
+server. Backup uses Node 24's SQLite backup API to reserve a new private
+snapshot directory, verify the whole database, and write a strict manifest as
+the final commit marker. The manifest binds the supported schema version and
+fingerprint, SQLite file digest, deterministic typed logical-content digest,
+and source marker. Restore reserves a distinct nonexistent data directory,
+creates `.ensemble-restore-incomplete` immediately, verifies the copied
+database, writes a new empty `.ensemble-owner.sqlite`, and atomically promotes
+the sentinel to `.ensemble-standalone` last. The destination owner file is
+fresh installation metadata, not a copy of the source owner or any WAL/journal
+file. Offline backup requires the existing owner file to be a regular,
+non-symlink file and acquires its SQLite lock; it never creates source metadata.
+A successfully restored directory can therefore be backed up before its first
+service start, while an older or incomplete marked directory without the owner
+file is refused without changing the source tree. Restore does not copy
+workspace trees or credentials, and it does not migrate or clear persisted
+domain, execution, Stop, writer, capacity or recovery holds. Ordinary service
+startup performs migrations, workspace recovery and execution reconciliation
+before scheduler admission.
+
+The operations procedure generates a private per-user LaunchAgent with
+caller-supplied absolute runtime/data/auth/log paths and an explicit loopback or
+HTTPS origin. The renderer sets `KeepAlive=false`; launchctl owns start,
+restart and stop. Its environment is limited to the separate auth-file path,
+operator origin and the reviewed fixed PATH needed to resolve the installed
+Codex CLI and native host commands. Passwords and shell wrappers are absent
+from the plist.
+
+S08a's deterministic restored-service fixture proves wrong/exact recovery
+receipt handling, independent Stop/Resume behavior and exactly one admitted
+turn after reconciliation. Its bounded macOS launchd evidence proves the
+per-user service lifecycle and backup/restore of populated paused/unready
+public records; that live fixture admits no work and does not inject an exact
+recovery receipt because #704 owns no recovery-control surface. Neither proof
+qualifies final-schema/external-effect recovery, managed workspace relocation,
+host reboot, production deployment, old-work disposition or Haze cutover;
+those remain explicit later operational gates.

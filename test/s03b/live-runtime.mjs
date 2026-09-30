@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRuntime } from "../../dist/src/standalone/codex.js";
@@ -102,7 +108,7 @@ async function run() {
     timeout: 10_000,
   }).trim();
 
-  root = mkdtempSync(join(tmpdir(), "ensemble-s03b-live-"));
+  root = realpathSync(mkdtempSync(join(tmpdir(), "ensemble-s03b-live-")));
   result.cleanup.fixtureCreated = true;
   const dataDir = join(root, "data");
   const workspace = join(root, "direct-workspace");

@@ -10,6 +10,7 @@
   "packageManager": "npm@12.1.0",
   "scripts": {
     "service": "node dist/src/standalone/cli.js",
+    "operations": "node dist/src/standalone/operations-cli.js",
     "operator-auth": "npm run build && node dist/src/standalone/operator-auth-cli.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -18,6 +19,7 @@
     "s04b:live": "node test/s04b/live-runtime.mjs --live",
     "s04d:live": "node test/s04d/live-operator.mjs --live",
     "s03b:live": "node test/s03b/live-runtime.mjs --live",
+    "s08a:live": "node test/s08a/live-operations.mjs",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
