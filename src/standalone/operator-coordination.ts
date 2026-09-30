@@ -152,19 +152,26 @@ function executionStatus(
       entry.assignmentId === assignment.assignmentId &&
       entry.assignmentVersion === assignment.version,
   );
-  const request = view.requests
-    .filter(
-      (candidate) =>
-        candidate.assignmentId === assignment.assignmentId &&
-        candidate.assignmentVersion === assignment.version,
-    )
-    .reduce<(typeof view.requests)[number] | undefined>(
+  const requests = view.requests.filter(
+    (candidate) => candidate.assignmentId === assignment.assignmentId,
+  );
+  const latestRequest = (candidates: typeof requests) =>
+    candidates.reduce<(typeof view.requests)[number] | undefined>(
       (latest, candidate) =>
         !latest || candidate.sequence > latest.sequence ? candidate : latest,
       undefined,
     );
+  const request =
+    latestRequest(
+      requests.filter((candidate) => candidate.state === "active"),
+    ) ??
+    latestRequest(
+      requests.filter(
+        (candidate) => candidate.assignmentVersion === assignment.version,
+      ),
+    );
   const current = request
-    ? history.find((entry) => entry.workId === request.workId)
+    ? view.history.find((entry) => entry.workId === request.workId)
     : history.reduce<CoordinationTaskView["history"][number] | undefined>(
         (latest, candidate) =>
           !latest ||

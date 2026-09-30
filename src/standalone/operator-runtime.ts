@@ -189,24 +189,33 @@ function statusForAssignment(
   api: RuntimeOperatorApi,
 ): string {
   const id = String(assignment.id);
-  const request = api
+  const requests = api
     .turnRequests()
-    .filter(
-      (candidate) =>
-        candidate.assignmentId === id &&
-        candidate.assignmentVersion === Number(assignment.version),
-    )
-    .reduce<TurnRequest | undefined>(
+    .filter((candidate) => candidate.assignmentId === id);
+  const latestRequest = (candidates: TurnRequest[]) =>
+    candidates.reduce<TurnRequest | undefined>(
       (latest, candidate) =>
         !latest || candidate.sequence > latest.sequence ? candidate : latest,
       undefined,
     );
+  const request =
+    latestRequest(
+      requests.filter((candidate) => candidate.state === "active"),
+    ) ??
+    latestRequest(
+      requests.filter(
+        (candidate) =>
+          candidate.assignmentVersion === Number(assignment.version),
+      ),
+    );
+  const requestVersion =
+    request?.assignmentVersion ?? Number(assignment.version);
   const recoveryRecords = api
     .recoveryView()
     .filter(
       (candidate) =>
         candidate.binding?.assignmentId === id &&
-        candidate.binding.assignmentVersion === Number(assignment.version),
+        candidate.binding.assignmentVersion === requestVersion,
     );
   const recovery = request
     ? recoveryRecords.find((candidate) => candidate.workId === request.workId)

@@ -342,7 +342,29 @@ async function run() {
   assert.equal(new URL(page.url()).origin, origin);
   const runtimeBeforeStop = await page.locator("body").innerText();
   assert.match(runtimeBeforeStop, /S04d live operator question and Stop/);
+  assert.match(runtimeBeforeStop, /Execution status: Running\./);
   assert.match(runtimeBeforeStop, /Best-effort Stop/);
+  const callbackAssignmentHref = `/runtime/assignment/${encodeURIComponent(question.requestingAssignmentId)}`;
+  const taskAssignmentsSection = page
+    .getByRole("heading", { name: "Task-scoped assignments" })
+    .locator("xpath=..");
+  const callbackAssignmentLink = taskAssignmentsSection.locator(
+    `a[href="${callbackAssignmentHref}"]`,
+  );
+  assert.equal(
+    await callbackAssignmentLink.count(),
+    1,
+    "runtime view links the assignment that requested the live question",
+  );
+  const callbackAssignmentRow = await callbackAssignmentLink
+    .locator("xpath=..")
+    .innerText();
+  assert.match(callbackAssignmentRow, /:\s*Running\./);
+  evidence.runtimeBeforeStop = {
+    taskExecutionRunning: /Execution status: Running\./.test(runtimeBeforeStop),
+    requestingAssignmentLinked: true,
+    requestingAssignmentRunning: /:\s*Running\./.test(callbackAssignmentRow),
+  };
   await page.goto(`${origin}/coordination/task/${taskId}`);
   assert.equal(new URL(page.url()).origin, origin);
   const coordinationBody = await page.locator("body").innerText();

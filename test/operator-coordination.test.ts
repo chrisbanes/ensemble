@@ -253,6 +253,253 @@ test("operator status follows a newer queued continuation over completed history
     );
 });
 
+test("operator pages retain an active worker turn after applying next-turn revisions", async (t) => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-operator-active-old-version-"),
+  );
+  const runtime = new OperatorRuntime();
+  const service = new StandaloneService(
+    join(directory, "data"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false }, routingClient: null },
+  );
+  t.after(async () => {
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await service.start();
+
+  const leadProfileId = randomUUID();
+  const workerProfileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  const assignmentId = randomUUID();
+  command(service, {
+    type: "profile.create",
+    profileId: leadProfileId,
+    name: "Active-turn lead",
+    instructions: "Coordinate the task.",
+    capabilities: "coordinate",
+  });
+  command(service, {
+    type: "profile.create",
+    profileId: workerProfileId,
+    name: "Active-turn worker",
+    instructions: "Review the initial task context.",
+    capabilities: "review",
+  });
+  command(service, {
+    type: "project.create",
+    projectId,
+    name: "Active-turn project",
+    leadProfileId,
+  });
+  command(service, {
+    type: "project.configure",
+    projectId,
+    expectedVersion: 1,
+    paused: false,
+    instructions: "Initial project instructions.",
+  });
+  command(service, {
+    type: "routing.configure",
+    projectId,
+    expectedVersion: 1,
+    enabled: false,
+    guidance: "Routing is not enabled.",
+    candidateProfileIds: [workerProfileId],
+  });
+  command(service, {
+    type: "task.create",
+    projectId,
+    taskId,
+    title: "Active worker version probe",
+    outcome: "Keep the current turn active during the revision update.",
+    ready: false,
+  });
+  command(service, {
+    type: "assignment.create",
+    projectId,
+    taskId,
+    assignmentId,
+    profileId: workerProfileId,
+    brief: "Work against the current task context.",
+    resultDestination: "lead",
+    requesterAssignmentId: null,
+  });
+  await service.provisionTask(taskId);
+  command(service, {
+    type: "task.configure",
+    projectId,
+    taskId,
+    expectedVersion: 1,
+    ready: true,
+  });
+  await waitUntil(() => runtime.turns === 1);
+
+  const assignment = service.domain().assignment(assignmentId);
+  assert.equal(assignment.state, "running");
+  const activeRequest = service
+    .turnRequests()
+    .find(
+      (request) =>
+        request.assignmentId === assignmentId && request.state === "active",
+    );
+  assert.ok(activeRequest);
+  assert.equal(activeRequest.assignmentVersion, 1);
+  const activeIntent = service
+    .list()
+    .find((intent) => intent.workId === activeRequest.workId);
+  assert.equal(activeIntent?.state, "running");
+
+  command(service, {
+    type: "profile.configure",
+    profileId: workerProfileId,
+    expectedVersion: 1,
+    instructions: "Updated worker instructions for the next turn.",
+  });
+  command(service, {
+    type: "project.configure",
+    projectId,
+    expectedVersion: Number(service.domain().project(projectId).version),
+    instructions: "Updated project instructions for the next turn.",
+  });
+  command(service, {
+    type: "assignment.apply",
+    projectId,
+    assignmentId,
+    expectedVersion: 1,
+  });
+  const updatedAssignment = service.domain().assignment(assignmentId);
+  assert.equal(Number(updatedAssignment.version), 2);
+  assert.equal(Number(updatedAssignment.profileRevision), 2);
+  assert.equal(
+    Number(updatedAssignment.instructionsRevision),
+    Number(service.domain().project(projectId).instructionsRevision),
+  );
+  assert.equal(
+    service
+      .turnRequests()
+      .find((request) => request.workId === activeRequest.workId)
+      ?.assignmentVersion,
+    1,
+  );
+  assert.equal(
+    service
+      .turnRequests()
+      .find((request) => request.workId === activeRequest.workId)?.state,
+    "active",
+  );
+  assert.equal(
+    service.list().find((intent) => intent.workId === activeRequest.workId)
+      ?.state,
+    "running",
+  );
+
+  const runtimeRoutes = runtimeOperatorRoutes(service);
+  const runtimeTaskPage = await route(
+    runtimeRoutes,
+    "GET",
+    "/runtime/task/:taskId",
+  ).handler({ params: { taskId }, fields: {}, csrfToken: "test-token" });
+  const runtimeAssignmentPage = await route(
+    runtimeRoutes,
+    "GET",
+    "/runtime/assignment/:assignmentId",
+  ).handler({
+    params: { assignmentId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(runtimeTaskPage.kind, "html");
+  assert.equal(runtimeAssignmentPage.kind, "html");
+  if (runtimeTaskPage.kind === "html") {
+    assert.match(runtimeTaskPage.body, /Execution status: Running\./);
+    assert.match(runtimeTaskPage.body, /Active-turn worker<\/a>: Running\./);
+  }
+  if (runtimeAssignmentPage.kind === "html") {
+    assert.match(runtimeAssignmentPage.body, /Execution status: Running\./);
+    assert.ok(
+      runtimeAssignmentPage.body.includes(
+        `Captured instruction revision ${updatedAssignment.instructionsRevision}; profile revision ${updatedAssignment.profileRevision}.`,
+      ),
+    );
+  }
+
+  const coordinationRoutes = coordinationOperatorRoutes(
+    service.coordinationView(),
+    service.domain(),
+    (id) => service.routingAvailability(id),
+  );
+  const coordinationTaskPage = await route(
+    coordinationRoutes,
+    "GET",
+    "/coordination/task/:taskId",
+  ).handler({ params: { taskId }, fields: {}, csrfToken: "test-token" });
+  const coordinationAssignmentPage = await route(
+    coordinationRoutes,
+    "GET",
+    "/coordination/assignment/:assignmentId",
+  ).handler({
+    params: { assignmentId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(coordinationTaskPage.kind, "html");
+  assert.equal(coordinationAssignmentPage.kind, "html");
+  if (coordinationTaskPage.kind === "html")
+    assert.match(
+      coordinationTaskPage.body,
+      /Active-turn worker<\/a> — selected assignment state running; execution: Running\./,
+    );
+  if (coordinationAssignmentPage.kind === "html") {
+    assert.match(
+      coordinationAssignmentPage.body,
+      /Assignment state: running; execution: Running\./,
+    );
+    assert.match(
+      coordinationAssignmentPage.body,
+      /Assignment revision 1; conversation revision [0-9]+; runtime intent running\./,
+    );
+  }
+
+  runtime.complete("operator-turn-1");
+  await waitUntil(
+    () =>
+      service
+        .turnRequests()
+        .find((request) => request.workId === activeRequest.workId)?.state ===
+      "completed",
+  );
+  const completedRuntimeTaskPage = await route(
+    runtimeOperatorRoutes(service),
+    "GET",
+    "/runtime/task/:taskId",
+  ).handler({ params: { taskId }, fields: {}, csrfToken: "test-token" });
+  const completedCoordinationTaskPage = await route(
+    coordinationOperatorRoutes(
+      service.coordinationView(),
+      service.domain(),
+      (id) => service.routingAvailability(id),
+    ),
+    "GET",
+    "/coordination/task/:taskId",
+  ).handler({ params: { taskId }, fields: {}, csrfToken: "test-token" });
+  assert.equal(completedRuntimeTaskPage.kind, "html");
+  assert.equal(completedCoordinationTaskPage.kind, "html");
+  if (completedRuntimeTaskPage.kind === "html")
+    assert.doesNotMatch(
+      completedRuntimeTaskPage.body,
+      /Execution status: Running\./,
+    );
+  if (completedCoordinationTaskPage.kind === "html")
+    assert.doesNotMatch(
+      completedCoordinationTaskPage.body,
+      /execution: Running\./,
+    );
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => (resolve = done));
