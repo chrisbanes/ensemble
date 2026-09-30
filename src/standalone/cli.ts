@@ -1,5 +1,6 @@
 import { StandaloneService } from "./service.js";
 import { LocalOperatorHttp, LocalOperatorUi } from "./operator.js";
+import { OperatorAuth } from "./operator-auth.js";
 
 const [command, dataDir, ...args] = process.argv.slice(2);
 if (!command || !dataDir)
@@ -7,6 +8,13 @@ if (!command || !dataDir)
     "Usage: ensemble <serve|operator|run|list> ABSOLUTE_DATA_DIR [workId prompt workspace previousWorkId]",
   );
 const service = new StandaloneService(dataDir);
+const operatorAuth =
+  command === "operator"
+    ? await OperatorAuth.open({
+        authFile: process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+        origin: process.env.ENSEMBLE_OPERATOR_ORIGIN ?? "",
+      })
+    : undefined;
 await service.start();
 try {
   if (command === "run") {
@@ -29,9 +37,14 @@ try {
       process.once("SIGTERM", resolve);
     });
   } else if (command === "operator") {
-    const ui = new LocalOperatorHttp(new LocalOperatorUi(service.domain()));
-    const port = await ui.start(args[0] ? Number(args[0]) : 8787);
-    process.stdout.write(`http://127.0.0.1:${port}/\n`);
+    if (!operatorAuth)
+      throw new Error("Operator authentication is unavailable");
+    const ui = new LocalOperatorHttp(
+      new LocalOperatorUi(service.domain()),
+      operatorAuth,
+    );
+    await ui.start(args[0] ? Number(args[0]) : 8787);
+    process.stdout.write(`${operatorAuth?.origin}/\n`);
     try {
       await new Promise<void>((resolve) => {
         process.once("SIGINT", resolve);
@@ -43,4 +56,5 @@ try {
   } else throw new Error(`Unknown command ${command}`);
 } finally {
   await service.stop();
+  operatorAuth?.close();
 }

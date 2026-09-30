@@ -10,6 +10,7 @@
   "packageManager": "npm@12.1.0",
   "scripts": {
     "service": "node dist/src/standalone/cli.js",
+    "operator-auth": "npm run build && node dist/src/standalone/operator-auth-cli.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@types/node": "26.6.3",
+    "playwright": "1.63.0",
     "typescript": "7.0.2"
   }
 }

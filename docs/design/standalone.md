@@ -262,8 +262,10 @@ reviewed cutover; never run competing writers against the same task workspace.
 - macOS service lifecycle, effective execution policy and operator recovery controls;
   stronger process/read isolation only if separately selected.
 - Effective-admission transaction/supervisor protocol and restart reconciliation.
-- Web API/UI technology and a separate authenticated operator session over the
-  private Tailscale transport, including CSRF/origin checks for control requests.
+- Runtime/release qualification of the separate authenticated operator session
+  and private Tailscale transport. The current UI and CSRF/origin boundary are
+  documented in [S04c](s04c-operator-ui.md); private Serve proof remains bounded
+  evidence, not deployment authorization.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
 - Routing persistence, task-scoped lead execution identities, candidate validation,
   confidence criteria and separate API timeout/retry budgets; see the routing design.
