@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { DomainStore } from "../src/core/domain.js";
 import { Store } from "../src/core/store.js";
+import { OperatorAuth } from "../src/standalone/operator-auth.js";
 import {
   LocalOperatorHttp,
   LocalOperatorUi,
@@ -91,7 +93,10 @@ test("local forms submit versioned commands and render secret-safe views", async
     assert.match(html, /credential configured/);
     assert.doesNotMatch(html, /TYPESAFE_KEY/);
     assert.match(html, /task.create/);
-    assert.match(ui.task(task.id), /Held: project-paused, task-unready/);
+    assert.match(
+      ui.task(task.id),
+      /Configuration eligibility only: held: project-paused, task-unready\./,
+    );
     await ui.submit({
       type: "project.configure",
       projectId: project.id,
@@ -109,7 +114,10 @@ test("local forms submit versioned commands and render secret-safe views", async
       outcome: "Ship",
       ready: "1",
     });
-    assert.match(ui.task(task.id), /Eligible/);
+    assert.ok(
+      /eligible for future admission/i.test(ui.task(task.id)),
+      "eligible means configuration eligibility only",
+    );
     const assignment = (await ui.submit({
       type: "assignment.create",
       projectId: project.id,
@@ -118,66 +126,76 @@ test("local forms submit versioned commands and render secret-safe views", async
       brief: "Build",
       resultDestination: "lead:task",
     })) as { id: string };
-    assert.match(ui.task(task.id), new RegExp(assignment.id));
+    assert.doesNotMatch(ui.task(task.id), new RegExp(assignment.id));
+    assert.match(ui.task(task.id), /eligibility only/i);
+    assert.match(ui.assignment(assignment.id), /execution state.*unavailable/i);
   } finally {
-    db.close();
-  }
-});
-
-test("loopback HTTP serves and accepts local operator forms", async () => {
-  const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA foreign_keys = ON");
-  new Store(db).ensureHost("test");
-  const domain = new DomainStore(db);
-  domain.migrate();
-  const http = new LocalOperatorHttp(new LocalOperatorUi(domain));
-  try {
-    const port = await http.start();
-    const base = `http://127.0.0.1:${port}`;
-    const home = await fetch(base);
-    assert.equal(home.status, 200);
-    assert.match(await home.text(), /<form method="post" action="\/command"/);
-    const created = await fetch(`${base}/command`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        origin: base,
-      },
-      body: new URLSearchParams({
-        type: "project.create",
-        name: "Web project",
-      }),
-      redirect: "manual",
-    });
-    assert.equal(created.status, 303);
-    assert.match(await (await fetch(base)).text(), /Web project/);
-    const refused = await fetch(`${base}/command`, {
-      method: "POST",
-      headers: { origin: "https://elsewhere.example" },
-      body: new URLSearchParams({ type: "project.create", name: "Unwanted" }),
-    });
-    assert.equal(refused.status, 403);
-  } finally {
-    await http.stop();
     db.close();
   }
 });
 
 test("rendered form retries replay one receipt and retain create IDs", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-form-retry-"));
+  chmodSync(directory, 0o700);
+  const authFile = join(directory, "operator-auth.json");
   const service = new StandaloneService(directory, fakeRuntime);
   let http: LocalOperatorHttp | undefined;
+  let auth: OperatorAuth | undefined;
   try {
     await service.start();
     const domain = service.domain();
-    http = new LocalOperatorHttp(new LocalOperatorUi(domain));
-    const base = `http://127.0.0.1:${await http.start()}`;
-    const page = async (path: string) => (await fetch(`${base}${path}`)).text();
+    const portServer = createServer();
+    await new Promise<void>((resolve) =>
+      portServer.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (portServer.address() as AddressInfo).port;
+    await new Promise<void>((resolve, reject) =>
+      portServer.close((error) => (error ? reject(error) : resolve())),
+    );
+    const base = `http://127.0.0.1:${port}`;
+    const password = "retry form operator password";
+    await OperatorAuth.initialize(authFile, password);
+    auth = await OperatorAuth.open({ authFile, origin: base });
+    http = new LocalOperatorHttp(new LocalOperatorUi(domain), auth);
+    await http.start(port);
+    const loginPage = await fetch(`${base}/login`);
+    const cookie = loginPage.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.ok(cookie);
+    const loginHtml = await loginPage.text();
+    const loginToken = formValue(loginHtml, "csrfToken");
+    const login = await fetch(`${base}/login`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: base,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ password, csrfToken: loginToken }),
+      redirect: "manual",
+    });
+    assert.equal(login.status, 303);
+    const authenticatedCookie = login.headers
+      .get("set-cookie")
+      ?.split(";", 1)[0];
+    assert.ok(authenticatedCookie);
+    const page = async (path: string) =>
+      fetch(`${base}${path}`, {
+        headers: { cookie: authenticatedCookie },
+      }).then((response) => response.text());
+    const home = await page("/");
+    const csrfToken = formValue(
+      renderedForm(home, "project.create"),
+      "csrfToken",
+    );
     const post = async (fields: Record<string, string>) =>
       fetch(`${base}/command`, {
         method: "POST",
-        headers: { origin: base },
-        body: new URLSearchParams(fields),
+        headers: {
+          cookie: authenticatedCookie,
+          origin: base,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ ...fields, csrfToken }),
         redirect: "manual",
       });
 
@@ -208,7 +226,12 @@ test("rendered form retries replay one receipt and retain create IDs", async () 
     assert.equal((await post(project)).status, 303);
     assert.equal(domain.projects().length, 1);
     assert.equal(domain.project(projectId).id, projectId);
-    assert.equal((await post({ ...project, name: "Changed" })).status, 400);
+    const conflictingReplay = await post({ ...project, name: "Changed" });
+    assert.equal(conflictingReplay.status, 409);
+    assert.match(
+      await conflictingReplay.text(),
+      /reload.*review before retrying/i,
+    );
     assert.equal(domain.projects().length, 1);
     assert.notEqual(
       formValue(renderedForm(await page("/"), "project.create"), "key"),
@@ -232,24 +255,34 @@ test("rendered form retries replay one receipt and retain create IDs", async () 
     assert.equal((await post(task)).status, 303);
     assert.equal(domain.tasks(projectId).length, 1);
 
-    const assignmentForm = renderedForm(
-      await page(`/task/${taskId}`),
-      "assignment.create",
+    const taskHtml = await page(`/task/${taskId}`);
+    assert.ok(
+      /Scheduler admission, execution status, runtime history, dependency and recovery details are unavailable in this operator surface\./.test(
+        taskHtml,
+      ),
+      "task view distinguishes configuration from execution status",
     );
-    const assignmentId = formValue(assignmentForm, "assignmentId");
-    const assignment = {
-      type: "assignment.create",
-      key: formValue(assignmentForm, "key"),
-      projectId,
-      taskId,
-      assignmentId,
-      profileId,
-      brief: "Build",
-      resultDestination: "lead:task",
-    };
-    assert.equal((await post(assignment)).status, 303);
-    assert.equal((await post(assignment)).status, 303);
-    assert.equal(domain.assignments(taskId).length, 1);
+    assert.ok(
+      !/data-command="(?:assignment|dependency|imported-blockers)/.test(
+        taskHtml,
+      ),
+      "task page omits deferred action forms",
+    );
+    assert.equal(
+      (
+        await post({
+          type: "assignment.create",
+          key: "unauthorized-assignment",
+          projectId,
+          taskId,
+          profileId,
+          brief: "Build",
+          resultDestination: "lead:task",
+        })
+      ).status,
+      400,
+    );
+    assert.equal(domain.assignments(taskId).length, 0);
 
     const configureForm = renderedForm(
       await page(`/project/${projectId}`),
@@ -265,9 +298,10 @@ test("rendered form retries replay one receipt and retain create IDs", async () 
     assert.equal((await post(configure)).status, 303);
     assert.equal((await post(configure)).status, 303);
     assert.equal(domain.project(projectId).version, 2);
-    assert.equal((await post({ ...configure, name: "Changed" })).status, 400);
+    assert.equal((await post({ ...configure, name: "Changed" })).status, 409);
   } finally {
     await http?.stop();
+    auth?.close();
     await service.stop();
     rmSync(directory, { recursive: true, force: true });
   }

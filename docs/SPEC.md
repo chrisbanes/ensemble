@@ -13,12 +13,15 @@ conservative recovery, and the S04b task-coordination foundations: durable resul
 and recipient inboxes, human-request attention/interactions, retained-assignee
 follow-up, revision-bound lead completion and bounded assignment-routing
 provenance. These are covered by deterministic service tests and a disposable
-test-only read view, not by the production operator UI. A [bounded real Codex
-journey](evidence/s04b-live-runtime-2026-09-29.md) observed registered dynamic
-tools on resumed lead and worker threads after service/App Server restart. This
-qualifies that tested journey only, not universal reattachment. The complete
-operator journey and authenticated remote UI are not implemented; requirements
-below remain product obligations rather than passing acceptance claims.
+test-only read view, not by the production coordination, history or recovery UI.
+A [bounded real Codex journey](evidence/s04b-live-runtime-2026-09-29.md) observed
+registered dynamic tools on resumed lead and worker threads after service/App
+Server restart. This qualifies that tested journey only, not universal
+reattachment. The authenticated operator UI foundation is implemented; the full
+operator journey, assignment router and private Tailscale proof remain
+incomplete. The [S04c boundary](design/s04c-operator-ui.md) describes the UI
+scope and limits. Requirements below remain product obligations rather than
+passing acceptance claims.
 
 ## Purpose and scope
 
@@ -26,9 +29,10 @@ Ensemble is one standalone service coordinating multiple projects for a trusted
 single operator. It owns tasks, scheduling, assignments, execution supervision,
 workspaces, durable conversations and an operator interface. Keep TypeScript,
 Node.js and SQLite. The first deployment runs on Chris's Mac and serves a web
-operator interface, using Codex with the existing operator login. Codex App Server qualification, web
-stack and authentication implementation require technical review; no BB installation is required
-by the target product. Private remote access uses Tailscale plus a separate
+operator interface, using Codex with the existing operator login. Codex App
+Server qualification remains a runtime gate; the initial web/authentication
+foundation is documented in S04c. No BB installation is required by the target
+product. Private remote access uses Tailscale plus a separate
 Ensemble operator login. The standalone installation starts with a fresh database;
 historical BB record import is outside the first release.
 
@@ -253,8 +257,9 @@ controls. Live steering is deferred; stop is a separate control. Exact transcrip
 and message transport is part of Codex App Server qualification.
 The durable attention inbox is the notification source of truth; suppress unchanged
 alerts. OS/push delivery is optional, not a release dependency. Credentials must not
-appear in UI payloads or exposed transcripts. Remote UI exposure requires a reviewed
-operator authentication and transport boundary.
+appear in UI payloads or exposed transcripts. The current #703 authentication
+boundary is defined in [S04c](design/s04c-operator-ui.md); complete remote access
+and release qualification remain separate acceptance work.
 
 ## GitHub and completion
 

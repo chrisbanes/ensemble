@@ -30,10 +30,15 @@ Codex probe separately checks registered tools after service/App Server restart;
 the [bounded live evidence](docs/evidence/s04b-live-runtime-2026-09-29.md)
 qualifies the observed resumed-thread coordination callbacks, not universal
 reattachment. The BB plugin, packaging and integration harness have been removed.
-#694 retains final operator scheduling/capacity controls and recovery
-presentation; #703 retains the authenticated remote operator UI. S05 physical
-sleep/wake qualification and the installed Haze prototype's reviewed cutover
-remain pending.
+The full assignment router, #694 operator scheduling/capacity controls and
+recovery presentation, and S05 physical sleep/wake qualification remain pending.
+#703 adds an authenticated operator UI
+foundation with a separate password/session boundary and initial project,
+profile, routing and local-task forms. Runtime, coordination, history and
+recovery UI remain unavailable, and the bounded private Tailscale proof remains
+unproved. The [S04c boundary](docs/design/s04c-operator-ui.md) records its scope
+and limits. The installed Haze prototype stays in place until the reviewed
+operational cutover.
 
 ## Planning checkpoint
 
@@ -63,12 +68,14 @@ npm run check
 ```
 
 `check` runs strict type checking, lint, formatting, compilation and tests,
-including deterministic S03b scheduler/supervision/recovery/power coverage and
-S04b coordination, routing, inbox, interaction, completion and service-integration
-fixtures. Real App Server qualification is separate and must be run explicitly
-with `npm run s03b:live` and `npm run s04b:live`; each harness refuses to run
-without its `--live` opt-in. These checks do not prove physical sleep/wake
-behavior or operational host-restart recovery.
+including deterministic S03b scheduler, supervision, recovery, power and
+service-integration fixtures, S04b coordination, routing, inbox, interaction and
+completion tests, and the operator auth, HTTP and Chromium browser tests. CI
+installs the pinned Chromium engine used by those browser tests. Real App Server
+qualification is separate and must be run explicitly with `npm run s03b:live`
+and `npm run s04b:live`; each harness requires its `--live` opt-in. These checks
+do not prove physical sleep/wake behavior, operational host-restart recovery or
+private remote Tailscale access.
 
 The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
@@ -87,10 +94,16 @@ partial marker whose contents match the beginning of the expected marker.
 Unrelated unmarked contents, including prototype data, remain refused.
 The service database is `standalone.sqlite`; `.ensemble-owner.sqlite` provides
 cross-process ownership of the marked directory.
-`operator` serves the local forms at `http://127.0.0.1:8787/` while the service
-runs. It has no remote access or separate login; #703 owns that foundation.
-The [S04a boundary](docs/design/s04a-command-boundary.md) describes the command,
-read-view and admission records available to dependent slices.
+Initialize a separate operator password with
+`npm run operator-auth -- init ABSOLUTE_AUTH_FILE`, then set
+`ENSEMBLE_OPERATOR_AUTH_FILE` and `ENSEMBLE_OPERATOR_ORIGIN` before starting the
+`operator` command. Use the exact loopback origin (including port) for local
+access or an HTTPS origin for a separately managed private transport. Use a
+canonical origin without a trailing slash. The server still binds only to
+`127.0.0.1`; it does not configure Tailscale Serve.
+Sessions are in-memory and reset on restart. The [S04a boundary](docs/design/s04a-command-boundary.md)
+describes domain commands and admission records; [S04c](docs/design/s04c-operator-ui.md)
+describes the authenticated web boundary and current UI limits.
 
 `StandaloneService.provisionTask` durably binds a domain task to one retained
 workspace, including repository-free and multiple-repository tasks.

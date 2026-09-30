@@ -12,9 +12,11 @@ bounded routing provenance, and a typed task coordination view. Its deterministi
 service contract does not establish the production operator UI. The separate
 [disposable Codex probe](../evidence/s04b-live-runtime-2026-09-29.md) qualifies
 resumed-thread coordination callbacks for its bounded tested journey only. The
-#694 operator scheduling/capacity controls and recovery
-presentation, authenticated remote UI, physical sleep/wake qualification and
-operational host-restart qualification remain separate work. See the
+#694 operator scheduling/capacity controls and recovery presentation remain
+separate work. #703 implements the authenticated operator UI foundation;
+production runtime, coordination, history and recovery views remain unavailable,
+and private Tailscale access is unproved. Physical sleep/wake and operational
+host-restart qualification also remain separate work. See the
 [S04b coordination boundary](s04b-coordination-boundary.md).
 [ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
 assignment-routing and project-lead accountability decisions.
@@ -269,8 +271,10 @@ reviewed cutover; never run competing writers against the same task workspace.
 - macOS service lifecycle, effective execution policy and operator recovery controls;
   stronger process/read isolation only if separately selected.
 - Effective-admission transaction/supervisor protocol and restart reconciliation.
-- Web API/UI technology and a separate authenticated operator session over the
-  private Tailscale transport, including CSRF/origin checks for control requests.
+- Runtime/release qualification of the separate authenticated operator session
+  and private Tailscale transport. The current UI and CSRF/origin boundary are
+  documented in [S04c](s04c-operator-ui.md); private Serve proof remains bounded
+  evidence, not deployment authorization.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
 - Routing persistence, task-scoped lead execution identities, candidate validation,
   confidence criteria and separate API timeout/retry budgets; see the routing design.

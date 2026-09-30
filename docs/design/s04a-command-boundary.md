@@ -54,15 +54,16 @@ A routing operation is not an execution intent. When routing is disabled, an
 explicit lead allocation can still use the scoped `assignment.create` command
 without a routing operation.
 
-For #703, `LocalOperatorUi` supplies project, task, profile, assignment, routing,
-and dependency forms plus HTML read views over the same commands. `LocalOperatorHttp`
-mounts these locally on `127.0.0.1` only; the `operator` CLI mode starts it while
-the standalone runtime is active.
+For #703, `LocalOperatorUi` supplies project, task, profile and routing forms plus
+HTML read views over the same commands. The authenticated `LocalOperatorHttp`
+mounts on `127.0.0.1` only; the `operator` CLI mode starts it while the
+standalone runtime is active. Its web allowlist does not expose assignment,
+dependency or imported-blocker commands. Runtime/coordination details and
+controls are unavailable in this slice; see [S04c](s04c-operator-ui.md).
 Each rendered form carries a command key, and create forms also carry their
 record ID. Reposting the same form payload replays one receipt after a lost
 redirect; a changed payload with that key conflicts. A fresh form gets a new key.
 The read view reports credential availability, never a credential value or
 environment-variable reference. Configuration accepts only `env:NAME`
-references; the later authenticated
-operator foundation owns remote access and login. The loopback interface is an
-integration surface, not the finished operator UI.
+references. The authenticated operator foundation owns private remote access
+qualification separately; the current interface is not the finished release UI.
