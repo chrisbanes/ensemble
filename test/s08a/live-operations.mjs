@@ -495,11 +495,11 @@ async function run() {
   }).trim();
   stage = "preflight-codex-login";
   stageLog(stage);
-  const loginStatus = execFileSync(codexExecutable, ["login", "status"], {
-    encoding: "utf8",
+  const loginStatus = runCommand(codexExecutable, ["login", "status"], {
     timeout: 15_000,
   });
-  assert.match(loginStatus, /Logged in/);
+  assert.equal(loginStatus.status, 0, "Codex login status must succeed");
+  assert.match(`${loginStatus.stdout}${loginStatus.stderr}`, /Logged in/);
   const domain = `gui/${process.getuid()}`;
   stage = "preflight-gui-domain";
   stageLog(stage);
