@@ -1,5 +1,17 @@
 export { StandaloneService } from "./service.js";
 export type { StandaloneServiceOptions } from "./service.js";
+export {
+  createSnapshot,
+  restoreSnapshot,
+  verifySnapshot,
+} from "./operations.js";
+export type {
+  OperationsFaultStage,
+  OperationsOptions,
+  SnapshotManifestV1,
+} from "./operations.js";
+export { renderLaunchAgent, writeLaunchAgent } from "./launchd.js";
+export type { LaunchAgentConfiguration } from "./launchd.js";
 export type {
   CapacityConfigureCommand,
   CapacityLimits,

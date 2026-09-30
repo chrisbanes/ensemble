@@ -39,6 +39,14 @@ recovery UI remain unavailable, and the bounded private Tailscale proof remains
 unproved. The [S04c boundary](docs/design/s04c-operator-ui.md) records its scope
 and limits. The installed Haze prototype stays in place until the reviewed
 operational cutover.
+S08a adds offline generic SQLite backup/restore commands and a separate
+operations CLI, plus a private per-user LaunchAgent renderer. Its exact
+reconciliation receipt/admission journey remains deterministic T4 evidence;
+the bounded T5 launchd journey preserves a paused project and unready task
+across start/restart/backup/restore without admitting work. Neither is final
+schema/external-effect recovery, production deployment or cutover evidence.
+See the [macOS operations procedure](docs/operations/standalone-macos.md) and
+[S08a evidence](docs/evidence/s08a-operations-2026-09-30.md).
 
 ## Planning checkpoint
 

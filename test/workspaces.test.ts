@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -16,8 +17,10 @@ import { Store } from "../src/core/store.js";
 import {
   SqliteWorkspaceBindingStore,
   WorkspaceManager,
+  type TaskWorkspaceBinding,
   type TaskWorkspaceRepositoryInput,
   type WorkspaceCleanupEvidence,
+  type WorkspaceBindingStore,
 } from "../src/standalone/workspaces.js";
 
 function fixture() {
@@ -321,6 +324,72 @@ test("a missing workspace becomes a visible execution hold and is not silently r
     assert.equal(exists(binding.path), false);
   } finally {
     f.close();
+  }
+});
+
+test("restored managed bindings reject source-root identity before path access", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-workspace-restore-"));
+  const sourceInstall = join(root, "source-install");
+  const destinationInstall = join(root, "destination-install");
+  const sourceWorkspaceRoot = join(sourceInstall, "workspaces");
+  const destinationWorkspaceRoot = join(destinationInstall, "workspaces");
+  const workspaceId = randomUUID();
+  const bindingPath = join(sourceWorkspaceRoot, workspaceId);
+  const repositoryPath = join(bindingPath, "repo-1");
+  const sentinelPath = join(repositoryPath, "preserve.txt");
+  mkdirSync(repositoryPath, { recursive: true });
+  mkdirSync(destinationInstall);
+  writeFileSync(sentinelPath, "source workspace remains untouched\n");
+  const original = readFileSync(sentinelPath);
+  let binding: TaskWorkspaceBinding = {
+    taskId: "restored-task",
+    workspaceId,
+    path: bindingPath,
+    repositories: [
+      {
+        repositoryId: "source-repo",
+        sourcePath: join(root, "source-repository"),
+        workspacePath: repositoryPath,
+        ref: "HEAD",
+        gitCommonDir: join(root, "source-repository", ".git"),
+        commit: "a".repeat(40),
+      },
+    ],
+    state: "ready",
+    reason: null,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+  const store: WorkspaceBindingStore = {
+    createOrGet: () => binding,
+    get: () => binding,
+    list: () => [binding],
+    bindRepository: () => binding,
+    update: (_taskId, state, reason) => {
+      binding = { ...binding, state, reason };
+      return binding;
+    },
+  };
+  const observedPaths: string[] = [];
+  const manager = new WorkspaceManager(store, destinationWorkspaceRoot, {
+    beforePathAccess: (path) => observedPaths.push(path),
+  });
+  try {
+    await manager.recover();
+    assert.equal(binding.state, "held");
+    assert.match(
+      binding.reason ?? "",
+      /Stored workspace path does not match its identity/,
+    );
+    assert.equal(
+      observedPaths.some(
+        (path) => path === bindingPath || path.startsWith(`${sourceInstall}/`),
+      ),
+      false,
+    );
+    assert.equal(readFileSync(sentinelPath).equals(original), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -19,6 +20,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Store } from "../src/core/store.js";
+import { StandaloneDataDirectory } from "../src/standalone/data-directory.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import type { Runtime } from "../src/standalone/codex.js";
@@ -188,6 +190,33 @@ test("canonical directory has one process owner; crash and failed startup releas
     await next.stop();
   } finally {
     child?.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("offline data-directory ownership conflicts with the running service and releases on stop", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-shared-owner-"));
+  const data = join(root, "data");
+  const service = new StandaloneService(data, () => new FakeRuntime());
+  let offline: StandaloneDataDirectory | undefined;
+  try {
+    await service.start();
+    assert.throws(
+      () => StandaloneDataDirectory.openExclusive(data),
+      /already owned/,
+    );
+
+    await service.stop();
+    offline = StandaloneDataDirectory.openExclusive(data);
+    assert.equal(offline.root, realpathSync(data));
+    assert.equal(
+      offline.databasePath,
+      join(realpathSync(data), "standalone.sqlite"),
+    );
+    assert.equal(offline.workspacePath, join(realpathSync(data), "workspaces"));
+  } finally {
+    offline?.close();
+    await service.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });
