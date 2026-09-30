@@ -129,6 +129,11 @@ class ObservedCodexRuntime extends CodexRuntime {
         turnId: call.turnId,
         callId: call.callId,
         tool: call.tool,
+        profileId:
+          call.tool === "ensemble_delegate" &&
+          typeof call.arguments.profileId === "string"
+            ? call.arguments.profileId
+            : null,
         workId: intent?.workId ?? null,
         assignmentId: request?.assignmentId ?? null,
         success: null,
@@ -254,7 +259,7 @@ async function setup() {
     outcome: [
       "This is a disposable coordination integration probe. Use only the registered Ensemble tools. Do not use shell, filesystem, browser, network, or any other tools.",
       `Lead profile ID: ${leadProfileId}. Worker profile ID: ${workerProfileId}.`,
-      "As lead, delegate exactly once to the worker profile with a brief requiring the worker to report summary S04B_RESULT_V1 through ensemble_report_result.",
+      "As lead, call ensemble_delegate exactly once with profileId set to the exact Worker profile ID literal above, not the Lead ID. Give the worker a brief requiring summary S04B_RESULT_V1 through ensemble_report_result.",
       "When the first result is delivered, request one follow-up for that exact result ID. The follow-up instructions must ask the worker to report summary S04B_RESULT_V2 through ensemble_report_result.",
       "When the revised result is delivered, request task completion with exactly the current result ID in reviewedResultIds.",
       "The service is configured for capacity one. Do not claim completion without using the completion tool.",
@@ -372,6 +377,19 @@ async function run() {
   assert.equal(firstDelegate.threadId, initialLeadThreadId);
   assert.equal(firstDelegate.turnId, initialLeadTurnId);
   assert.equal(firstDelegate.assignmentId, leadAssignmentId);
+  progress("verify-worker-assignment");
+  const delegatedAssignments = service
+    .domain()
+    .assignments(taskId)
+    .filter(
+      (assignment) => assignment.requesterAssignmentId === leadAssignmentId,
+    )
+    .map((assignment) => ({
+      assignmentId: String(assignment.id),
+      profileId: String(assignment.profileId),
+      state: String(assignment.state),
+    }));
+  evidence.task.delegatedAssignments = delegatedAssignments;
   const childAssignment = service
     .domain()
     .assignments(taskId)
