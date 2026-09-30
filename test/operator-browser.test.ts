@@ -14,11 +14,21 @@ import {
   type APIResponse,
   type Response as PlaywrightResponse,
 } from "playwright";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolDefinition,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 import {
   LocalOperatorHttp,
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
 import { OperatorAuth } from "../src/standalone/operator-auth.js";
+import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
+import { OperatorRouteRegistry } from "../src/standalone/operator-routes.js";
+import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
 const password = "browser test operator password";
@@ -40,6 +50,83 @@ function fakeRuntime() {
       return "completed" as const;
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+class BrowserJourneyRuntime implements Runtime {
+  turns = 0;
+  threads = 0;
+  private readonly outcomes = new Map<
+    string,
+    ReturnType<typeof deferred<"completed" | "failed">>
+  >();
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
+
+  async start() {}
+
+  async stop() {
+    for (const outcome of this.outcomes.values()) outcome.resolve("completed");
+  }
+
+  async startThread(
+    _workspace: string,
+    _tools?: readonly RuntimeToolDefinition[],
+  ) {
+    return `browser-thread-${++this.threads}`;
+  }
+
+  async resumeThread(
+    _threadId: string,
+    _tools?: readonly RuntimeToolDefinition[],
+  ) {}
+
+  async startTurn(_threadId: string, _workspace: string, _prompt: string) {
+    const turnId = `browser-turn-${++this.turns}`;
+    this.outcomes.set(turnId, deferred());
+    return turnId;
+  }
+
+  async interruptTurn() {}
+
+  async waitForTurn(_threadId: string, turnId: string) {
+    return this.outcomes.get(turnId)?.promise ?? "failed";
+  }
+
+  onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
+
+  callTool(call: RuntimeToolCall) {
+    assert.ok(this.toolCall, "service registered the runtime tool listener");
+    return this.toolCall(call);
+  }
+
+  complete(turnId: string) {
+    this.outcomes.get(turnId)?.resolve("completed");
+  }
+}
+
+function serviceRoutes(service: StandaloneService): OperatorRouteRegistry {
+  const routes = new OperatorRouteRegistry();
+  routes.registerSlot("runtime", runtimeOperatorRoutes(service));
+  routes.registerSlot(
+    "coordination",
+    coordinationOperatorRoutes(
+      service.coordinationView(),
+      service.domain(),
+      (projectId) => service.routingAvailability(projectId),
+    ),
+  );
+  return routes;
 }
 
 async function unusedPort(): Promise<number> {
@@ -91,6 +178,38 @@ async function save(page: Page, form: Locator): Promise<void> {
   assert.equal((await response).status(), 303);
 }
 
+async function submitControl(
+  page: Page,
+  form: Locator,
+  path: string,
+  buttonName: string,
+): Promise<void> {
+  const response = page.waitForResponse(
+    (candidate) =>
+      new URL(candidate.url()).pathname === path &&
+      candidate.request().method() === "POST",
+    { timeout: 5_000 },
+  );
+  await form.getByRole("button", { name: buttonName }).click();
+  assert.equal((await response).status(), 303);
+}
+
+function command(service: StandaloneService, value: object): unknown {
+  return service.domain().execute({
+    key: randomUUID(),
+    actor: "operator",
+    ...value,
+  } as never);
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("browser fixture timed out");
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 test("Chromium verifies the independent login and guarded browser session", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-operator-browser-"));
   chmodSync(directory, 0o700);
@@ -130,7 +249,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     };
     await OperatorAuth.initialize(authFile, password);
     auth = await OperatorAuth.open(authOptions);
-    http = new LocalOperatorHttp(ui, auth);
+    http = new LocalOperatorHttp(ui, auth, { routes: serviceRoutes(service) });
     await http.start(port);
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
@@ -206,6 +325,44 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     );
     assert.ok(await page.getByRole("link", { name: "Runtime" }).count());
     assert.ok(await page.getByRole("link", { name: "Coordination" }).count());
+    await page.getByRole("link", { name: "Runtime", exact: true }).click();
+    assert.match(
+      await page.locator("body").innerText(),
+      /Effective execution policy/,
+    );
+    assert.doesNotMatch(
+      await page.locator("body").innerText(),
+      /does not start or control execution/,
+    );
+    const capacityForm = page.locator(
+      'form[action="/runtime/control/capacity"]',
+    );
+    await capacityForm.locator('input[name="globalLimit"]').fill("3");
+    await capacityForm
+      .locator('select[name="projectId"]')
+      .selectOption(project.id);
+    await capacityForm.locator('input[name="projectLimit"]').fill("1");
+    const capacityResponse = page.waitForResponse(
+      (candidate) =>
+        new URL(candidate.url()).pathname === "/runtime/control/capacity" &&
+        candidate.request().method() === "POST",
+    );
+    await capacityForm.getByRole("button", { name: "Save capacity" }).click();
+    assert.equal((await capacityResponse).status(), 303);
+    assert.equal(service.capacityLimits([project.id]).globalLimit, 3);
+    assert.equal(
+      service.capacityLimits([project.id]).projectOverrides[project.id],
+      1,
+    );
+    await page.getByRole("link", { name: "Coordination", exact: true }).click();
+    assert.match(
+      await page.locator("body").innerText(),
+      /Private browser project/,
+    );
+    assert.doesNotMatch(
+      await page.locator("body").innerText(),
+      /Coordination state is not implemented/,
+    );
 
     await page.goto(`${origin}/project/${project.id}`);
     const originalProjectForm = page.locator(
@@ -353,8 +510,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     const taskHtml = await page.locator("body").innerText();
     assert.match(taskHtml, /Deliver the operator form journey/);
     assert.match(taskHtml, /eligibility only/i);
-    assert.match(taskHtml, /scheduler.*unavailable/i);
-    assert.doesNotMatch(taskHtml, /no work is admitted or running/i);
+    assert.match(taskHtml, /do not confirm runtime admission or execution/i);
     const taskConfigure = page.locator('form[data-command="task.configure"]');
     await taskConfigure
       .locator('input[name="title"]')
@@ -381,7 +537,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     assert.equal(domain.routing(browserProjectId).credentialAvailable, 1);
     await page.goto(`${origin}/project/${browserProjectId}`);
     const routingHtml = await page.locator("body").innerText();
-    assert.match(routingHtml, /credential configured/);
+    assert.match(routingHtml, /credential reference configured/);
     assert.doesNotMatch(routingHtml, /PRIVATE_BROWSER_CREDENTIAL_REF/);
     assert.equal(
       domain.routing(browserProjectId).candidateProfileIds,
@@ -412,7 +568,9 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     ui = new LocalOperatorUi(domain);
     const restartedAuth = await OperatorAuth.open(authOptions);
     auth = restartedAuth;
-    http = new LocalOperatorHttp(ui, restartedAuth);
+    http = new LocalOperatorHttp(ui, restartedAuth, {
+      routes: serviceRoutes(service),
+    });
     await http.start(port);
     assert.equal(
       Boolean(restartedAuth.getSession(priorServiceToken)),
@@ -447,6 +605,558 @@ test("Chromium verifies the independent login and guarded browser session", asyn
       /Private browser project/,
     );
     assert.equal(domain.projects().length, 2);
+  } finally {
+    await context?.close();
+    await browser?.close();
+    await http?.stop();
+    auth?.close();
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Chromium submits coordination and runtime controls with durable readback", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-operator-forms-browser-"),
+  );
+  chmodSync(directory, 0o700);
+  const dataFile = join(directory, "data");
+  const authFile = join(directory, "operator-auth.json");
+  const runtime = new BrowserJourneyRuntime();
+  const serviceOptions = {
+    power: { enabled: false },
+    routingClient: null,
+    supervisor: { observationMs: 5 },
+  } as const;
+  let service = new StandaloneService(
+    dataFile,
+    () => runtime,
+    undefined,
+    serviceOptions,
+  );
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  let auth: OperatorAuth | undefined;
+  let http: LocalOperatorHttp | undefined;
+  try {
+    await service.start();
+    const leadProfileId = randomUUID();
+    const workerProfileId = randomUUID();
+    const revokedProfileId = randomUUID();
+    const projectId = randomUUID();
+    const taskId = randomUUID();
+    const blockerTaskId = randomUUID();
+    const instructionTaskId = randomUUID();
+    const workerAssignmentId = randomUUID();
+    command(service, {
+      type: "profile.create",
+      profileId: leadProfileId,
+      name: "Browser lead",
+      instructions: "Coordinate the browser fixture.",
+      capabilities: "coordinate",
+    });
+    command(service, {
+      type: "profile.create",
+      profileId: workerProfileId,
+      name: "Browser worker",
+      instructions: "Review and report the supplied fixture.",
+      capabilities: "review; browser verification",
+    });
+    command(service, {
+      type: "profile.create",
+      profileId: revokedProfileId,
+      name: "Browser revoked candidate",
+      instructions: "This profile is no longer available for routing.",
+      capabilities: "historical verification",
+    });
+    command(service, {
+      type: "project.create",
+      projectId,
+      name: "Operator forms project",
+      leadProfileId,
+    });
+    command(service, {
+      type: "project.configure",
+      projectId,
+      expectedVersion: 1,
+      paused: false,
+    });
+    command(service, {
+      type: "routing.configure",
+      projectId,
+      expectedVersion: 1,
+      enabled: true,
+      guidance:
+        "BROWSER_ROUTING_GUIDANCE_SENTINEL: prefer browser verification.",
+      credentialRef: "env:PRIVATE_BROWSER_ROUTING_SECRET",
+      candidateProfileIds: [workerProfileId, revokedProfileId],
+    });
+    command(service, {
+      type: "profile.configure",
+      profileId: revokedProfileId,
+      expectedVersion: 1,
+      revoked: true,
+    });
+    command(service, {
+      type: "task.create",
+      projectId,
+      taskId,
+      title: "Operator forms task",
+      outcome: "Exercise coordination and runtime operator forms.",
+      ready: false,
+    });
+    command(service, {
+      type: "task.create",
+      projectId,
+      taskId: blockerTaskId,
+      title: "Operator dependency blocker",
+      outcome: "Remain incomplete during the operator journey.",
+      ready: false,
+    });
+    command(service, {
+      type: "task.create",
+      projectId,
+      taskId: instructionTaskId,
+      title: "Instruction apply task",
+      outcome: "Remain selected while instructions are updated.",
+      ready: false,
+    });
+    service.domain().ensureLeadAssignment(instructionTaskId);
+    service.domain().ensureLeadAssignment(taskId);
+    command(service, {
+      type: "assignment.create",
+      projectId,
+      taskId,
+      assignmentId: workerAssignmentId,
+      profileId: workerProfileId,
+      brief: "Review the fixture and return one result.",
+      resultDestination: "lead",
+      requesterAssignmentId: null,
+    });
+    const fixtureDb = (
+      service as unknown as {
+        db: { prepare(sql: string): { run(...args: unknown[]): void } };
+      }
+    ).db;
+    fixtureDb
+      .prepare(`UPDATE domain_assignments
+        SET resultRecipientAssignmentId = NULL,
+          resultRecipientDisposition = 'unresolved'
+        WHERE id = ?`)
+      .run(workerAssignmentId);
+    await service.provisionTask(taskId);
+    command(service, {
+      type: "task.configure",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
+    await waitUntil(() => runtime.turns === 1);
+    const leadAssignment = service
+      .domain()
+      .assignments(taskId)
+      .find((assignment) => assignment.profileId === leadProfileId);
+    assert.ok(leadAssignment);
+    const leadWork = service
+      .list()
+      .find((intent) => intent.turnId === "browser-turn-1");
+    assert.ok(leadWork?.threadId && leadWork.turnId);
+    for (const [tool, arguments_, callId] of [
+      [
+        "ensemble_ask_question",
+        { question: "Which result format should I retain?" },
+        "browser-question",
+      ],
+      [
+        "ensemble_request_approval",
+        {
+          action: "Record fixture-only operator approval",
+          target: "fixture-only",
+          material: { version: "fixture-approve" },
+        },
+        "browser-approval-approve",
+      ],
+      [
+        "ensemble_request_approval",
+        {
+          action: "Publish the fixture result",
+          target: "operator-forms-fixture",
+          material: { version: "fixture-deny" },
+        },
+        "browser-approval-deny",
+      ],
+    ] as const) {
+      const result = await runtime.callTool({
+        threadId: leadWork.threadId,
+        turnId: leadWork.turnId,
+        callId,
+        tool,
+        arguments: arguments_,
+      });
+      assert.equal(result.success, true, result.text);
+    }
+
+    const port = await unusedPort();
+    const origin = `http://127.0.0.1:${port}`;
+    const authOptions = { authFile, origin };
+    await OperatorAuth.initialize(authFile, password);
+    auth = await OperatorAuth.open(authOptions);
+    const ui = new LocalOperatorUi(service.domain());
+    http = new LocalOperatorHttp(ui, auth, { routes: serviceRoutes(service) });
+    await http.start(port);
+    browser = await chromium.launch({ headless: true });
+    context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    assert.match(await page.locator("body").innerText(), /Sign in/);
+    assert.equal((await signIn(page, password)).status(), 303);
+
+    await page.goto(`${origin}/coordination/task/${taskId}`);
+    const routingView = await page.locator("body").innerText();
+    assert.match(routingView, /Credential reference: configured/);
+    assert.match(routingView, /Routing client: unavailable/);
+    assert.match(
+      routingView,
+      /Effective routing availability: unavailable \(missing client credentials\)/,
+    );
+    assert.match(
+      routingView,
+      /Project routing guidance: BROWSER_ROUTING_GUIDANCE_SENTINEL: prefer browser verification\./,
+    );
+    assert.match(
+      routingView,
+      /Browser worker — capabilities: review; browser verification; eligible routing candidate/,
+    );
+    assert.match(
+      routingView,
+      /Browser revoked candidate — capabilities: historical verification; unavailable: profile revoked/,
+    );
+    assert.doesNotMatch(routingView, /PRIVATE_BROWSER_ROUTING_SECRET/);
+    const messageForm = page
+      .locator('form[action="/coordination/control/message"]')
+      .filter({
+        has: page.locator(
+          `input[name="recipientAssignmentId"][value="${leadAssignment.id}"]`,
+        ),
+      });
+    await messageForm
+      .locator('textarea[name="message"]')
+      .fill("Please use the new operator direction on the next turn.");
+    await submitControl(
+      page,
+      messageForm,
+      "/coordination/control/message",
+      "Submit",
+    );
+    const answerForm = page.locator(
+      'form[action="/coordination/control/question/answer"]',
+    );
+    await answerForm
+      .locator('textarea[name="answer"]')
+      .fill("Retain the reviewed summary format.");
+    await submitControl(
+      page,
+      answerForm,
+      "/coordination/control/question/answer",
+      "Submit",
+    );
+    const approvalForm = page
+      .locator('form[action="/coordination/control/approval/decision"]')
+      .filter({
+        has: page.locator('input[name="decision"][value="approved"]'),
+      })
+      .filter({
+        has: page.locator(
+          'input[name="action"][value="Record fixture-only operator approval"]',
+        ),
+      });
+    assert.equal(
+      await approvalForm.locator('input[name="materialJson"]').inputValue(),
+      '{"version":"fixture-approve"}',
+    );
+    await submitControl(
+      page,
+      approvalForm,
+      "/coordination/control/approval/decision",
+      "Approve this exact material",
+    );
+    const denialForm = page
+      .locator('form[action="/coordination/control/approval/decision"]')
+      .filter({ has: page.locator('input[name="decision"][value="denied"]') });
+    await submitControl(
+      page,
+      denialForm,
+      "/coordination/control/approval/decision",
+      "Deny",
+    );
+    let taskView = service.coordinationView().readTask(taskId);
+    assert.equal(taskView.questions[0]?.status, "answered");
+    assert.equal(
+      taskView.approvals.find(
+        (approval) =>
+          approval.action === "Record fixture-only operator approval",
+      )?.status,
+      "approved",
+    );
+    assert.equal(
+      taskView.approvals.find(
+        (approval) => approval.action === "Publish the fixture result",
+      )?.status,
+      "denied",
+    );
+    assert.ok(
+      taskView.messages.some(
+        (message) =>
+          message.eventType === "operator-message" &&
+          message.text ===
+            "Please use the new operator direction on the next turn.",
+      ),
+    );
+
+    runtime.complete("browser-turn-1");
+    await waitUntil(
+      () =>
+        runtime.turns === 2 &&
+        service
+          .turnRequests()
+          .some(
+            (request) =>
+              request.assignmentId === workerAssignmentId &&
+              request.state === "active",
+          ),
+    );
+    const workerWork = service
+      .list()
+      .find((intent) => intent.turnId === "browser-turn-2");
+    assert.ok(workerWork?.threadId && workerWork.turnId);
+    const reported = await runtime.callTool({
+      threadId: workerWork.threadId,
+      turnId: workerWork.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "Browser-reviewed result awaiting reconciliation" },
+    });
+    assert.equal(reported.success, true, reported.text);
+    runtime.complete(workerWork.turnId);
+    await waitUntil(
+      () =>
+        service.coordinationView().readTask(taskId).unresolvedResults.length ===
+        1,
+    );
+    await page.goto(`${origin}/coordination/task/${taskId}`);
+    const reconciliationForm = page.locator(
+      'form[action="/coordination/control/result/recipient"]',
+    );
+    await submitControl(
+      page,
+      reconciliationForm,
+      "/coordination/control/result/recipient",
+      "Reconcile to Browser lead",
+    );
+    taskView = service.coordinationView().readTask(taskId);
+    assert.equal(taskView.unresolvedResults.length, 0);
+    assert.equal(taskView.results[0]?.recipientAssignmentId, leadAssignment.id);
+
+    await waitUntil(() => runtime.turns === 3);
+    await page.goto(`${origin}/coordination/task/${taskId}`);
+    await page
+      .getByRole("link", { name: "Task-scoped runtime controls and recovery" })
+      .click();
+    assert.equal(new URL(page.url()).pathname, `/runtime/task/${taskId}`);
+
+    const dependencyForm = page.locator(
+      'form[action="/runtime/control/dependency/add"]',
+    );
+    await dependencyForm
+      .locator('select[name="blockerTaskId"]')
+      .selectOption(blockerTaskId);
+    await submitControl(
+      page,
+      dependencyForm,
+      "/runtime/control/dependency/add",
+      "Add dependency",
+    );
+    assert.deepEqual(service.domain().dependencies(taskId), [blockerTaskId]);
+
+    await page.goto(`${origin}/project/${projectId}`);
+    const projectForm = page.locator('form[data-command="project.configure"]');
+    await projectForm
+      .locator('textarea[name="instructions"]')
+      .fill("Browser-applied current project instructions.");
+    await save(page, projectForm);
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      2,
+    );
+    await page.goto(`${origin}/runtime/task/${instructionTaskId}`);
+    const instructionAssignment = service
+      .domain()
+      .assignments(instructionTaskId)
+      .find((assignment) => assignment.profileId === leadProfileId);
+    assert.ok(instructionAssignment);
+    const instructionForm = page
+      .locator('form[action="/runtime/control/instruction-apply"]')
+      .filter({
+        has: page.locator(
+          `input[name="assignmentId"][value="${instructionAssignment.id}"]`,
+        ),
+      });
+    await submitControl(
+      page,
+      instructionForm,
+      "/runtime/control/instruction-apply",
+      "Apply current instructions for the next turn",
+    );
+    assert.equal(
+      Number(
+        service.domain().assignment(String(instructionAssignment.id))
+          .instructionsRevision,
+      ),
+      2,
+    );
+
+    await page.goto(`${origin}/runtime/task/${taskId}`);
+    const stopForm = page.locator('form[action="/runtime/control/stop"]');
+    await submitControl(
+      page,
+      stopForm,
+      "/runtime/control/stop",
+      "Best-effort Stop",
+    );
+    let runtimeText = await page.locator("body").innerText();
+    assert.match(runtimeText, /Operator Stop remains active/);
+    assert.match(runtimeText, /Writer ownership remains held/);
+    assert.match(runtimeText, /Effects may continue/);
+    const stoppedRecoveryRecord = service
+      .recoveryView()
+      .find((record) => record.binding?.taskId === taskId);
+    assert.ok(stoppedRecoveryRecord?.binding);
+    assert.ok(stoppedRecoveryRecord.intent.threadId);
+    assert.ok(stoppedRecoveryRecord.intent.turnId);
+    assert.ok(
+      runtimeText.includes(`Recovery record: ${stoppedRecoveryRecord.workId}`),
+    );
+    assert.ok(
+      runtimeText.includes(
+        `Assignment ${stoppedRecoveryRecord.binding.assignmentId} (version ${stoppedRecoveryRecord.binding.assignmentVersion};`,
+      ),
+    );
+    assert.match(runtimeText, /Generation: work revision .*; request sequence/);
+    assert.ok(
+      runtimeText.includes(
+        `Recorded thread identity: ${stoppedRecoveryRecord.intent.threadId}`,
+      ),
+    );
+    assert.ok(
+      runtimeText.includes(
+        `Recorded turn identity: ${stoppedRecoveryRecord.intent.turnId}`,
+      ),
+    );
+    assert.match(runtimeText, /not proof of termination or release/);
+    await submitControl(
+      page,
+      page.locator('form[action="/runtime/control/resume"]'),
+      "/runtime/control/resume",
+      "Resume task",
+    );
+    runtimeText = await page.locator("body").innerText();
+    assert.match(runtimeText, /Operator Stop is not active/);
+    assert.match(runtimeText, /Writer ownership remains held/);
+    assert.match(runtimeText, /Effects may continue/);
+
+    await http.stop();
+    http = undefined;
+    auth.close();
+    auth = undefined;
+    await service.stop();
+    const nextRuntime = new BrowserJourneyRuntime();
+    service = new StandaloneService(
+      dataFile,
+      () => nextRuntime,
+      undefined,
+      serviceOptions,
+    );
+    await service.start();
+    auth = await OperatorAuth.open(authOptions);
+    http = new LocalOperatorHttp(new LocalOperatorUi(service.domain()), auth, {
+      routes: serviceRoutes(service),
+    });
+    await http.start(port);
+    await page.goto(origin);
+    assert.match(await page.locator("body").innerText(), /Sign in/);
+    assert.equal((await signIn(page, password)).status(), 303);
+
+    taskView = service.coordinationView().readTask(taskId);
+    assert.equal(taskView.questions[0]?.status, "answered");
+    assert.equal(
+      taskView.approvals.find(
+        (approval) =>
+          approval.action === "Record fixture-only operator approval",
+      )?.status,
+      "approved",
+    );
+    assert.equal(
+      taskView.approvals.find(
+        (approval) => approval.action === "Publish the fixture result",
+      )?.status,
+      "denied",
+    );
+    assert.equal(taskView.unresolvedResults.length, 0);
+    assert.equal(taskView.results[0]?.recipientAssignmentId, leadAssignment.id);
+    assert.ok(
+      taskView.messages.some(
+        (message) =>
+          message.eventType === "operator-message" &&
+          message.text ===
+            "Please use the new operator direction on the next turn.",
+      ),
+    );
+    assert.deepEqual(service.domain().dependencies(taskId), [blockerTaskId]);
+    assert.equal(
+      Number(
+        service.domain().assignment(String(instructionAssignment.id))
+          .instructionsRevision,
+      ),
+      2,
+    );
+    assert.ok(
+      service
+        .recoveryView()
+        .some(
+          (record) => record.binding?.taskId === taskId && record.holds.writer,
+        ),
+    );
+    const persistedRecoveryRecord = service
+      .recoveryView()
+      .find((record) => record.binding?.assignmentId === workerAssignmentId);
+    assert.ok(persistedRecoveryRecord?.binding);
+    await page.goto(
+      `${origin}/runtime/assignment/${persistedRecoveryRecord.binding.assignmentId}`,
+    );
+    const persistedAssignmentText = await page.locator("body").innerText();
+    assert.ok(
+      persistedAssignmentText.includes(
+        `Recovery record: ${persistedRecoveryRecord.workId}`,
+      ),
+    );
+    assert.match(persistedAssignmentText, /Observations:/);
+    assert.match(persistedAssignmentText, /Pending effects:/);
+    assert.match(
+      persistedAssignmentText,
+      /Recorded identities, observations, receipts, and dispositions are evidence only/,
+    );
+    await page.goto(`${origin}/runtime/task/${taskId}`);
+    const persistedDependency = page.locator(
+      'form[action="/runtime/control/dependency/remove"]',
+    );
+    await submitControl(
+      page,
+      persistedDependency,
+      "/runtime/control/dependency/remove",
+      "Remove dependency",
+    );
+    assert.deepEqual(service.domain().dependencies(taskId), []);
   } finally {
     await context?.close();
     await browser?.close();

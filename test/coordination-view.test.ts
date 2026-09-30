@@ -353,10 +353,17 @@ test("task coordination view is scoped, durable, and excludes runtime internals"
     );
     assert.equal(dto.questions.length, 1);
     assert.equal(dto.approvals.length, 1);
+    assert.equal(dto.approvals[0]?.materialJson, '{"version":"next"}');
     assert.equal(dto.attention.interactions.length, 2);
     assert.equal(dto.attention.routingFallbacks.length, 1);
     assert.equal(dto.routing.dispositions.length, 1);
     assert.equal(dto.routing.attempts.length, 1);
+    assert.equal(
+      view
+        .readTask(f.otherTaskId)
+        .approvals.some((approval) => approval.materialJson !== null),
+      false,
+    );
 
     const serialized = JSON.stringify(dto);
     assert.equal(serialized.includes(f.otherTaskId), false);

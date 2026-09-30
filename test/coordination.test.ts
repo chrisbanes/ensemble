@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -888,7 +889,11 @@ test("questions and approvals stay in operator attention until one exact respons
       arguments: { question: "Which supported format should I use?" },
     });
     const questionId = questionResponse.text.split(" ").at(-1) ?? "";
-    const material = { operation: "publish", privateMarker: "do-not-persist" };
+    const material = {
+      operation: "publish",
+      privateMarker: "persist-exact-material",
+      nested: { z: 2, a: 1 },
+    };
     const approvalResponse = f.coordination.requestApproval({
       threadId: "thread-nested-a",
       turnId: "turn-nested-a",
@@ -904,9 +909,22 @@ test("questions and approvals stay in operator attention until one exact respons
       f.coordination.interactions(taskA).map((item) => item.status),
       ["open", "open"],
     );
-    assert.doesNotMatch(
-      JSON.stringify(f.coordination.interactions(taskA)),
-      /do-not-persist/,
+    const reopenedApproval = f.coordination
+      .interactions(taskA)
+      .find((item) => item.interactionId === approvalId);
+    assert.ok(reopenedApproval);
+    const expectedMaterialJson =
+      '{"nested":{"a":1,"z":2},"operation":"publish","privateMarker":"persist-exact-material"}';
+    assert.equal(reopenedApproval.materialJson, expectedMaterialJson);
+    assert.equal(
+      reopenedApproval.materialHash,
+      createHash("sha256").update(expectedMaterialJson).digest("hex"),
+    );
+    assert.equal(
+      f.coordination
+        .interactions(taskB)
+        .some((item) => item.materialJson?.includes("persist-exact-material")),
+      false,
     );
 
     const questionKey = "60000000-0000-4000-8000-000000000001";
@@ -1127,6 +1145,66 @@ test("approval denial and profile revocation never authorize", () => {
         material,
       }),
       false,
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("legacy open approvals migrate without material and can only be denied", () => {
+  const f = fixture();
+  try {
+    const material = { operation: "publish", version: "unknown" };
+    const response = f.coordination.requestApproval({
+      threadId: "thread-nested-a",
+      turnId: "turn-nested-a",
+      callId: "call-legacy-approval",
+      tool: "ensemble_request_approval",
+      arguments: { action: "publish", target: "legacy-artifact", material },
+    });
+    const interactionId = response.text.split(" ").at(-1) ?? "";
+    const before = f.coordination
+      .interactions(taskA)
+      .find((item) => item.interactionId === interactionId);
+    assert.ok(before?.materialHash);
+
+    f.db.exec("ALTER TABLE coordination_interactions DROP COLUMN materialJson");
+    f.reopen();
+
+    const migrated = f.coordination
+      .interactions(taskA)
+      .find((item) => item.interactionId === interactionId);
+    assert.equal(migrated?.materialJson, null);
+    assert.equal(migrated?.materialHash, before.materialHash);
+    assert.throws(
+      () =>
+        f.coordination.decideApproval({
+          actor: "operator",
+          key: nextCommand(),
+          interactionId,
+          expectedRevision: 1,
+          decision: "approved",
+          action: "publish",
+          target: "legacy-artifact",
+          material,
+        }),
+      /Legacy approval material is unavailable and cannot be approved/,
+    );
+    const denial = f.coordination.decideApproval({
+      actor: "operator",
+      key: nextCommand(),
+      interactionId,
+      expectedRevision: 1,
+      decision: "denied",
+      action: "publish",
+      target: "legacy-artifact",
+    });
+    assert.equal(JSON.parse(denial.payload).materialHash, before.materialHash);
+    assert.equal(
+      f.coordination
+        .interactions(taskA)
+        .find((item) => item.interactionId === interactionId)?.status,
+      "denied",
     );
   } finally {
     f.close();

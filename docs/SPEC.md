@@ -12,16 +12,25 @@ The standalone service has durable scheduling, capacity admission, supervision,
 conservative recovery, and the S04b task-coordination foundations: durable results
 and recipient inboxes, human-request attention/interactions, retained-assignee
 follow-up, revision-bound lead completion and bounded assignment-routing
-provenance. These are covered by deterministic service tests and a disposable
-test-only read view, not by the production coordination, history or recovery UI.
+provenance. Issue #694 mounts authenticated runtime and coordination routes in
+the production operator command, including task/assignment history, capacity,
+dependency and instruction controls, interaction decisions, and recovery
+presentation. Approval decisions retain and compare exact canonical material;
+legacy records without retained material are deny-only. See the
+[S04d integration boundary](design/s04d-operator-integration.md).
 A [bounded real Codex journey](evidence/s04b-live-runtime-2026-09-29.md) observed
 registered dynamic tools on resumed lead and worker threads after service/App
 Server restart. This qualifies that tested journey only, not universal
-reattachment. The authenticated operator UI foundation is implemented; the full
-operator journey, assignment router and private Tailscale proof remain
-incomplete. The [S04c boundary](design/s04c-operator-ui.md) describes the UI
-scope and limits. Requirements below remain product obligations rather than
-passing acceptance claims.
+reattachment. A bounded real-runtime operator journey observed a live question,
+best-effort Stop, persistent holds and retained history after restart; its
+evidence is [S04d](evidence/s04d-operator-2026-09-30.md). Same-host private
+HTTPS access through an approved disposable Tailscale route has passed, proving
+the private route and browser boundary from the fixture host only;
+independent-device reachability and S05 acceptance are not established. The
+full assignment router is also outstanding. The
+[S04c boundary](design/s04c-operator-ui.md) describes the earlier #703
+foundation; requirements below remain product obligations rather than passing
+acceptance claims.
 S08a provides a separate offline operations CLI for generic standalone SQLite
 snapshot/verification/restore and a generated per-user LaunchAgent. These
 preserve database state and use ordinary service-start reconciliation; they do

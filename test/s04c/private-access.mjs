@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { readHiddenPassword } from "../../dist/src/standalone/operator-hidden-password.js";
+import { postWithoutFollowingRedirects } from "../../dist/test/s04c/private-access-requests.js";
 
 function readConfiguration() {
   const origin = process.env.ENSEMBLE_TEST_HTTPS_ORIGIN ?? "";
@@ -53,6 +54,9 @@ if (args.length !== 1 || args[0] !== "--live") {
     let page;
     let signedIn = false;
     let failed = false;
+    let capacityRestore;
+    let capacityChangeAttempted = false;
+    let capacityRestored = false;
     try {
       password = await readHiddenPassword(
         process.stdin,
@@ -83,11 +87,21 @@ if (args.length !== 1 || args[0] !== "--live") {
       );
       assert.ok(anonymousCookie);
 
+      phase = "unauthenticated runtime and coordination reads";
+      for (const path of ["/runtime", "/coordination"]) {
+        const response = await page.goto(`${config.origin}${path}`);
+        assert.equal(response?.status(), 200);
+        const body = await page.locator("body").innerText();
+        assert.match(body, /Sign in/);
+        assert.equal(body.includes(config.privateMarker), false);
+      }
+
       phase = "unauthenticated private write";
       const unauthenticatedName = `Unauthenticated proof ${randomUUID()}`;
       const anonymousContext = await browser.newContext();
       try {
-        const response = await anonymousContext.request.post(
+        const response = await postWithoutFollowingRedirects(
+          anonymousContext.request,
           `${config.origin}/command`,
           {
             headers: { origin: config.origin },
@@ -100,6 +114,20 @@ if (args.length !== 1 || args[0] !== "--live") {
           },
         );
         assert.equal(response.status(), 401);
+        const runtimeWrite = await postWithoutFollowingRedirects(
+          anonymousContext.request,
+          `${config.origin}/runtime/control/capacity`,
+          {
+            headers: { origin: config.origin },
+            form: {
+              key: randomUUID(),
+              globalLimit: "2",
+              projectId: config.projectId,
+              projectLimit: "2",
+            },
+          },
+        );
+        assert.equal(runtimeWrite.status(), 401);
       } finally {
         await anonymousContext.close();
       }
@@ -133,6 +161,27 @@ if (args.length !== 1 || args[0] !== "--live") {
       assert.equal(new URL(page.url()).origin, config.origin);
       const privateBody = await page.locator("body").innerText();
       assert.equal(privateBody.includes(config.privateMarker), true);
+      await page.goto(`${config.origin}/runtime`);
+      assert.equal(new URL(page.url()).origin, config.origin);
+      const runtimeBody = await page.locator("body").innerText();
+      assert.equal(runtimeBody.includes(config.privateMarker), true);
+      const globalLimit = Number(
+        /Global active turns:\s*(\d+)/.exec(runtimeBody)?.[1],
+      );
+      const projectLine = runtimeBody
+        .split("\n")
+        .find((line) => line.includes(config.privateMarker));
+      const projectLimit = Number(
+        /:\s*(\d+) active turns/.exec(projectLine ?? "")?.[1],
+      );
+      assert.ok(Number.isSafeInteger(globalLimit) && globalLimit > 0);
+      assert.ok(Number.isSafeInteger(projectLimit) && projectLimit > 0);
+      await page.goto(`${config.origin}/coordination`);
+      assert.equal(new URL(page.url()).origin, config.origin);
+      assert.equal(
+        (await page.locator("body").innerText()).includes(config.privateMarker),
+        true,
+      );
       await page.goto(`${config.origin}/`);
       assert.equal(new URL(page.url()).origin, config.origin);
       assert.equal(
@@ -155,7 +204,8 @@ if (args.length !== 1 || args[0] !== "--live") {
           csrfToken,
         },
       ]) {
-        const response = await context.request.post(
+        const response = await postWithoutFollowingRedirects(
+          context.request,
           `${config.origin}/command`,
           {
             headers: attempt.headers,
@@ -169,6 +219,21 @@ if (args.length !== 1 || args[0] !== "--live") {
           },
         );
         assert.equal(response.status(), 403);
+        const runtimeResponse = await postWithoutFollowingRedirects(
+          context.request,
+          `${config.origin}/runtime/control/capacity`,
+          {
+            headers: attempt.headers,
+            form: {
+              key: randomUUID(),
+              globalLimit: String(globalLimit),
+              projectId: config.projectId,
+              projectLimit: String(projectLimit),
+              csrfToken: attempt.csrfToken,
+            },
+          },
+        );
+        assert.equal(runtimeResponse.status(), 403);
       }
       await page.goto(`${config.origin}/`);
       assert.equal(new URL(page.url()).origin, config.origin);
@@ -176,7 +241,73 @@ if (args.length !== 1 || args[0] !== "--live") {
       assert.equal(deniedBody.includes(deniedName), false);
       assert.equal(deniedBody.includes(unauthenticatedName), false);
 
+      phase = "same-origin runtime capacity write and replay";
+      const changedProjectLimit = projectLimit === 1 ? 2 : projectLimit - 1;
+      const capacityKey = randomUUID();
+      capacityRestore = {
+        globalLimit,
+        projectId: config.projectId,
+        projectLimit,
+        csrfToken,
+      };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        capacityChangeAttempted = true;
+        const response = await postWithoutFollowingRedirects(
+          context.request,
+          `${config.origin}/runtime/control/capacity`,
+          {
+            headers: { origin: config.origin },
+            form: {
+              key: capacityKey,
+              globalLimit: String(globalLimit),
+              projectId: config.projectId,
+              projectLimit: String(changedProjectLimit),
+              csrfToken,
+            },
+          },
+        );
+        assert.equal(response.status(), 303);
+        assert.equal(response.headers().location, "/runtime");
+      }
+      await page.goto(`${config.origin}/runtime`);
+      const updatedRuntimeBody = await page.locator("body").innerText();
+      assert.equal(updatedRuntimeBody.includes(config.privateMarker), true);
+      const updatedProjectLine = updatedRuntimeBody
+        .split("\n")
+        .find((line) => line.includes(config.privateMarker));
+      assert.match(
+        updatedProjectLine ?? "",
+        new RegExp(`:\\s*${changedProjectLimit} active turns`),
+      );
+      const restoreKey = randomUUID();
+      const restored = await postWithoutFollowingRedirects(
+        context.request,
+        `${config.origin}/runtime/control/capacity`,
+        {
+          headers: { origin: config.origin },
+          form: {
+            key: restoreKey,
+            globalLimit: String(globalLimit),
+            projectId: config.projectId,
+            projectLimit: String(projectLimit),
+            csrfToken,
+          },
+        },
+      );
+      assert.equal(restored.status(), 303);
+      await page.goto(`${config.origin}/runtime`);
+      const restoredRuntimeBody = await page.locator("body").innerText();
+      const restoredProjectLine = restoredRuntimeBody
+        .split("\n")
+        .find((line) => line.includes(config.privateMarker));
+      assert.match(
+        restoredProjectLine ?? "",
+        new RegExp(`:\\s*${projectLimit} active turns`),
+      );
+      capacityRestored = true;
+
       phase = "same-origin configuration write";
+      await page.goto(`${config.origin}/`);
       const createdName = `S04c private proof ${randomUUID()}`;
       const projectForm = page.locator('form[data-command="project.create"]');
       await projectForm.locator('input[name="name"]').fill(createdName);
@@ -200,6 +331,36 @@ if (args.length !== 1 || args[0] !== "--live") {
       );
     } finally {
       password = "";
+      if (
+        capacityRestore &&
+        capacityChangeAttempted &&
+        !capacityRestored &&
+        context
+      ) {
+        try {
+          const response = await postWithoutFollowingRedirects(
+            context.request,
+            `${config.origin}/runtime/control/capacity`,
+            {
+              headers: { origin: config.origin },
+              form: {
+                key: randomUUID(),
+                globalLimit: String(capacityRestore.globalLimit),
+                projectId: capacityRestore.projectId,
+                projectLimit: String(capacityRestore.projectLimit),
+                csrfToken: capacityRestore.csrfToken,
+              },
+            },
+          );
+          assert.equal(response.status(), 303);
+          capacityRestored = true;
+        } catch {
+          failed = true;
+          process.stderr.write(
+            "Private-access capacity restoration was not confirmed; restore the disposable fixture before release\n",
+          );
+        }
+      }
       if (signedIn && page) {
         try {
           phase = "browser logout cleanup";

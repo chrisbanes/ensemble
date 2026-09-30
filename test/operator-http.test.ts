@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { tmpdir } from "./temp.js";
 import { DomainStore } from "../src/core/domain.js";
 import { Store } from "../src/core/store.js";
+import type { Runtime } from "../src/standalone/codex.js";
 import {
   OperatorAuth,
   type OperatorSession,
@@ -17,9 +18,31 @@ import {
   LocalOperatorHttp,
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
+import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
 import { OperatorRouteRegistry } from "../src/standalone/operator-routes.js";
+import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
+import { StandaloneService } from "../src/standalone/service.js";
 
 const password = "test operator password";
+
+function fakeRuntime(): Runtime {
+  return {
+    async start() {},
+    async stop() {},
+    onUnexpectedRequest() {},
+    async startThread() {
+      return "thread";
+    },
+    async resumeThread() {},
+    async startTurn() {
+      return "turn";
+    },
+    async interruptTurn() {},
+    async waitForTurn() {
+      return "completed";
+    },
+  };
+}
 
 async function unusedPort(): Promise<number> {
   const server = createServer();
@@ -741,6 +764,212 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
     await http?.stop();
     auth?.close();
     db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real runtime and coordination routes inherit HTTP guards and persist capacity", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-real-operator-routes-"),
+  );
+  chmodSync(directory, 0o700);
+  const authFile = join(directory, "operator-auth.json");
+  const service = new StandaloneService(directory, fakeRuntime, undefined, {
+    routingClient: null,
+    power: { enabled: false },
+  });
+  let http: LocalOperatorHttp | undefined;
+  let auth: OperatorAuth | undefined;
+  try {
+    await service.start();
+    const domain = service.domain();
+    const profileId = randomUUID();
+    const projectId = randomUUID();
+    const taskId = randomUUID();
+    domain.execute({
+      key: randomUUID(),
+      actor: "operator",
+      type: "profile.create",
+      profileId,
+      name: "PRIVATE-OPERATOR-PROFILE",
+      instructions: "PRIVATE-OPERATOR-INSTRUCTIONS",
+      capabilities: "coordinate",
+    });
+    domain.execute({
+      key: randomUUID(),
+      actor: "operator",
+      type: "project.create",
+      projectId,
+      name: "PRIVATE-OPERATOR-PROJECT",
+      leadProfileId: profileId,
+    });
+    domain.execute({
+      key: randomUUID(),
+      actor: "operator",
+      type: "task.create",
+      projectId,
+      taskId,
+      title: "PRIVATE-OPERATOR-TASK",
+      outcome: "PRIVATE-OPERATOR-OUTCOME",
+      ready: false,
+    });
+    const assignment = domain.ensureLeadAssignment(taskId);
+    assert.ok(assignment);
+    const assignmentId = String(assignment.id);
+
+    const runtimeRoutes = runtimeOperatorRoutes(service);
+    const coordinationRoutes = coordinationOperatorRoutes(
+      service.coordinationView(),
+      domain,
+      (projectId) => service.routingAvailability(projectId),
+    );
+    const routes = new OperatorRouteRegistry();
+    routes.registerSlot("runtime", runtimeRoutes);
+    routes.registerSlot("coordination", coordinationRoutes);
+    const port = await unusedPort();
+    const origin = `http://127.0.0.1:${port}`;
+    await OperatorAuth.initialize(authFile, password);
+    auth = await OperatorAuth.open({ authFile, origin });
+    http = new LocalOperatorHttp(new LocalOperatorUi(domain), auth, { routes });
+    await http.start(port);
+
+    const pathFor = (path: string) =>
+      path.replace(":taskId", taskId).replace(":assignmentId", assignmentId);
+    const getPaths = [...runtimeRoutes, ...coordinationRoutes]
+      .filter((route) => route.method === "GET")
+      .map((route) => pathFor(route.path));
+    const postPaths = [...runtimeRoutes, ...coordinationRoutes]
+      .filter((route) => route.method === "POST")
+      .map((route) => route.path);
+
+    for (const path of getPaths) {
+      const response = await fetch(`${origin}${path}`, { redirect: "manual" });
+      assert.equal(response.status, 200, `pre-login GET ${path}`);
+      assert.match(await response.text(), /Sign in/);
+    }
+    for (const path of postPaths) {
+      const response = await fetch(`${origin}${pathFor(path)}`, {
+        method: "POST",
+        headers: {
+          origin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ attempted: "unauthenticated" }),
+        redirect: "manual",
+      });
+      assert.equal(response.status, 401, `unauthenticated POST ${path}`);
+      assert.doesNotMatch(await response.text(), /PRIVATE-OPERATOR/);
+    }
+
+    const loginPage = await fetch(`${origin}/login`);
+    const anonymousCookie = cookiePair(loginPage);
+    const login = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie: anonymousCookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        password,
+        csrfToken: csrfFrom(await loginPage.text()),
+      }),
+      redirect: "manual",
+    });
+    assert.equal(login.status, 303);
+    const sessionCookie = cookiePair(login);
+    const authenticatedHome = await fetch(origin, {
+      headers: { cookie: sessionCookie },
+    });
+    const protectedCsrf = csrfFrom(await authenticatedHome.text());
+
+    for (const path of postPaths) {
+      for (const attempt of [
+        { origin: "https://elsewhere.example", csrfToken: protectedCsrf },
+        { origin, csrfToken: "wrong" },
+        { origin: "", csrfToken: protectedCsrf },
+      ]) {
+        const headers: Record<string, string> = {
+          cookie: sessionCookie,
+          "content-type": "application/x-www-form-urlencoded",
+        };
+        if (attempt.origin) headers.origin = attempt.origin;
+        const response = await fetch(`${origin}${pathFor(path)}`, {
+          method: "POST",
+          headers,
+          body: new URLSearchParams({ csrfToken: attempt.csrfToken }),
+          redirect: "manual",
+        });
+        assert.equal(response.status, 403, `guarded POST ${path}`);
+      }
+      const malformed = await fetch(`${origin}${pathFor(path)}`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie: sessionCookie,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ csrfToken: protectedCsrf }),
+        redirect: "manual",
+      });
+      assert.equal(malformed.status, 400, `malformed POST ${path}`);
+      assert.doesNotMatch(await malformed.text(), /PRIVATE-OPERATOR/);
+    }
+
+    const duplicateField = await fetch(`${origin}/runtime/control/capacity`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie: sessionCookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: [
+        `csrfToken=${encodeURIComponent(protectedCsrf)}`,
+        "key=00000000-0000-4000-8000-000000000001",
+        "globalLimit=3",
+        "%67lobalLimit=4",
+        "projectId=",
+        "projectLimit=",
+      ].join("&"),
+      redirect: "manual",
+    });
+    assert.equal(duplicateField.status, 400);
+    assert.equal(service.capacityLimits([projectId]).globalLimit, 4);
+
+    const replayKey = randomUUID();
+    const capacityForm = new URLSearchParams({
+      csrfToken: protectedCsrf,
+      key: replayKey,
+      globalLimit: "3",
+      projectId,
+      projectLimit: "1",
+    });
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch(`${origin}/runtime/control/capacity`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie: sessionCookie,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: capacityForm,
+        redirect: "manual",
+      });
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get("location"), "/runtime");
+      assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.ok(response.headers.get("content-security-policy"));
+    }
+    assert.equal(service.capacityLimits([projectId]).globalLimit, 3);
+    assert.equal(
+      service.capacityLimits([projectId]).projectOverrides[projectId],
+      1,
+    );
+  } finally {
+    await http?.stop();
+    auth?.close();
+    await service.stop();
     rmSync(directory, { recursive: true, force: true });
   }
 });

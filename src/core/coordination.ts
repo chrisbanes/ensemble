@@ -110,9 +110,17 @@ const approvalDecisionSchema = z
     decision: z.enum(["approved", "denied"]),
     action: z.string().trim().min(1).max(512),
     target: z.string().trim().min(1).max(2000).optional(),
-    material: z.unknown(),
+    material: z.unknown().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((command, context) => {
+    if (command.decision === "approved" && command.material === undefined)
+      context.addIssue({
+        code: "custom",
+        message: "Approval material is required to approve",
+        path: ["material"],
+      });
+  });
 const operatorMessageSchema = z
   .object({
     actor: z.literal("operator"),
@@ -250,6 +258,7 @@ export interface CoordinationInteraction {
   action: string | null;
   target: string | null;
   materialHash: string | null;
+  materialJson: string | null;
   response: string | null;
   revision: number;
   createdAt: number;
@@ -371,6 +380,7 @@ export class CoordinationStore {
         action TEXT,
         target TEXT,
         materialHash TEXT,
+        materialJson TEXT,
         response TEXT,
         revision INTEGER NOT NULL CHECK(revision > 0),
         createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -468,6 +478,13 @@ export class CoordinationStore {
         ordinal INTEGER NOT NULL CHECK(ordinal > 0),
         UNIQUE(batchId, ordinal)
       );`);
+      const interactionColumns = this.db
+        .prepare("PRAGMA table_info(coordination_interactions)")
+        .all() as Row[];
+      if (!interactionColumns.some((column) => column.name === "materialJson"))
+        this.db.exec(
+          "ALTER TABLE coordination_interactions ADD COLUMN materialJson TEXT",
+        );
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_interaction_event
         ON coordination_inbox_events(interactionId) WHERE interactionId IS NOT NULL;`);
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_routing_fallback
@@ -788,16 +805,21 @@ export class CoordinationStore {
       action: null,
       target: null,
       materialHash: null,
+      materialJson: null,
     });
   }
 
   requestApproval(input: CoordinationCall): CoordinationToolResponse {
     const call = approvalCallSchema.parse(input);
+    const materialJson = canonical(call.arguments.material);
+    if (new TextEncoder().encode(materialJson).byteLength > 8192)
+      throw new Error("Approval material exceeds the 8 KiB operator limit");
     return this.requestInteraction(call, "approval", {
       prompt: `Approval requested for ${call.arguments.action}`,
       action: call.arguments.action,
       target: call.arguments.target ?? null,
       materialHash: payloadHash(call.arguments.material),
+      materialJson,
     });
   }
 
@@ -806,7 +828,7 @@ export class CoordinationStore {
       "SELECT interactionId, taskId, requestingAssignmentId, " +
       "requestingWorkId, requestingWorkRevision, requestingAssignmentVersion, " +
       "conversationRevision, kind, status, prompt, action, target, materialHash, " +
-      "response, revision, createdAt, updatedAt FROM coordination_interactions" +
+      "materialJson, response, revision, createdAt, updatedAt FROM coordination_interactions" +
       (taskId ? " WHERE taskId = ?" : "") +
       " ORDER BY createdAt, interactionId";
     const rows = (
@@ -904,7 +926,7 @@ export class CoordinationStore {
     decision: "approved" | "denied";
     action: string;
     target?: string;
-    material: unknown;
+    material?: unknown;
   }): InboxEvent {
     const command = approvalDecisionSchema.parse(input);
     const payload = {
@@ -913,7 +935,8 @@ export class CoordinationStore {
       decision: command.decision,
       action: command.action,
       target: command.target ?? null,
-      materialHash: payloadHash(command.material),
+      materialHash:
+        command.material === undefined ? null : payloadHash(command.material),
     };
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -927,7 +950,7 @@ export class CoordinationStore {
         return replay;
       }
       const interaction = this.required(
-        "SELECT interactionId, taskId, requestingAssignmentId, kind, status, action, target, materialHash, revision FROM coordination_interactions WHERE interactionId = ?",
+        "SELECT interactionId, taskId, requestingAssignmentId, kind, status, action, target, materialHash, materialJson, revision FROM coordination_interactions WHERE interactionId = ?",
         command.interactionId,
       );
       this.requireOpenInteraction(
@@ -937,12 +960,33 @@ export class CoordinationStore {
       );
       if (
         interaction.action !== command.action ||
-        interaction.target !== (command.target ?? null) ||
-        interaction.materialHash !== payload.materialHash
+        interaction.target !== (command.target ?? null)
       )
         throw new Error(
           "Approval material does not match the requested revision",
         );
+      if (interaction.materialJson === null) {
+        if (command.decision === "approved")
+          throw new Error(
+            "Legacy approval material is unavailable and cannot be approved",
+          );
+        if (
+          command.material !== undefined &&
+          interaction.materialHash !== payload.materialHash
+        )
+          throw new Error(
+            "Approval material does not match the requested revision",
+          );
+      } else if (
+        command.material === undefined ||
+        canonical(command.material) !== interaction.materialJson ||
+        interaction.materialHash !== payload.materialHash
+      ) {
+        throw new Error(
+          "Approval material does not match the requested revision",
+        );
+      }
+      const materialHash = String(interaction.materialHash);
       const event = this.insertInteractionEvent(
         String(interaction.taskId),
         String(interaction.requestingAssignmentId),
@@ -954,7 +998,7 @@ export class CoordinationStore {
           decision: command.decision,
           action: command.action,
           target: command.target ?? null,
-          materialHash: payload.materialHash,
+          materialHash,
         },
       );
       this.db
@@ -1063,7 +1107,8 @@ export class CoordinationStore {
       `SELECT interaction.requestingAssignmentId,
       interaction.requestingAssignmentVersion, interaction.status,
       interaction.revision, interaction.action, interaction.target,
-      interaction.materialHash, assignment.version, profile.revoked
+      interaction.materialHash, interaction.materialJson,
+      assignment.version, profile.revoked
       FROM coordination_interactions interaction
       JOIN domain_assignments assignment
         ON assignment.id = interaction.requestingAssignmentId
@@ -1082,6 +1127,7 @@ export class CoordinationStore {
         row.revoked === 0 &&
         row.action === request.action &&
         row.target === (request.target ?? null) &&
+        row.materialJson === canonical(request.material) &&
         row.materialHash === payloadHash(request.material),
     );
   }
@@ -2208,6 +2254,7 @@ export class CoordinationStore {
       action: string | null;
       target: string | null;
       materialHash: string | null;
+      materialJson: string | null;
     },
   ): CoordinationToolResponse {
     const call = generalCallSchema.parse(input);
@@ -2225,8 +2272,8 @@ export class CoordinationStore {
         .prepare(`INSERT INTO coordination_interactions
         (interactionId, taskId, requestingAssignmentId, requestingWorkId,
           requestingWorkRevision, requestingAssignmentVersion, conversationRevision,
-          kind, status, prompt, action, target, materialHash, revision)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 1)`)
+          kind, status, prompt, action, target, materialHash, materialJson, revision)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1)`)
         .run(
           interactionId,
           String(binding.taskId),
@@ -2240,6 +2287,7 @@ export class CoordinationStore {
           value.action,
           value.target,
           value.materialHash,
+          value.materialJson,
         );
       const attentionId = randomUUID();
       this.db
@@ -2422,6 +2470,7 @@ export class CoordinationStore {
       action: row.action === null ? null : String(row.action),
       target: row.target === null ? null : String(row.target),
       materialHash: row.materialHash === null ? null : String(row.materialHash),
+      materialJson: row.materialJson === null ? null : String(row.materialJson),
       response: row.response === null ? null : String(row.response),
       revision: Number(row.revision),
       createdAt: Number(row.createdAt),

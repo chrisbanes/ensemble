@@ -272,9 +272,11 @@ reviewed cutover; never run competing writers against the same task workspace.
   stronger process/read isolation only if separately selected.
 - Effective-admission transaction/supervisor protocol and restart reconciliation.
 - Runtime/release qualification of the separate authenticated operator session
-  and private Tailscale transport. The current UI and CSRF/origin boundary are
-  documented in [S04c](s04c-operator-ui.md); private Serve proof remains bounded
-  evidence, not deployment authorization.
+  and private Tailscale transport. S04d adds the production runtime and
+  coordination operator routes on top of the [S04c](s04c-operator-ui.md)
+  login/CSRF/Origin boundary. The bounded operator journey is recorded in
+  [S04d evidence](../evidence/s04d-operator-2026-09-30.md); private Serve proof
+  remains unproved and is not deployment or cutover authorization.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
 - Routing persistence, task-scoped lead execution identities, candidate validation,
   confidence criteria and separate API timeout/retry budgets; see the routing design.

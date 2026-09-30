@@ -17,6 +17,7 @@
     "test": "npm run build && node --test dist/test/*.test.js",
     "s04b:view": "node test/s04b/local-view.mjs",
     "s04b:live": "node test/s04b/live-runtime.mjs --live",
+    "s04d:live": "node test/s04d/live-operator.mjs --live",
     "s03b:live": "node test/s03b/live-runtime.mjs --live",
     "s08a:live": "node test/s08a/live-operations.mjs",
     "lint": "biome lint .",
