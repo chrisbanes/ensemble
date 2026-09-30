@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { tmpdir } from "../../dist/test/temp.js";
 import {
   CodexRuntime,
   StandaloneService,
