@@ -307,6 +307,7 @@ if (args.length !== 1 || args[0] !== "--live") {
       capacityRestored = true;
 
       phase = "same-origin configuration write";
+      await page.goto(`${config.origin}/`);
       const createdName = `S04c private proof ${randomUUID()}`;
       const projectForm = page.locator('form[data-command="project.create"]');
       await projectForm.locator('input[name="name"]').fill(createdName);
