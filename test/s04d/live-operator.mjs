@@ -162,6 +162,7 @@ function operatorRoutes(currentService) {
     coordinationOperatorRoutes(
       currentService.coordinationView(),
       currentService.domain(),
+      (projectId) => currentService.routingAvailability(projectId),
     ),
   );
   return routes;
