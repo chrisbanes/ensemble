@@ -13,6 +13,7 @@ import type {
 } from "../src/standalone/codex.js";
 import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
 import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
+import type { RoutingChoiceClient } from "../src/standalone/routing.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
 const runtime: Runtime = {
@@ -47,6 +48,7 @@ test("coordination adapter owns task-scoped read and mutation routes", async (t)
   const routes = coordinationOperatorRoutes(
     service.coordinationView(),
     service.domain(),
+    (projectId) => service.routingAvailability(projectId),
   );
   assert.deepEqual(
     routes.map(({ method, path }) => `${method} ${path}`),
@@ -211,7 +213,11 @@ test("operator status follows a newer queued continuation over completed history
     );
 
   const coordinationTaskRoute = route(
-    coordinationOperatorRoutes(service.coordinationView(), service.domain()),
+    coordinationOperatorRoutes(
+      service.coordinationView(),
+      service.domain(),
+      (projectId) => service.routingAvailability(projectId),
+    ),
     "GET",
     "/coordination/task/:taskId",
   );
@@ -339,6 +345,191 @@ function route(
   return result;
 }
 
+test("routing availability distinguishes credentials, clients, and project scope", async (t) => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-routing-availability-"),
+  );
+  const missingService = new StandaloneService(
+    join(directory, "missing"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false } },
+  );
+  let injectedRequests = 0;
+  const injectedClient: RoutingChoiceClient = {
+    async choose() {
+      injectedRequests += 1;
+      throw new Error("availability inspection must not call the provider");
+    },
+  };
+  const injectedService = new StandaloneService(
+    join(directory, "injected"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false }, routingClient: injectedClient },
+  );
+  t.after(async () => {
+    await missingService.stop();
+    await injectedService.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await missingService.start();
+  await injectedService.start();
+
+  const leadProfileId = randomUUID();
+  const candidateProfileId = randomUUID();
+  const enabledProjectId = randomUUID();
+  const unrelatedProjectId = randomUUID();
+  const injectedProjectId = randomUUID();
+  const unreferencedProjectId = randomUUID();
+  const noCandidateProjectId = randomUUID();
+  const revokedCandidateProfileId = randomUUID();
+  command(missingService, {
+    type: "profile.create",
+    profileId: leadProfileId,
+    name: "Availability lead",
+    instructions: "Coordinate the project.",
+    capabilities: "coordinate",
+  });
+  command(missingService, {
+    type: "profile.create",
+    profileId: candidateProfileId,
+    name: "Available candidate",
+    instructions: "Review the supplied task.",
+    capabilities: "review; TypeScript",
+  });
+  command(injectedService, {
+    type: "profile.create",
+    profileId: leadProfileId,
+    name: "Availability lead",
+    instructions: "Coordinate the project.",
+    capabilities: "coordinate",
+  });
+  command(injectedService, {
+    type: "profile.create",
+    profileId: candidateProfileId,
+    name: "Available candidate",
+    instructions: "Review the supplied task.",
+    capabilities: "review; TypeScript",
+  });
+  command(injectedService, {
+    type: "profile.create",
+    profileId: revokedCandidateProfileId,
+    name: "Revoked candidate",
+    instructions: "No longer available for routing.",
+    capabilities: "historical review",
+  });
+  for (const [service, projectId, name] of [
+    [missingService, enabledProjectId, "Credential-missing project"],
+    [missingService, unrelatedProjectId, "Unrelated project"],
+    [injectedService, injectedProjectId, "Injected-client project"],
+    [injectedService, unreferencedProjectId, "Unreferenced project"],
+  ] as const) {
+    command(service, {
+      type: "project.create",
+      projectId,
+      name,
+      leadProfileId,
+    });
+  }
+  const missingEnvironmentName = `ENSEMBLE_TEST_ROUTING_${randomUUID()
+    .replaceAll("-", "")
+    .toUpperCase()}`;
+  assert.equal(process.env[missingEnvironmentName], undefined);
+  command(missingService, {
+    type: "routing.configure",
+    projectId: enabledProjectId,
+    expectedVersion: 1,
+    enabled: true,
+    guidance: "Prefer the configured candidate capabilities.",
+    credentialRef: `env:${missingEnvironmentName}`,
+    candidateProfileIds: [candidateProfileId],
+  });
+  command(injectedService, {
+    type: "routing.configure",
+    projectId: injectedProjectId,
+    expectedVersion: 1,
+    enabled: true,
+    guidance: "Use the injected client with a configured reference.",
+    credentialRef: "env:ENSEMBLE_TEST_INJECTED_ROUTING",
+    candidateProfileIds: [candidateProfileId],
+  });
+  command(injectedService, {
+    type: "routing.configure",
+    projectId: unreferencedProjectId,
+    expectedVersion: 1,
+    enabled: true,
+    guidance: "A client alone is insufficient without a stored reference.",
+    credentialRef: null,
+    candidateProfileIds: [candidateProfileId],
+  });
+  command(injectedService, {
+    type: "project.create",
+    projectId: noCandidateProjectId,
+    name: "No-candidate project",
+    leadProfileId,
+  });
+  command(injectedService, {
+    type: "routing.configure",
+    projectId: noCandidateProjectId,
+    expectedVersion: 1,
+    enabled: true,
+    guidance: "No eligible profiles are configured.",
+    credentialRef: "env:ENSEMBLE_TEST_NO_CANDIDATE_ROUTING",
+    candidateProfileIds: [revokedCandidateProfileId],
+  });
+  command(injectedService, {
+    type: "profile.configure",
+    profileId: revokedCandidateProfileId,
+    expectedVersion: 1,
+    revoked: true,
+  });
+
+  const missing = missingService.routingAvailability(enabledProjectId);
+  assert.deepEqual(missing, {
+    enabled: true,
+    credentialReferenceConfigured: true,
+    routingClientAvailable: false,
+    eligibleCandidateCount: 1,
+    available: false,
+    reason: "missing-client-credentials",
+  });
+  assert.doesNotMatch(JSON.stringify(missing), /ENSEMBLE_TEST_ROUTING/);
+  assert.deepEqual(missingService.routingAvailability(unrelatedProjectId), {
+    enabled: false,
+    credentialReferenceConfigured: false,
+    routingClientAvailable: false,
+    eligibleCandidateCount: 0,
+    available: false,
+    reason: "disabled",
+  });
+  assert.deepEqual(injectedService.routingAvailability(injectedProjectId), {
+    enabled: true,
+    credentialReferenceConfigured: true,
+    routingClientAvailable: true,
+    eligibleCandidateCount: 1,
+    available: true,
+    reason: null,
+  });
+  assert.deepEqual(injectedService.routingAvailability(unreferencedProjectId), {
+    enabled: true,
+    credentialReferenceConfigured: false,
+    routingClientAvailable: true,
+    eligibleCandidateCount: 1,
+    available: false,
+    reason: "missing-client-credentials",
+  });
+  assert.deepEqual(injectedService.routingAvailability(noCandidateProjectId), {
+    enabled: true,
+    credentialReferenceConfigured: true,
+    routingClientAvailable: true,
+    eligibleCandidateCount: 0,
+    available: false,
+    reason: "no-eligible-candidates",
+  });
+  assert.equal(injectedRequests, 0);
+});
+
 test("coordination histories and keyed controls stay scoped and durable", async (t) => {
   const directory = mkdtempSync(
     join(tmpdir(), "ensemble-operator-coordination-flow-"),
@@ -357,6 +548,8 @@ test("coordination histories and keyed controls stay scoped and durable", async 
 
   const leadProfileId = randomUUID();
   const workerProfileId = randomUUID();
+  const revokedProfileId = randomUUID();
+  const otherWorkerProfileId = randomUUID();
   const projectId = randomUUID();
   const otherProjectId = randomUUID();
   const taskId = randomUUID();
@@ -373,7 +566,21 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     profileId: workerProfileId,
     name: "Worker",
     instructions: "review",
-    capabilities: "review",
+    capabilities: "review; TypeScript implementation",
+  });
+  command(service, {
+    type: "profile.create",
+    profileId: revokedProfileId,
+    name: "Revoked candidate",
+    instructions: "This profile has been revoked.",
+    capabilities: "historical review",
+  });
+  command(service, {
+    type: "profile.create",
+    profileId: otherWorkerProfileId,
+    name: "Other project candidate",
+    instructions: "Keep this profile scoped to another project.",
+    capabilities: "other-project-only",
   });
   command(service, {
     type: "project.create",
@@ -391,10 +598,17 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     type: "routing.configure",
     projectId,
     expectedVersion: 1,
-    enabled: false,
-    guidance: "Select only approved candidate profiles.",
+    enabled: true,
+    guidance:
+      "PROJECT_ROUTING_GUIDANCE_SENTINEL: prefer implementation skills.",
     credentialRef: "env:PRIVATE_ROUTING_CREDENTIAL_SENTINEL",
-    candidateProfileIds: [workerProfileId],
+    candidateProfileIds: [workerProfileId, revokedProfileId],
+  });
+  command(service, {
+    type: "profile.configure",
+    profileId: revokedProfileId,
+    expectedVersion: 1,
+    revoked: true,
   });
   command(service, {
     type: "task.create",
@@ -423,9 +637,9 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     projectId: otherProjectId,
     expectedVersion: 1,
     enabled: false,
-    guidance: "No external routing is enabled.",
+    guidance: "OTHER_PROJECT_ROUTING_GUIDANCE_SENTINEL",
     credentialRef: null,
-    candidateProfileIds: [workerProfileId],
+    candidateProfileIds: [workerProfileId, otherWorkerProfileId],
   });
   const messageAssignmentId = randomUUID();
   command(service, {
@@ -572,6 +786,7 @@ test("coordination histories and keyed controls stay scoped and durable", async 
   let routes = coordinationOperatorRoutes(
     service.coordinationView(),
     service.domain(),
+    (projectId) => service.routingAvailability(projectId),
   );
   const getTask = route(routes, "GET", "/coordination/task/:taskId");
   const page = await getTask.handler({
@@ -584,11 +799,28 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     assert.match(page.body, /Task-scoped lead/);
     assert.match(page.body, /task-scoped lead history/);
     assert.match(page.body, /Routing selection is not execution admission/);
-    assert.match(page.body, /credential is configured/);
+    assert.match(page.body, /Credential reference: configured/);
+    assert.match(page.body, /Routing client: unavailable/);
+    assert.match(
+      page.body,
+      /Effective routing availability: unavailable \(missing client credentials\)/,
+    );
+    assert.match(
+      page.body,
+      /Project routing guidance: PROJECT_ROUTING_GUIDANCE_SENTINEL: prefer implementation skills\./,
+    );
+    assert.match(
+      page.body,
+      /Worker — capabilities: review; TypeScript implementation; eligible routing candidate/,
+    );
+    assert.match(
+      page.body,
+      /Revoked candidate — capabilities: historical review; unavailable: profile revoked/,
+    );
     assert.match(page.body, /APPROVAL_MATERIAL_SENTINEL/);
     assert.doesNotMatch(
       page.body,
-      /PRIVATE_(?:RUNTIME_PROMPT|TASK_OUTCOME|ASSIGNMENT_BRIEF|ROUTING_CREDENTIAL)_SENTINEL|OTHER_TASK_(?:TITLE|OUTCOME)_SENTINEL/,
+      /PRIVATE_(?:RUNTIME_PROMPT|TASK_OUTCOME|ASSIGNMENT_BRIEF|ROUTING_CREDENTIAL)_SENTINEL|OTHER_TASK_(?:TITLE|OUTCOME)_SENTINEL|OTHER_PROJECT_ROUTING_GUIDANCE_SENTINEL|Other project candidate/,
     );
   }
   const assignmentPage = await route(
@@ -715,6 +947,7 @@ test("coordination histories and keyed controls stay scoped and durable", async 
   routes = coordinationOperatorRoutes(
     service.coordinationView(),
     service.domain(),
+    (projectId) => service.routingAvailability(projectId),
   );
   assert.deepEqual(
     await route(routes, "POST", "/coordination/control/message").handler(

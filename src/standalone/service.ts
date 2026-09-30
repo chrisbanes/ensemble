@@ -110,6 +110,21 @@ export interface StandaloneServiceOptions {
   };
 }
 
+export type RoutingAvailabilityReason =
+  | "disabled"
+  | "missing-client-credentials"
+  | "no-eligible-candidates"
+  | null;
+
+export interface RoutingAvailability {
+  enabled: boolean;
+  credentialReferenceConfigured: boolean;
+  routingClientAvailable: boolean;
+  eligibleCandidateCount: number;
+  available: boolean;
+  reason: RoutingAvailabilityReason;
+}
+
 /** Only the owner's empty SQLite file can identify an interrupted first start. */
 function markerReady(directory: string): boolean {
   const entries = readdirSync(directory);
@@ -516,6 +531,34 @@ export class StandaloneService {
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;
+  }
+
+  routingAvailability(projectId: string): RoutingAvailability {
+    const domain = this.domain();
+    const routing = domain.routing(projectId);
+    const credentialReference = domain.routingCredentialReference(projectId);
+    const credentialReferenceConfigured = credentialReference !== null;
+    const routingClientAvailable =
+      this.options.routingClient === undefined
+        ? routingClientFromEnvironment(credentialReference) !== undefined
+        : this.options.routingClient !== null;
+    const enabled = Number(routing.enabled) === 1;
+    const eligibleCandidateCount = domain.routingCandidates(projectId).length;
+    const reason: RoutingAvailabilityReason = !enabled
+      ? "disabled"
+      : !credentialReferenceConfigured || !routingClientAvailable
+        ? "missing-client-credentials"
+        : eligibleCandidateCount === 0
+          ? "no-eligible-candidates"
+          : null;
+    return {
+      enabled,
+      credentialReferenceConfigured,
+      routingClientAvailable,
+      eligibleCandidateCount,
+      available: reason === null,
+      reason,
+    };
   }
 
   coordinationView(): CoordinationView {

@@ -4,6 +4,7 @@ import type { CoordinationTaskView } from "./coordination-view.js";
 import type { CoordinationView } from "./coordination-view.js";
 import type { DomainStore } from "../core/domain.js";
 import type { OperatorRoute } from "./operator-routes.js";
+import type { RoutingAvailability } from "./service.js";
 
 const uuid = z.string().uuid();
 const positiveInteger = z
@@ -82,6 +83,7 @@ export interface CoordinationOperatorApi {
     | "reconcileResultRecipient"
   >;
   domain(): OperatorDomain;
+  routingAvailability(projectId: string): RoutingAvailability;
 }
 
 function escapeHtml(value: unknown): string {
@@ -289,6 +291,7 @@ function approvalSection(
 function routingSection(
   task: CoordinationTaskView,
   domain: OperatorDomain,
+  availability: RoutingAvailability,
 ): string {
   const routing = domain.routing(task.task.projectId);
   const candidateIds = z
@@ -296,7 +299,22 @@ function routingSection(
     .parse(JSON.parse(String(routing.candidateProfileIds)));
   const candidates = candidateIds
     .map((profileId) => domain.profile(profileId))
-    .map((profile) => escapeHtml(profile.name));
+    .map((profile) => {
+      const revoked = Number(profile.revoked) !== 0;
+      const eligibility = revoked
+        ? "unavailable: profile revoked"
+        : "eligible routing candidate";
+      return `<li>${escapeHtml(profile.name)} — capabilities: ${escapeHtml(profile.capabilities || "none specified")}; ${eligibility}</li>`;
+    })
+    .join("");
+  const reason = {
+    disabled: "disabled",
+    "missing-client-credentials": "missing client credentials",
+    "no-eligible-candidates": "no eligible candidates",
+  } as const;
+  const effective = availability.available
+    ? "available"
+    : `unavailable (${availability.reason ? reason[availability.reason] : "unknown"})`;
   const dispositions = task.routing.dispositions
     .map((disposition) => {
       const selected = disposition.assignmentId
@@ -311,7 +329,7 @@ function routingSection(
         `<li>Routing status: ${escapeHtml(attempt.status)}; attempts used: ${escapeHtml(attempt.attemptsUsed)}; outcome: ${escapeHtml(attempt.outcome ?? "not recorded")}.</li>`,
     )
     .join("");
-  return `<section><h2>Routing</h2><p>Automatic routing is ${routing.enabled ? "enabled" : "disabled"}; credential is ${routing.credentialAvailable ? "configured" : "not configured"}. The credential reference is not displayed.</p><p>Configured candidate profiles: ${candidates.length ? candidates.join(", ") : "none"}.</p><p>Routing selection is not execution admission; assignment runtime state appears separately.</p>${dispositions || attempts ? `<ul>${dispositions}${attempts}</ul>` : "<p>No routing decision has been recorded.</p>"}</section>`;
+  return `<section><h2>Routing</h2><p>Automatic routing is ${availability.enabled ? "enabled" : "disabled"}.</p><p>Credential reference: ${availability.credentialReferenceConfigured ? "configured" : "not configured"}. Routing client: ${availability.routingClientAvailable ? "available" : "unavailable"}. The credential reference is not displayed.</p><p>Effective routing availability: ${effective}.</p><p>Project routing guidance: ${escapeHtml(routing.guidance)}</p><p>Configured candidates:</p>${candidates ? `<ul>${candidates}</ul>` : "<p>None.</p>"}<p>Routing selection is not execution admission; assignment runtime state appears separately.</p>${dispositions || attempts ? `<ul>${dispositions}${attempts}</ul>` : "<p>No routing decision has been recorded.</p>"}</section>`;
 }
 
 function resultSection(
@@ -436,7 +454,8 @@ function taskPage(
     })
     .join("");
   const fallbackCount = view.attention.routingFallbacks.length;
-  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
+  const availability = api.routingAvailability(String(view.task.projectId));
+  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
 }
 
 function assignmentPage(
@@ -605,9 +624,11 @@ export class CoordinationOperatorRoutes {
 export function coordinationOperatorRoutes(
   view: CoordinationView,
   domain: DomainStore,
+  routingAvailability: (projectId: string) => RoutingAvailability,
 ): OperatorRoute[] {
   return new CoordinationOperatorRoutes({
     view: () => view,
     domain: () => domain,
+    routingAvailability,
   }).routes;
 }

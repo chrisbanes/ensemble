@@ -46,7 +46,11 @@ try {
     routes.registerSlot("runtime", runtimeOperatorRoutes(service));
     routes.registerSlot(
       "coordination",
-      coordinationOperatorRoutes(service.coordinationView(), service.domain()),
+      coordinationOperatorRoutes(
+        service.coordinationView(),
+        service.domain(),
+        (projectId) => service.routingAvailability(projectId),
+      ),
     );
     const ui = new LocalOperatorHttp(
       new LocalOperatorUi(service.domain()),

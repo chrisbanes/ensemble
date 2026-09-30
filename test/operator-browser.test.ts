@@ -120,7 +120,11 @@ function serviceRoutes(service: StandaloneService): OperatorRouteRegistry {
   routes.registerSlot("runtime", runtimeOperatorRoutes(service));
   routes.registerSlot(
     "coordination",
-    coordinationOperatorRoutes(service.coordinationView(), service.domain()),
+    coordinationOperatorRoutes(
+      service.coordinationView(),
+      service.domain(),
+      (projectId) => service.routingAvailability(projectId),
+    ),
   );
   return routes;
 }
@@ -533,7 +537,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     assert.equal(domain.routing(browserProjectId).credentialAvailable, 1);
     await page.goto(`${origin}/project/${browserProjectId}`);
     const routingHtml = await page.locator("body").innerText();
-    assert.match(routingHtml, /credential configured/);
+    assert.match(routingHtml, /credential reference configured/);
     assert.doesNotMatch(routingHtml, /PRIVATE_BROWSER_CREDENTIAL_REF/);
     assert.equal(
       domain.routing(browserProjectId).candidateProfileIds,
@@ -638,6 +642,7 @@ test("Chromium submits coordination and runtime controls with durable readback",
     await service.start();
     const leadProfileId = randomUUID();
     const workerProfileId = randomUUID();
+    const revokedProfileId = randomUUID();
     const projectId = randomUUID();
     const taskId = randomUUID();
     const blockerTaskId = randomUUID();
@@ -655,7 +660,14 @@ test("Chromium submits coordination and runtime controls with durable readback",
       profileId: workerProfileId,
       name: "Browser worker",
       instructions: "Review and report the supplied fixture.",
-      capabilities: "review",
+      capabilities: "review; browser verification",
+    });
+    command(service, {
+      type: "profile.create",
+      profileId: revokedProfileId,
+      name: "Browser revoked candidate",
+      instructions: "This profile is no longer available for routing.",
+      capabilities: "historical verification",
     });
     command(service, {
       type: "project.create",
@@ -673,10 +685,17 @@ test("Chromium submits coordination and runtime controls with durable readback",
       type: "routing.configure",
       projectId,
       expectedVersion: 1,
-      enabled: false,
-      guidance: "Only the configured worker is permitted.",
-      credentialRef: null,
-      candidateProfileIds: [workerProfileId],
+      enabled: true,
+      guidance:
+        "BROWSER_ROUTING_GUIDANCE_SENTINEL: prefer browser verification.",
+      credentialRef: "env:PRIVATE_BROWSER_ROUTING_SECRET",
+      candidateProfileIds: [workerProfileId, revokedProfileId],
+    });
+    command(service, {
+      type: "profile.configure",
+      profileId: revokedProfileId,
+      expectedVersion: 1,
+      revoked: true,
     });
     command(service, {
       type: "task.create",
@@ -794,6 +813,26 @@ test("Chromium submits coordination and runtime controls with durable readback",
     assert.equal((await signIn(page, password)).status(), 303);
 
     await page.goto(`${origin}/coordination/task/${taskId}`);
+    const routingView = await page.locator("body").innerText();
+    assert.match(routingView, /Credential reference: configured/);
+    assert.match(routingView, /Routing client: unavailable/);
+    assert.match(
+      routingView,
+      /Effective routing availability: unavailable \(missing client credentials\)/,
+    );
+    assert.match(
+      routingView,
+      /Project routing guidance: BROWSER_ROUTING_GUIDANCE_SENTINEL: prefer browser verification\./,
+    );
+    assert.match(
+      routingView,
+      /Browser worker — capabilities: review; browser verification; eligible routing candidate/,
+    );
+    assert.match(
+      routingView,
+      /Browser revoked candidate — capabilities: historical verification; unavailable: profile revoked/,
+    );
+    assert.doesNotMatch(routingView, /PRIVATE_BROWSER_ROUTING_SECRET/);
     const messageForm = page
       .locator('form[action="/coordination/control/message"]')
       .filter({

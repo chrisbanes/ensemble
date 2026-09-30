@@ -821,6 +821,7 @@ test("real runtime and coordination routes inherit HTTP guards and persist capac
     const coordinationRoutes = coordinationOperatorRoutes(
       service.coordinationView(),
       domain,
+      (projectId) => service.routingAvailability(projectId),
     );
     const routes = new OperatorRouteRegistry();
     routes.registerSlot("runtime", runtimeRoutes);

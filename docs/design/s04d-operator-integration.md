@@ -49,6 +49,17 @@ approvals; missing legacy material cannot be approved and may only be denied.
 The operator view renders escaped canonical material and omits approval actions
 for malformed retained data.
 
+The task Coordination routing section shows that project's guidance and
+configured candidates with their capabilities and current routing eligibility;
+revoked configured profiles remain visible as unavailable. It distinguishes a
+stored credential reference from an available routing client and gives only
+bounded effective-availability reasons (disabled, missing client credentials,
+or no eligible candidates). It exposes neither references nor environment names
+or secret values and makes no provider request. Routing availability does not
+describe capacity, busy state or execution admission; candidate selection still
+does not authorize a runtime turn. The project configuration page calls this a
+credential reference, not a configured credential.
+
 ## Verification boundary
 
 Deterministic adapter tests use real SQLite and fake only the runtime boundary.

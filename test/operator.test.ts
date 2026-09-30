@@ -90,7 +90,7 @@ test("local forms submit versioned commands and render secret-safe views", async
       candidateProfileIds: JSON.stringify([profile.id]),
     });
     const html = ui.project(project.id);
-    assert.match(html, /credential configured/);
+    assert.match(html, /credential reference configured/);
     assert.doesNotMatch(html, /TYPESAFE_KEY/);
     assert.match(html, /task.create/);
     assert.match(
