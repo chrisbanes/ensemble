@@ -328,6 +328,21 @@ async function run() {
     .turnRequests()
     .find((request) => request.assignmentId && request.kind === "assignment");
   assert.ok(initialLeadRequest);
+  progress("initial-lead-execution-admission");
+  await waitUntil(
+    () =>
+      service
+        .list()
+        .some(
+          (item) =>
+            item.workId === initialLeadRequest.workId &&
+            item.state === "running" &&
+            item.threadId !== null &&
+            item.turnId !== null,
+        ),
+    30_000,
+    "initial lead execution admission",
+  );
   const leadAssignmentId = initialLeadRequest.assignmentId;
   assert.equal(
     service.domain().assignment(leadAssignmentId).profileId,
