@@ -206,6 +206,7 @@ function recordScheduler(label) {
 }
 
 async function setup() {
+  progress("profile-project-task-setup");
   const leadProfileId = randomUUID();
   const workerProfileId = randomUUID();
   projectId = randomUUID();
@@ -265,7 +266,9 @@ async function setup() {
     globalLimit: 1,
     projectOverrides: { [projectId]: 1 },
   });
+  progress("task-workspace-provisioning");
   await service.provisionTask(taskId);
+  progress("task-admission");
   command({
     type: "task.configure",
     projectId,
@@ -310,6 +313,17 @@ async function run() {
   assert.ok(firstProcess, "expected macOS App Server process identity");
   evidence.runtime.firstProcess = processEvidence(firstProcess);
   const { leadProfileId, workerProfileId } = await setup();
+  progress("initial-lead-admission");
+  await waitUntil(
+    () =>
+      service
+        .turnRequests()
+        .some(
+          (request) => request.assignmentId && request.kind === "assignment",
+        ),
+    30_000,
+    "initial lead turn request",
+  );
   const initialLeadRequest = service
     .turnRequests()
     .find((request) => request.assignmentId && request.kind === "assignment");
