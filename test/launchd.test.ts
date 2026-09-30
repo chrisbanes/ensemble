@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  accessSync,
   chmodSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -52,16 +54,93 @@ function createFixture(): {
   };
 }
 
-function parsePlist(plistPath: string): Record<string, unknown> {
-  return JSON.parse(
-    execFileSync(
-      "/usr/bin/plutil",
-      ["-convert", "json", "-o", "-", plistPath],
-      {
-        encoding: "utf8",
-      },
-    ),
-  ) as Record<string, unknown>;
+function lintPlistIfAvailable(
+  plistPath: string,
+  environment: {
+    platform: NodeJS.Platform;
+    executablePath: string;
+  } = { platform: process.platform, executablePath: "/usr/bin/plutil" },
+): boolean {
+  if (environment.platform !== "darwin") return false;
+  try {
+    accessSync(environment.executablePath, fsConstants.X_OK);
+  } catch {
+    return false;
+  }
+  execFileSync(environment.executablePath, ["-lint", plistPath], {
+    encoding: "utf8",
+  });
+  return true;
+}
+
+test("native plist lint requires macOS and an available executable", () => {
+  const fixture = createFixture();
+  try {
+    const plistPath = join(fixture.root, "not-created.plist");
+    assert.equal(
+      lintPlistIfAvailable(plistPath, {
+        platform: "linux",
+        executablePath: "/usr/bin/false",
+      }),
+      false,
+    );
+    assert.equal(
+      lintPlistIfAvailable(plistPath, {
+        platform: "darwin",
+        executablePath: join(fixture.root, "missing-plutil"),
+      }),
+      false,
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function assertLaunchAgentFields(
+  plist: string,
+  configuration: LaunchAgentConfiguration,
+): void {
+  const argumentsXml = [
+    configuration.nodePath,
+    configuration.cliPath,
+    "operator",
+    configuration.dataDirectory,
+    String(configuration.port),
+  ]
+    .map((value) => `    <string>${xmlEscape(value)}</string>`)
+    .join("\n");
+  const environmentXml = Object.entries({
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    ENSEMBLE_OPERATOR_AUTH_FILE: configuration.authFile,
+    ENSEMBLE_OPERATOR_ORIGIN: configuration.origin,
+  })
+    .map(
+      ([key, value]) =>
+        `    <key>${key}</key>\n    <string>${xmlEscape(value)}</string>`,
+    )
+    .join("\n");
+  const expectedFields = [
+    `  <key>Label</key>\n  <string>${xmlEscape(configuration.label)}</string>`,
+    `  <key>ProgramArguments</key>\n  <array>\n${argumentsXml}\n  </array>`,
+    `  <key>EnvironmentVariables</key>\n  <dict>\n${environmentXml}\n  </dict>`,
+    `  <key>StandardOutPath</key>\n  <string>${xmlEscape(configuration.stdoutPath)}</string>`,
+    `  <key>StandardErrorPath</key>\n  <string>${xmlEscape(configuration.stderrPath)}</string>`,
+    "  <key>RunAtLoad</key>\n  <true/>",
+    "  <key>KeepAlive</key>\n  <false/>",
+  ];
+
+  for (const field of expectedFields) {
+    assert.ok(plist.includes(field), `plist must include ${field}`);
+  }
 }
 
 test("LaunchAgent renders exact private operator arguments and writes exclusively", () => {
@@ -75,25 +154,11 @@ test("LaunchAgent renders exact private operator arguments and writes exclusivel
     assert.throws(() => writeLaunchAgent(fixture.configuration, plistPath));
     assert.equal(existsSync(plistPath), true);
 
-    execFileSync("/usr/bin/plutil", ["-lint", plistPath], { encoding: "utf8" });
-    const parsed = parsePlist(plistPath);
-    assert.equal(parsed.Label, fixture.configuration.label);
-    assert.deepEqual(parsed.ProgramArguments, [
-      fixture.configuration.nodePath,
-      fixture.configuration.cliPath,
-      "operator",
-      fixture.configuration.dataDirectory,
-      String(fixture.configuration.port),
-    ]);
-    assert.deepEqual(parsed.EnvironmentVariables, {
-      ENSEMBLE_OPERATOR_AUTH_FILE: fixture.configuration.authFile,
-      ENSEMBLE_OPERATOR_ORIGIN: fixture.configuration.origin,
-      PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    });
-    assert.equal(parsed.StandardOutPath, fixture.configuration.stdoutPath);
-    assert.equal(parsed.StandardErrorPath, fixture.configuration.stderrPath);
-    assert.equal(parsed.RunAtLoad, true);
-    assert.equal(parsed.KeepAlive, false);
+    lintPlistIfAvailable(plistPath);
+    assertLaunchAgentFields(
+      readFileSync(plistPath, "utf8"),
+      fixture.configuration,
+    );
     assert.equal(plist.includes("password"), false);
     assert.equal(plist.includes("/bin/sh"), false);
     assert.equal(plist.includes("launchctl"), false);
@@ -198,7 +263,8 @@ test("operations CLI renders a private LaunchAgent without echoing paths", () =>
       label: configuration.label,
     });
     assert.equal(statSync(plistPath).mode & 0o777, 0o600);
-    execFileSync("/usr/bin/plutil", ["-lint", plistPath], { encoding: "utf8" });
+    lintPlistIfAvailable(plistPath);
+    assertLaunchAgentFields(readFileSync(plistPath, "utf8"), configuration);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
