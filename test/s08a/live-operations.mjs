@@ -461,18 +461,24 @@ async function bootoutAndVerify(dataDirectory) {
 
 async function run() {
   EVIDENCE.optIn = true;
-  stage = "preflight-runtime";
+  stage = "preflight-platform";
   stageLog(stage);
   assert.equal(
     process.platform,
     "darwin",
     "the disposable proof requires macOS",
   );
+  stage = "preflight-pinned-runtime";
+  stageLog(stage);
   assert.equal(process.version, "v24.21.0");
   assert.equal(realpathSync(process.execPath), PINNED_NODE);
   assert.equal(realpathSync(PINNED_NPM), PINNED_NPM);
   assert.equal(realpathSync(process.env.npm_execpath ?? ""), PINNED_NPM);
+  stage = "preflight-npm-identity";
+  stageLog(stage);
   assert.match(process.env.npm_config_user_agent ?? "", /npm\/12\.1\.0\b/);
+  stage = "preflight-build-artifacts";
+  stageLog(stage);
   cliPath = realpathSync(resolve("dist/src/standalone/cli.js"));
   const operationsCli = realpathSync(
     resolve("dist/src/standalone/operations-cli.js"),
@@ -481,10 +487,14 @@ async function run() {
   const gitExecutable = pathExecutable("git");
   const caffeinateExecutable = pathExecutable("caffeinate");
   assert.equal(codexExecutable, "/opt/homebrew/bin/codex");
+  stage = "preflight-codex-version";
+  stageLog(stage);
   const codexVersion = execFileSync(codexExecutable, ["--version"], {
     encoding: "utf8",
     timeout: 15_000,
   }).trim();
+  stage = "preflight-codex-login";
+  stageLog(stage);
   const loginStatus = execFileSync(codexExecutable, ["login", "status"], {
     encoding: "utf8",
     timeout: 15_000,
@@ -832,6 +842,10 @@ try {
   await run();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : null;
   const kind = /timed? out|timeout/i.test(message)
     ? "timeout"
     : /login|auth|account/i.test(message)
@@ -839,7 +853,7 @@ try {
       : /launchctl|launchagent|process exit/i.test(message)
         ? "launchd-lifecycle"
         : "operations-or-assertion-failure";
-  EVIDENCE.failure = { stage, kind };
+  EVIDENCE.failure = { stage, kind, code };
   process.exitCode = 1;
 } finally {
   await cleanup();
