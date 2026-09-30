@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
-import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 import type {
   ExactExecutionIdentity,
   ExecutionInspection,
@@ -71,6 +76,11 @@ class RecoveryRuntime implements Runtime {
   readonly turnStartEntered = deferred<void>();
   readonly turnEntered = deferred<void>();
   readonly turnGate = deferred<void>();
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
+  private currentThreadId = "";
+  private currentTurnId = "";
 
   async start() {}
 
@@ -96,14 +106,20 @@ class RecoveryRuntime implements Runtime {
   }
 
   async startThread() {
-    return `thread-${++this.threads}`;
+    this.currentThreadId = `thread-${++this.threads}`;
+    return this.currentThreadId;
   }
 
-  async resumeThread() {}
+  async resumeThread(threadId: string) {
+    this.currentThreadId = threadId;
+  }
 
   async startTurn() {
     this.turnStartEntered.resolve();
-    return this.turnStartGate ?? `turn-${++this.turns}`;
+    this.currentTurnId = this.turnStartGate
+      ? "late-turn"
+      : `turn-${++this.turns}`;
+    return this.turnStartGate ?? this.currentTurnId;
   }
 
   async interruptTurn(threadId: string, turnId: string) {
@@ -111,12 +127,22 @@ class RecoveryRuntime implements Runtime {
   }
 
   async waitForTurn() {
+    await this.toolCall?.({
+      threadId: this.currentThreadId,
+      turnId: this.currentTurnId,
+      callId: `fixture-question-${this.currentThreadId}-${this.currentTurnId}`,
+      tool: "ensemble_ask_question",
+      arguments: { question: "Recovery fixture is waiting for the next step" },
+    });
     this.turnEntered.resolve();
     await this.turnGate.promise;
     return "completed" as const;
   }
 
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
 }
 
 class ManualClock {
@@ -245,6 +271,7 @@ async function activeFixture(
     .list()
     .find((candidate) => candidate.workId === workId);
   assert.equal(active?.state, turnStartResponse ? "submitting" : "running");
+  assert.equal(service.domain().assignment(assignmentId).state, "running");
   assert.ok(active?.threadId);
   if (!turnStartResponse) assert.ok(active?.turnId);
   return {
@@ -349,6 +376,11 @@ test("startup inspects only a bound original generation and never blindly resubm
     assert.equal(record?.observations.at(-1)?.kind, "exact-live");
     assert.equal(record?.holds.writer, true);
     assert.equal(record?.holds.capacity, true);
+    assert.equal(
+      recovered.domain().assignment(old.assignmentId).state,
+      "running",
+      "a recovered uncertain generation must not demote its admitted assignment",
+    );
     assert.equal(runtime.threads, 0);
     assert.equal(runtime.turns, 0);
     assert.equal(
@@ -394,6 +426,11 @@ test("lost turn-start response is quarantined without inspection or replay", asy
     assert.equal(
       recovered.list().find((item) => item.workId === old.workId)?.turnId,
       null,
+    );
+    assert.equal(
+      recovered.domain().assignment(old.assignmentId).state,
+      "running",
+      "a lost turn-start response must retain the admitted assignment state",
     );
     assert.equal(
       recovered.capacityLimits([old.projectId]).currentUsage.global,

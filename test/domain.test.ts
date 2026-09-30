@@ -10,6 +10,7 @@ import {
   type DomainCommand,
 } from "../src/core/domain.js";
 import { Store } from "../src/core/store.js";
+import { ExecutionState } from "../src/standalone/state.js";
 
 const p = "10000000-0000-4000-8000-000000000001";
 const q = "10000000-0000-4000-8000-000000000002";
@@ -33,6 +34,9 @@ function fixture() {
   let domain = new DomainStore(db);
   domain.migrate();
   return {
+    get db() {
+      return db;
+    },
     get domain() {
       return domain;
     },
@@ -461,6 +465,83 @@ test("routing assignment and operation commit together after revision and admiss
     assert.deepEqual(f.domain.recordRouting(input), operation);
     f.reopen();
     assert.equal(f.domain.routingOperation(input.id).assignmentId, assignment);
+  } finally {
+    f.close();
+  }
+});
+
+test("routing checks a committed standalone hold before writing any disposition", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Builder",
+      instructions: "Code",
+      capabilities: "code",
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Alpha",
+      leadProfileId: profile,
+    });
+    run(f.domain, {
+      type: "project.configure",
+      actor: "operator",
+      projectId: p,
+      expectedVersion: 1,
+      paused: false,
+    });
+    run(f.domain, {
+      type: "task.create",
+      actor: "operator",
+      projectId: p,
+      taskId: a,
+      title: "Task",
+      outcome: "Ship",
+      ready: true,
+    });
+    run(f.domain, {
+      type: "routing.configure",
+      actor: "operator",
+      projectId: p,
+      expectedVersion: 1,
+      enabled: true,
+      guidance: "Fit",
+      credentialRef: "env:TYPESAFE_KEY",
+      candidateProfileIds: [profile],
+    });
+    const state = new ExecutionState(f.db);
+    state.stopTask(a);
+    const input = {
+      id: key(),
+      projectId: p,
+      taskId: a,
+      taskVersion: 1,
+      assignmentId: key(),
+      candidateRevisions: { [profile]: 1 },
+      guidanceRevision: 2,
+      model: "jev-1.13.0",
+      question: "Choose",
+      judgment: "Builder",
+      disposition: "assigned",
+      resultDestination: "lead:task",
+      assignment: {
+        profileId: profile,
+        brief: "Ship",
+        requesterAssignmentId: null,
+      },
+    };
+
+    assert.throws(
+      () => f.domain.recordRouting(input, () => !state.taskHold(a)),
+      /external admission/i,
+    );
+    assert.deepEqual(f.domain.routingOperations(a), []);
+    assert.throws(() => f.domain.assignment(input.assignmentId), /Unknown/);
   } finally {
     f.close();
   }

@@ -58,8 +58,71 @@ const completedTurn = z.object({
       .optional(),
   }),
 });
+const runtimeToolDefinitionSchema = z
+  .object({
+    type: z.literal("function"),
+    name: z.string().min(1).max(128),
+    description: z.string().min(1).max(1024),
+    inputSchema: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+const runtimeToolCallSchema = z.object({
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  callId: z.string().min(1),
+  tool: z.string().min(1).max(128),
+  arguments: z.record(z.string(), z.unknown()),
+});
+const runtimeToolResultSchema = z
+  .object({ text: z.string().max(16000), success: z.boolean() })
+  .strict();
 
 export type CodexErrorInfo = z.infer<typeof codexErrorInfoSchema>;
+
+export interface RuntimeToolDefinition {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface RuntimeToolCall {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface RuntimeToolResult {
+  text: string;
+  success: boolean;
+}
+
+export function parseRuntimeToolCall(
+  input: unknown,
+): RuntimeToolCall | undefined {
+  const parsed = runtimeToolCallSchema.safeParse(input);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function registeredTools(input: readonly RuntimeToolDefinition[] = []) {
+  const parsed = z.array(runtimeToolDefinitionSchema).parse(input);
+  const names = new Set<string>();
+  for (const tool of parsed) {
+    if (names.has(tool.name))
+      throw new Error(`Duplicate dynamic tool name: ${tool.name}`);
+    names.add(tool.name);
+  }
+  return Object.freeze(
+    parsed.map((tool) =>
+      Object.freeze({
+        ...tool,
+        inputSchema: Object.freeze({ ...tool.inputSchema }),
+      }),
+    ),
+  );
+}
 
 export interface FailureEvidence {
   threadId: string;
@@ -174,14 +237,26 @@ export function unexpectedRequest(
       .safeParse(params);
     if (identity.success) return { method, ...identity.data };
   }
+  if (method === "item/tool/call") {
+    const identity = z
+      .object({ threadId: z.string().min(1), turnId: z.string().min(1) })
+      .safeParse(params);
+    if (identity.success) return { method, ...identity.data };
+  }
   return { method };
 }
 
 export interface Runtime {
   start(): Promise<void>;
   stop(): Promise<void>;
-  startThread(workspace: string): Promise<string>;
-  resumeThread(threadId: string): Promise<void>;
+  startThread(
+    workspace: string,
+    tools?: readonly RuntimeToolDefinition[],
+  ): Promise<string>;
+  resumeThread(
+    threadId: string,
+    tools?: readonly RuntimeToolDefinition[],
+  ): Promise<void>;
   startTurn(
     threadId: string,
     workspace: string,
@@ -193,6 +268,9 @@ export interface Runtime {
     turnId: string,
   ): Promise<"completed" | "failed">;
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void;
+  onToolCall?(
+    listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>,
+  ): void;
   onTerminalAnomaly?(
     listener: (anomaly: {
       threadId?: string;
@@ -223,6 +301,7 @@ export class CodexRuntime implements Runtime {
     {
       resolve(value: unknown): void;
       reject(error: Error): void;
+      beforeResolve?(value: unknown): void;
       timer: NodeJS.Timeout;
     }
   >();
@@ -231,6 +310,11 @@ export class CodexRuntime implements Runtime {
   private readonly terminalHistory = new Map<string, "completed" | "failed">();
   private readonly failures = new Map<string, FailureEvidence>();
   private unexpected?: (request: UnexpectedRequest) => void;
+  private toolCall?: (call: RuntimeToolCall) => Promise<RuntimeToolResult>;
+  private readonly threadTools = new Map<
+    string,
+    readonly RuntimeToolDefinition[]
+  >();
   private terminalAnomaly?: (anomaly: {
     threadId?: string;
     turnId?: string;
@@ -242,6 +326,12 @@ export class CodexRuntime implements Runtime {
 
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
     this.unexpected = listener;
+  }
+
+  onToolCall(
+    listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>,
+  ): void {
+    this.toolCall = listener;
   }
 
   onTerminalAnomaly(
@@ -290,6 +380,7 @@ export class CodexRuntime implements Runtime {
       if (this.child !== child) throw new Error("Runtime stopped");
       await this.request("initialize", {
         clientInfo: { name: "ensemble", version: "0.1.0" },
+        capabilities: { experimentalApi: true },
       });
       if (this.child !== child) throw new Error("Runtime stopped");
       await this.send(`${JSON.stringify({ method: "initialized" })}\n`);
@@ -336,26 +427,48 @@ export class CodexRuntime implements Runtime {
     if (this.child !== expectedChild) throw new Error("Runtime stopped");
   }
 
-  async startThread(workspace: string): Promise<string> {
+  async startThread(
+    workspace: string,
+    tools: readonly RuntimeToolDefinition[] = [],
+  ): Promise<string> {
+    const definitions = registeredTools(tools);
     const response = thread.parse(
-      await this.request("thread/start", {
-        cwd: workspace,
-        approvalPolicy: "never",
-        sandbox: "workspace-write",
-        ephemeral: false,
-      }),
+      await this.request(
+        "thread/start",
+        {
+          cwd: workspace,
+          approvalPolicy: "never",
+          sandbox: "workspace-write",
+          ephemeral: false,
+          ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
+        },
+        (raw) => {
+          const started = thread.parse(raw);
+          this.threadTools.set(started.thread.id, definitions);
+        },
+      ),
     );
+    this.threadTools.set(response.thread.id, definitions);
     return response.thread.id;
   }
 
-  async resumeThread(threadId: string): Promise<void> {
+  async resumeThread(
+    threadId: string,
+    tools?: readonly RuntimeToolDefinition[],
+  ): Promise<void> {
+    const definitions = registeredTools(
+      tools ?? this.threadTools.get(threadId) ?? [],
+    );
     thread.parse(
       await this.request("thread/resume", {
         threadId,
         approvalPolicy: "never",
         sandbox: "workspace-write",
+        ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
       }),
     );
+    if (tools !== undefined || !this.threadTools.has(threadId))
+      this.threadTools.set(threadId, definitions);
   }
 
   async startTurn(
@@ -454,7 +567,11 @@ export class CodexRuntime implements Runtime {
     });
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  private request(
+    method: string,
+    params: unknown,
+    beforeResolve?: (value: unknown) => void,
+  ): Promise<unknown> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("Runtime unavailable"));
     if (this.failure) return Promise.reject(this.failure);
@@ -464,7 +581,12 @@ export class CodexRuntime implements Runtime {
         this.pending.delete(id);
         reject(new Error(`${method} timed out`));
       }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, {
+        resolve,
+        reject,
+        timer,
+        ...(beforeResolve ? { beforeResolve } : {}),
+      });
       void this.send(`${JSON.stringify({ id, method, params })}\n`).catch(
         (error: Error) => this.failChild(child, error),
       );
@@ -507,6 +629,10 @@ export class CodexRuntime implements Runtime {
     }
     if (message.method && message.id !== undefined) {
       const method = message.method;
+      if (method === "item/tool/call") {
+        this.receiveToolCall(child, message.id, message.params);
+        return;
+      }
       let holdFailed = false;
       try {
         this.unexpected?.(unexpectedRequest(method, message.params));
@@ -537,7 +663,16 @@ export class CodexRuntime implements Runtime {
       this.pending.delete(Number(message.id));
       if (message.error !== undefined)
         pending.reject(new Error(JSON.stringify(message.error)));
-      else pending.resolve(message.result);
+      else {
+        try {
+          pending.beforeResolve?.(message.result);
+          pending.resolve(message.result);
+        } catch (error) {
+          pending.reject(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      }
       return;
     }
     if (message.method === "turn/completed") {
@@ -571,6 +706,81 @@ export class CodexRuntime implements Runtime {
       }
     }
     if (message.method) this.events.emit(message.method, message.params);
+  }
+
+  private receiveToolCall(
+    child: ChildProcessWithoutNullStreams,
+    id: string | number,
+    params: unknown,
+  ): void {
+    const call = parseRuntimeToolCall(params);
+    const definitions = call ? this.threadTools.get(call.threadId) : undefined;
+    const registered = definitions?.some((tool) => tool.name === call?.tool);
+    if (!call || !registered || !this.toolCall) {
+      let holdFailed = false;
+      try {
+        this.unexpected?.(unexpectedRequest("item/tool/call", params));
+      } catch (error) {
+        holdFailed = true;
+        this.failChild(
+          child,
+          new Error(
+            `Could not persist unexpected request hold: ${String(error)}`,
+          ),
+        );
+      }
+      if (this.child === child)
+        void this.send(
+          `${JSON.stringify({
+            id,
+            result: {
+              contentItems: [{ type: "inputText", text: "not authorized" }],
+              success: false,
+            },
+          })}\n`,
+        ).then(
+          () => {
+            if (holdFailed) child.kill("SIGTERM");
+          },
+          (error: Error) => this.failChild(child, error),
+        );
+      return;
+    }
+    void this.dispatchToolCall(child, id, call);
+  }
+
+  private async dispatchToolCall(
+    child: ChildProcessWithoutNullStreams,
+    id: string | number,
+    call: RuntimeToolCall,
+  ): Promise<void> {
+    let response: RuntimeToolResult;
+    try {
+      const rawResult = await this.toolCall?.(call);
+      const parsed = runtimeToolResultSchema.safeParse(rawResult);
+      response = parsed.success
+        ? parsed.data
+        : { text: "request failed", success: false };
+    } catch {
+      response = { text: "request failed", success: false };
+    }
+    if (this.child !== child) return;
+    try {
+      await this.send(
+        `${JSON.stringify({
+          id,
+          result: {
+            contentItems: [{ type: "inputText", text: response.text }],
+            success: response.success,
+          },
+        })}\n`,
+      );
+    } catch (error) {
+      this.failChild(
+        child,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   private fail(error: Error): void {

@@ -8,10 +8,17 @@ implementation contracts remain subject to S01 evidence.
 [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
 ADR-1003 with that ownership change. The [BB specification](SPEC-bb.md) is history.
-The standalone service now has durable scheduling, capacity admission,
-supervision and conservative recovery primitives. The full operator journey,
-assignment routing and authenticated remote UI are not implemented; requirements
-below remain product obligations rather than passing acceptance claims.
+The standalone service has durable scheduling, capacity admission, supervision,
+conservative recovery, and the S04b task-coordination foundations: durable results
+and recipient inboxes, human-request attention/interactions, retained-assignee
+follow-up, revision-bound lead completion and bounded assignment-routing
+provenance. These are covered by deterministic service tests and a disposable
+test-only read view, not by the production operator UI. The bounded real Codex
+journey must separately qualify dynamic tools after service/App Server restart;
+until its evidence is recorded, resumed-thread tool availability remains
+unproved. The complete operator journey and authenticated remote UI are not
+implemented; requirements below remain product obligations rather than passing
+acceptance claims.
 
 ## Purpose and scope
 

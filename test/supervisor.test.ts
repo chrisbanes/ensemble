@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
-import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 
 interface StopOutcome {
   workId: string;
@@ -103,6 +108,9 @@ class SupervisorRuntime implements Runtime {
     turnId?: string;
     reason: string;
   }) => void;
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
 
   async start() {}
   async stop() {}
@@ -120,7 +128,16 @@ class SupervisorRuntime implements Runtime {
     return this.startTurnGate ?? `turn-${++this.turns}`;
   }
 
-  async waitForTurn() {
+  async waitForTurn(threadId: string, turnId: string) {
+    await this.toolCall?.({
+      threadId,
+      turnId,
+      callId: `fixture-question-${threadId}-${turnId}`,
+      tool: "ensemble_ask_question",
+      arguments: {
+        question: "Supervisor fixture is waiting for the next step",
+      },
+    });
     this.turnEntered?.();
     await this.turnGate;
     return this.terminal;
@@ -133,6 +150,10 @@ class SupervisorRuntime implements Runtime {
   }
 
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
 
   onTerminalAnomaly(
     listener: (event: {

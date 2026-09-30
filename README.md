@@ -20,11 +20,19 @@ a standalone service with a durable turn scheduler and execution supervisor in
 `src/standalone`. The S03b service slice implements shared writer/capacity
 admission, capacity-waiting, bounded Stop observation, conservative restart
 reconciliation, exact recovery receipts, narrow retry accounting and a macOS
-sleep/wake admission gate. The BB plugin, packaging and integration harness have
-been removed. The full assignment router, #694 operator scheduling/capacity
-controls and recovery presentation, #703 authenticated remote operator UI, and
-S05 physical sleep/wake qualification remain pending. The installed Haze
-prototype stays in place until the reviewed operational cutover.
+sleep/wake admission gate. S04b adds task-scoped coordination tools and durable
+results, recipient inboxes, operator attention/interactions, same-assignment
+follow-up revisions, revision-bound lead completion, bounded routing provenance,
+and a typed task-scoped coordination view. Deterministic service tests cover
+restart and capacity-one delivery. `test/s04b/local-view.mjs` is a disposable,
+read-only integration probe, not a production operator route. The explicit live
+Codex probe separately checks registered tools after service/App Server restart;
+its recorded evidence, not the fixture, determines whether that runtime surface
+is qualified. The BB plugin, packaging and integration harness have been removed.
+#694 retains final operator scheduling/capacity controls and recovery
+presentation; #703 retains the authenticated remote operator UI. S05 physical
+sleep/wake qualification and the installed Haze prototype's reviewed cutover
+remain pending.
 
 ## Planning checkpoint
 
@@ -54,11 +62,12 @@ npm run check
 ```
 
 `check` runs strict type checking, lint, formatting, compilation and tests,
-including deterministic S03b scheduler, supervision, recovery, power and
-service-integration fixtures. Real App Server qualification is separate and
-must be run explicitly with `npm run s03b:live`; the harness refuses to run
-without its `--live` opt-in. These checks do not
-prove physical sleep/wake behavior or operational host-restart recovery.
+including deterministic S03b scheduler/supervision/recovery/power coverage and
+S04b coordination, routing, inbox, interaction, completion and service-integration
+fixtures. Real App Server qualification is separate and must be run explicitly
+with `npm run s03b:live` and `npm run s04b:live`; each harness refuses to run
+without its `--live` opt-in. These checks do not prove physical sleep/wake
+behavior or operational host-restart recovery.
 
 The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
@@ -109,6 +118,7 @@ over historical documents. A reviewed requirement is not an implemented capabili
 - [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
 - [ADR-1005](docs/adr/1005-service-assignment-routing.md): service routing and project-lead accountability.
 - [Assignment-routing design](docs/design/assignment-routing.md): selection, fallback and durable result destinations.
+- [S04b coordination boundary](docs/design/s04b-coordination-boundary.md): durable task coordination, completion and evidence boundaries.
 - [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
 - [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
 - [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.

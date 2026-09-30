@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
-import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 import type {
   ExactExecutionIdentity,
   ExecutionInspection,
@@ -50,6 +55,9 @@ class IntegrationRuntime implements Runtime {
     Deferred<"completed" | "failed">
   >();
   private readonly entered = new Map<number, Deferred<void>>();
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
 
   async start() {}
 
@@ -88,12 +96,25 @@ class IntegrationRuntime implements Runtime {
   async waitForTurn(_threadId: string, turnId: string) {
     const outcome = this.outcomes.get(turnId);
     if (!outcome) throw new Error("Unknown fixture turn");
+    await this.toolCall?.({
+      threadId: _threadId,
+      turnId,
+      callId: `fixture-question-${_threadId}-${turnId}`,
+      tool: "ensemble_ask_question",
+      arguments: {
+        question: "Integration fixture is waiting for the next step",
+      },
+    });
     const turnNumber = Number(turnId.slice("turn-".length));
     this.entered.get(turnNumber)?.resolve();
     return outcome.promise;
   }
 
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
 
   async waitForTurnNumber(turn: number): Promise<void> {
     await waitUntil(() => this.turns >= turn);
