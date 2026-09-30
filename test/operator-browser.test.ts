@@ -1028,6 +1028,32 @@ test("Chromium submits coordination and runtime controls with durable readback",
     assert.match(runtimeText, /Operator Stop remains active/);
     assert.match(runtimeText, /Writer ownership remains held/);
     assert.match(runtimeText, /Effects may continue/);
+    const stoppedRecoveryRecord = service
+      .recoveryView()
+      .find((record) => record.binding?.taskId === taskId);
+    assert.ok(stoppedRecoveryRecord?.binding);
+    assert.ok(stoppedRecoveryRecord.intent.threadId);
+    assert.ok(stoppedRecoveryRecord.intent.turnId);
+    assert.ok(
+      runtimeText.includes(`Recovery record: ${stoppedRecoveryRecord.workId}`),
+    );
+    assert.ok(
+      runtimeText.includes(
+        `Assignment ${stoppedRecoveryRecord.binding.assignmentId} (version ${stoppedRecoveryRecord.binding.assignmentVersion};`,
+      ),
+    );
+    assert.match(runtimeText, /Generation: work revision .*; request sequence/);
+    assert.ok(
+      runtimeText.includes(
+        `Recorded thread identity: ${stoppedRecoveryRecord.intent.threadId}`,
+      ),
+    );
+    assert.ok(
+      runtimeText.includes(
+        `Recorded turn identity: ${stoppedRecoveryRecord.intent.turnId}`,
+      ),
+    );
+    assert.match(runtimeText, /not proof of termination or release/);
     await submitControl(
       page,
       page.locator('form[action="/runtime/control/resume"]'),
@@ -1100,6 +1126,25 @@ test("Chromium submits coordination and runtime controls with durable readback",
         .some(
           (record) => record.binding?.taskId === taskId && record.holds.writer,
         ),
+    );
+    const persistedRecoveryRecord = service
+      .recoveryView()
+      .find((record) => record.binding?.assignmentId === workerAssignmentId);
+    assert.ok(persistedRecoveryRecord?.binding);
+    await page.goto(
+      `${origin}/runtime/assignment/${persistedRecoveryRecord.binding.assignmentId}`,
+    );
+    const persistedAssignmentText = await page.locator("body").innerText();
+    assert.ok(
+      persistedAssignmentText.includes(
+        `Recovery record: ${persistedRecoveryRecord.workId}`,
+      ),
+    );
+    assert.match(persistedAssignmentText, /Observations:/);
+    assert.match(persistedAssignmentText, /Pending effects:/);
+    assert.match(
+      persistedAssignmentText,
+      /Recorded identities, observations, receipts, and dispositions are evidence only/,
     );
     await page.goto(`${origin}/runtime/task/${taskId}`);
     const persistedDependency = page.locator(

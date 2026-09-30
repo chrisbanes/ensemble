@@ -251,6 +251,57 @@ function statusForAssignment(
   return "No active execution is reported";
 }
 
+function recoveryRecordEvidence(
+  record: RecoveryRecord,
+  taskHold: string | undefined,
+): string {
+  const binding = record.binding;
+  const assignment = binding
+    ? `Assignment ${escapeHtml(binding.assignmentId)} (version ${escapeHtml(binding.assignmentVersion)}; instructions revision ${escapeHtml(binding.instructionsRevision)}; profile revision ${escapeHtml(binding.profileRevision)})`
+    : "Assignment identity not recorded";
+  const workRevision =
+    record.generation.workRevision === null
+      ? "not recorded"
+      : escapeHtml(record.generation.workRevision);
+  const requestSequence = escapeHtml(record.generation.requestSequence);
+  const thread = record.intent.threadId
+    ? `Recorded thread identity: ${escapeHtml(record.intent.threadId)}`
+    : "Recorded thread identity: not available";
+  const turn = record.intent.turnId
+    ? `Recorded turn identity: ${escapeHtml(record.intent.turnId)}`
+    : "Recorded turn identity: not available";
+  const process = record.processIdentity
+    ? `Recorded process identity: process ID ${escapeHtml(record.processIdentity.processId)}; started ${escapeHtml(record.processIdentity.processStartedAt)}; boot identity ${escapeHtml(record.processIdentity.bootId)}`
+    : "Recorded process identity: not available";
+  const request = record.request;
+  const observations = record.observations.length
+    ? record.observations
+        .map(
+          (observation) =>
+            `<li>Observation: ${escapeHtml(observation.kind)} — ${escapeHtml(observation.reason ?? "Reason not recorded")}</li>`,
+        )
+        .join("")
+    : "<li>No recovery observations are recorded.</li>";
+  const pendingEffects = record.pendingEffects.length
+    ? record.pendingEffects
+        .map(
+          (effect) =>
+            `<li>Pending effect: ${escapeHtml(effect.state)} — ${escapeHtml(effect.reason)}</li>`,
+        )
+        .join("")
+    : "<li>No pending effects are recorded for this recovery record.</li>";
+  const uncertaintyReason =
+    record.intent.reason ??
+    request?.reason ??
+    "No uncertainty reason is recorded";
+  const taskHoldReason = record.holds.task ?? taskHold;
+  const receipt = record.receipt
+    ? `Recorded recovery receipt: ${escapeHtml(record.receipt.id)}; workspace disposition: ${escapeHtml(record.receipt.workspaceDisposition)}`
+    : "Recorded recovery receipt: none";
+
+  return `<li><h3>Recovery record: ${escapeHtml(record.workId)}</h3><ul><li>${assignment}</li><li>Generation: work revision ${workRevision}; request sequence ${requestSequence}</li><li>Runtime intent: ${escapeHtml(record.intent.state)}; intent reason: ${escapeHtml(record.intent.reason ?? "not recorded")}</li><li>Turn request: ${escapeHtml(request?.state ?? "not recorded")}; request reason: ${escapeHtml(request?.reason ?? "not recorded")}</li><li>${thread}; not proof of termination or release</li><li>${turn}; not proof of termination or release</li><li>${process}; not proof of termination or release</li><li>${receipt}; not proof of termination or release</li><li>Task hold reason: ${escapeHtml(taskHoldReason ?? "not recorded")}</li><li>Uncertainty hold: ${record.holds.uncertainty ? `active; reason: ${escapeHtml(uncertaintyReason)}` : "not active for this record"}</li><li>Writer hold: ${record.holds.writer ? "active" : "not recorded"}; capacity hold: ${record.holds.capacity ? "active" : "not recorded"}; Stop hold: ${record.holds.stop ? "active" : "not recorded"}</li><li>Observations:<ul>${observations}</ul></li><li>Pending effects:<ul>${pendingEffects}</ul></li></ul></li>`;
+}
+
 function executionHoldSection(taskId: string, api: RuntimeOperatorApi): string {
   const records = api
     .recoveryView()
@@ -261,15 +312,21 @@ function executionHoldSection(taskId: string, api: RuntimeOperatorApi): string {
   const capacity = records.some((record) => record.holds.capacity);
   const uncertainty = records.some((record) => record.holds.uncertainty);
   const held = hold !== undefined || stop || writer || capacity || uncertainty;
-  const stateEvidence = records
-    .map(
-      (record) =>
-        `<li>Runtime intent: ${escapeHtml(record.intent.state)}; turn request: ${escapeHtml(record.request?.state ?? "not recorded")}.</li>`,
-    )
+  const maximumVisibleRecords = 20;
+  const visibleRecords = records.slice(-maximumVisibleRecords);
+  const omittedRecords = records.length - visibleRecords.length;
+  const recordEvidence = visibleRecords
+    .map((record) => recoveryRecordEvidence(record, hold))
     .join("");
+  const omittedNotice = omittedRecords
+    ? `<p>Showing the newest ${maximumVisibleRecords} of ${records.length} recorded recovery records; ${omittedRecords} older records are omitted from this page.</p>`
+    : "";
+  const evidenceList = recordEvidence
+    ? `<h3>Recorded recovery evidence</h3>${omittedNotice}<ul>${recordEvidence}</ul><p>Recorded identities, observations, receipts, and dispositions are evidence only; they do not prove that a process has terminated or that all effects have been released.</p>`
+    : "";
   if (!held)
-    return `<section><h2>Execution ownership and recovery</h2><p>No unresolved execution hold is reported.</p>${stateEvidence ? `<ul>${stateEvidence}</ul>` : ""}</section>`;
-  return `<section><h2>Execution ownership and recovery</h2><ul><li>${stop ? "Operator Stop remains active" : "Operator Stop is not active"}</li><li>${writer ? "Writer ownership remains held" : "No unresolved writer hold is recorded"}</li><li>${capacity ? "Capacity remains held" : "No unresolved capacity hold is recorded"}</li><li>${uncertainty ? "Execution state is uncertain" : "No uncertainty hold is recorded"}</li></ul>${stateEvidence ? `<h3>Recorded service state</h3><ul>${stateEvidence}</ul>` : ""}<p>Effects may continue while an execution is stopping. Elapsed time, interruption acknowledgement, and Resume do not resolve writer ownership. Use independent recovery evidence before allowing another writer.</p></section>`;
+    return `<section><h2>Execution ownership and recovery</h2><p>No unresolved execution hold is reported.</p>${evidenceList}</section>`;
+  return `<section><h2>Execution ownership and recovery</h2><ul><li>${stop ? "Operator Stop remains active" : "Operator Stop is not active"}</li><li>${writer ? "Writer ownership remains held" : "No unresolved writer hold is recorded"}</li><li>${capacity ? "Capacity remains held" : "No unresolved capacity hold is recorded"}</li><li>${uncertainty ? "Execution state is uncertain" : "No uncertainty hold is recorded"}</li></ul>${evidenceList}<p>Effects may continue while an execution is stopping. Elapsed time, interruption acknowledgement, and Resume do not resolve writer ownership. Use independent recovery evidence before allowing another writer.</p></section>`;
 }
 
 function dependencyForm(

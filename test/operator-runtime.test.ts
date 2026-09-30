@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { DomainCommand } from "../src/core/domain.js";
 import type { Runtime } from "../src/standalone/codex.js";
 import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
+import type { RuntimeProcessIdentity } from "../src/standalone/recovery-types.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
 const runtime: Runtime = {
@@ -56,6 +57,63 @@ class HeldRuntime implements Runtime {
   }
   onUnexpectedRequest() {}
   onToolCall() {}
+}
+
+function deferredOutcome() {
+  let resolve!: (status: "completed" | "failed") => void;
+  const promise = new Promise<"completed" | "failed">((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+class RecoveryEvidenceRuntime implements Runtime {
+  readonly process: RuntimeProcessIdentity = {
+    processId: "fixture-process-<script>",
+    processStartedAt: "fixture-started-&-bounded",
+    bootId: "fixture-boot-identity",
+  };
+  threads = 0;
+  turns = 0;
+  private readonly outcomes = new Map<
+    string,
+    ReturnType<typeof deferredOutcome>
+  >();
+
+  async start() {}
+
+  async stop() {
+    for (const outcome of this.outcomes.values()) outcome.resolve("failed");
+  }
+
+  processIdentity() {
+    return this.process;
+  }
+
+  async startThread() {
+    return `fixture-thread-${++this.threads}-<img src=x onerror=alert(1)>`;
+  }
+
+  async resumeThread() {}
+
+  async startTurn() {
+    const turnId = `fixture-turn-${++this.turns}-&-recorded`;
+    this.outcomes.set(turnId, deferredOutcome());
+    return turnId;
+  }
+
+  async interruptTurn() {}
+
+  async waitForTurn(_threadId: string, turnId: string) {
+    return this.outcomes.get(turnId)?.promise ?? "failed";
+  }
+
+  onUnexpectedRequest() {}
+  onToolCall() {}
+
+  finish(turnId: string, status: "completed" | "failed") {
+    this.outcomes.get(turnId)?.resolve(status);
+  }
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -549,6 +607,236 @@ test("task runtime detail keeps stop and writer holds visible after Resume", asy
       heldAssignmentPage.body,
       /Execution status: Held; recovery is required\./,
     );
+});
+
+test("task and assignment recovery views render every scoped record without implying release", async (t) => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-runtime-recovery-view-"),
+  );
+  const runtime = new RecoveryEvidenceRuntime();
+  const service = new StandaloneService(
+    join(directory, "data"),
+    () => runtime,
+    undefined,
+    {
+      power: { enabled: false },
+      supervisor: { observationMs: 5 },
+      terminationVerifier: {
+        async verify(processIdentity) {
+          return {
+            kind: "verified",
+            processIdentity,
+            verifiedAt: "2026-09-30T12:00:00.000Z",
+            method: "mac-pid-absent-same-boot",
+          };
+        },
+      },
+    },
+  );
+  t.after(async () => {
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await service.start();
+
+  const leadProfileId = randomUUID();
+  const workerProfileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  const workerAssignmentId = randomUUID();
+  command(service, {
+    type: "profile.create",
+    profileId: leadProfileId,
+    name: "Recovery lead",
+    instructions: "PRIVATE_RECOVERY_INSTRUCTIONS_SENTINEL",
+    capabilities: "coordinate",
+  });
+  command(service, {
+    type: "profile.create",
+    profileId: workerProfileId,
+    name: "Recovery worker",
+    instructions: "PRIVATE_RECOVERY_WORKER_INSTRUCTIONS_SENTINEL",
+    capabilities: "review",
+  });
+  command(service, {
+    type: "project.create",
+    projectId,
+    name: "Recovery evidence project",
+    leadProfileId,
+  });
+  command(service, {
+    type: "project.configure",
+    projectId,
+    expectedVersion: 1,
+    paused: false,
+  });
+  command(service, {
+    type: "routing.configure",
+    projectId,
+    expectedVersion: 1,
+    enabled: false,
+    guidance: "No routing calls are made by this view fixture.",
+    credentialRef: "env:PRIVATE_RECOVERY_CREDENTIAL_SENTINEL",
+    candidateProfileIds: [workerProfileId],
+  });
+  command(service, {
+    type: "task.create",
+    projectId,
+    taskId,
+    title: "Task-scoped recovery evidence",
+    outcome: "PRIVATE_RECOVERY_OUTCOME_SENTINEL",
+    ready: false,
+  });
+  const leadAssignment = service.domain().ensureLeadAssignment(taskId);
+  assert.ok(leadAssignment);
+  command(service, {
+    type: "assignment.create",
+    projectId,
+    taskId,
+    assignmentId: workerAssignmentId,
+    profileId: workerProfileId,
+    brief: "PRIVATE_RECOVERY_BRIEF_SENTINEL",
+    resultDestination: "lead",
+    requesterAssignmentId: null,
+  });
+  await service.provisionTask(taskId);
+  command(service, {
+    type: "task.configure",
+    projectId,
+    taskId,
+    expectedVersion: 1,
+    ready: true,
+  });
+  await waitUntil(() => runtime.turns === 1);
+
+  await service.stopTask(taskId);
+  const firstRecord = service
+    .recoveryView()
+    .find((record) => record.binding?.taskId === taskId);
+  assert.ok(firstRecord?.binding);
+  assert.ok(firstRecord.intent.threadId);
+  assert.ok(firstRecord.intent.turnId);
+  assert.ok(firstRecord.processIdentity);
+  const firstTurnId = firstRecord.intent.turnId;
+  await service.resolveHeldExecution({
+    workId: firstRecord.workId,
+    workRevision: firstRecord.generation.workRevision,
+    requestSequence: firstRecord.generation.requestSequence,
+    threadId: firstRecord.intent.threadId,
+    turnId: firstTurnId,
+    processIdentity: firstRecord.processIdentity,
+    termination: { kind: "process-exit" },
+    effects: "settled",
+    workspace: "reconciled",
+  });
+  runtime.finish(firstTurnId, "failed");
+  await service.resumeTask(taskId);
+  await waitUntil(() => runtime.turns === 2);
+  await service.stopTask(taskId);
+
+  const records = service
+    .recoveryView()
+    .filter((record) => record.binding?.taskId === taskId);
+  assert.equal(
+    records.length,
+    2,
+    "both SQLite-backed generations are retained",
+  );
+  const receiptRecord = records.find((record) => record.receipt !== null);
+  const pendingRecord = records.find(
+    (record) => record.receipt === null && record.pendingEffects.length > 0,
+  );
+  assert.ok(receiptRecord?.receipt);
+  assert.ok(receiptRecord?.binding);
+  assert.ok(pendingRecord?.binding);
+  assert.notEqual(receiptRecord.workId, pendingRecord.workId);
+
+  const taskRoute = runtimeOperatorRoutes(service).find(
+    (candidate) =>
+      candidate.method === "GET" && candidate.path === "/runtime/task/:taskId",
+  );
+  const assignmentRoute = runtimeOperatorRoutes(service).find(
+    (candidate) =>
+      candidate.method === "GET" &&
+      candidate.path === "/runtime/assignment/:assignmentId",
+  );
+  assert.ok(taskRoute);
+  assert.ok(assignmentRoute);
+  const taskPage = await taskRoute.handler({
+    params: { taskId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  const assignmentPage = await assignmentRoute.handler({
+    params: { assignmentId: pendingRecord.binding.assignmentId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(taskPage.kind, "html");
+  assert.equal(assignmentPage.kind, "html");
+  if (taskPage.kind !== "html" || assignmentPage.kind !== "html") return;
+
+  for (const page of [taskPage.body, assignmentPage.body]) {
+    assert.match(page, new RegExp(`Recovery record: ${receiptRecord.workId}`));
+    assert.match(page, new RegExp(`Recovery record: ${pendingRecord.workId}`));
+    assert.ok(
+      page.includes(
+        `Assignment ${receiptRecord.binding.assignmentId} (version ${receiptRecord.binding.assignmentVersion}; instructions revision ${receiptRecord.binding.instructionsRevision}; profile revision ${receiptRecord.binding.profileRevision})`,
+      ),
+    );
+    assert.match(page, /Generation: work revision 1; request sequence 1/);
+    assert.match(page, /Runtime intent: reconciled/);
+    assert.match(
+      page,
+      /intent reason: Execution state requires operator attention/,
+    );
+    assert.match(page, /Turn request: held/);
+    assert.match(
+      page,
+      /request reason: Execution state requires operator attention/,
+    );
+    assert.match(
+      page,
+      /Recorded thread identity.*not proof of termination or release/,
+    );
+    assert.match(
+      page,
+      /Recorded turn identity: fixture-turn-[0-9]+-&amp;-recorded/,
+    );
+    assert.match(page, /Recorded process identity/);
+    assert.match(page, /process ID fixture-process-&lt;script&gt;/);
+    assert.match(page, /started fixture-started-&amp;-bounded/);
+    assert.match(page, /boot identity fixture-boot-identity/);
+    assert.match(
+      page,
+      /Recorded recovery receipt: [0-9a-f-]+; workspace disposition: reconciled/,
+    );
+    assert.match(
+      page,
+      /Observation: termination-verified — Original process termination was independently verified/,
+    );
+    assert.match(
+      page,
+      /Observation: receipt-accepted — A validated recovery receipt resolved this generation/,
+    );
+    assert.match(
+      page,
+      /Pending effect: pending — Assignment result has not been committed/,
+    );
+    assert.match(page, /Task hold reason: Task stopped/);
+    assert.match(
+      page,
+      /fixture-thread-[0-9]+-&lt;img src=x onerror=alert\(1\)&gt;/,
+    );
+    assert.doesNotMatch(page, /<img src=x onerror=alert\(1\)>/);
+    assert.match(page, /Effects may continue while an execution is stopping/);
+    assert.doesNotMatch(page, /no unresolved execution hold is reported/i);
+    assert.doesNotMatch(page, /execution stopped and released/i);
+    assert.doesNotMatch(
+      page,
+      /PRIVATE_RECOVERY_(?:INSTRUCTIONS|WORKER_INSTRUCTIONS|OUTCOME|BRIEF|CREDENTIAL)_SENTINEL/,
+    );
+  }
 });
 
 test("dependency controls replay add and remove commands across restart", async (t) => {
