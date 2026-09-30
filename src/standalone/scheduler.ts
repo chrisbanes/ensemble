@@ -127,13 +127,15 @@ export class SchedulerStore {
       TurnRequestInput,
       "requestKey" | "workId" | "kind" | "workspace"
     >,
+    generation?: { requestKey: string; workId: string },
   ): TurnRequest {
     if (!input.assignmentId)
       throw new Error("Assignment request needs an assignment ID");
     return this.ensure({
       ...input,
-      requestKey: `assignment:${input.assignmentId}:initial`,
-      workId: `assignment:${input.assignmentId}:initial`,
+      requestKey:
+        generation?.requestKey ?? `assignment:${input.assignmentId}:initial`,
+      workId: generation?.workId ?? `assignment:${input.assignmentId}:initial`,
       kind: "assignment",
       workspace: null,
     });

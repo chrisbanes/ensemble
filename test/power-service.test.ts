@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
-import type { Runtime } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+} from "../src/standalone/codex.js";
 import type {
   ExactExecutionIdentity,
   ExecutionInspection,
@@ -81,6 +85,9 @@ class FakeRuntime implements Runtime {
   inspectionGate: Promise<void> | undefined;
   firstTurnEntered: (() => void) | undefined;
   firstTurnGate: Promise<void> | undefined;
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
 
   async start() {}
   async stop() {}
@@ -100,7 +107,14 @@ class FakeRuntime implements Runtime {
       bootId: "fake-boot",
     };
   }
-  async waitForTurn() {
+  async waitForTurn(threadId: string, turnId: string) {
+    await this.toolCall?.({
+      threadId,
+      turnId,
+      callId: `fixture-question-${threadId}-${turnId}`,
+      tool: "ensemble_ask_question",
+      arguments: { question: "Power fixture is waiting for the next step" },
+    });
     if (this.turns === 1) {
       this.firstTurnEntered?.();
       await this.firstTurnGate;
@@ -113,6 +127,9 @@ class FakeRuntime implements Runtime {
     this.inspectionStarted?.();
     await this.inspectionGate;
     return { kind: "exact-live", identity };
+  }
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
   }
 }
 

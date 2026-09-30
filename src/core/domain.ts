@@ -242,6 +242,9 @@ export class DomainStore {
           profileId TEXT NOT NULL REFERENCES profiles(id), profileRevision INTEGER NOT NULL,
           instructionsRevision INTEGER NOT NULL, brief TEXT NOT NULL,
           resultDestination TEXT NOT NULL, requesterAssignmentId TEXT,
+          resultRecipientAssignmentId TEXT,
+          resultRecipientDisposition TEXT NOT NULL DEFAULT 'unresolved'
+            CHECK(resultRecipientDisposition IN ('resolved','unresolved')),
           state TEXT NOT NULL CHECK(state IN ('pending','running','completed','held'))
         );
         CREATE TABLE IF NOT EXISTS task_lead_bindings (
@@ -274,16 +277,82 @@ export class DomainStore {
           assignmentId TEXT, candidateRevisions TEXT NOT NULL,
           guidanceRevision INTEGER NOT NULL, model TEXT NOT NULL,
           question TEXT NOT NULL, judgment TEXT, disposition TEXT NOT NULL,
-          resultDestination TEXT NOT NULL, payloadHash TEXT NOT NULL,
+          resultDestination TEXT NOT NULL, brief TEXT NOT NULL,
+          payloadHash TEXT NOT NULL,
           UNIQUE(projectId, taskId, taskVersion)
         );`);
       const version = this.db
         .prepare("SELECT version FROM domain_schema")
         .get() as Row | undefined;
-      if (version && version.version !== 1)
+      if (
+        version &&
+        version.version !== 1 &&
+        version.version !== 2 &&
+        version.version !== 3
+      )
         throw new Error("Unsupported domain schema version");
-      if (!version)
-        this.db.prepare("INSERT INTO domain_schema (version) VALUES (1)").run();
+      const assignmentColumns = this.db
+        .prepare("PRAGMA table_info(domain_assignments)")
+        .all() as Row[];
+      if (
+        !assignmentColumns.some(
+          (column) => column.name === "resultRecipientAssignmentId",
+        )
+      )
+        this.db.exec(
+          "ALTER TABLE domain_assignments ADD COLUMN resultRecipientAssignmentId TEXT",
+        );
+      const routingColumns = this.db
+        .prepare("PRAGMA table_info(routing_operations)")
+        .all() as Row[];
+      if (!routingColumns.some((column) => column.name === "brief"))
+        this.db.exec(
+          "ALTER TABLE routing_operations ADD COLUMN brief TEXT NOT NULL DEFAULT ''",
+        );
+      if (
+        !assignmentColumns.some(
+          (column) => column.name === "resultRecipientDisposition",
+        )
+      )
+        this.db.exec(
+          "ALTER TABLE domain_assignments ADD COLUMN resultRecipientDisposition TEXT NOT NULL DEFAULT 'unresolved' CHECK(resultRecipientDisposition IN ('resolved','unresolved'))",
+        );
+      if (!version || version.version === 1) {
+        this.db.exec(
+          "UPDATE domain_assignments\n" +
+            "SET resultRecipientAssignmentId = requesterAssignmentId\n" +
+            "WHERE requesterAssignmentId IS NOT NULL\n" +
+            "AND EXISTS (SELECT 1 FROM domain_assignments requester\n" +
+            "WHERE requester.id = domain_assignments.requesterAssignmentId\n" +
+            "AND requester.taskId = domain_assignments.taskId);\n" +
+            "UPDATE domain_assignments\n" +
+            "SET resultRecipientAssignmentId = resultDestination\n" +
+            "WHERE resultRecipientAssignmentId IS NULL\n" +
+            "AND resultDestination <> 'lead'\n" +
+            "AND EXISTS (SELECT 1 FROM domain_assignments recipient\n" +
+            "WHERE recipient.id = domain_assignments.resultDestination\n" +
+            "AND recipient.taskId = domain_assignments.taskId);\n" +
+            "UPDATE domain_assignments\n" +
+            "SET resultRecipientAssignmentId = (SELECT binding.assignmentId\n" +
+            "FROM task_lead_bindings binding WHERE binding.taskId = domain_assignments.taskId\n" +
+            "AND binding.projectId = domain_assignments.projectId)\n" +
+            "WHERE resultRecipientAssignmentId IS NULL AND resultDestination = 'lead';\n" +
+            "UPDATE domain_assignments SET resultRecipientDisposition = CASE\n" +
+            "WHEN resultRecipientAssignmentId IS NOT NULL THEN 'resolved' ELSE 'unresolved' END;\n" +
+            "UPDATE domain_schema SET version = 2",
+        );
+        if (!version)
+          this.db
+            .prepare("INSERT INTO domain_schema (version) VALUES (2)")
+            .run();
+      }
+      if (!version || Number(version.version) < 3) {
+        this.db.exec(`UPDATE routing_operations
+          SET brief = COALESCE((SELECT outcome FROM domain_tasks
+            WHERE domain_tasks.id = routing_operations.taskId), '')
+          WHERE brief = '';
+          UPDATE domain_schema SET version = 3`);
+      }
       this.db
         .prepare(
           "INSERT OR IGNORE INTO scheduler_capacity_limits (singleton, globalLimit) VALUES (1, 4)",
@@ -418,17 +487,19 @@ export class DomainStore {
   assignments(taskId: string): Row[] {
     return this.db
       .prepare(
-        "SELECT id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, state FROM domain_assignments WHERE taskId = ? ORDER BY rowid",
+        "SELECT id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, resultRecipientAssignmentId, resultRecipientDisposition, state FROM domain_assignments WHERE taskId = ? ORDER BY rowid",
       )
       .all(id.parse(taskId)) as Row[];
   }
 
   pendingAssignments(): Row[] {
     return this.db
-      .prepare(`SELECT id, taskId, projectId, version, profileId,
-        profileRevision, instructionsRevision, brief, resultDestination,
-        requesterAssignmentId, state
-        FROM domain_assignments WHERE state = 'pending' ORDER BY rowid`)
+      .prepare(
+        "SELECT id, taskId, projectId, version, profileId, profileRevision, " +
+          "instructionsRevision, brief, resultDestination, requesterAssignmentId, " +
+          "resultRecipientAssignmentId, resultRecipientDisposition, state " +
+          "FROM domain_assignments WHERE state = 'pending' ORDER BY rowid",
+      )
       .all() as Row[];
   }
 
@@ -484,36 +555,17 @@ export class DomainStore {
   }
 
   ensureLeadAssignment(taskId: string): Row | undefined {
-    const binding = this.ensureLeadBinding(taskId);
-    if (!binding) return undefined;
-    const assignmentId = present(binding, "assignmentId");
-    const existing = this.db
-      .prepare("SELECT * FROM domain_assignments WHERE id = ?")
-      .get(assignmentId) as Row | undefined;
-    if (existing) return existing;
-    const task = this.task(taskId);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db
-        .prepare(`INSERT OR IGNORE INTO domain_assignments
-          (id, taskId, projectId, version, profileId, profileRevision,
-            instructionsRevision, brief, resultDestination, requesterAssignmentId, state)
-          VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'lead', NULL, 'pending')`)
-        .run(
-          assignmentId,
-          taskId,
-          present(binding, "projectId"),
-          present(binding, "profileId"),
-          present(binding, "profileRevision"),
-          present(binding, "instructionsRevision"),
-          `Task: ${task.title}\nOutcome: ${task.outcome}`,
-        );
+      const assignment = this.ensureLeadAssignmentWithinTransaction(
+        id.parse(taskId),
+      );
       this.db.exec("COMMIT");
+      return assignment;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return this.assignment(String(assignmentId));
   }
 
   task(taskId: string): Row {
@@ -606,6 +658,7 @@ export class DomainStore {
     )
       reasons.push("profile-not-permitted");
     if (assignment.state === "held") reasons.push("assignment-held");
+    if (assignment.state === "completed") reasons.push("assignment-completed");
     if (expected) {
       if (Number(assignment.version) !== expected.assignmentVersion)
         reasons.push("assignment-revision-changed");
@@ -638,6 +691,46 @@ export class DomainStore {
       credentialAvailable: row.credentialRef === null ? 0 : 1,
       candidateProfileIds: present(row, "candidateProfileIds"),
     };
+  }
+
+  /** Internal credential reference for the TypeSafe adapter; never part of routing(). */
+  routingCredentialReference(projectId: string): string | null {
+    const row = this.required(
+      "SELECT credentialRef FROM project_routing WHERE projectId = ?",
+      id.parse(projectId),
+    );
+    return row.credentialRef === null ? null : String(row.credentialRef);
+  }
+
+  routingCandidates(projectId: string): Row[] {
+    const configured = JSON.parse(
+      String(this.routing(projectId).candidateProfileIds),
+    ) as unknown;
+    return z
+      .array(id)
+      .parse(configured)
+      .map((profileId) => this.profile(profileId))
+      .filter((profile) => Number(profile.revoked) === 0)
+      .map((profile) => ({
+        profileId: present(profile, "id"),
+        name: present(profile, "name"),
+        capabilities: present(profile, "capabilities"),
+        profileRevision: present(profile, "version"),
+      }));
+  }
+
+  routingOperations(taskId?: string): Row[] {
+    const sql =
+      "SELECT id, projectId, taskId, taskVersion, assignmentId, candidateRevisions, " +
+      "guidanceRevision, model, question, judgment, disposition, resultDestination, brief " +
+      "FROM routing_operations" +
+      (taskId ? " WHERE taskId = ?" : "") +
+      " ORDER BY rowid";
+    return (
+      taskId
+        ? this.db.prepare(sql).all(id.parse(taskId))
+        : this.db.prepare(sql).all()
+    ) as Row[];
   }
 
   dependencies(taskId: string): string[] {
@@ -676,25 +769,29 @@ export class DomainStore {
     return { eligible: reasons.length === 0, reasons };
   }
 
-  recordRouting(input: {
-    id: string;
-    projectId: string;
-    taskId: string;
-    taskVersion: number;
-    assignmentId: string | null;
-    candidateRevisions: Record<string, number>;
-    guidanceRevision: number;
-    model: string;
-    question: string;
-    judgment: string | null;
-    disposition: string;
-    resultDestination: string;
-    assignment?: {
-      profileId: string;
-      brief: string;
-      requesterAssignmentId: string | null;
-    };
-  }): Row {
+  recordRouting(
+    input: {
+      id: string;
+      projectId: string;
+      taskId: string;
+      taskVersion: number;
+      assignmentId: string | null;
+      candidateRevisions: Record<string, number>;
+      guidanceRevision: number;
+      model: string;
+      question: string;
+      judgment: string | null;
+      disposition: string;
+      resultDestination: string;
+      brief?: string;
+      assignment?: {
+        profileId: string;
+        brief: string;
+        requesterAssignmentId: string | null;
+      };
+    },
+    externallyAdmitted?: () => boolean,
+  ): Row {
     const data = z
       .object({
         id,
@@ -709,6 +806,7 @@ export class DomainStore {
         judgment: prose.nullable(),
         disposition: label,
         resultDestination: label,
+        brief: prose.optional(),
         assignment: z
           .object({
             profileId: id,
@@ -736,6 +834,8 @@ export class DomainStore {
         this.db.exec("COMMIT");
         return this.routingOperation(data.id);
       }
+      if (externallyAdmitted && !externallyAdmitted())
+        throw new Error("External admission rejected routing disposition");
       const task = this.task(data.taskId);
       if (task.projectId !== data.projectId)
         throw new Error("Task belongs to another project");
@@ -747,9 +847,9 @@ export class DomainStore {
         !this.admission(data.taskId).eligible
       )
         throw new Error("Routing decision is stale or task is held");
-      const candidateIds = JSON.parse(
-        String(routing.candidateProfileIds),
-      ) as string[];
+      const candidateIds = this.routingCandidates(data.projectId).map(
+        (candidate) => String(candidate.profileId),
+      );
       if (
         canonical(candidateIds) !==
         canonical(Object.keys(data.candidateRevisions).sort())
@@ -757,10 +857,11 @@ export class DomainStore {
         throw new Error("Routing candidate set changed");
       for (const profileId of candidateIds)
         if (
-          this.activeProfile(profileId).version !==
-          data.candidateRevisions[profileId]
+          this.profile(profileId).version !== data.candidateRevisions[profileId]
         )
           throw new Error("Candidate profile revision changed");
+      if (this.assignments(data.taskId).length > 0)
+        throw new Error("Routing decision became stale: task already assigned");
       if (data.disposition === "assigned") {
         if (!data.assignmentId || !data.assignment)
           throw new Error("Assigned routing requires an assignment");
@@ -782,9 +883,11 @@ export class DomainStore {
         });
       } else if (data.assignmentId || data.assignment)
         throw new Error("Non-assigned routing cannot create an assignment");
+      else if (!this.ensureLeadAssignmentWithinTransaction(data.taskId))
+        throw new Error("Routing fallback requires a configured task lead");
       this.db
         .prepare(
-          "INSERT INTO routing_operations (id, projectId, taskId, taskVersion, assignmentId, candidateRevisions, guidanceRevision, model, question, judgment, disposition, resultDestination, payloadHash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO routing_operations (id, projectId, taskId, taskVersion, assignmentId, candidateRevisions, guidanceRevision, model, question, judgment, disposition, resultDestination, brief, payloadHash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           data.id,
@@ -799,6 +902,7 @@ export class DomainStore {
           data.judgment,
           data.disposition,
           data.resultDestination,
+          data.brief ?? String(task.outcome),
           hash,
         );
       this.db.exec("COMMIT");
@@ -812,7 +916,7 @@ export class DomainStore {
 
   routingOperation(operationId: string): Row {
     return this.required(
-      "SELECT id, projectId, taskId, taskVersion, assignmentId, candidateRevisions, guidanceRevision, model, question, judgment, disposition, resultDestination FROM routing_operations WHERE id = ?",
+      "SELECT id, projectId, taskId, taskVersion, assignmentId, candidateRevisions, guidanceRevision, model, question, judgment, disposition, resultDestination, brief FROM routing_operations WHERE id = ?",
       id.parse(operationId),
     );
   }
@@ -994,9 +1098,12 @@ export class DomainStore {
           if (requester.taskId !== command.taskId)
             throw new Error("Requester assignment belongs to another task");
         }
+        const resultRecipientAssignmentId =
+          command.requesterAssignmentId ??
+          this.ensureLeadBindingWithinTransaction(command.taskId);
         this.db
           .prepare(
-            "INSERT INTO domain_assignments (id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, state) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'pending')",
+            "INSERT INTO domain_assignments (id, taskId, projectId, version, profileId, profileRevision, instructionsRevision, brief, resultDestination, requesterAssignmentId, resultRecipientAssignmentId, resultRecipientDisposition, state) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
           )
           .run(
             command.assignmentId,
@@ -1008,6 +1115,8 @@ export class DomainStore {
             command.brief,
             command.resultDestination,
             command.requesterAssignmentId,
+            resultRecipientAssignmentId,
+            resultRecipientAssignmentId ? "resolved" : "unresolved",
           );
         return this.assignment(command.assignmentId);
       }
@@ -1101,6 +1210,68 @@ export class DomainStore {
         return this.capacityLimits(Object.keys(command.projectOverrides));
       }
     }
+  }
+
+  private ensureLeadAssignmentWithinTransaction(
+    taskId: string,
+  ): Row | undefined {
+    const assignmentId = this.ensureLeadBindingWithinTransaction(taskId);
+    if (!assignmentId) return undefined;
+    const existing = this.one(
+      "SELECT * FROM domain_assignments WHERE id = ?",
+      assignmentId,
+    );
+    if (existing) return existing;
+    const binding = this.required(
+      "SELECT taskId, projectId, profileId, profileRevision, instructionsRevision, assignmentId FROM task_lead_bindings WHERE taskId = ?",
+      taskId,
+    );
+    const task = this.task(taskId);
+    this.db
+      .prepare(`INSERT OR IGNORE INTO domain_assignments
+        (id, taskId, projectId, version, profileId, profileRevision,
+          instructionsRevision, brief, resultDestination, requesterAssignmentId,
+          resultRecipientAssignmentId, resultRecipientDisposition, state)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'lead', NULL, ?, 'resolved', 'pending')`)
+      .run(
+        assignmentId,
+        taskId,
+        String(binding.projectId),
+        String(binding.profileId),
+        Number(binding.profileRevision),
+        Number(binding.instructionsRevision),
+        `Task: ${task.title}\nOutcome: ${task.outcome}`,
+        assignmentId,
+      );
+    return this.assignment(assignmentId);
+  }
+
+  private ensureLeadBindingWithinTransaction(taskId: string): string | null {
+    const existing = this.one(
+      "SELECT assignmentId FROM task_lead_bindings WHERE taskId = ?",
+      taskId,
+    );
+    if (existing) return String(existing.assignmentId);
+    const task = this.task(taskId);
+    const project = this.project(String(task.projectId));
+    if (typeof project.leadProfileId !== "string") return null;
+    const profile = this.activeProfile(project.leadProfileId);
+    const assignmentId = randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO task_lead_bindings " +
+          "(taskId, projectId, profileId, profileRevision, instructionsRevision, assignmentId) " +
+          "VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        taskId,
+        String(task.projectId),
+        project.leadProfileId,
+        present(profile, "version"),
+        present(project, "instructionsRevision"),
+        assignmentId,
+      );
+    return assignmentId;
   }
 
   private snapshotProfile(profileId: string): void {

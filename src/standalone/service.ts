@@ -11,11 +11,29 @@ import { DatabaseSync } from "node:sqlite";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { Store } from "../core/store.js";
 import {
+  CoordinationStore,
+  type CoordinationCall,
+  type CoordinationReceipt,
+  type InboxDelivery,
+} from "../core/coordination.js";
+import {
+  dispatchCoordinationTool,
+  isCoordinationTool,
+  coordinationTools,
+} from "./coordination-tools.js";
+import { CoordinationView } from "./coordination-view.js";
+import {
   DomainStore,
   type CapacityConfigureCommand,
   type CapacityLimits,
 } from "../core/domain.js";
-import { CodexRuntime, parseFailureEvidence, type Runtime } from "./codex.js";
+import {
+  CodexRuntime,
+  parseFailureEvidence,
+  type Runtime,
+  type RuntimeToolCall,
+  type RuntimeToolResult,
+} from "./codex.js";
 import type {
   RecoveryRecord,
   RecoveryReceipt,
@@ -27,6 +45,17 @@ import {
   type TurnRequest,
 } from "./scheduler.js";
 import {
+  RoutingAttemptStore,
+  RoutingCoordinator,
+  RoutingOperationStaleError,
+  routingClientFromEnvironment,
+  routingModel,
+  type RoutingChoiceClient,
+  type RoutingOutcome,
+  type RoutingSnapshot,
+  type RoutingStaleReason,
+} from "./routing.js";
+import {
   ExecutionSupervisor,
   type ExecutionSupervisorOptions,
   type StopObservation,
@@ -34,6 +63,7 @@ import {
 import { MacProcessTerminationVerifier } from "./termination.js";
 import {
   ExecutionState,
+  type CoordinationExecutionBinding,
   type ExecutionIntent,
   type TaskExecutionBinding,
   type TaskExecutionContext,
@@ -64,6 +94,7 @@ const immutableRevisionMismatches = new Set([
 ]);
 
 export interface StandaloneServiceOptions {
+  routingClient?: RoutingChoiceClient | null;
   supervisor?: ExecutionSupervisorOptions;
   terminationVerifier?: TerminationVerifier;
   power?: {
@@ -121,6 +152,8 @@ export class StandaloneService {
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
   private domainState: DomainStore | undefined;
+  private coordination: CoordinationStore | undefined;
+  private routingAttempts: RoutingAttemptStore | undefined;
   private workspaces: WorkspaceManager | undefined;
   private schedulerStore: SchedulerStore | undefined;
   private scheduler: TurnScheduler | undefined;
@@ -132,6 +165,7 @@ export class StandaloneService {
   private readonly active = new Set<Promise<ExecutionIntent>>();
   private readonly activeByWorkId = new Map<string, Promise<ExecutionIntent>>();
   private readonly callbacks = new Map<string, Set<Promise<unknown>>>();
+  private readonly routingCoordinators = new Map<string, RoutingCoordinator>();
   private readonly retryNow: () => number;
   private readonly fallbackBackoffMs: number;
   private readonly maxFallbackBackoffMs: number;
@@ -210,6 +244,9 @@ export class StandaloneService {
       });
       domain.migrate();
       this.domainState = domain;
+      const routingAttempts = new RoutingAttemptStore(db);
+      routingAttempts.migrate();
+      this.routingAttempts = routingAttempts;
       const schedulerStore = new SchedulerStore(db);
       this.schedulerStore = schedulerStore;
       const workspaces = new WorkspaceManager(
@@ -231,6 +268,9 @@ export class StandaloneService {
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
+      const coordination = new CoordinationStore(db, domain);
+      coordination.migrate();
+      this.coordination = coordination;
       const runtime = this.runtimeFactory();
       this.runtime = runtime;
       this.supervisor = new ExecutionSupervisor(
@@ -298,6 +338,7 @@ export class StandaloneService {
           this.supervisor?.noteAnomaly(item.workId);
         }
       });
+      runtime.onToolCall?.((call) => this.handleToolCall(call));
       runtime.onTerminalAnomaly?.((anomaly) => {
         const items = state.list();
         const matched =
@@ -381,6 +422,9 @@ export class StandaloneService {
           this.runtime = undefined;
           this.supervisor = undefined;
           this.domainState = undefined;
+          this.coordination = undefined;
+          this.routingAttempts = undefined;
+          this.routingCoordinators.clear();
           this.schedulerStore = undefined;
           this.scheduler = undefined;
           this.workspaces = undefined;
@@ -427,6 +471,9 @@ export class StandaloneService {
     this.db = undefined;
     this.state = undefined;
     this.domainState = undefined;
+    this.coordination = undefined;
+    this.routingAttempts = undefined;
+    this.routingCoordinators.clear();
     this.schedulerStore = undefined;
     this.workspaces = undefined;
     this.activeByWorkId.clear();
@@ -469,6 +516,23 @@ export class StandaloneService {
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;
+  }
+
+  coordinationView(): CoordinationView {
+    if (
+      !this.coordination ||
+      !this.routingAttempts ||
+      !this.state ||
+      !this.domainState
+    )
+      throw new Error("Service is not started");
+    return new CoordinationView(
+      this.domainState,
+      this.coordination,
+      this.state,
+      this.routingAttempts,
+      () => this.wakeScheduler(),
+    );
   }
 
   capacityLimits(projectIds: string[] = []): CapacityLimits {
@@ -598,6 +662,58 @@ export class StandaloneService {
       .catch(() => {});
   }
 
+  private handleToolCall(call: RuntimeToolCall): Promise<RuntimeToolResult> {
+    const coordination = this.coordination;
+    const state = this.state;
+    if (!coordination || !state || !isCoordinationTool(call.tool))
+      return Promise.resolve({
+        text: "Coordination tool is unavailable for this execution",
+        success: false,
+      });
+    let receipt: CoordinationReceipt | undefined;
+    try {
+      receipt = coordination.receipt(call as CoordinationCall);
+    } catch (error) {
+      return Promise.resolve({
+        text: String(error).slice(0, 1000),
+        success: false,
+      });
+    }
+    if (receipt) return Promise.resolve(receipt.response);
+
+    let binding: CoordinationExecutionBinding | undefined;
+    try {
+      binding = state.coordinationBinding(call.threadId, call.turnId);
+    } catch (error) {
+      return Promise.resolve({
+        text: String(error).slice(0, 1000),
+        success: false,
+      });
+    }
+    if (!binding)
+      return Promise.resolve({
+        text: "Coordination call is not bound to current task work",
+        success: false,
+      });
+
+    const pending = Promise.resolve()
+      .then(async () => {
+        const response = dispatchCoordinationTool(
+          coordination,
+          call as CoordinationCall,
+          () => !state.taskHold(binding.taskId),
+        );
+        if (response.success) await this.wakeScheduler();
+        return response;
+      })
+      .catch((error: unknown) => ({
+        text: String(error).slice(0, 1000),
+        success: false,
+      }));
+    this.registerExecutionCallback(binding.workId, pending);
+    return pending;
+  }
+
   async submitTask(
     workId: string,
     assignmentId: string,
@@ -673,42 +789,339 @@ export class StandaloneService {
     throw new Error("Turn request is queued until its task workspace is ready");
   }
 
+  private routingStaleReason(
+    domain: DomainStore,
+    state: ExecutionState,
+    snapshot: RoutingSnapshot,
+  ): RoutingStaleReason | undefined {
+    if (state.taskHold(snapshot.taskId)) return "task-held";
+    const task = domain.task(snapshot.taskId);
+    if (Number(task.version) !== snapshot.taskVersion)
+      return "task-revision-changed";
+    const routing = domain.routing(snapshot.projectId);
+    if (
+      Number(routing.version) !== snapshot.guidanceRevision ||
+      Number(routing.enabled) !== 1
+    )
+      return "routing-revision-changed";
+    const candidates = domain.routingCandidates(snapshot.projectId);
+    const capturedIds = snapshot.candidates
+      .map((candidate) => candidate.profileId)
+      .sort();
+    const currentIds = candidates
+      .map((candidate) => String(candidate.profileId))
+      .sort();
+    if (JSON.stringify(currentIds) !== JSON.stringify(capturedIds))
+      return "candidate-set-changed";
+    if (
+      candidates.some((candidate) => {
+        const captured = snapshot.candidates.find(
+          (item) => item.profileId === candidate.profileId,
+        );
+        return Number(candidate.profileRevision) !== captured?.profileRevision;
+      })
+    )
+      return "candidate-profile-changed";
+    if (!domain.admission(snapshot.taskId).eligible) return "admission-held";
+    if (domain.assignments(snapshot.taskId).length > 0)
+      return "assignment-already-exists";
+    return undefined;
+  }
+
   private async wakeScheduler(): Promise<void> {
     const scheduler = this.scheduler;
     const store = this.schedulerStore;
     const domain = this.domainState;
-    if (!scheduler || !store || !domain) return;
+    const state = this.state;
+    const coordination = this.coordination;
+    const routingAttempts = this.routingAttempts;
+    if (
+      !scheduler ||
+      !store ||
+      !domain ||
+      !state ||
+      !coordination ||
+      !routingAttempts
+    )
+      return;
+    const deliveryWorkCompleted = (delivery: InboxDelivery): boolean => {
+      const intent = state.byWorkId(delivery.deliveryWorkId);
+      const binding = state.taskBinding(delivery.deliveryWorkId);
+      return Boolean(
+        intent?.state === "completed" &&
+          binding?.workId === delivery.deliveryWorkId &&
+          binding.taskId === delivery.taskId &&
+          binding.assignmentId === delivery.recipientAssignmentId &&
+          binding.assignmentVersion === delivery.assignmentVersion,
+      );
+    };
+    for (const delivery of coordination.queuedDeliveries())
+      if (deliveryWorkCompleted(delivery))
+        coordination.completeDeliveryBatch(delivery.deliveryWorkId);
+
+    for (const completion of coordination.completionRequests()) {
+      if (completion.status !== "pending") continue;
+      const intent = state.byWorkId(completion.leadWorkId);
+      const binding = state.taskBinding(completion.leadWorkId);
+      if (
+        intent?.state !== "completed" ||
+        !binding ||
+        binding.taskId !== completion.taskId ||
+        binding.assignmentId !== completion.leadAssignmentId
+      )
+        continue;
+      coordination.finalizeTaskCompletion({
+        requestId: completion.requestId,
+        workId: completion.leadWorkId,
+        terminal: "completed",
+      });
+    }
+    for (const workId of coordination.completedWorkNeedingDisposition())
+      coordination.recordSuccessfulTerminal(workId);
+
+    for (const operation of domain.routingOperations()) {
+      const disposition = String(operation.disposition);
+      if (!disposition.startsWith("lead-review:")) continue;
+      const taskId = String(operation.taskId);
+      const leadAssignment = domain.ensureLeadAssignment(taskId);
+      if (!leadAssignment) continue;
+      coordination.ensureRoutingFallbackEvent({
+        routingOperationId: String(operation.id),
+        taskId,
+        recipientAssignmentId: String(leadAssignment.id),
+        brief: String(operation.brief),
+        reason: disposition.slice("lead-review:".length),
+        evidence: String(operation.judgment ?? ""),
+      });
+    }
+
+    const committedRoutingIds = new Set(
+      domain.routingOperations().map((operation) => String(operation.id)),
+    );
+    for (const operation of routingAttempts.operations()) {
+      if (
+        operation.status === "stale" ||
+        committedRoutingIds.has(operation.operationId)
+      )
+        continue;
+      const staleReason = this.routingStaleReason(
+        domain,
+        state,
+        operation.snapshot,
+      );
+      if (staleReason)
+        routingAttempts.markStale(operation.operationId, staleReason);
+    }
+
     for (const task of domain.readyTasksWithLead()) {
       const taskId = String(task.id);
-      domain.ensureLeadBinding(taskId);
       const taskAssignments = domain.assignments(taskId);
+      if (taskAssignments.length > 0) continue;
       const route = domain.routing(String(task.projectId));
-      if (
-        taskAssignments.length === 0 &&
-        !(
-          Number(route.enabled) === 1 && Number(route.credentialAvailable) === 1
-        )
-      )
+      if (Number(route.enabled) !== 1) {
         domain.ensureLeadAssignment(taskId);
+        continue;
+      }
+      if (!domain.admission(taskId).eligible || state.taskHold(taskId))
+        continue;
+      const leadBinding = domain.ensureLeadBinding(taskId);
+      if (!leadBinding) continue;
+
+      const projectId = String(task.projectId);
+      const currentTask = domain.task(taskId);
+      const candidates = domain
+        .routingCandidates(projectId)
+        .map((candidate) => ({
+          profileId: String(candidate.profileId),
+          name: String(candidate.name),
+          capabilities: String(candidate.capabilities),
+          profileRevision: Number(candidate.profileRevision),
+        }));
+      const snapshot: RoutingSnapshot = {
+        projectId,
+        taskId,
+        taskVersion: Number(currentTask.version),
+        guidanceRevision: Number(route.version),
+        brief: String(currentTask.outcome),
+        findings: "",
+        guidance: String(route.guidance),
+        candidates,
+      };
+      const existingAttempt = routingAttempts.operation(
+        projectId,
+        taskId,
+        snapshot.taskVersion,
+      );
+      if (existingAttempt?.status === "stale") continue;
+      if (
+        existingAttempt &&
+        JSON.stringify(existingAttempt.snapshot) !== JSON.stringify(snapshot)
+      ) {
+        routingAttempts.markStale(
+          existingAttempt.operationId,
+          this.routingStaleReason(domain, state, existingAttempt.snapshot) ??
+            "domain-disposition-rejected",
+        );
+        continue;
+      }
+      const attempt =
+        existingAttempt ?? routingAttempts.ensureOperation(snapshot);
+      if (attempt.status === "stale") continue;
+
+      let outcome: RoutingOutcome;
+      if (candidates.length === 0) {
+        outcome = routingAttempts.completeFallback(attempt.operationId, {
+          kind: "lead-review",
+          reason: "no-candidates",
+          requestedModel: routingModel,
+        });
+      } else if (!snapshot.brief.trim()) {
+        outcome = routingAttempts.completeFallback(attempt.operationId, {
+          kind: "lead-review",
+          reason: "missing-context",
+          requestedModel: routingModel,
+        });
+      } else {
+        const credentialReference =
+          domain.routingCredentialReference(projectId);
+        const client =
+          this.options.routingClient === undefined
+            ? routingClientFromEnvironment(credentialReference)
+            : (this.options.routingClient ?? undefined);
+        if (!route.credentialAvailable || !client) {
+          outcome = routingAttempts.completeFallback(attempt.operationId, {
+            kind: "lead-review",
+            reason: "missing-credentials",
+            requestedModel: routingModel,
+          });
+        } else {
+          const cacheKey =
+            this.options.routingClient === undefined
+              ? (credentialReference ?? "missing-credential-reference")
+              : "injected-routing-client";
+          let coordinator = this.routingCoordinators.get(cacheKey);
+          if (!coordinator) {
+            coordinator = new RoutingCoordinator(routingAttempts, client);
+            this.routingCoordinators.set(cacheKey, coordinator);
+          }
+          try {
+            outcome = await coordinator.route(snapshot);
+          } catch (error) {
+            if (error instanceof RoutingOperationStaleError) continue;
+            throw error;
+          }
+        }
+      }
+
+      const staleReason = this.routingStaleReason(domain, state, snapshot);
+      if (staleReason) {
+        routingAttempts.markStale(attempt.operationId, staleReason);
+        continue;
+      }
+      const disposition =
+        outcome.kind === "assigned"
+          ? "assigned"
+          : `lead-review:${outcome.reason}`;
+      let recorded: ReturnType<DomainStore["recordRouting"]>;
+      try {
+        recorded = domain.recordRouting(
+          {
+            id: attempt.operationId,
+            projectId,
+            taskId,
+            taskVersion: snapshot.taskVersion,
+            assignmentId:
+              outcome.kind === "assigned" ? attempt.operationId : null,
+            candidateRevisions: Object.fromEntries(
+              candidates.map((candidate) => [
+                candidate.profileId,
+                candidate.profileRevision,
+              ]),
+            ),
+            guidanceRevision: snapshot.guidanceRevision,
+            model: outcome.requestedModel,
+            question:
+              "Choose the best eligible initial assignee, or return for lead review.",
+            judgment: JSON.stringify(outcome),
+            disposition,
+            resultDestination: "lead:task",
+            brief: snapshot.brief,
+            ...(outcome.kind === "assigned"
+              ? {
+                  assignment: {
+                    profileId: outcome.profileId,
+                    brief: snapshot.brief,
+                    requesterAssignmentId: null,
+                  },
+                }
+              : {}),
+          },
+          () => !state.taskHold(taskId),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const staleReason =
+          this.routingStaleReason(domain, state, snapshot) ??
+          (message === "External admission rejected routing disposition"
+            ? "task-held"
+            : /stale|held|candidate|revision|already assigned/i.test(message)
+              ? "domain-disposition-rejected"
+              : undefined);
+        if (!staleReason) throw error;
+        routingAttempts.markStale(attempt.operationId, staleReason);
+        continue;
+      }
+      if (outcome.kind === "lead-review") {
+        const leadAssignment = domain.ensureLeadAssignment(taskId);
+        if (!leadAssignment)
+          throw new Error("Routing fallback requires a configured task lead");
+        coordination.ensureRoutingFallbackEvent({
+          routingOperationId: String(recorded.id),
+          taskId,
+          recipientAssignmentId: String(leadAssignment.id),
+          brief: snapshot.brief,
+          reason: outcome.reason,
+          evidence: JSON.stringify(outcome),
+        });
+      }
     }
     for (const assignment of domain.pendingAssignments()) {
       const taskId = String(assignment.taskId);
       const task = domain.task(taskId);
       if (Number(task.ready) !== 1 || task.state !== "open") continue;
-      if (store.list().some((item) => item.assignmentId === assignment.id))
-        continue;
+      const assignmentId = String(assignment.id);
+      const initialWorkId = `assignment:${assignmentId}:initial`;
+      if (store.list().some((item) => item.workId === initialWorkId)) continue;
+      const queued = coordination
+        .queuedDeliveries()
+        .find((item) => item.recipientAssignmentId === assignmentId);
+      let delivery: InboxDelivery | undefined = queued;
+      if (!delivery && coordination.pendingEvents(assignmentId).length > 0)
+        delivery = coordination.bindDeliveryBatch(
+          assignmentId,
+          initialWorkId,
+          Number(assignment.version),
+        );
+      const requestWorkId = delivery?.deliveryWorkId ?? initialWorkId;
       try {
-        store.createAssignment({
-          taskId,
-          projectId: String(assignment.projectId),
-          assignmentId: String(assignment.id),
-          taskVersion: Number(task.version),
-          assignmentVersion: Number(assignment.version),
-          instructionsRevision: Number(assignment.instructionsRevision),
-          profileRevision: Number(assignment.profileRevision),
-          prompt: String(assignment.brief),
-          previousWorkId: null,
-        });
+        store.createAssignment(
+          {
+            taskId,
+            projectId: String(assignment.projectId),
+            assignmentId,
+            taskVersion: Number(task.version),
+            assignmentVersion: Number(assignment.version),
+            instructionsRevision: Number(assignment.instructionsRevision),
+            profileRevision: Number(assignment.profileRevision),
+            prompt: this.assignmentPrompt(String(assignment.brief), delivery),
+            previousWorkId: delivery
+              ? (state.latestCompletedAssignmentWork(assignmentId) ?? null)
+              : null,
+          },
+          delivery
+            ? { requestKey: requestWorkId, workId: requestWorkId }
+            : undefined,
+        );
       } catch (error) {
         const existing = store
           .list()
@@ -720,7 +1133,152 @@ export class StandaloneService {
           );
       }
     }
+
+    const requests = store.list();
+    for (const delivery of coordination.queuedDeliveries()) {
+      if (deliveryWorkCompleted(delivery)) {
+        coordination.completeDeliveryBatch(delivery.deliveryWorkId);
+        continue;
+      }
+      if (requests.some((item) => item.workId === delivery.deliveryWorkId))
+        continue;
+      let assignment: ReturnType<DomainStore["assignment"]>;
+      try {
+        assignment = domain.assignment(delivery.recipientAssignmentId);
+      } catch {
+        continue;
+      }
+      const task = domain.task(delivery.taskId);
+      if (
+        Number(assignment.version) !== delivery.assignmentVersion ||
+        (assignment.state !== "pending" && assignment.state !== "running") ||
+        Number(task.ready) !== 1 ||
+        task.state !== "open"
+      )
+        continue;
+      const workId = delivery.deliveryWorkId;
+      store.createAssignment(
+        {
+          taskId: delivery.taskId,
+          projectId: String(assignment.projectId),
+          assignmentId: delivery.recipientAssignmentId,
+          taskVersion: Number(task.version),
+          assignmentVersion: delivery.assignmentVersion,
+          instructionsRevision: Number(assignment.instructionsRevision),
+          profileRevision: Number(assignment.profileRevision),
+          prompt: this.assignmentPrompt(String(assignment.brief), delivery),
+          previousWorkId:
+            state.latestCompletedAssignmentWork(
+              delivery.recipientAssignmentId,
+            ) ?? null,
+        },
+        { requestKey: workId, workId },
+      );
+    }
+
+    for (const recipientAssignmentId of coordination.pendingEventRecipients()) {
+      if (
+        coordination
+          .queuedDeliveries()
+          .some((item) => item.recipientAssignmentId === recipientAssignmentId)
+      )
+        continue;
+      let assignment: ReturnType<DomainStore["assignment"]>;
+      try {
+        assignment = domain.assignment(recipientAssignmentId);
+      } catch {
+        continue;
+      }
+      const task = domain.task(String(assignment.taskId));
+      if (
+        (assignment.state !== "pending" && assignment.state !== "running") ||
+        Number(task.ready) !== 1 ||
+        task.state !== "open" ||
+        state.assignmentHasUnfinishedExecution(recipientAssignmentId) ||
+        store
+          .list()
+          .some(
+            (item) =>
+              item.assignmentId === recipientAssignmentId &&
+              (item.state === "queued" ||
+                item.state === "active" ||
+                item.state === "held"),
+          )
+      )
+        continue;
+      const pending = coordination.pendingEvents(recipientAssignmentId);
+      const first = pending[0];
+      if (!first) continue;
+      const version = Number(assignment.version);
+      const workId = `assignment:${recipientAssignmentId}:v${version}:inbox:${first.eventId}`;
+      const delivery = coordination.bindDeliveryBatch(
+        recipientAssignmentId,
+        workId,
+        version,
+      );
+      if (!delivery) continue;
+      store.createAssignment(
+        {
+          taskId: delivery.taskId,
+          projectId: String(assignment.projectId),
+          assignmentId: recipientAssignmentId,
+          taskVersion: Number(task.version),
+          assignmentVersion: version,
+          instructionsRevision: Number(assignment.instructionsRevision),
+          profileRevision: Number(assignment.profileRevision),
+          prompt: this.assignmentPrompt(String(assignment.brief), delivery),
+          previousWorkId:
+            state.latestCompletedAssignmentWork(recipientAssignmentId) ?? null,
+        },
+        { requestKey: workId, workId },
+      );
+    }
+
+    for (const repair of coordination.reportingRepairs()) {
+      if (repair.state !== "queued") continue;
+      if (store.list().some((item) => item.workId === repair.repairWorkId))
+        continue;
+      let assignment: ReturnType<DomainStore["assignment"]>;
+      try {
+        assignment = domain.assignment(repair.assignmentId);
+      } catch {
+        continue;
+      }
+      const task = domain.task(repair.taskId);
+      if (
+        Number(assignment.version) !== repair.assignmentVersion ||
+        assignment.state === "held" ||
+        Number(task.ready) !== 1 ||
+        task.state !== "open"
+      )
+        continue;
+      const prompt = `${String(assignment.brief)}\n\nReporting repair: the previous successful turn ended without a saved result or durable waiting action. Continue this assignment and record a result or request a durable next action before ending.`;
+      store.createAssignment(
+        {
+          taskId: repair.taskId,
+          projectId: String(assignment.projectId),
+          assignmentId: repair.assignmentId,
+          taskVersion: Number(task.version),
+          assignmentVersion: repair.assignmentVersion,
+          instructionsRevision: Number(assignment.instructionsRevision),
+          profileRevision: Number(assignment.profileRevision),
+          prompt,
+          previousWorkId:
+            state.latestCompletedAssignmentWork(repair.assignmentId) ??
+            repair.missedWorkId,
+        },
+        { requestKey: repair.repairWorkId, workId: repair.repairWorkId },
+      );
+    }
     await scheduler.wake();
+  }
+
+  private assignmentPrompt(brief: string, delivery?: InboxDelivery): string {
+    if (!delivery) return brief;
+    const events = delivery.events.map(
+      (event) => `- ${event.eventType}: ${event.payload}`,
+    );
+    return `${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
   }
 
   private async attemptRequest(request: TurnRequest): Promise<void> {
@@ -918,15 +1476,19 @@ export class StandaloneService {
     const runtime = this.requireRuntime();
     try {
       let threadId: string;
+      const tools =
+        request.kind === "assignment" && request.assignmentId
+          ? coordinationTools
+          : undefined;
       if (previous?.threadId) {
         if (state.get(intent.id).state !== "submitting")
           throw new Error("Execution admission was held");
-        await runtime.resumeThread(previous.threadId);
+        await runtime.resumeThread(previous.threadId, tools);
         threadId = previous.threadId;
       } else {
         if (state.get(intent.id).state !== "submitting")
           throw new Error("Execution admission was held");
-        threadId = await runtime.startThread(workspace);
+        threadId = await runtime.startThread(workspace, tools);
       }
       const threadBound = state.bindThread(intent.id, threadId);
       this.requireSupervisor().threadBound(request.workId, threadId);
@@ -959,6 +1521,28 @@ export class StandaloneService {
       else if (outcome === "completed") {
         state.complete(intent.id, threadId, turnId);
         this.lastCompletedWorkId = request.workId;
+        const coordination = this.coordination;
+        const binding = state.taskBinding(request.workId);
+        if (coordination) {
+          const delivery = coordination.deliveryForWork(request.workId);
+          if (delivery?.state === "queued")
+            coordination.completeDeliveryBatch(request.workId);
+          if (binding) {
+            for (const completion of coordination.completionRequests(
+              binding.taskId,
+            ))
+              if (
+                completion.leadWorkId === request.workId &&
+                completion.status === "pending"
+              )
+                coordination.finalizeTaskCompletion({
+                  requestId: completion.requestId,
+                  workId: request.workId,
+                  terminal: "completed",
+                });
+            coordination.recordSuccessfulTerminal(request.workId);
+          }
+        }
       } else {
         state.hold(intent.id, "Bound turn failed or was interrupted");
         const evidence = parseFailureEvidence(

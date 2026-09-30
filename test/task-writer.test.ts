@@ -10,13 +10,20 @@ import {
   ExecutionState,
   type ExecutionIntent,
 } from "../src/standalone/state.js";
-import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 import type { WorkspaceManager } from "../src/standalone/workspaces.js";
 
 class RuntimeFixture implements Runtime {
   starts = 0;
   resumes = 0;
   turns = 0;
+  private threadIds = 0;
+  private turnIds = 0;
   interrupts: Array<{ threadId: string; turnId: string }> = [];
   beforeInterrupt?: () => void;
   outcome: "completed" | "failed" = "completed";
@@ -27,18 +34,32 @@ class RuntimeFixture implements Runtime {
     turnId?: string;
     reason: string;
   }) => void;
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
   async start() {}
   async stop() {}
   async startThread() {
-    return `thread-${++this.starts}`;
+    this.starts++;
+    return `thread-${++this.threadIds}`;
   }
   async resumeThread() {
     this.resumes++;
   }
   async startTurn() {
-    return `turn-${++this.turns}`;
+    this.turns++;
+    return `turn-${++this.turnIds}`;
   }
-  async waitForTurn() {
+  async waitForTurn(threadId: string, turnId: string) {
+    await this.toolCall?.({
+      threadId,
+      turnId,
+      callId: `fixture-question-${threadId}-${turnId}`,
+      tool: "ensemble_ask_question",
+      arguments: {
+        question: "Task-writer fixture is waiting for the next step",
+      },
+    });
     this.entered?.();
     await this.gate;
     return this.outcome;
@@ -48,6 +69,9 @@ class RuntimeFixture implements Runtime {
     this.interrupts.push({ threadId, turnId });
   }
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
   onTerminalAnomaly(
     listener: (event: {
       threadId?: string;

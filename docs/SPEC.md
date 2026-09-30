@@ -8,11 +8,19 @@ implementation contracts remain subject to S01 evidence.
 [ADR-1004](adr/1004-standalone-service.md) removes BB from the target architecture.
 This specification preserves the product policies from ADR-1001, ADR-1002 and
 ADR-1003 with that ownership change. The [BB specification](SPEC-bb.md) is history.
-The standalone service now has durable scheduling, capacity admission,
-supervision and conservative recovery primitives. The authenticated operator UI
-foundation is implemented; the full operator journey and assignment router are
-not. See the [S04c boundary](design/s04c-operator-ui.md) for the implemented
-scope and limits. Remaining requirements below are product obligations, not
+The standalone service has durable scheduling, capacity admission, supervision,
+conservative recovery, and the S04b task-coordination foundations: durable results
+and recipient inboxes, human-request attention/interactions, retained-assignee
+follow-up, revision-bound lead completion and bounded assignment-routing
+provenance. These are covered by deterministic service tests and a disposable
+test-only read view, not by the production coordination, history or recovery UI.
+A [bounded real Codex journey](evidence/s04b-live-runtime-2026-09-29.md) observed
+registered dynamic tools on resumed lead and worker threads after service/App
+Server restart. This qualifies that tested journey only, not universal
+reattachment. The authenticated operator UI foundation is implemented; the full
+operator journey, assignment router and private Tailscale proof remain
+incomplete. The [S04c boundary](design/s04c-operator-ui.md) describes the UI
+scope and limits. Requirements below remain product obligations rather than
 passing acceptance claims.
 
 ## Purpose and scope
@@ -167,6 +175,9 @@ completed turn with neither result nor waiting reason; then hold for attention.
 Persist that allowance and apply normal admission controls. Results arriving while
 their recipient is active wait for its next turn; coalesce continuation wakeups while
 retaining individual acknowledgements. Paused/stopped recipients retain their inbox.
+Operator messages may target only pending or running assignments. Held or completed
+assignments are not implicitly revived; resolve the hold or create explicit follow-up/
+recovery first. Legacy inbox events do not dispatch a completed assignment.
 
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No

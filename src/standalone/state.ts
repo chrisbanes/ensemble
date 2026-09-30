@@ -45,6 +45,10 @@ export interface TaskExecutionBinding extends TaskExecutionContext {
   conversationRevision: number;
 }
 
+export interface CoordinationExecutionBinding extends TaskExecutionBinding {
+  state: "running" | "completed";
+}
+
 export interface StopTarget {
   taskId: string;
   workId: string;
@@ -855,6 +859,83 @@ export class ExecutionState {
     return this.db
       .prepare("SELECT * FROM task_execution_bindings WHERE workId = ?")
       .get(workId) as TaskExecutionBinding | undefined;
+  }
+
+  coordinationBinding(
+    threadId: string,
+    turnId: string,
+  ): CoordinationExecutionBinding | undefined {
+    const rows = this.db
+      .prepare(`SELECT binding.workId, binding.taskId,
+      binding.assignmentId, binding.assignmentVersion,
+      binding.instructionsRevision, binding.profileRevision,
+      binding.conversationRevision, intent.state
+      FROM task_execution_bindings binding
+      JOIN execution_intents intent ON intent.workId = binding.workId
+      JOIN task_work_revisions revision ON revision.workId = binding.workId
+      JOIN assignment_conversations conversation
+        ON conversation.assignmentId = binding.assignmentId
+      JOIN domain_assignments assignment ON assignment.id = binding.assignmentId
+      WHERE intent.threadId = ? AND intent.turnId = ?
+        AND intent.state IN ('running','completed')
+        AND assignment.version = binding.assignmentVersion
+        AND conversation.revision = binding.conversationRevision
+        AND NOT EXISTS (
+          SELECT 1 FROM task_work_revision_ambiguities ambiguous
+          WHERE ambiguous.assignmentId = binding.assignmentId
+            AND ambiguous.conversationRevision = binding.conversationRevision
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM task_work_revisions newer
+          WHERE newer.assignmentId = revision.assignmentId
+            AND newer.conversationRevision = revision.conversationRevision
+            AND newer.workRevision > revision.workRevision
+        )
+      LIMIT 2`)
+      .all(threadId, turnId) as Array<
+      TaskExecutionBinding & { state: "running" | "completed" }
+    >;
+    if (rows.length > 1)
+      throw new Error("Coordination callback matches ambiguous work");
+    return rows[0];
+  }
+
+  latestCompletedAssignmentWork(assignmentId: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT binding.workId
+      FROM task_execution_bindings binding
+      JOIN execution_intents intent ON intent.workId = binding.workId
+      JOIN task_work_revisions revision ON revision.workId = binding.workId
+      JOIN assignment_conversations conversation
+        ON conversation.assignmentId = binding.assignmentId
+        AND conversation.revision = binding.conversationRevision
+      WHERE binding.assignmentId = ? AND intent.state = 'completed'
+        AND intent.threadId IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM task_work_revision_ambiguities ambiguous
+          WHERE ambiguous.assignmentId = binding.assignmentId
+            AND ambiguous.conversationRevision = binding.conversationRevision
+        )
+      ORDER BY revision.workRevision DESC LIMIT 1`)
+      .get(z.string().uuid().parse(assignmentId)) as
+      | { workId: string }
+      | undefined;
+    return row?.workId;
+  }
+
+  assignmentHasUnfinishedExecution(assignmentId: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM task_execution_bindings binding
+      JOIN execution_intents intent ON intent.workId = binding.workId
+      WHERE binding.assignmentId = ?
+        AND intent.state IN ('ready','capacity-waiting','held','submitting','running')
+        AND NOT EXISTS (
+          SELECT 1 FROM execution_request_refusals refusal
+          WHERE refusal.workId = intent.workId
+        ) LIMIT 1`)
+        .get(z.string().uuid().parse(assignmentId)) !== undefined
+    );
   }
 
   replaceConversation(assignmentId: string): number {
@@ -1833,6 +1914,30 @@ export class ExecutionState {
           .prepare(`INSERT INTO execution_capacity_reservations (workId, projectId)
           VALUES (?, ?)`)
           .run(workId, options.projectId);
+        const taskBinding = this.taskBinding(workId);
+        if (taskBinding) {
+          const activated = this.db
+            .prepare(`UPDATE domain_assignments SET state = 'running'
+            WHERE id = ? AND taskId = ? AND version = ?
+              AND state IN ('pending', 'running')
+              AND EXISTS (
+                SELECT 1 FROM task_execution_bindings binding
+                WHERE binding.workId = ?
+                  AND binding.assignmentId = domain_assignments.id
+                  AND binding.taskId = domain_assignments.taskId
+                  AND binding.assignmentVersion = domain_assignments.version
+              ) RETURNING id`)
+            .get(
+              taskBinding.assignmentId,
+              taskBinding.taskId,
+              taskBinding.assignmentVersion,
+              workId,
+            ) as { id: string } | undefined;
+          if (!activated)
+            throw new Error(
+              "Assignment admission no longer matches its bound version",
+            );
+        }
         if (this.hasTurnRequests)
           this.db
             .prepare(

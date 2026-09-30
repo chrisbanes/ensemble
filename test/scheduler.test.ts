@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
-import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolResult,
+  UnexpectedRequest,
+} from "../src/standalone/codex.js";
 
 class GatedRuntime implements Runtime {
   starts = 0;
@@ -13,6 +18,9 @@ class GatedRuntime implements Runtime {
   prompts: string[] = [];
   entered: (() => void) | undefined;
   release: Promise<void> | undefined;
+  private toolCall:
+    | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
+    | undefined;
   async start() {}
   async stop() {}
   async startThread() {
@@ -26,12 +34,22 @@ class GatedRuntime implements Runtime {
     return `turn-${this.turns}`;
   }
   async interruptTurn() {}
-  async waitForTurn() {
+  async waitForTurn(threadId: string, turnId: string) {
+    await this.toolCall?.({
+      threadId,
+      turnId,
+      callId: `fixture-question-${threadId}-${turnId}`,
+      tool: "ensemble_ask_question",
+      arguments: { question: "Scheduler fixture is waiting for the next step" },
+    });
     this.entered?.();
     await this.release;
     return "completed" as const;
   }
   onUnexpectedRequest(_listener: (request: UnexpectedRequest) => void) {}
+  onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
+    this.toolCall = listener;
+  }
 }
 
 function deferred() {
@@ -229,14 +247,6 @@ test("eligible pending assignments dispatch once and retain request identity aft
       ready: false,
     });
     await service.provisionTask(taskId);
-    execute({
-      type: "task.configure",
-      actor: "operator",
-      projectId,
-      taskId,
-      expectedVersion: 1,
-      ready: true,
-    });
     const entered = deferred();
     const release = deferred();
     runtime.entered = entered.resolve;
@@ -252,6 +262,14 @@ test("eligible pending assignments dispatch once and retain request identity aft
       resultDestination: "lead",
       requesterAssignmentId: null,
     });
+    execute({
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
     assert.equal(
       await waitUntil(() => runtime.turns === 1),
       true,
@@ -261,7 +279,11 @@ test("eligible pending assignments dispatch once and retain request identity aft
     assert.equal(runtime.turns, 1);
     const first = service.list().find((item) => item.state === "running");
     assert.ok(first);
-    assert.equal(service.domain().assignment(assignmentId).state, "pending");
+    const admittedAssignmentState = service
+      .domain()
+      .assignment(assignmentId).state;
+    release.resolve();
+    assert.equal(admittedAssignmentState, "running");
 
     execute({
       type: "project.configure",
@@ -317,6 +339,7 @@ test("lead bindings are task-scoped and enabled routing waits for an assignment"
   const leadTaskIds: string[] = [randomUUID(), randomUUID()];
   const leadProfileId = randomUUID();
   const workerProfileId = randomUUID();
+  const gate = deferred();
   const execute = (command: Record<string, unknown>) =>
     service.domain().execute({ key: randomUUID(), ...command } as never);
   try {
@@ -390,20 +413,9 @@ test("lead bindings are task-scoped and enabled routing waits for an assignment"
       });
     await service.provisionTask(routedTaskId);
     for (const taskId of leadTaskIds) await service.provisionTask(taskId);
-    const gate = deferred();
     let entered = 0;
     runtime.entered = () => entered++;
     runtime.release = gate.promise;
-    for (const taskId of [routedTaskId, ...leadTaskIds])
-      execute({
-        type: "task.configure",
-        actor: "operator",
-        projectId: taskId === routedTaskId ? routedProjectId : leadProjectId,
-        taskId,
-        expectedVersion: 1,
-        ready: true,
-      });
-
     const assignmentId = randomUUID();
     execute({
       type: "assignment.create",
@@ -416,6 +428,16 @@ test("lead bindings are task-scoped and enabled routing waits for an assignment"
       resultDestination: "lead",
       requesterAssignmentId: null,
     });
+    for (const taskId of [routedTaskId, ...leadTaskIds])
+      execute({
+        type: "task.configure",
+        actor: "operator",
+        projectId: taskId === routedTaskId ? routedProjectId : leadProjectId,
+        taskId,
+        expectedVersion: 1,
+        ready: true,
+      });
+
     assert.equal(await waitUntil(() => entered === 3), true);
     const bindings = service.domain().leadBindings();
     assert.equal(bindings.length, 3);
@@ -452,6 +474,7 @@ test("lead bindings are task-scoped and enabled routing waits for an assignment"
     );
     assert.equal(runtime.turns, 3);
   } finally {
+    gate.resolve();
     await service.stop();
     rmSync(root, { recursive: true, force: true });
   }
@@ -521,14 +544,6 @@ test("direct and managed turns share one atomic provisional reservation ledger",
     runtime.entered = () => entered++;
     runtime.release = release.promise;
     execute({
-      type: "task.configure",
-      actor: "operator",
-      projectId,
-      taskId,
-      expectedVersion: 1,
-      ready: true,
-    });
-    execute({
       type: "assignment.create",
       actor: "agent",
       projectId,
@@ -538,6 +553,14 @@ test("direct and managed turns share one atomic provisional reservation ledger",
       brief: "Managed work",
       resultDestination: "lead",
       requesterAssignmentId: null,
+    });
+    execute({
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
     });
     const directOne = service.submit("direct-one", "Direct one", firstDirect);
     const directTwo = service.submit("direct-two", "Direct two", secondDirect);
@@ -637,14 +660,6 @@ test("failed writer admission rolls back the entire reservation transition", asy
       ready: false,
     });
     await service.provisionTask(taskId);
-    execute({
-      type: "task.configure",
-      actor: "operator",
-      projectId,
-      taskId,
-      expectedVersion: 1,
-      ready: true,
-    });
     const db = (
       service as unknown as {
         db: {
@@ -666,6 +681,14 @@ test("failed writer admission rolls back the entire reservation transition", asy
       resultDestination: "lead",
       requesterAssignmentId: null,
     });
+    execute({
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
     assert.equal(
       await waitUntil(() =>
         service
@@ -685,6 +708,7 @@ test("failed writer admission rolls back the entire reservation transition", asy
         ?.state,
       "held",
     );
+    assert.equal(service.domain().assignment(assignmentId).state, "pending");
     assert.equal(
       db.prepare("SELECT COUNT(*) AS count FROM task_writer_admissions").get()
         ?.count,
@@ -1059,6 +1083,10 @@ test("capacity one yields a completed requester to its child and resumes it once
       true,
     );
     assert.equal(runtime.turns, 1);
+    assert.equal(
+      service.domain().assignment(childAssignmentId).state,
+      "pending",
+    );
     assert.equal(
       service.recordTaskResult(parentWorkId, "early child result"),
       false,
