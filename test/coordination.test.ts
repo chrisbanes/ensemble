@@ -17,6 +17,7 @@ const workerProfile = "30000000-0000-4000-8000-000000000002";
 const childA = "40000000-0000-4000-8000-000000000001";
 const nestedA = "40000000-0000-4000-8000-000000000002";
 const childB = "40000000-0000-4000-8000-000000000003";
+const grandchildA = "40000000-0000-4000-8000-000000000005";
 let commandSequence = 0;
 type WithoutKey<T> = T extends unknown ? Omit<T, "key"> : never;
 
@@ -241,11 +242,16 @@ test("results route to same-task lead or requester and histories stay isolated",
   try {
     const leadA = f.domain.ensureLeadAssignment(taskA);
     const leadB = f.domain.ensureLeadAssignment(taskB);
-    const first = f.coordination.recordResult(
-      report("thread-child-a", "turn-child-a", "call-a"),
-    );
     const nested = f.coordination.recordResult(
       report("thread-nested-a", "turn-nested-a", "call-nested"),
+    );
+    const childDelivery = f.coordination.bindDeliveryBatch(
+      childA,
+      "work-child-a",
+    );
+    assert.ok(childDelivery);
+    const first = f.coordination.recordResult(
+      report("thread-child-a", "turn-child-a", "call-a"),
     );
     const otherTask = f.coordination.recordResult(
       report("thread-child-b", "turn-child-b", "call-b"),
@@ -274,6 +280,150 @@ test("results route to same-task lead or requester and histories stay isolated",
       [taskA, taskA],
     );
     assert.equal(f.coordination.results(taskB).length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("requesters wait for descendants and consume exact-work inbox batches", () => {
+  const f = fixture();
+  try {
+    f.domain.execute({
+      type: "assignment.create",
+      actor: "agent",
+      key: nextCommand(),
+      projectId,
+      taskId: taskA,
+      assignmentId: grandchildA,
+      profileId: workerProfile,
+      brief: "Nested grandchild work",
+      resultDestination: "requester",
+      requesterAssignmentId: nestedA,
+    });
+    f.addWork(
+      grandchildA,
+      "work-grandchild-a",
+      "thread-grandchild-a",
+      "turn-grandchild-a",
+    );
+
+    assert.throws(
+      () =>
+        f.coordination.recordResult(
+          report("thread-nested-a", "turn-nested-a", "call-nested-early"),
+        ),
+      /delegated assignments are not completed/,
+    );
+    assert.deepEqual(f.coordination.results(), []);
+    assert.equal(f.domain.assignment(nestedA).state, "running");
+
+    const grandchildResult = f.coordination.recordResult(
+      report("thread-grandchild-a", "turn-grandchild-a", "call-grandchild"),
+    ).result;
+    assert.equal(grandchildResult.recipientAssignmentId, nestedA);
+    const nestedDelivery = f.coordination.bindDeliveryBatch(
+      nestedA,
+      "work-nested-a",
+    );
+    assert.deepEqual(
+      nestedDelivery?.events.map((event) => event.resultId),
+      [grandchildResult.resultId],
+    );
+    const nestedResult = f.coordination.recordResult(
+      report("thread-nested-a", "turn-nested-a", "call-nested"),
+    ).result;
+    assert.equal(nestedResult.recipientAssignmentId, childA);
+
+    const parentDelivery = f.coordination.bindDeliveryBatch(
+      childA,
+      "work-child-a",
+    );
+    assert.deepEqual(
+      parentDelivery?.events.map((event) => event.resultId),
+      [nestedResult.resultId],
+    );
+    f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: childA,
+      expectedAssignmentVersion: 1,
+      message: "Late event beyond the current batch",
+    });
+    assert.throws(
+      () =>
+        f.coordination.recordResult(
+          report("thread-child-a", "turn-child-a", "call-parent"),
+        ),
+      /inbox events remain undelivered/,
+    );
+    assert.equal(f.domain.assignment(childA).state, "running");
+    assert.deepEqual(
+      f.coordination.pendingEvents(childA).map((event) => event.eventType),
+      ["operator-message"],
+    );
+
+    f.coordination.completeDeliveryBatch("work-child-a");
+    const laterDelivery = f.coordination.bindDeliveryBatch(
+      childA,
+      "work-child-a-continuation",
+    );
+    assert.deepEqual(
+      laterDelivery?.events.map((event) => event.eventType),
+      ["operator-message"],
+    );
+    assert.deepEqual(f.coordination.pendingEvents(childA), []);
+    assert.throws(
+      () =>
+        f.coordination.recordResult(
+          report("thread-child-a", "turn-child-a", "call-parent-late-event"),
+        ),
+      /inbox events remain undelivered/,
+    );
+
+    f.reopen();
+    f.db
+      .prepare(
+        "UPDATE execution_intents SET state = 'completed' WHERE workId = ?",
+      )
+      .run("work-child-a");
+    assert.deepEqual(
+      f.coordination
+        .bindDeliveryBatch(childA, "work-child-a-continuation")
+        ?.events.map((event) => event.eventType),
+      ["operator-message"],
+    );
+
+    f.state.replaceConversation(childA);
+    f.addWork(
+      childA,
+      "work-child-a-continuation",
+      "thread-child-a-continuation",
+      "turn-child-a-continuation",
+    );
+    const continuation = f.coordination.bindDeliveryBatch(
+      childA,
+      "work-child-a-continuation",
+    );
+    assert.deepEqual(
+      continuation?.events.map((event) => event.eventType),
+      ["operator-message"],
+    );
+    const parentResult = f.coordination.recordResult(
+      report(
+        "thread-child-a-continuation",
+        "turn-child-a-continuation",
+        "call-parent-after-restart",
+      ),
+    ).result;
+    assert.equal(
+      parentResult.recipientAssignmentId,
+      f.domain.ensureLeadAssignment(taskA)?.id,
+    );
+    f.coordination.completeDeliveryBatch("work-child-a-continuation");
+    assert.deepEqual(f.coordination.pendingEvents(childA), []);
+    assert.equal(f.domain.assignment(nestedA).state, "completed");
+    assert.equal(f.domain.assignment(grandchildA).state, "completed");
   } finally {
     f.close();
   }
@@ -370,6 +520,10 @@ test("unresolved result destinations survive reopen and reconcile once", () => {
 test("exact receipts replay after completion before live binding checks", () => {
   const f = fixture();
   try {
+    f.coordination.recordResult(
+      report("thread-nested-a", "turn-nested-a", "call-replay-nested"),
+    );
+    assert.ok(f.coordination.bindDeliveryBatch(childA, "work-child-a"));
     const call = report("thread-child-a", "turn-child-a", "call-replay");
     const first = f.coordination.recordResult(call);
     f.db
@@ -482,8 +636,20 @@ test("result and inbox or unresolved hold commit atomically", () => {
   ] as const) {
     const f = fixture();
     try {
+      if (table === "coordination_inbox_events") {
+        f.coordination.recordResult(
+          report("thread-nested-a", "turn-nested-a", "call-fail-nested"),
+        );
+        assert.ok(f.coordination.bindDeliveryBatch(childA, "work-child-a"));
+      }
       if (table === "coordination_unresolved_result_destinations")
         f.addUnresolvedWork();
+      const resultsBefore = f.coordination.results().length;
+      const leadInboxBefore = f.coordination.inboxEvents(
+        String(f.domain.ensureLeadAssignment(taskA)?.id),
+      ).length;
+      const unresolvedBefore =
+        f.coordination.unresolvedResultDestinations().length;
       f.db.exec(
         "CREATE TRIGGER fail_effect BEFORE INSERT ON " +
           table +
@@ -493,14 +659,17 @@ test("result and inbox or unresolved hold commit atomically", () => {
         () => f.coordination.recordResult(call),
         /injected effect failure/,
       );
-      assert.equal(f.coordination.results().length, 0);
+      assert.equal(f.coordination.results().length, resultsBefore);
       assert.equal(
         f.coordination.inboxEvents(
           String(f.domain.ensureLeadAssignment(taskA)?.id),
         ).length,
-        0,
+        leadInboxBefore,
       );
-      assert.equal(f.coordination.unresolvedResultDestinations().length, 0);
+      assert.equal(
+        f.coordination.unresolvedResultDestinations().length,
+        unresolvedBefore,
+      );
       assert.equal(f.coordination.receipt(call), undefined);
     } finally {
       f.close();
@@ -1107,6 +1276,10 @@ test("delivery batches and scheduler admission reject completed assignments", ()
 test("follow-up reuses the completed assignment and binds the exact result", () => {
   const f = fixture();
   try {
+    f.coordination.recordResult(
+      report("thread-nested-a", "turn-nested-a", "call-follow-up-nested"),
+    );
+    assert.ok(f.coordination.bindDeliveryBatch(childA, "work-child-a"));
     const result = f.coordination.recordResult(
       report("thread-child-a", "turn-child-a", "call-follow-up-result"),
     ).result;

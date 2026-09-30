@@ -547,6 +547,38 @@ export class CoordinationStore {
       const binding = this.currentBinding(call.threadId, call.turnId);
       if (!binding)
         throw new Error("Coordination callback is not bound to current work");
+      const unfinishedChild = this.one(
+        `SELECT 1 FROM domain_assignments
+        WHERE requesterAssignmentId = ? AND state <> 'completed'
+        LIMIT 1`,
+        String(binding.assignmentId),
+      );
+      if (unfinishedChild)
+        throw new Error(
+          "Assignment cannot report while delegated assignments are not completed",
+        );
+      const undeliveredInboxEvent = this.one(
+        `SELECT 1 FROM coordination_inbox_events event
+        WHERE event.recipientAssignmentId = ? AND (
+          NOT EXISTS (
+            SELECT 1 FROM coordination_delivery_events delivered
+            WHERE delivered.eventId = event.eventId
+          ) OR EXISTS (
+            SELECT 1 FROM coordination_delivery_events delivered
+            JOIN coordination_delivery_batches batch
+              ON batch.batchId = delivered.batchId
+            WHERE delivered.eventId = event.eventId
+              AND batch.state = 'queued' AND batch.deliveryWorkId <> ?
+          )
+        )
+        LIMIT 1`,
+        String(binding.assignmentId),
+        String(binding.workId),
+      );
+      if (undeliveredInboxEvent)
+        throw new Error(
+          "Assignment cannot report while inbox events remain undelivered",
+        );
       const priorResult = this.one(
         "SELECT resultId, taskId, assignmentId, workId, workRevision, assignmentVersion, summary, payloadHash, recipientAssignmentId, destinationDisposition, createdAt " +
           "FROM coordination_results WHERE assignmentId = ? AND workRevision = ?",

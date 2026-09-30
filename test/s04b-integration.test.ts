@@ -1925,13 +1925,6 @@ test("restart leaves legacy inbox events for a completed recipient undelivered",
         .assignments(taskId)
         .find((assignment) => assignment.profileId === leadProfileId)?.id,
     );
-    const message = await service.coordinationView().postOperatorMessage({
-      taskId,
-      key: randomUUID(),
-      recipientAssignmentId: leadAssignmentId,
-      expectedAssignmentVersion: 1,
-      message: "This event predates completion.",
-    });
     const result = await runtime.callTool({
       threadId: "thread-1",
       turnId: "turn-1",
@@ -1944,12 +1937,21 @@ test("restart leaves legacy inbox events for a completed recipient undelivered",
     await waitUntil(
       () => service.domain().assignment(leadAssignmentId).state === "completed",
     );
+    const legacyEventId = randomUUID();
+    const db = (service as unknown as { db: DatabaseSync }).db;
+    db.prepare(`INSERT INTO coordination_inbox_events
+      (eventId, taskId, recipientAssignmentId, eventType, payload)
+      VALUES (?, ?, ?, 'operator-message', ?)`).run(
+      legacyEventId,
+      taskId,
+      leadAssignmentId,
+      JSON.stringify({ message: "Legacy event for completed assignment." }),
+    );
     assert.equal(
       service
         .coordinationView()
         .readTask(taskId)
-        .messages.find((item) => item.eventId === message.eventId)
-        ?.deliveryState,
+        .messages.find((item) => item.eventId === legacyEventId)?.deliveryState,
       "pending",
     );
     await service.stop();
@@ -1964,8 +1966,7 @@ test("restart leaves legacy inbox events for a completed recipient undelivered",
       service
         .coordinationView()
         .readTask(taskId)
-        .messages.find((item) => item.eventId === message.eventId)
-        ?.deliveryState,
+        .messages.find((item) => item.eventId === legacyEventId)?.deliveryState,
       "pending",
     );
     assert.equal(
