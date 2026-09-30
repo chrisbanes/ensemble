@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpdir } from "./temp.js";
 import type { DomainCommand } from "../src/core/domain.js";
 import type { Runtime } from "../src/standalone/codex.js";
 import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { readHiddenPassword } from "../../dist/src/standalone/operator-hidden-password.js";
+import { postWithoutFollowingRedirects } from "../../dist/test/s04c/private-access-requests.js";
 
 function readConfiguration() {
   const origin = process.env.ENSEMBLE_TEST_HTTPS_ORIGIN ?? "";
@@ -99,7 +100,8 @@ if (args.length !== 1 || args[0] !== "--live") {
       const unauthenticatedName = `Unauthenticated proof ${randomUUID()}`;
       const anonymousContext = await browser.newContext();
       try {
-        const response = await anonymousContext.request.post(
+        const response = await postWithoutFollowingRedirects(
+          anonymousContext.request,
           `${config.origin}/command`,
           {
             headers: { origin: config.origin },
@@ -112,7 +114,8 @@ if (args.length !== 1 || args[0] !== "--live") {
           },
         );
         assert.equal(response.status(), 401);
-        const runtimeWrite = await anonymousContext.request.post(
+        const runtimeWrite = await postWithoutFollowingRedirects(
+          anonymousContext.request,
           `${config.origin}/runtime/control/capacity`,
           {
             headers: { origin: config.origin },
@@ -201,7 +204,8 @@ if (args.length !== 1 || args[0] !== "--live") {
           csrfToken,
         },
       ]) {
-        const response = await context.request.post(
+        const response = await postWithoutFollowingRedirects(
+          context.request,
           `${config.origin}/command`,
           {
             headers: attempt.headers,
@@ -215,7 +219,8 @@ if (args.length !== 1 || args[0] !== "--live") {
           },
         );
         assert.equal(response.status(), 403);
-        const runtimeResponse = await context.request.post(
+        const runtimeResponse = await postWithoutFollowingRedirects(
+          context.request,
           `${config.origin}/runtime/control/capacity`,
           {
             headers: attempt.headers,
@@ -247,7 +252,8 @@ if (args.length !== 1 || args[0] !== "--live") {
       };
       for (let attempt = 0; attempt < 2; attempt += 1) {
         capacityChangeAttempted = true;
-        const response = await context.request.post(
+        const response = await postWithoutFollowingRedirects(
+          context.request,
           `${config.origin}/runtime/control/capacity`,
           {
             headers: { origin: config.origin },
@@ -274,7 +280,8 @@ if (args.length !== 1 || args[0] !== "--live") {
         new RegExp(`:\\s*${changedProjectLimit} active turns`),
       );
       const restoreKey = randomUUID();
-      const restored = await context.request.post(
+      const restored = await postWithoutFollowingRedirects(
+        context.request,
         `${config.origin}/runtime/control/capacity`,
         {
           headers: { origin: config.origin },
@@ -330,7 +337,8 @@ if (args.length !== 1 || args[0] !== "--live") {
         context
       ) {
         try {
-          const response = await context.request.post(
+          const response = await postWithoutFollowingRedirects(
+            context.request,
             `${config.origin}/runtime/control/capacity`,
             {
               headers: { origin: config.origin },
