@@ -86,7 +86,9 @@ The extended [`test/s04c/private-access.mjs`](../../test/s04c/private-access.mjs
 also checks the new private Runtime/Coordination reads and a same-origin,
 replayed capacity write, restoring the disposable project's original effective
 limit afterward. It requires an explicitly provisioned disposable HTTPS/Tailscale
-fixture and second peer. If that fixture is absent, the proof is unproved and
-#694 remains incomplete. The test does not create, replace or remove persistent
-Tailscale Serve configuration; neither this proof nor the loopback proof
-authorizes deployment or cutover.
+fixture and a passing run from the fixture host through its canonical Tailscale
+HTTPS URL. This proves the private route and browser boundary from that host; it
+does not establish reachability from a separate device. If the fixture or route
+is absent, the proof is unproved and #694 remains incomplete. The test does not
+create, replace or remove persistent Tailscale Serve configuration; neither this
+proof nor the loopback proof authorizes deployment or cutover.
