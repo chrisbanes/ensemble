@@ -19,6 +19,9 @@ import {
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
 import { OperatorAuth } from "../src/standalone/operator-auth.js";
+import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
+import { OperatorRouteRegistry } from "../src/standalone/operator-routes.js";
+import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
 const password = "browser test operator password";
@@ -40,6 +43,16 @@ function fakeRuntime() {
       return "completed" as const;
     },
   };
+}
+
+function serviceRoutes(service: StandaloneService): OperatorRouteRegistry {
+  const routes = new OperatorRouteRegistry();
+  routes.registerSlot("runtime", runtimeOperatorRoutes(service));
+  routes.registerSlot(
+    "coordination",
+    coordinationOperatorRoutes(service.coordinationView(), service.domain()),
+  );
+  return routes;
 }
 
 async function unusedPort(): Promise<number> {
@@ -130,7 +143,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     };
     await OperatorAuth.initialize(authFile, password);
     auth = await OperatorAuth.open(authOptions);
-    http = new LocalOperatorHttp(ui, auth);
+    http = new LocalOperatorHttp(ui, auth, { routes: serviceRoutes(service) });
     await http.start(port);
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
@@ -206,6 +219,44 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     );
     assert.ok(await page.getByRole("link", { name: "Runtime" }).count());
     assert.ok(await page.getByRole("link", { name: "Coordination" }).count());
+    await page.getByRole("link", { name: "Runtime", exact: true }).click();
+    assert.match(
+      await page.locator("body").innerText(),
+      /Effective execution policy/,
+    );
+    assert.doesNotMatch(
+      await page.locator("body").innerText(),
+      /does not start or control execution/,
+    );
+    const capacityForm = page.locator(
+      'form[action="/runtime/control/capacity"]',
+    );
+    await capacityForm.locator('input[name="globalLimit"]').fill("3");
+    await capacityForm
+      .locator('select[name="projectId"]')
+      .selectOption(project.id);
+    await capacityForm.locator('input[name="projectLimit"]').fill("1");
+    const capacityResponse = page.waitForResponse(
+      (candidate) =>
+        new URL(candidate.url()).pathname === "/runtime/control/capacity" &&
+        candidate.request().method() === "POST",
+    );
+    await capacityForm.getByRole("button", { name: "Save capacity" }).click();
+    assert.equal((await capacityResponse).status(), 303);
+    assert.equal(service.capacityLimits([project.id]).globalLimit, 3);
+    assert.equal(
+      service.capacityLimits([project.id]).projectOverrides[project.id],
+      1,
+    );
+    await page.getByRole("link", { name: "Coordination", exact: true }).click();
+    assert.match(
+      await page.locator("body").innerText(),
+      /Private browser project/,
+    );
+    assert.doesNotMatch(
+      await page.locator("body").innerText(),
+      /Coordination state is not implemented/,
+    );
 
     await page.goto(`${origin}/project/${project.id}`);
     const originalProjectForm = page.locator(
@@ -353,8 +404,7 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     const taskHtml = await page.locator("body").innerText();
     assert.match(taskHtml, /Deliver the operator form journey/);
     assert.match(taskHtml, /eligibility only/i);
-    assert.match(taskHtml, /scheduler.*unavailable/i);
-    assert.doesNotMatch(taskHtml, /no work is admitted or running/i);
+    assert.match(taskHtml, /do not confirm runtime admission or execution/i);
     const taskConfigure = page.locator('form[data-command="task.configure"]');
     await taskConfigure
       .locator('input[name="title"]')
@@ -412,7 +462,9 @@ test("Chromium verifies the independent login and guarded browser session", asyn
     ui = new LocalOperatorUi(domain);
     const restartedAuth = await OperatorAuth.open(authOptions);
     auth = restartedAuth;
-    http = new LocalOperatorHttp(ui, restartedAuth);
+    http = new LocalOperatorHttp(ui, restartedAuth, {
+      routes: serviceRoutes(service),
+    });
     await http.start(port);
     assert.equal(
       Boolean(restartedAuth.getSession(priorServiceToken)),

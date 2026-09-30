@@ -140,7 +140,7 @@ export class LocalOperatorUi {
       .tasks(projectId)
       .map(
         (task) =>
-          `<li><a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)})</li>`,
+          `<li><a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)}). <a href="/runtime/task/${escapeHtml(task.id)}">Runtime</a> · <a href="/coordination/task/${escapeHtml(task.id)}">Coordination</a></li>`,
       )
       .join("");
     const candidateProfileIds = JSON.stringify(
@@ -154,7 +154,7 @@ export class LocalOperatorUi {
   task(taskId: string, csrfToken = ""): string {
     const task = this.store.task(taskId);
     const admission = this.store.admission(taskId);
-    return `<main><h1>${escapeHtml(task.title)}</h1><p>Outcome: ${escapeHtml(task.outcome)}</p><p>${task.ready ? "Ready" : "Not ready"}; ${escapeHtml(task.state)}.</p><p>Configuration eligibility only: ${admission.eligible ? "eligible for future admission" : `held: ${escapeHtml(admission.reasons.join(", "))}`}.</p><p>Scheduler admission, execution status, runtime history, dependency and recovery details are unavailable in this operator surface.</p>${form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + textarea("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)), undefined, csrfToken)}</main>`;
+    return `<main><h1>${escapeHtml(task.title)}</h1><p>Outcome: ${escapeHtml(task.outcome)}</p><p>${task.ready ? "Ready" : "Not ready"}; ${escapeHtml(task.state)}.</p><p>Configuration eligibility only: ${admission.eligible ? "eligible for future admission" : `held: ${escapeHtml(admission.reasons.join(", "))}`}.</p><p>Readiness and configuration eligibility do not confirm runtime admission or execution.</p><p><a href="/runtime/task/${escapeHtml(taskId)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/task/${escapeHtml(taskId)}">Task-scoped coordination and history</a></p>${form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + textarea("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)), undefined, csrfToken)}</main>`;
   }
 
   profile(profileId: string, csrfToken = ""): string {
@@ -164,7 +164,9 @@ export class LocalOperatorUi {
 
   assignment(assignmentId: string): string {
     const assignment = this.store.assignment(assignmentId);
-    return `<main><h1>Assignment ${escapeHtml(assignment.id)}</h1><p>Admission, execution state, runtime history and controls are unavailable in this operator surface.</p></main>`;
+    const task = this.store.task(String(assignment.taskId));
+    const profile = this.store.profile(String(assignment.profileId));
+    return `<main><h1>${escapeHtml(profile.name)} assignment</h1><p>Task: <a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a>. Assignment lifecycle state: ${escapeHtml(assignment.state)}; this does not confirm runtime admission or execution.</p><p><a href="/runtime/assignment/${escapeHtml(assignment.id)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/assignment/${escapeHtml(assignment.id)}">Conversation and coordination history</a></p></main>`;
   }
 
   runtime(): string {

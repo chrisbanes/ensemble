@@ -128,7 +128,20 @@ test("local forms submit versioned commands and render secret-safe views", async
     })) as { id: string };
     assert.doesNotMatch(ui.task(task.id), new RegExp(assignment.id));
     assert.match(ui.task(task.id), /eligibility only/i);
-    assert.match(ui.assignment(assignment.id), /execution state.*unavailable/i);
+    assert.match(
+      ui.assignment(assignment.id),
+      /does not confirm runtime admission or execution/i,
+    );
+    assert.ok(
+      ui
+        .assignment(assignment.id)
+        .includes(`/runtime/assignment/${assignment.id}`),
+    );
+    assert.ok(
+      ui
+        .assignment(assignment.id)
+        .includes(`/coordination/assignment/${assignment.id}`),
+    );
   } finally {
     db.close();
   }
@@ -257,7 +270,7 @@ test("rendered form retries replay one receipt and retain create IDs", async () 
 
     const taskHtml = await page(`/task/${taskId}`);
     assert.ok(
-      /Scheduler admission, execution status, runtime history, dependency and recovery details are unavailable in this operator surface\./.test(
+      /Readiness and configuration eligibility do not confirm runtime admission or execution\./.test(
         taskHtml,
       ),
       "task view distinguishes configuration from execution status",

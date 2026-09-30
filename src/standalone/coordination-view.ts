@@ -199,7 +199,7 @@ export interface ApprovalDecisionCommand {
   decision: "approved" | "denied";
   action: string;
   target?: string;
-  material: unknown;
+  material?: unknown;
 }
 
 const operatorMessageCommand = z
@@ -238,9 +238,17 @@ const approvalDecisionCommand = z
     decision: z.enum(["approved", "denied"]),
     action: z.string().trim().min(1).max(512),
     target: z.string().trim().min(1).max(2000).optional(),
-    material: z.unknown(),
+    material: z.unknown().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((command, context) => {
+    if (command.decision === "approved" && command.material === undefined)
+      context.addIssue({
+        code: "custom",
+        message: "Approval material is required to approve",
+        path: ["material"],
+      });
+  });
 
 /** Curated task-scoped operator reads and commands; it never exposes runtime prompts or payloads. */
 export class CoordinationView {
@@ -475,7 +483,9 @@ export class CoordinationView {
         decision: command.decision,
         action: command.action,
         ...(command.target === undefined ? {} : { target: command.target }),
-        material: command.material,
+        ...(command.material === undefined
+          ? {}
+          : { material: command.material }),
       }),
     );
   }
