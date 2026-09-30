@@ -268,7 +268,7 @@ export class StandaloneService {
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
-      const coordination = new CoordinationStore(db);
+      const coordination = new CoordinationStore(db, domain);
       coordination.migrate();
       this.coordination = coordination;
       const runtime = this.runtimeFactory();
@@ -701,6 +701,7 @@ export class StandaloneService {
         const response = dispatchCoordinationTool(
           coordination,
           call as CoordinationCall,
+          () => !state.taskHold(binding.taskId),
         );
         if (response.success) await this.wakeScheduler();
         return response;
@@ -843,6 +844,21 @@ export class StandaloneService {
       !routingAttempts
     )
       return;
+    const deliveryWorkCompleted = (delivery: InboxDelivery): boolean => {
+      const intent = state.byWorkId(delivery.deliveryWorkId);
+      const binding = state.taskBinding(delivery.deliveryWorkId);
+      return Boolean(
+        intent?.state === "completed" &&
+          binding?.workId === delivery.deliveryWorkId &&
+          binding.taskId === delivery.taskId &&
+          binding.assignmentId === delivery.recipientAssignmentId &&
+          binding.assignmentVersion === delivery.assignmentVersion,
+      );
+    };
+    for (const delivery of coordination.queuedDeliveries())
+      if (deliveryWorkCompleted(delivery))
+        coordination.completeDeliveryBatch(delivery.deliveryWorkId);
+
     for (const completion of coordination.completionRequests()) {
       if (completion.status !== "pending") continue;
       const intent = state.byWorkId(completion.leadWorkId);
@@ -1120,8 +1136,7 @@ export class StandaloneService {
 
     const requests = store.list();
     for (const delivery of coordination.queuedDeliveries()) {
-      const completed = state.byWorkId(delivery.deliveryWorkId);
-      if (completed?.state === "completed") {
+      if (deliveryWorkCompleted(delivery)) {
         coordination.completeDeliveryBatch(delivery.deliveryWorkId);
         continue;
       }
@@ -1136,7 +1151,7 @@ export class StandaloneService {
       const task = domain.task(delivery.taskId);
       if (
         Number(assignment.version) !== delivery.assignmentVersion ||
-        assignment.state === "held" ||
+        (assignment.state !== "pending" && assignment.state !== "running") ||
         Number(task.ready) !== 1 ||
         task.state !== "open"
       )
@@ -1176,7 +1191,7 @@ export class StandaloneService {
       }
       const task = domain.task(String(assignment.taskId));
       if (
-        assignment.state === "held" ||
+        (assignment.state !== "pending" && assignment.state !== "running") ||
         Number(task.ready) !== 1 ||
         task.state !== "open" ||
         state.assignmentHasUnfinishedExecution(recipientAssignmentId) ||

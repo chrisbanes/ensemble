@@ -171,6 +171,9 @@ completed turn with neither result nor waiting reason; then hold for attention.
 Persist that allowance and apply normal admission controls. Results arriving while
 their recipient is active wait for its next turn; coalesce continuation wakeups while
 retaining individual acknowledgements. Paused/stopped recipients retain their inbox.
+Operator messages may target only pending or running assignments. Held or completed
+assignments are not implicitly revived; resolve the hold or create explicit follow-up/
+recovery first. Legacy inbox events do not dispatch a completed assignment.
 
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No

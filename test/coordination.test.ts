@@ -603,6 +603,111 @@ test("delegation derives same-task requester identity and replays exactly once",
   }
 });
 
+test("delegation rejects withdrawn domain admission without a child or receipt", () => {
+  for (const withdrawal of ["pause", "unready", "dependency"] as const) {
+    const f = fixture();
+    try {
+      if (withdrawal === "pause") {
+        const project = f.domain.project(projectId);
+        f.domain.execute({
+          key: nextCommand(),
+          type: "project.configure",
+          actor: "operator",
+          projectId,
+          expectedVersion: Number(project.version),
+          paused: true,
+        });
+      } else if (withdrawal === "unready") {
+        const task = f.domain.task(taskA);
+        f.domain.execute({
+          key: nextCommand(),
+          type: "task.configure",
+          actor: "operator",
+          projectId,
+          taskId: taskA,
+          expectedVersion: Number(task.version),
+          ready: false,
+        });
+      } else {
+        const task = f.domain.task(taskA);
+        f.domain.execute({
+          key: nextCommand(),
+          type: "dependency.add",
+          actor: "operator",
+          projectId,
+          taskId: taskA,
+          blockerTaskId: taskB,
+          expectedVersion: Number(task.version),
+        });
+      }
+
+      const call = {
+        threadId: "thread-child-a",
+        turnId: "turn-child-a",
+        callId: `call-withdrawn-${withdrawal}`,
+        tool: "ensemble_delegate",
+        arguments: { profileId: workerProfile, brief: "Must not start." },
+      };
+      assert.throws(() => f.coordination.delegate(call), /admission/i);
+      assert.equal(
+        f.domain
+          .assignments(taskA)
+          .filter((assignment) => assignment.requesterAssignmentId === childA)
+          .length,
+        1,
+      );
+      assert.equal(
+        f.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM coordination_receipts WHERE threadId = ? AND turnId = ? AND callId = ?",
+          )
+          .get(call.threadId, call.turnId, call.callId)?.count,
+        0,
+      );
+    } finally {
+      f.close();
+    }
+  }
+});
+
+test("delegation checks the external task hold inside its write transaction", () => {
+  const f = fixture();
+  try {
+    f.db
+      .prepare("INSERT INTO task_writer_holds (taskId, reason) VALUES (?, ?)")
+      .run(taskA, "Task stopped");
+    const call = {
+      threadId: "thread-child-a",
+      turnId: "turn-child-a",
+      callId: "call-external-hold",
+      tool: "ensemble_delegate",
+      arguments: { profileId: workerProfile, brief: "Must not start." },
+    };
+    assert.throws(
+      () => f.coordination.delegate(call, () => !f.state.taskHold(taskA)),
+      /external task hold/i,
+    );
+    assert.equal(f.state.taskHold(taskA), "Task stopped");
+    assert.equal(
+      f.domain
+        .assignments(taskA)
+        .filter((assignment) => assignment.requesterAssignmentId === childA)
+        .length,
+      1,
+    );
+    assert.equal(
+      f.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM coordination_receipts WHERE callId = ?",
+        )
+        .get(call.callId)?.count,
+      0,
+    );
+  } finally {
+    f.close();
+  }
+});
+
 test("questions and approvals stay in operator attention until one exact response", () => {
   const f = fixture();
   try {
@@ -878,6 +983,16 @@ test("operator messages are task-scoped, revision-bound, and replay once", () =>
       first.eventId,
     );
     assert.equal(f.coordination.pendingEvents(childA).length, 1);
+    const pendingLead = String(f.leadAssignment(taskA)?.id);
+    const pendingEvent = f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: pendingLead,
+      expectedAssignmentVersion: 1,
+      message: "This pending assignment may receive work.",
+    });
+    assert.equal(pendingEvent.recipientAssignmentId, pendingLead);
     assert.throws(
       () =>
         f.coordination.postOperatorMessage({
@@ -911,6 +1026,79 @@ test("operator messages are task-scoped, revision-bound, and replay once", () =>
         .filter((event) => event.eventType === "operator-message").length,
       1,
     );
+    assert.equal(f.coordination.inboxEvents(pendingLead).length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("operator messages reject held and completed recipients", () => {
+  const f = fixture();
+  try {
+    const command = {
+      actor: "operator" as const,
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: childA,
+      expectedAssignmentVersion: 1,
+      message: "Continue only after explicit recovery.",
+    };
+    f.db
+      .prepare("UPDATE domain_assignments SET state = 'held' WHERE id = ?")
+      .run(childA);
+    assert.throws(
+      () => f.coordination.postOperatorMessage(command),
+      /pending or running/i,
+    );
+    f.db
+      .prepare("UPDATE domain_assignments SET state = 'completed' WHERE id = ?")
+      .run(childA);
+    assert.throws(
+      () =>
+        f.coordination.postOperatorMessage({ ...command, key: nextCommand() }),
+      /pending or running/i,
+    );
+    assert.equal(f.coordination.inboxEvents(childA).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test("delivery batches and scheduler admission reject completed assignments", () => {
+  const f = fixture();
+  try {
+    const lead = String(f.leadAssignment(taskA)?.id);
+    f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: 1,
+      message: "A legacy queued event.",
+    });
+    f.db
+      .prepare("UPDATE domain_assignments SET state = 'held' WHERE id = ?")
+      .run(lead);
+    assert.equal(
+      f.coordination.bindDeliveryBatch(lead, "held-recipient-delivery"),
+      undefined,
+    );
+    f.db
+      .prepare("UPDATE domain_assignments SET state = 'completed' WHERE id = ?")
+      .run(lead);
+
+    assert.equal(f.domain.assignmentAdmission(lead).eligible, false);
+    assert.ok(
+      f.domain
+        .assignmentAdmission(lead)
+        .reasons.includes("assignment-completed"),
+    );
+    assert.equal(
+      f.coordination.bindDeliveryBatch(lead, "completed-recipient-delivery"),
+      undefined,
+    );
+    assert.equal(f.coordination.queuedDeliveries().length, 0);
+    assert.equal(f.coordination.pendingEvents(lead).length, 1);
   } finally {
     f.close();
   }
@@ -969,11 +1157,17 @@ test("follow-up reuses the completed assignment and binds the exact result", () 
 test("completion requires current lead work and all durable task gates", () => {
   const f = fixture();
   try {
-    const workerResult = f.coordination.recordResult(
-      report("thread-child-a", "turn-child-a", "call-completion-child"),
-    ).result;
     const nestedResult = f.coordination.recordResult(
       report("thread-nested-a", "turn-nested-a", "call-completion-nested"),
+    ).result;
+    const childDelivery = f.coordination.bindDeliveryBatch(
+      childA,
+      "delivery-child-result",
+    );
+    assert.ok(childDelivery);
+    f.coordination.completeDeliveryBatch(childDelivery.deliveryWorkId);
+    const workerResult = f.coordination.recordResult(
+      report("thread-child-a", "turn-child-a", "call-completion-child"),
     ).result;
     assert.equal(
       (
@@ -993,12 +1187,6 @@ test("completion requires current lead work and all durable task gates", () => {
     );
     assert.ok(leadDelivery);
     f.coordination.completeDeliveryBatch(leadDelivery.deliveryWorkId);
-    const childDelivery = f.coordination.bindDeliveryBatch(
-      childA,
-      "delivery-child-result",
-    );
-    assert.ok(childDelivery);
-    f.coordination.completeDeliveryBatch(childDelivery.deliveryWorkId);
     f.db
       .prepare(
         "UPDATE execution_intents SET state = 'completed' WHERE workId IN (?, ?)",
@@ -1210,15 +1398,21 @@ test("completion requires current lead work and all durable task gates", () => {
 test("stale lead completion is durably rejected and cannot finalize later", () => {
   const f = fixture();
   try {
-    const workerResult = f.coordination.recordResult(
-      report("thread-child-a", "turn-child-a", "call-stale-completion-child"),
-    ).result;
     const nestedResult = f.coordination.recordResult(
       report(
         "thread-nested-a",
         "turn-nested-a",
         "call-stale-completion-nested",
       ),
+    ).result;
+    const childDelivery = f.coordination.bindDeliveryBatch(
+      childA,
+      "delivery-stale-child",
+    );
+    assert.ok(childDelivery);
+    f.coordination.completeDeliveryBatch(childDelivery.deliveryWorkId);
+    const workerResult = f.coordination.recordResult(
+      report("thread-child-a", "turn-child-a", "call-stale-completion-child"),
     ).result;
     const leadId = String(f.leadAssignment(taskA)?.id);
     const leadDelivery = f.coordination.bindDeliveryBatch(
@@ -1227,12 +1421,6 @@ test("stale lead completion is durably rejected and cannot finalize later", () =
     );
     assert.ok(leadDelivery);
     f.coordination.completeDeliveryBatch(leadDelivery.deliveryWorkId);
-    const childDelivery = f.coordination.bindDeliveryBatch(
-      childA,
-      "delivery-stale-child",
-    );
-    assert.ok(childDelivery);
-    f.coordination.completeDeliveryBatch(childDelivery.deliveryWorkId);
     f.db
       .prepare(
         "UPDATE execution_intents SET state = 'completed' WHERE workId IN (?, ?)",

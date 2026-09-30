@@ -649,6 +649,7 @@ export class DomainStore {
     )
       reasons.push("profile-not-permitted");
     if (assignment.state === "held") reasons.push("assignment-held");
+    if (assignment.state === "completed") reasons.push("assignment-completed");
     if (expected) {
       if (Number(assignment.version) !== expected.assignmentVersion)
         reasons.push("assignment-revision-changed");

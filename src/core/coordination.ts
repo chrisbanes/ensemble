@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { DomainStore } from "./domain.js";
 import type { Database } from "./store.js";
 
 const uuid = z.string().uuid();
@@ -308,15 +309,19 @@ export interface ReportingRepair {
 
 /** Durable result, receipt, inbox, and delivery state over the service SQLite DB. */
 export class CoordinationStore {
-  constructor(private readonly db: Database) {}
+  private readonly domain: DomainStore;
+
+  constructor(
+    private readonly db: Database,
+    domain?: DomainStore,
+  ) {
+    this.domain = domain ?? new DomainStore(db);
+  }
 
   migrate(): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_schema (
-        version INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS coordination_receipts (
+      this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_receipts (
         threadId TEXT NOT NULL, turnId TEXT NOT NULL, callId TEXT NOT NULL,
         tool TEXT NOT NULL, payloadHash TEXT NOT NULL,
         taskId TEXT NOT NULL REFERENCES domain_tasks(id),
@@ -463,76 +468,11 @@ export class CoordinationStore {
         ordinal INTEGER NOT NULL CHECK(ordinal > 0),
         UNIQUE(batchId, ordinal)
       );`);
-      const deliveryColumns = this.db
-        .prepare("PRAGMA table_info(coordination_delivery_batches)")
-        .all() as Row[];
-      if (
-        !deliveryColumns.some((column) => column.name === "assignmentVersion")
-      )
-        this.db.exec(`ALTER TABLE coordination_delivery_batches
-          ADD COLUMN assignmentVersion INTEGER NOT NULL DEFAULT 1 CHECK(assignmentVersion > 0)`);
-      const eventColumns = this.db
-        .prepare("PRAGMA table_info(coordination_inbox_events)")
-        .all() as Row[];
-      if (!eventColumns.some((column) => column.name === "interactionId"))
-        this.db.exec(
-          "ALTER TABLE coordination_inbox_events ADD COLUMN interactionId TEXT",
-        );
-      if (!eventColumns.some((column) => column.name === "routingOperationId"))
-        this.db.exec(`ALTER TABLE coordination_inbox_events
-          ADD COLUMN routingOperationId TEXT REFERENCES routing_operations(id)`);
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_interaction_event
         ON coordination_inbox_events(interactionId) WHERE interactionId IS NOT NULL;`);
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_routing_fallback
         ON coordination_inbox_events(routingOperationId)
         WHERE routingOperationId IS NOT NULL;`);
-      const completionColumns = this.db
-        .prepare("PRAGMA table_info(coordination_completion_requests)")
-        .all() as Row[];
-      if (
-        !completionColumns.some((column) => column.name === "rejectionReasons")
-      ) {
-        this.db.exec(`ALTER TABLE coordination_completion_requests
-          RENAME TO coordination_completion_requests_legacy;
-          CREATE TABLE coordination_completion_requests (
-            requestId TEXT PRIMARY KEY,
-            taskId TEXT NOT NULL REFERENCES domain_tasks(id),
-            leadAssignmentId TEXT NOT NULL REFERENCES domain_assignments(id),
-            leadWorkId TEXT NOT NULL REFERENCES execution_intents(workId),
-            leadWorkRevision INTEGER NOT NULL CHECK(leadWorkRevision > 0),
-            taskVersion INTEGER NOT NULL CHECK(taskVersion > 0),
-            reviewedResultIds TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('pending','rejected','finalized')),
-            rejectionReasons TEXT NOT NULL DEFAULT '[]',
-            revision INTEGER NOT NULL CHECK(revision > 0),
-            createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
-            finalizedAt INTEGER,
-            UNIQUE(leadWorkId)
-          );
-          INSERT INTO coordination_completion_requests
-            (requestId, taskId, leadAssignmentId, leadWorkId, leadWorkRevision,
-              taskVersion, reviewedResultIds, status, rejectionReasons, revision,
-              createdAt, finalizedAt)
-          SELECT requestId, taskId, leadAssignmentId, leadWorkId, leadWorkRevision,
-            taskVersion, reviewedResultIds, status, '[]', revision, createdAt, finalizedAt
-          FROM coordination_completion_requests_legacy;
-          DROP TABLE coordination_completion_requests_legacy;`);
-      }
-      const version = this.one("SELECT version FROM coordination_schema");
-      if (
-        version &&
-        version.version !== 1 &&
-        version.version !== 2 &&
-        version.version !== 3 &&
-        version.version !== 4
-      )
-        throw new Error("Unsupported coordination schema version");
-      if (!version)
-        this.db
-          .prepare("INSERT INTO coordination_schema (version) VALUES (4)")
-          .run();
-      else if (Number(version.version) < 4)
-        this.db.prepare("UPDATE coordination_schema SET version = 4").run();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -734,7 +674,10 @@ export class CoordinationStore {
     }
   }
 
-  delegate(input: CoordinationCall): CoordinationToolResponse {
+  delegate(
+    input: CoordinationCall,
+    externalAdmission: () => boolean = () => true,
+  ): CoordinationToolResponse {
     const call = delegateCallSchema.parse(input);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -745,6 +688,13 @@ export class CoordinationStore {
       }
       const binding = this.currentBinding(call.threadId, call.turnId);
       if (!binding) throw new Error("Delegation is not bound to current work");
+      const admission = this.domain.admission(String(binding.taskId));
+      if (!admission.eligible)
+        throw new Error(
+          `Task admission rejected delegation: ${admission.reasons.join(", ")}`,
+        );
+      if (!externalAdmission())
+        throw new Error("External task hold blocks delegation");
       const profile = this.required(
         "SELECT version, revoked FROM profiles WHERE id = ?",
         call.arguments.profileId,
@@ -1028,13 +978,15 @@ export class CoordinationStore {
         return replay;
       }
       const assignment = this.required(
-        "SELECT id, taskId, version FROM domain_assignments WHERE id = ?",
+        "SELECT id, taskId, version, state FROM domain_assignments WHERE id = ?",
         command.recipientAssignmentId,
       );
       if (assignment.taskId !== command.taskId)
         throw new Error("Message recipient belongs to another task");
       if (Number(assignment.version) !== command.expectedAssignmentVersion)
         throw new Error("Message recipient assignment version conflict");
+      if (assignment.state !== "pending" && assignment.state !== "running")
+        throw new Error("Message recipient must be pending or running");
       const event = this.newEvent(
         command.taskId,
         command.recipientAssignmentId,
@@ -1963,7 +1915,7 @@ export class CoordinationStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const sameWork = this.one(
-        "SELECT batchId, recipientAssignmentId FROM coordination_delivery_batches WHERE deliveryWorkId = ?",
+        "SELECT batchId, recipientAssignmentId, state FROM coordination_delivery_batches WHERE deliveryWorkId = ?",
         workId,
       );
       if (sameWork) {
@@ -1972,6 +1924,10 @@ export class CoordinationStore {
             "Delivery work identity reused for another recipient",
           );
         const batch = this.delivery(String(sameWork.batchId));
+        const recipientState = this.required(
+          "SELECT state FROM domain_assignments WHERE id = ?",
+          recipient,
+        ).state;
         if (
           requestedVersion !== undefined &&
           batch.assignmentVersion !== requestedVersion
@@ -1979,8 +1935,24 @@ export class CoordinationStore {
           throw new Error(
             "Delivery work identity reused for another assignment version",
           );
+        if (
+          sameWork.state !== "completed" &&
+          recipientState !== "pending" &&
+          recipientState !== "running"
+        ) {
+          this.db.exec("COMMIT");
+          return undefined;
+        }
         this.db.exec("COMMIT");
         return batch;
+      }
+      const recipientState = this.required(
+        "SELECT state FROM domain_assignments WHERE id = ?",
+        recipient,
+      ).state;
+      if (recipientState !== "pending" && recipientState !== "running") {
+        this.db.exec("COMMIT");
+        return undefined;
       }
       const active = this.one(
         "SELECT batchId FROM coordination_delivery_batches WHERE recipientAssignmentId = ? AND state = 'queued'",

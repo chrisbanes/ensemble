@@ -78,10 +78,11 @@ export function isCoordinationTool(name: string): boolean {
 export function dispatchCoordinationTool(
   store: CoordinationStore,
   call: CoordinationCall,
+  externalAdmission: () => boolean = () => true,
 ): CoordinationToolResponse {
   switch (call.tool) {
     case "ensemble_delegate":
-      return store.delegate(call);
+      return store.delegate(call, externalAdmission);
     case "ensemble_report_result":
       return store.recordResult(call).response;
     case "ensemble_ask_question":

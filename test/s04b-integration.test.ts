@@ -1611,6 +1611,375 @@ test("task threads receive scoped tools and delivery resumes the exact lead conv
   }
 });
 
+test("a Stop committed before delegation rejects without a child or receipt", async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-s04b-stop-before-delegate-"),
+  );
+  const runtime = new CoordinationRuntime();
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false } },
+  );
+  const leadProfileId = randomUUID();
+  const workerProfileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  let running = false;
+  try {
+    await service.start();
+    running = true;
+    command(service, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: leadProfileId,
+      name: "Lead",
+      instructions: "Coordinate",
+      capabilities: "delegate",
+    });
+    command(service, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: workerProfileId,
+      name: "Worker",
+      instructions: "Build",
+      capabilities: "code",
+    });
+    command(service, {
+      type: "project.create",
+      actor: "operator",
+      projectId,
+      name: "Coordination",
+      leadProfileId,
+    });
+    command(service, {
+      type: "project.configure",
+      actor: "operator",
+      projectId,
+      expectedVersion: 1,
+      paused: false,
+    });
+    command(service, {
+      type: "routing.configure",
+      actor: "operator",
+      projectId,
+      expectedVersion: 1,
+      enabled: false,
+      guidance: "",
+      candidateProfileIds: [workerProfileId],
+    });
+    command(service, {
+      type: "task.create",
+      actor: "operator",
+      projectId,
+      taskId,
+      title: "Coordinate work",
+      outcome: "Complete the task",
+      ready: false,
+    });
+    await service.provisionTask(taskId);
+    command(service, {
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
+    await runtime.waitForTurnNumber(1);
+    const leadAssignmentId = String(
+      service
+        .domain()
+        .assignments(taskId)
+        .find((assignment) => assignment.profileId === leadProfileId)?.id,
+    );
+    const db = (
+      service as unknown as {
+        db: { prepare(sql: string): { run(...args: unknown[]): unknown } };
+      }
+    ).db;
+    db.prepare(
+      "INSERT INTO task_writer_holds (taskId, reason) VALUES (?, 'Task stopped')",
+    ).run(taskId);
+    const response = await runtime.callTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "delegate-after-stop",
+      tool: "ensemble_delegate",
+      arguments: {
+        profileId: workerProfileId,
+        brief: "Must remain unassigned.",
+      },
+    });
+    assert.equal(response.success, false);
+    assert.match(response.text, /task hold/i);
+    assert.equal(service.taskHold(taskId), "Task stopped");
+    assert.deepEqual(
+      service
+        .domain()
+        .assignments(taskId)
+        .filter(
+          (assignment) => assignment.requesterAssignmentId === leadAssignmentId,
+        ),
+      [],
+    );
+    assert.equal(
+      rowCount(
+        service,
+        "SELECT COUNT(*) AS count FROM coordination_receipts WHERE callId = ?",
+        "delegate-after-stop",
+      ),
+      0,
+    );
+    runtime.complete(1);
+  } finally {
+    if (running) await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Stop after delegation commit leaves the child pending without dispatch", async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-s04b-stop-after-delegate-"),
+  );
+  const runtime = new StopAtAdmissionRuntime();
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false } },
+  );
+  const leadProfileId = randomUUID();
+  const workerProfileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  let leadAssignmentId = "";
+  let childAssignmentId = "";
+  let stop: Promise<unknown> | undefined;
+  let stopped = false;
+  let running = false;
+  try {
+    await service.start();
+    running = true;
+    command(service, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: leadProfileId,
+      name: "Lead",
+      instructions: "Coordinate",
+      capabilities: "delegate",
+    });
+    command(service, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: workerProfileId,
+      name: "Worker",
+      instructions: "Build",
+      capabilities: "code",
+    });
+    command(service, {
+      type: "project.create",
+      actor: "operator",
+      projectId,
+      name: "Coordination",
+      leadProfileId,
+    });
+    command(service, {
+      type: "project.configure",
+      actor: "operator",
+      projectId,
+      expectedVersion: 1,
+      paused: false,
+    });
+    command(service, {
+      type: "routing.configure",
+      actor: "operator",
+      projectId,
+      expectedVersion: 1,
+      enabled: false,
+      guidance: "",
+      candidateProfileIds: [workerProfileId],
+    });
+    command(service, {
+      type: "task.create",
+      actor: "operator",
+      projectId,
+      taskId,
+      title: "Coordinate work",
+      outcome: "Complete the task",
+      ready: false,
+    });
+    await service.provisionTask(taskId);
+    command(service, {
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
+    await runtime.waitForTurnNumber(1);
+    leadAssignmentId = String(
+      service
+        .domain()
+        .assignments(taskId)
+        .find((assignment) => assignment.profileId === leadProfileId)?.id,
+    );
+    runtime.beforeAdmission = () => {
+      const child = service
+        .domain()
+        .assignments(taskId)
+        .find(
+          (assignment) => assignment.requesterAssignmentId === leadAssignmentId,
+        );
+      if (child && !stopped) {
+        stopped = true;
+        childAssignmentId = String(child.id);
+        stop = service.stopTask(taskId);
+      }
+    };
+    const response = await runtime.callTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "delegate-before-stop",
+      tool: "ensemble_delegate",
+      arguments: { profileId: workerProfileId, brief: "Created before Stop." },
+    });
+    assert.equal(response.success, true);
+    await waitUntil(() => stopped);
+    assert.ok(service.taskHold(taskId));
+    assert.equal(
+      service.domain().assignment(childAssignmentId).state,
+      "pending",
+    );
+    assert.equal(runtime.turns, 1, "the child is not submitted to the runtime");
+    runtime.complete(1);
+    await stop;
+  } finally {
+    if (running) await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart leaves legacy inbox events for a completed recipient undelivered", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s04b-completed-inbox-"));
+  let runtime = new CoordinationRuntime();
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false } },
+  );
+  const leadProfileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  let running = false;
+  try {
+    await service.start();
+    running = true;
+    command(service, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: leadProfileId,
+      name: "Lead",
+      instructions: "Coordinate",
+      capabilities: "delegate",
+    });
+    command(service, {
+      type: "project.create",
+      actor: "operator",
+      projectId,
+      name: "Coordination",
+      leadProfileId,
+    });
+    command(service, {
+      type: "project.configure",
+      actor: "operator",
+      projectId,
+      expectedVersion: 1,
+      paused: false,
+    });
+    command(service, {
+      type: "task.create",
+      actor: "operator",
+      projectId,
+      taskId,
+      title: "Coordinate work",
+      outcome: "Complete the task",
+      ready: false,
+    });
+    await service.provisionTask(taskId);
+    command(service, {
+      type: "task.configure",
+      actor: "operator",
+      projectId,
+      taskId,
+      expectedVersion: 1,
+      ready: true,
+    });
+    await runtime.waitForTurnNumber(1);
+    const leadAssignmentId = String(
+      service
+        .domain()
+        .assignments(taskId)
+        .find((assignment) => assignment.profileId === leadProfileId)?.id,
+    );
+    const message = await service.coordinationView().postOperatorMessage({
+      taskId,
+      key: randomUUID(),
+      recipientAssignmentId: leadAssignmentId,
+      expectedAssignmentVersion: 1,
+      message: "This event predates completion.",
+    });
+    const result = await runtime.callTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "lead-result-before-completion",
+      tool: "ensemble_report_result",
+      arguments: { summary: "Completed the task." },
+    });
+    assert.equal(result.success, true);
+    runtime.complete(1);
+    await waitUntil(
+      () => service.domain().assignment(leadAssignmentId).state === "completed",
+    );
+    assert.equal(
+      service
+        .coordinationView()
+        .readTask(taskId)
+        .messages.find((item) => item.eventId === message.eventId)
+        ?.deliveryState,
+      "pending",
+    );
+    await service.stop();
+    running = false;
+
+    runtime = new CoordinationRuntime();
+    await service.start();
+    running = true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    assert.equal(runtime.turns, 0);
+    assert.equal(
+      service
+        .coordinationView()
+        .readTask(taskId)
+        .messages.find((item) => item.eventId === message.eventId)
+        ?.deliveryState,
+      "pending",
+    );
+    assert.equal(
+      (
+        service as unknown as { coordination: CoordinationStore }
+      ).coordination.queuedDeliveries().length,
+      0,
+    );
+  } finally {
+    if (running) await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("completion rejection is final for one lead generation; a fresh turn can complete", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-s04b-completion-"));
   const runtime = new CoordinationRuntime();
@@ -1938,7 +2307,7 @@ test("completion rejection is final for one lead generation; a fresh turn can co
   }
 });
 
-test("restart reconciles only the exact pending completion request after the state commit gap", async () => {
+test("restart acknowledges the exact lead inbox batch before finalizing a completion commit gap", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-s04b-completion-gap-"));
   const runtime = new CoordinationRuntime();
   const service = new StandaloneService(
@@ -1953,6 +2322,12 @@ test("restart reconciles only the exact pending completion request after the sta
   let running = false;
   let coordination: CoordinationStore | undefined;
   let originalFinalizer:
+    | CoordinationStore["finalizeTaskCompletion"]
+    | undefined;
+  let originalCompleteDelivery:
+    | CoordinationStore["completeDeliveryBatch"]
+    | undefined;
+  let originalPrototypeFinalizer:
     | CoordinationStore["finalizeTaskCompletion"]
     | undefined;
   try {
@@ -1998,6 +2373,15 @@ test("restart reconciles only the exact pending completion request after the sta
       outcome: "Complete without delegating.",
       ready: false,
     });
+    const leadAssignment = service.domain().ensureLeadAssignment(taskId);
+    assert.ok(leadAssignment);
+    const inboxMessage = await service.coordinationView().postOperatorMessage({
+      taskId,
+      key: randomUUID(),
+      recipientAssignmentId: String(leadAssignment.id),
+      expectedAssignmentVersion: Number(leadAssignment.version),
+      message: "Review the durable result inbox before finalizing.",
+    });
     await service.configureCapacity({
       key: randomUUID(),
       globalLimit: 1,
@@ -2032,6 +2416,15 @@ test("restart reconciles only the exact pending completion request after the sta
     coordination = (service as unknown as { coordination: CoordinationStore })
       .coordination;
     originalFinalizer = coordination.finalizeTaskCompletion.bind(coordination);
+    const completeDelivery =
+      coordination.completeDeliveryBatch.bind(coordination);
+    originalCompleteDelivery = completeDelivery;
+    const queuedBatch = coordination.deliveryForWork(workId);
+    assert.ok(queuedBatch);
+    coordination.completeDeliveryBatch = (deliveryWorkId) =>
+      deliveryWorkId === workId
+        ? queuedBatch
+        : completeDelivery(deliveryWorkId);
     coordination.finalizeTaskCompletion = (input) => {
       if (input.requestId !== requestId || input.workId !== workId)
         return originalFinalizer?.(input) as ReturnType<
@@ -2057,6 +2450,19 @@ test("restart reconciles only the exact pending completion request after the sta
       service.coordinationView().readTask(taskId).completionRequests[0]?.status,
       "pending",
     );
+    assert.equal(
+      coordination.deliveryForWork(workId)?.state,
+      "queued",
+      "the simulated crash leaves the exact lead inbox batch unacknowledged",
+    );
+    assert.equal(
+      service
+        .coordinationView()
+        .readTask(taskId)
+        .messages.find((message) => message.eventId === inboxMessage.eventId)
+        ?.deliveryState,
+      "queued",
+    );
     assert.equal(service.domain().task(taskId).state, "open");
     assert.equal(
       row(
@@ -2078,6 +2484,61 @@ test("restart reconciles only the exact pending completion request after the sta
     coordination.finalizeTaskCompletion = originalFinalizer;
     await service.stop();
     running = false;
+    originalPrototypeFinalizer =
+      CoordinationStore.prototype.finalizeTaskCompletion;
+    CoordinationStore.prototype.finalizeTaskCompletion = function (input) {
+      if (input.requestId !== requestId || input.workId !== workId)
+        return originalPrototypeFinalizer?.call(this, input) as ReturnType<
+          CoordinationStore["finalizeTaskCompletion"]
+        >;
+      const request = this.completionRequests(taskId).find(
+        (item) => item.requestId === requestId,
+      );
+      assert.ok(request);
+      return {
+        completed: false,
+        reasons: ["simulated-post-ack-finalizer-gap"],
+        request,
+      };
+    };
+    try {
+      await service.start();
+      running = true;
+    } finally {
+      CoordinationStore.prototype.finalizeTaskCompletion =
+        originalPrototypeFinalizer;
+    }
+    const afterBatchAcknowledgement = (
+      service as unknown as { coordination: CoordinationStore }
+    ).coordination;
+    assert.equal(
+      afterBatchAcknowledgement.deliveryForWork(workId)?.state,
+      "completed",
+    );
+    assert.equal(
+      service.coordinationView().readTask(taskId).completionRequests[0]?.status,
+      "pending",
+      "a crash after batch acknowledgement keeps its exact completion request retryable",
+    );
+    assert.equal(service.domain().task(taskId).state, "open");
+    assert.equal(
+      row(
+        service,
+        "SELECT state FROM execution_pending_effects WHERE workId = ? AND effectKey = 'assignment-result'",
+        workId,
+      )?.state,
+      "pending",
+    );
+    assert.equal(
+      rowCount(
+        service,
+        "SELECT COUNT(*) AS count FROM coordination_reporting_repairs WHERE taskId = ?",
+        taskId,
+      ),
+      0,
+    );
+    await service.stop();
+    running = false;
     await service.start();
     running = true;
     const recovered = service.coordinationView().readTask(taskId);
@@ -2094,6 +2555,23 @@ test("restart reconciles only the exact pending completion request after the sta
     );
     assert.equal(recovered.completionRequests[0]?.status, "finalized");
     assert.equal(
+      service
+        .coordinationView()
+        .readTask(taskId)
+        .messages.find((message) => message.eventId === inboxMessage.eventId)
+        ?.deliveryState,
+      "delivered",
+      "recovery acknowledges inbox delivery before the completion gate",
+    );
+    assert.equal(
+      rowCount(
+        service,
+        "SELECT COUNT(*) AS count FROM coordination_reporting_repairs WHERE taskId = ?",
+        taskId,
+      ),
+      0,
+    );
+    assert.equal(
       service.domain().assignment(recovered.assignments[0]?.assignmentId ?? "")
         .state,
       "completed",
@@ -2108,8 +2586,13 @@ test("restart reconciles only the exact pending completion request after the sta
       "restart reconciliation settles only the exact completed lead work effect",
     );
   } finally {
+    if (originalPrototypeFinalizer)
+      CoordinationStore.prototype.finalizeTaskCompletion =
+        originalPrototypeFinalizer;
     if (coordination && originalFinalizer)
       coordination.finalizeTaskCompletion = originalFinalizer;
+    if (coordination && originalCompleteDelivery)
+      coordination.completeDeliveryBatch = originalCompleteDelivery;
     if (running) await service.stop();
     rmSync(root, { recursive: true, force: true });
   }
