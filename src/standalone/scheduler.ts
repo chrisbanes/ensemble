@@ -19,6 +19,7 @@ const requestSchema = z.object({
 
 export type TurnRequestInput = z.input<typeof requestSchema>;
 export type TurnRequest = z.infer<typeof requestSchema> & {
+  sequence: number;
   state: "queued" | "active" | "completed" | "held";
   reason: string | null;
   nextEligibleAt: number | null;
@@ -226,6 +227,7 @@ export class SchedulerStore {
       .parse(row.state);
     return {
       ...value,
+      sequence: z.number().int().positive().parse(row.sequence),
       state,
       reason: z.string().nullable().parse(row.reason),
       nextEligibleAt:

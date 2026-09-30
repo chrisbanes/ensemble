@@ -68,6 +68,14 @@ export interface RecoveryExecutionIdentity {
   processIdentity: RuntimeProcessIdentity | null;
 }
 
+export interface TaskTurnRequest {
+  workId: string;
+  assignmentId: string | null;
+  assignmentVersion: number | null;
+  sequence: number;
+  state: "queued" | "active" | "completed" | "held";
+}
+
 export interface PowerEventCursor {
   version: 1;
   value: string;
@@ -1111,6 +1119,28 @@ export class ExecutionState {
       .prepare("SELECT * FROM execution_intents ORDER BY rowid")
       .all()
       .map((row) => intentSchema.parse(row));
+  }
+
+  taskTurnRequests(taskId: string): TaskTurnRequest[] {
+    if (!this.hasTurnRequests) return [];
+    return this.db
+      .prepare(`SELECT workId, assignmentId, assignmentVersion, sequence, state
+        FROM turn_requests
+        WHERE taskId = ? AND kind = 'assignment'
+        ORDER BY sequence`)
+      .all(z.string().uuid().parse(taskId))
+      .map((row) => {
+        const value = z
+          .object({
+            workId: z.string().min(1),
+            assignmentId: z.string().uuid().nullable(),
+            assignmentVersion: z.number().int().positive().nullable(),
+            sequence: z.number().int().positive(),
+            state: z.enum(["queued", "active", "completed", "held"]),
+          })
+          .parse(row);
+        return value;
+      });
   }
 
   recoveryIdentity(workId: string): RecoveryExecutionIdentity | undefined {

@@ -191,12 +191,36 @@ function statusForAssignment(
   const id = String(assignment.id);
   const request = api
     .turnRequests()
-    .find((candidate) => candidate.assignmentId === id);
-  const recovery = api
+    .filter(
+      (candidate) =>
+        candidate.assignmentId === id &&
+        candidate.assignmentVersion === Number(assignment.version),
+    )
+    .reduce<TurnRequest | undefined>(
+      (latest, candidate) =>
+        !latest || candidate.sequence > latest.sequence ? candidate : latest,
+      undefined,
+    );
+  const recoveryRecords = api
     .recoveryView()
-    .find((candidate) => candidate.binding?.assignmentId === id);
-  const intent = recovery
-    ? api.list().find((candidate) => candidate.workId === recovery.workId)
+    .filter(
+      (candidate) =>
+        candidate.binding?.assignmentId === id &&
+        candidate.binding.assignmentVersion === Number(assignment.version),
+    );
+  const recovery = request
+    ? recoveryRecords.find((candidate) => candidate.workId === request.workId)
+    : recoveryRecords.reduce<RecoveryRecord | undefined>(
+        (latest, candidate) =>
+          !latest ||
+          candidate.generation.requestSequence >
+            latest.generation.requestSequence
+            ? candidate
+            : latest,
+        undefined,
+      );
+  const intent = request
+    ? api.list().find((candidate) => candidate.workId === request.workId)
     : undefined;
   if (recovery?.holds.stop) return "Stopping; effects may continue";
   if (request?.state === "queued")

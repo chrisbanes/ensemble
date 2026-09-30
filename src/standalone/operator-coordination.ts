@@ -150,22 +150,46 @@ function executionStatus(
       entry.assignmentId === assignment.assignmentId &&
       entry.assignmentVersion === assignment.version,
   );
+  const request = view.requests
+    .filter(
+      (candidate) =>
+        candidate.assignmentId === assignment.assignmentId &&
+        candidate.assignmentVersion === assignment.version,
+    )
+    .reduce<(typeof view.requests)[number] | undefined>(
+      (latest, candidate) =>
+        !latest || candidate.sequence > latest.sequence ? candidate : latest,
+      undefined,
+    );
+  const current = request
+    ? history.find((entry) => entry.workId === request.workId)
+    : history.reduce<CoordinationTaskView["history"][number] | undefined>(
+        (latest, candidate) =>
+          !latest ||
+          candidate.conversationRevision > latest.conversationRevision
+            ? candidate
+            : latest,
+        undefined,
+      );
   if (
     assignment.state === "held" ||
-    history.some((entry) => entry.state === "held")
+    request?.state === "held" ||
+    current?.state === "held"
   )
     return "Held; recovery evidence remains in runtime history";
-  if (history.some((entry) => entry.state === "running")) return "Running";
-  if (history.some((entry) => entry.state === "submitting")) return "Starting";
-  if (history.some((entry) => entry.state === "resolved-failed"))
+  if (current?.state === "running") return "Running";
+  if (current?.state === "submitting") return "Starting";
+  if (current?.state === "resolved-failed")
     return "Failed; inspect runtime recovery history";
-  if (history.some((entry) => entry.state === "completed")) return "Completed";
-  if (history.some((entry) => entry.state === "reconciled"))
+  if (current?.state === "completed" || request?.state === "completed")
+    return "Completed";
+  if (current?.state === "reconciled")
     return "Reconciled; no active turn is reported";
-  if (history.some((entry) => entry.state === "capacity-waiting"))
+  if (current?.state === "capacity-waiting" || request?.state === "queued")
     return "Queued; waiting for capacity admission";
-  if (history.some((entry) => entry.state === "ready"))
-    return "Queued; not admitted to runtime";
+  if (current?.state === "ready") return "Queued; not admitted to runtime";
+  if (request?.state === "active")
+    return "Admitted; runtime state is not confirmed";
   if (assignment.state === "running")
     return "Admitted; runtime state is not confirmed";
   if (assignment.state === "completed") return "Completed";
@@ -412,7 +436,7 @@ function taskPage(
     })
     .join("");
   const fallbackCount = view.attention.routingFallbacks.length;
-  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="${taskHref(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
+  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
 }
 
 function assignmentPage(

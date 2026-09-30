@@ -9,7 +9,11 @@ import type {
   UnresolvedResultDestination,
 } from "../core/coordination.js";
 import type { DomainStore } from "../core/domain.js";
-import type { ExecutionIntent, ExecutionState } from "./state.js";
+import type {
+  ExecutionIntent,
+  ExecutionState,
+  TaskTurnRequest,
+} from "./state.js";
 import type {
   RoutingAttempt,
   RoutingAttemptStore,
@@ -142,6 +146,7 @@ export interface CoordinationTaskView {
   task: CoordinationTaskIdentity;
   assignments: CoordinationAssignmentSummary[];
   history: CoordinationWorkHistoryEntry[];
+  requests: TaskTurnRequest[];
   results: AssignmentResult[];
   unresolvedResults: UnresolvedResultDestination[];
   messages: CoordinationViewMessage[];
@@ -389,6 +394,7 @@ export class CoordinationView {
       },
       assignments: assignmentSummaries,
       history,
+      requests: this.state.taskTurnRequests(id),
       results: this.coordination.results(id),
       unresolvedResults: this.coordination.unresolvedResultDestinations(id),
       messages,

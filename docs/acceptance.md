@@ -181,3 +181,20 @@ contracts. The revised S01 gate requires integration and conservative coordinati
 not guaranteed descendant termination, strict outside-read denial or universal live
 reattachment. Unresolved crash/Stop/failure holds still require independent recovery;
 changing this contract neither passes S01 nor releases dependent work.
+
+## S04d operator integration evidence
+
+Issue #694 mounts the Runtime and Coordination route slots in the production
+operator command. The exact-material approval boundary, real-SQLite adapter
+coverage, shared HTTP guards and Chromium journey are described in the
+[S04d design](design/s04d-operator-integration.md). Its bounded real-runtime
+operator journey is recorded in
+[S04d evidence](evidence/s04d-operator-2026-09-30.md); it is evidence for the
+observed journey only, not universal termination or reattachment.
+
+The private-access script extends the existing S04c proof to the new private
+views and capacity write. R04's private-transport portion remains unproved until
+the bounded proof runs against an approved disposable HTTPS fixture reachable
+from an approved second peer, with exact cleanup confirmed. Missing fixture
+configuration is a blocker, not a waived gate. This work does not authorize
+persistent Serve changes, deployment or cutover.

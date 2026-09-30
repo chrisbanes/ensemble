@@ -12,6 +12,7 @@ import type {
   UnexpectedRequest,
 } from "../src/standalone/codex.js";
 import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
+import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
 import { StandaloneService } from "../src/standalone/service.js";
 
 const runtime: Runtime = {
@@ -59,6 +60,191 @@ test("coordination adapter owns task-scoped read and mutation routes", async (t)
       "POST /coordination/control/result/recipient",
     ],
   );
+});
+
+test("operator status follows a newer queued continuation over completed history", async (t) => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-operator-current-status-"),
+  );
+  const runtime = new OperatorRuntime();
+  const service = new StandaloneService(
+    join(directory, "data"),
+    () => runtime,
+    undefined,
+    { power: { enabled: false }, routingClient: null },
+  );
+  t.after(async () => {
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await service.start();
+
+  const profileId = randomUUID();
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  const capacityTaskId = randomUUID();
+  command(service, {
+    type: "profile.create",
+    profileId,
+    name: "Current-status lead",
+    instructions: "Coordinate the task.",
+    capabilities: "coordinate",
+  });
+  command(service, {
+    type: "project.create",
+    projectId,
+    name: "Current-status project",
+    leadProfileId: profileId,
+  });
+  command(service, {
+    type: "project.configure",
+    projectId,
+    expectedVersion: 1,
+    paused: false,
+  });
+  command(service, {
+    type: "task.create",
+    projectId,
+    taskId,
+    title: "Current assignment status",
+    outcome: "Report the task outcome.",
+    ready: false,
+  });
+  command(service, {
+    type: "task.create",
+    projectId,
+    taskId: capacityTaskId,
+    title: "Capacity-holding task",
+    outcome: "Report the capacity task outcome.",
+    ready: false,
+  });
+  await service.configureCapacity({
+    key: randomUUID(),
+    globalLimit: 1,
+    projectOverrides: { [projectId]: 1 },
+  });
+  await service.provisionTask(taskId);
+  await service.provisionTask(capacityTaskId);
+  command(service, {
+    type: "task.configure",
+    projectId,
+    taskId,
+    expectedVersion: 1,
+    ready: true,
+  });
+  await waitUntil(() => runtime.turns === 1);
+  command(service, {
+    type: "task.configure",
+    projectId,
+    taskId: capacityTaskId,
+    expectedVersion: 1,
+    ready: true,
+  });
+  await waitUntil(() =>
+    service
+      .turnRequests()
+      .some(
+        (request) =>
+          request.taskId === capacityTaskId && request.state === "queued",
+      ),
+  );
+
+  const assignment = service.domain().assignments(taskId)[0];
+  assert.ok(assignment);
+  await service.coordinationView().postOperatorMessage({
+    taskId,
+    key: randomUUID(),
+    recipientAssignmentId: String(assignment.id),
+    expectedAssignmentVersion: Number(assignment.version),
+    message: "Continue with the latest operator direction.",
+  });
+  runtime.complete("operator-turn-1");
+  await waitUntil(
+    () =>
+      service
+        .turnRequests()
+        .filter((request) => request.assignmentId === assignment.id).length ===
+        2 &&
+      service
+        .turnRequests()
+        .filter((request) => request.assignmentId === assignment.id)[1]
+        ?.state === "queued" &&
+      runtime.turns === 2,
+  );
+
+  const requests = service
+    .turnRequests()
+    .filter((request) => request.assignmentId === assignment.id);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.state, "completed");
+  assert.equal(requests[1]?.state, "queued");
+  const history = service.coordinationView().readTask(taskId).history;
+  assert.ok(history.some((entry) => entry.state === "completed"));
+
+  const runtimeTaskRoute = runtimeOperatorRoutes(service).find(
+    (candidate) =>
+      candidate.method === "GET" && candidate.path === "/runtime/task/:taskId",
+  );
+  assert.ok(runtimeTaskRoute);
+  const runtimePage = await runtimeTaskRoute.handler({
+    params: { taskId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(runtimePage.kind, "html");
+  const runtimeAssignmentRoute = runtimeOperatorRoutes(service).find(
+    (candidate) =>
+      candidate.method === "GET" &&
+      candidate.path === "/runtime/assignment/:assignmentId",
+  );
+  assert.ok(runtimeAssignmentRoute);
+  const runtimeAssignmentPage = await runtimeAssignmentRoute.handler({
+    params: { assignmentId: String(assignment.id) },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(runtimeAssignmentPage.kind, "html");
+  if (runtimeAssignmentPage.kind === "html")
+    assert.match(
+      runtimeAssignmentPage.body,
+      /Execution status: Queued; waiting for capacity admission\./,
+    );
+
+  const coordinationTaskRoute = route(
+    coordinationOperatorRoutes(service.coordinationView(), service.domain()),
+    "GET",
+    "/coordination/task/:taskId",
+  );
+  const coordinationPage = await coordinationTaskRoute.handler({
+    params: { taskId },
+    fields: {},
+    csrfToken: "test-token",
+  });
+  assert.equal(coordinationPage.kind, "html");
+  assert.deepEqual(
+    {
+      runtimeShowsCurrentQueue:
+        runtimePage.kind === "html" &&
+        /Current-status lead \(project lead\)<\/a>: Queued; waiting for capacity admission\./.test(
+          runtimePage.body,
+        ),
+      coordinationShowsCurrentQueue:
+        coordinationPage.kind === "html" &&
+        /execution: Queued; waiting for capacity admission\./.test(
+          coordinationPage.body,
+        ),
+    },
+    {
+      runtimeShowsCurrentQueue: true,
+      coordinationShowsCurrentQueue: true,
+    },
+  );
+  if (coordinationPage.kind === "html")
+    assert.ok(
+      coordinationPage.body.includes(
+        `<a href="/runtime/task/${taskId}">Task-scoped runtime controls and recovery</a>`,
+      ),
+    );
 });
 
 function deferred<T>() {

@@ -1,5 +1,10 @@
 # S04c authenticated operator UI foundation
 
+This document records the #703 starting boundary. Issue #694 supersedes its
+statements that runtime and coordination pages are unavailable; the current
+production integration and bounded evidence are described in
+[`s04d-operator-integration.md`](s04d-operator-integration.md).
+
 Issue [#703](https://github.com/chrisbanes/ensemble/issues/703) implements the
 independent login, session and request boundary, a shared server-rendered shell,
 and the initial project/profile/routing/local-task forms. This is a bounded
@@ -76,15 +81,13 @@ recovery and other #694 controls are not web commands. The underlying domain
 service retains its own command contract; this allowlist is the boundary for the
 operator web surface, not a duplicate domain or command implementation.
 
-The current views support project/profile setup, routing configuration, and
-local-task create/edit/read. Credential references are never rendered back;
-the view reports only whether routing has a configured reference. Runtime and
-coordination pages say `Unavailable`. Assignment detail reports admission and
-execution state unavailable and exposes no runtime history or control. Task
-details label eligibility as configuration only and show persisted task
-content/readiness, but no assignment, dependency, runtime-history or recovery
-controls. An eligible/Ready task is not claimed to have started. Project pause
-and task Ready remain configuration, not execution.
+At the #703 boundary, views supported project/profile setup, routing
+configuration, and local-task create/edit/read. Credential references were not
+rendered back. Runtime and coordination pages, assignment history, dependency
+controls and recovery presentation were unavailable. Issue #694 adds those
+operator routes without changing this original slice's authentication
+contract. Task readiness and configuration eligibility still do not prove
+runtime admission or execution.
 
 ## Verification boundary
 
