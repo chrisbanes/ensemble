@@ -173,6 +173,13 @@ qualification. S08b verifies final-schema and external-effect recovery and opera
 cutover against the S07 release candidate, reusing valid S08a evidence. The operational
 release gate requires both the S07 release candidate and S08 operational evidence;
 a cutover is not a prerequisite for building or testing the release candidate.
+S08a evidence is composed deliberately: deterministic T4 tests prove exact
+restored-execution receipt reconciliation, independent Stop/Resume and one
+post-recovery admission; the disposable launchd proof backs up/restores
+populated paused/unready public records and confirms start/restart/stop without
+admission. The latter does not inject a live exact recovery receipt because
+#704 does not own a recovery-control surface. Neither result passes S08b's
+final-schema, external-effect, old-work disposition or cutover checks.
 
 Record every proof as passed, failed or unproved with its runtime/source identity,
 observed effects and limits. Missing evidence is never a pass. Earlier termination,

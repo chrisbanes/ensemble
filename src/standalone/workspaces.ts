@@ -74,6 +74,11 @@ export type WorkspaceCleanupResult =
   | { outcome: "cleaned"; binding: TaskWorkspaceBinding }
   | { outcome: "retained"; binding: TaskWorkspaceBinding; reason: string };
 
+export type WorkspaceManagerOptions = {
+  /** Narrow path-access observer used to prove restored-root identity ordering. */
+  beforePathAccess?: (path: string) => void;
+};
+
 /** The task-domain and writer-owner call seam; neither needs to own this storage. */
 export interface TaskWorkspaceLifecycle {
   provision(
@@ -240,6 +245,7 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   constructor(
     private readonly store: WorkspaceBindingStore,
     workspaceRoot: string,
+    private readonly options: WorkspaceManagerOptions = {},
   ) {
     if (!isAbsolute(workspaceRoot))
       throw new Error("Workspace directory must be absolute");
@@ -301,6 +307,14 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   async recover(): Promise<void> {
     for (const binding of this.store.list()) {
       await this.withTaskLock(binding.taskId, async () => {
+        if (binding.path !== join(this.workspaceRoot, binding.workspaceId)) {
+          this.store.update(
+            binding.taskId,
+            "held",
+            "Stored workspace path does not match its identity",
+          );
+          return;
+        }
         if (binding.state === "provisioning") {
           await this.provisionBinding(binding);
         } else if (binding.state === "ready") {
@@ -499,6 +513,8 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   private async ensureManagedRoot(
     binding: TaskWorkspaceBinding,
   ): Promise<void> {
+    if (binding.path !== join(this.workspaceRoot, binding.workspaceId))
+      throw new Error("Stored workspace path does not match its identity");
     this.assertRepositoryPaths(binding);
     await mkdir(this.workspaceRoot, { recursive: true });
     const rootInfo = await lstat(this.workspaceRoot);
@@ -509,8 +525,6 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
       dirname(this.workspaceRoot)
     )
       throw new Error("Workspace directory parent changed");
-    if (binding.path !== join(this.workspaceRoot, binding.workspaceId))
-      throw new Error("Stored workspace path does not match its identity");
     const workspaceInfo = await lstatIfExists(binding.path);
     if (!workspaceInfo) {
       if (binding.state !== "provisioning")
@@ -524,12 +538,17 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   private async assertManagedRoot(
     binding: TaskWorkspaceBinding,
   ): Promise<void> {
+    if (binding.path !== join(this.workspaceRoot, binding.workspaceId))
+      throw new Error("Stored workspace path does not match its identity");
     this.assertRepositoryPaths(binding);
+    this.options.beforePathAccess?.(binding.path);
     const workspaceInfo = await lstatIfExists(binding.path);
     if (!workspaceInfo) throw new Error("Task workspace is missing");
     if (workspaceInfo.isSymbolicLink() || !workspaceInfo.isDirectory())
       throw new Error("Task workspace path is not a real directory");
+    this.options.beforePathAccess?.(this.workspaceRoot);
     const canonicalRoot = await realpath(this.workspaceRoot);
+    this.options.beforePathAccess?.(binding.path);
     const canonicalWorkspace = await realpath(binding.path);
     if (resolve(canonicalRoot) !== this.workspaceRoot)
       throw new Error("Workspace directory escaped its managed location");

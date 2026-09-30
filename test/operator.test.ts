@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";

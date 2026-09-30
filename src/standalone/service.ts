@@ -1,14 +1,10 @@
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { isAbsolute, join, resolve, sep } from "node:path";
+import {
+  STANDALONE_MARKER_CONTENTS,
+  StandaloneDataDirectory,
+} from "./data-directory.js";
 import { Store } from "../core/store.js";
 import {
   CoordinationStore,
@@ -79,11 +75,9 @@ import {
   WorkspaceManager,
   type TaskWorkspaceRepositoryInput,
   type WorkspaceCleanupEvidence,
+  type WorkspaceManagerOptions,
 } from "./workspaces.js";
 
-const marker = "ensemble-standalone-v1\n";
-const markerName = ".ensemble-standalone";
-const ownerName = ".ensemble-owner.sqlite";
 const immutableRevisionMismatches = new Set([
   "assignment-revision-changed",
   "assignment-instructions-changed",
@@ -97,6 +91,7 @@ export interface StandaloneServiceOptions {
   routingClient?: RoutingChoiceClient | null;
   supervisor?: ExecutionSupervisorOptions;
   terminationVerifier?: TerminationVerifier;
+  workspaceManager?: WorkspaceManagerOptions;
   power?: {
     enabled?: boolean;
     eventSource?: PowerEventSource;
@@ -110,45 +105,9 @@ export interface StandaloneServiceOptions {
   };
 }
 
-/** Only the owner's empty SQLite file can identify an interrupted first start. */
-function markerReady(directory: string): boolean {
-  const entries = readdirSync(directory);
-  const mark = join(directory, markerName);
-  const hasMarker = entries.includes(markerName);
-  if (hasMarker) {
-    const state = lstatSync(mark);
-    if (!state.isFile() || state.isSymbolicLink())
-      throw new Error("Data directory marker must be a regular file");
-    const contents = readFileSync(mark, "utf8");
-    if (contents === marker) return true;
-    if (!marker.startsWith(contents))
-      throw new Error("Data directory marker mismatch");
-  }
-  const expected = [
-    ownerName,
-    `${ownerName}-journal`,
-    ...(hasMarker ? [markerName] : []),
-  ];
-  if (entries.length === 0) return false;
-  if (
-    !entries.includes(ownerName) ||
-    !entries.every((entry) => expected.includes(entry))
-  )
-    throw new Error("Unmarked data directory must be empty");
-  const owner = lstatSync(join(directory, ownerName));
-  if (!owner.isFile() || owner.isSymbolicLink() || owner.size !== 0)
-    throw new Error("Interrupted owner file is not a fresh installation");
-  if (entries.includes(`${ownerName}-journal`)) {
-    const journal = lstatSync(join(directory, `${ownerName}-journal`));
-    if (!journal.isFile() || journal.isSymbolicLink())
-      throw new Error("Interrupted owner journal is not a regular file");
-  }
-  return false;
-}
-
 /** Owns only standalone.sqlite in a marked data directory. No import or attach path exists. */
 export class StandaloneService {
-  private owner: DatabaseSync | undefined;
+  private owner: StandaloneDataDirectory | undefined;
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
   private domainState: DomainStore | undefined;
@@ -176,7 +135,7 @@ export class StandaloneService {
     private readonly markerWriter: (path: string, flag: "wx" | "w") => void = (
       path,
       flag,
-    ) => writeFileSync(path, marker, { flag, mode: 0o600 }),
+    ) => writeFileSync(path, STANDALONE_MARKER_CONTENTS, { flag, mode: 0o600 }),
     private readonly options: StandaloneServiceOptions = {},
   ) {
     this.retryNow = options.retry?.now ?? Date.now;
@@ -199,40 +158,12 @@ export class StandaloneService {
   async start(): Promise<void> {
     if (this.db) throw new Error("Service already started");
     this.lastCompletedWorkId = undefined;
-    if (!isAbsolute(this.dataDir))
-      throw new Error("Data directory must be absolute");
-    const directory = resolve(this.dataDir);
-    if (existsSync(directory)) {
-      if (
-        lstatSync(directory).isSymbolicLink() ||
-        !lstatSync(directory).isDirectory()
-      )
-        throw new Error("Data directory must be a real directory");
-      markerReady(directory);
-    } else mkdirSync(directory, { recursive: true, mode: 0o700 });
-    // SQLite owns the OS file lock for this transaction. A process crash releases
-    // it without consulting stale PID files or a clock.
-    const canonical = realpathSync(directory);
-    const ownerPath = join(canonical, ownerName);
-    if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
-      throw new Error("Service ownership file must not be a symlink");
-    const owner = new DatabaseSync(ownerPath, { timeout: 0 });
+    const dataDirectory = StandaloneDataDirectory.openExclusive(this.dataDir, {
+      markerWriter: this.markerWriter,
+    });
+    this.owner = dataDirectory;
+    const { databasePath: database, workspacePath } = dataDirectory;
     try {
-      try {
-        owner.exec("BEGIN IMMEDIATE");
-      } catch (error) {
-        throw new Error("Data directory is already owned", { cause: error });
-      }
-      this.owner = owner;
-      if (!markerReady(canonical)) {
-        const mark = join(canonical, markerName);
-        this.markerWriter(mark, existsSync(mark) ? "w" : "wx");
-        if (!markerReady(canonical))
-          throw new Error("Data directory marker write incomplete");
-      }
-      const database = join(canonical, "standalone.sqlite");
-      if (existsSync(database) && lstatSync(database).isSymbolicLink())
-        throw new Error("Standalone database must not be a symlink");
       const db = new DatabaseSync(database);
       this.db = db;
       db.exec(
@@ -249,14 +180,26 @@ export class StandaloneService {
       this.routingAttempts = routingAttempts;
       const schedulerStore = new SchedulerStore(db);
       this.schedulerStore = schedulerStore;
+      const workspaceBindings = new SqliteWorkspaceBindingStore(db);
       const workspaces = new WorkspaceManager(
-        new SqliteWorkspaceBindingStore(db),
-        join(canonical, "workspaces"),
+        workspaceBindings,
+        workspacePath,
+        this.options.workspaceManager,
       );
       await workspaces.recover();
       this.workspaces = workspaces;
       const state = new ExecutionState(db);
       for (const item of state.list()) {
+        const executionBinding = state.taskBinding(item.workId);
+        const workspaceBinding = executionBinding
+          ? workspaceBindings.get(executionBinding.taskId)
+          : undefined;
+        const bindingRootMismatch =
+          workspaceBinding !== undefined &&
+          workspaceBinding.path !==
+            join(workspacePath, workspaceBinding.workspaceId);
+        if (bindingRootMismatch) continue;
+        this.options.workspaceManager?.beforePathAccess?.(item.workspace);
         let workspaceKey: string;
         try {
           workspaceKey = realpathSync(item.workspace);
@@ -433,7 +376,7 @@ export class StandaloneService {
             this.db?.close();
           } finally {
             this.db = undefined;
-            owner.close();
+            dataDirectory.close();
             this.owner = undefined;
           }
         }

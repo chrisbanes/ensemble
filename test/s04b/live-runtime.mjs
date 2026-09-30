@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -305,7 +305,7 @@ async function run() {
   };
 
   progress("fixture-setup");
-  root = mkdtempSync(join(tmpdir(), "ensemble-s04b-live-"));
+  root = realpathSync(mkdtempSync(join(tmpdir(), "ensemble-s04b-live-")));
   evidence.cleanup.fixtureCreated = true;
   const dataDir = join(root, "data");
   runtime = new ObservedCodexRuntime();

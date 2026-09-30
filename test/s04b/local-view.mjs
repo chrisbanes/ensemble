@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StandaloneService } from "../../dist/src/standalone/service.js";
@@ -148,7 +148,9 @@ async function waitUntil(predicate) {
   }
 }
 
-const root = mkdtempSync(join(tmpdir(), "ensemble-s04b-local-view-"));
+const root = realpathSync(
+  mkdtempSync(join(tmpdir(), "ensemble-s04b-local-view-")),
+);
 const runtime = new SmokeRuntime();
 const service = new StandaloneService(
   join(root, "data"),
