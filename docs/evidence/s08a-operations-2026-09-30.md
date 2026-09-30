@@ -10,7 +10,7 @@ or cutover.
 ## Source and runtime identity
 
 - Branch: `cb/issue-704-operations`.
-- Tested source revision: `86d9b1c600d40240ad216384d902870a860f0caf`, with a
+- Tested source revision: `3543097763ca00245824b9fca8d5f5f615b56f2f`, with a
   clean working tree before the live run.
 - Node.js: `v24.21.0`,
   `/private/tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin/node`,
@@ -41,13 +41,13 @@ PATH=/private/tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin:/opt/homeb
   run s08a:live -- --live
 ```
 
-The first sandboxed attempt stopped before creating a fixture because the
-ephemeral `127.0.0.1` listener returned `EPERM`. The same command then ran with
-the narrowly approved local-loopback/launchctl execution permission and exited
-zero. No fixture existed from the sandboxed attempt.
+The first sandboxed attempt stopped before creating a fixture because spawning
+the `launchctl` preflight returned `EPERM`. The same command then ran with the
+narrowly approved launchctl execution permission and exited zero. No fixture
+existed from the sandboxed attempt.
 
 The proof used one random disposable fixture root and LaunchAgent label
-`com.chrisbanes.ensemble.s08a-a3a180ad7ead` in `gui/501`. Before creating that
+`com.chrisbanes.ensemble.s08a-c5f893f22457` in `gui/501`. Before creating that
 job, the harness verified the exact rendered plist with `plutil -lint` and
 parsed its arguments and environment. The plist's environment contained exactly
 the separate auth-file path, canonical operator origin, and
@@ -55,7 +55,7 @@ the separate auth-file path, canonical operator origin, and
 `KeepAlive=false`. The service used the existing Codex login, and the journey
 did not request a model turn.
 
-The service started as PID `28525`; `kickstart -k` restarted it as PID `28593`
+The service started as PID `89825`; `kickstart -k` restarted it as PID `90027`
 and the authenticated operator view retained the public fixture. After
 `bootout`, offline backup and verification succeeded. The snapshot manifest
 reported:
@@ -64,17 +64,19 @@ reported:
 - Supported schema version: `6`.
 - Schema fingerprint: `bd7925d5fad799bfde920b43a7baf17ef8e53c05610e365b68601a5ea8bfaab2`.
 - Logical-content SHA-256:
-  `8cc42af5e8825e36636d02ba6dc6277cb517c7e1d98490ead1f7aed1f7b9d0ad`.
+  `fb8afffc692717fc186f20759013a00c6ad670e13c1cad576cafc99cb9b9aaa7`.
 - SQLite-file SHA-256:
-  `69bc94e3922dba8a56a36b5ea075cad6473c57751f4eab43188c5cb3fbf69160`, equal
+  `64b1abd12dd074fb9ea6ff0fe526929ea8396790e8c31faac93edc220bae04b7`, equal
   to the manifest digest.
 
 An attempted backup while the source service owned its data directory was
 refused, did not create the requested snapshot path, and left the source data
 tree byte-identical by the harness's tree digest. Restore into a pre-existing
 directory was refused; its `keep.txt` file and the original snapshot database
-remained byte-identical. Successful restore created a new marked destination.
-The restored LaunchAgent then started as PID `28711`, restarted as PID `28767`,
+remained byte-identical. Successful restore created a new marked destination
+and a fresh empty mode-0600 `.ensemble-owner.sqlite` before promoting the
+normal marker; the harness read back its file type, mode, and zero-byte size.
+The restored LaunchAgent then started as PID `90144`, restarted as PID `90193`,
 and both authenticated public views retained one profile, one paused project,
 and one unready task. This fixture had no eligible assignment and admitted no
 work.
@@ -83,7 +85,7 @@ Both per-user jobs were booted out. The harness confirmed the observed service
 processes had exited, the random label was absent, the exact temporary fixture
 root had been removed, and every tracked data/auth/log/snapshot/restore/plist
 fixture path was absent. A separate post-run readback confirmed the label was
-still absent and PIDs `28525`, `28593`, `28711`, and `28767` had all exited.
+still absent and PIDs `89825`, `90027`, `90144`, and `90193` had all exited.
 The harness did not print its temporary root, password, session cookie, private
 logs, or raw login output.
 
@@ -103,16 +105,20 @@ changed.
 Recovery evidence is intentionally split. The deterministic restored-service
 test `restored public state reconciles exact execution evidence before one
 eligible admission` proves wrong/exact receipt handling, independent Stop and
-Resume, source-root identity rejection before access to the old managed path,
-and one admission after reconciliation. The live launchd fixture proves
+Resume, source-root identity rejection before access to the old managed path
+even when the persisted binding already had an unrelated hold, and one
+admission after reconciliation. Focused offline-operation tests also prove
+that successful and injected-failure backups of a never-started restored tree
+preserve every source entry and file byte, and that an older marked directory
+without owner metadata is refused unchanged. The live launchd fixture proves
 start/restart/stop and backup/verify/restore of paused/unready public data, but
 it does not inject a live exact receipt: #704 owns no recovery-control surface.
 This is not a live receipt-recovery claim.
 
 ## Verification commands
 
-After the live proof and source changes, the following required command passed
-with the pinned runtime:
+On the exact tested source revision, before the live proof, the following
+required commands passed with the pinned runtime:
 
 ```sh
 PATH=/private/tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
@@ -124,9 +130,10 @@ PATH=/private/tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin:/opt/homeb
   /private/tmp/ensemble-node.T1JoRI/npm-12.1.0/package/bin/npm-cli.js run check
 ```
 
+`npm ci` installed the locked dependencies with zero reported vulnerabilities.
 `npm run check` passed typecheck, Biome lint, formatting, TypeScript build, and
-all 208 tests. `git diff --check` passed. The final source revision is recorded
-above; this evidence file is a documentation-only follow-up.
+all 210 tests. `git diff --check` passed. The tested source revision is
+recorded above; this evidence file is a documentation-only follow-up.
 
 ## Limits
 
@@ -136,6 +143,12 @@ above; this evidence file is a documentation-only follow-up.
   contents, credentials, logs, provider records or external effects.
 - A restored managed binding under a different installation root remains held;
   this proof did not relocate workspaces.
+- Offline backup refuses a marked source missing its regular in-tree owner file;
+  older ownerless restores need a separately reviewed recovery path before
+  backup.
+- Service and operations paths must be lexically canonical and cannot traverse
+  symlinked ancestors; paths under a system temp alias such as macOS `/var`
+  must use their canonical physical path.
 - No host reboot, pre-login service guarantee, production deployment, old-work
   disposition, Haze prototype access, or cutover was performed.
 - The live paused/unready fixture made no model turn and does not prove live
