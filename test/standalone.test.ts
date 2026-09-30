@@ -15,7 +15,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -137,7 +137,7 @@ test("canonical directory has one process owner; crash and failed startup releas
       join(alias, "data"),
       () => new FakeRuntime(),
     );
-    await assert.rejects(second.start(), /already owned/);
+    await assert.rejects(second.start(), /symlink|canonical|ancestor/i);
     const db = new DatabaseSync(join(data, "standalone.sqlite"));
     const state = new ExecutionState(db);
     const row = state.create("live", "test", workspace);
@@ -157,7 +157,10 @@ test("canonical directory has one process owner; crash and failed startup releas
         { encoding: "utf8", timeout: 5000 },
       );
       assert.notEqual(attempt.status, 0);
-      assert.match(attempt.stderr, /already owned/);
+      assert.match(
+        attempt.stderr,
+        args[1] === data ? /already owned/ : /symlink|canonical|ancestor/i,
+      );
     }
     await assert.rejects(
       new StandaloneService(data, () => new FakeRuntime()).start(),

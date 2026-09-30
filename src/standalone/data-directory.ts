@@ -8,15 +8,56 @@ import {
   writeFileSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 export const STANDALONE_MARKER_NAME = ".ensemble-standalone";
 export const STANDALONE_MARKER_CONTENTS = "ensemble-standalone-v1\n";
 export const STANDALONE_OWNER_NAME = ".ensemble-owner.sqlite";
 
+/**
+ * Require a lexical absolute directory path whose existing components are all
+ * real directories. `any` is reserved for a service data root that may need
+ * recursive creation; operation targets may only omit their final component.
+ */
+export function assertCanonicalDirectoryPath(
+  input: string,
+  label: string,
+  missing: "none" | "leaf" | "any" = "none",
+): string {
+  if (!isAbsolute(input)) throw new Error(`${label} path must be absolute`);
+  if (resolve(input) !== input)
+    throw new Error(`${label} path must be lexically canonical`);
+
+  const components = input.slice(sep.length).split(sep).filter(Boolean);
+  let current: string = sep;
+  for (const [index, component] of components.entries()) {
+    current = join(current, component);
+    let state: ReturnType<typeof lstatSync>;
+    try {
+      state = lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (
+        missing === "any" ||
+        (missing === "leaf" && index === components.length - 1)
+      )
+        return input;
+      throw new Error(`${label} parent must be a real directory`, {
+        cause: error,
+      });
+    }
+    if (state.isSymbolicLink() || !state.isDirectory())
+      throw new Error(
+        `${label} path contains a symlink or non-directory ancestor`,
+      );
+  }
+  return input;
+}
+
 export type StandaloneDataDirectoryOptions = {
   createFreshMarker?: boolean;
   markerWriter?: (path: string, flag: "wx" | "w") => void;
+  requireExistingOwner?: boolean;
 };
 
 const defaultMarkerWriter = (path: string, flag: "wx" | "w") =>
@@ -79,9 +120,11 @@ export class StandaloneDataDirectory {
     dataDir: string,
     options: StandaloneDataDirectoryOptions = {},
   ): StandaloneDataDirectory {
-    if (!isAbsolute(dataDir))
-      throw new Error("Data directory must be absolute");
-    const directory = resolve(dataDir);
+    const directory = assertCanonicalDirectoryPath(
+      dataDir,
+      "Data directory",
+      options.createFreshMarker === false ? "none" : "any",
+    );
     if (existsSync(directory)) {
       const state = lstatSync(directory);
       if (state.isSymbolicLink() || !state.isDirectory())
@@ -92,13 +135,31 @@ export class StandaloneDataDirectory {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
 
+    assertCanonicalDirectoryPath(directory, "Data directory");
     const canonical = realpathSync(directory);
+    if (canonical !== directory)
+      throw new Error("Data directory path must be lexically canonical");
     const markerIsReady = standaloneMarkerReady(canonical);
     if (options.createFreshMarker === false && !markerIsReady)
       throw new Error("Data directory is not a marked standalone directory");
     const ownerPath = join(canonical, STANDALONE_OWNER_NAME);
-    if (existsSync(ownerPath) && lstatSync(ownerPath).isSymbolicLink())
-      throw new Error("Service ownership file must not be a symlink");
+    let ownerInfo: ReturnType<typeof lstatSync> | undefined;
+    try {
+      ownerInfo = lstatSync(ownerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (options.requireExistingOwner)
+        throw new Error(
+          "Data directory owner file is required for offline operations",
+          {
+            cause: error,
+          },
+        );
+    }
+    if (ownerInfo && (ownerInfo.isSymbolicLink() || !ownerInfo.isFile()))
+      throw new Error(
+        "Service ownership file must be a regular non-symlink file",
+      );
     const owner = new DatabaseSync(ownerPath, { timeout: 0 });
     try {
       try {

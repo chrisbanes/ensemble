@@ -3,7 +3,8 @@
 This procedure applies to the standalone Ensemble service only. It does not
 read or migrate the installed Haze prototype, install a persistent service on
 its own, or authorize production deployment or cutover. Keep all data, auth,
-snapshot, restore, plist and log paths separate, absolute, real (not symlinks),
+snapshot, restore, plist and log paths separate, absolute and lexically
+canonical, with every existing path component a real directory (not a symlink),
 and private to the operator.
 
 ## Runtime and authentication
@@ -129,7 +130,10 @@ strict `manifest.json` commit marker. Node 24's SQLite backup API captures the
 whole database without table-specific export. Verification checks SQLite
 integrity, schema version/fingerprint, database bytes, and a deterministic
 typed logical-content digest. A database owner lock is required; no process ID
-or timestamp is treated as ownership evidence.
+or timestamp is treated as ownership evidence. The owner must already be a
+regular, non-symlink file: offline backup never creates installation metadata
+in the source. A marked directory without an owner file is refused before
+modification.
 
 Restore only to a distinct, nonexistent data-directory path whose parent is
 already private:
@@ -142,8 +146,10 @@ npm run operations -- verify \
   /absolute/private/snapshots/ensemble-2026-09-30
 ```
 
-The restore command verifies the snapshot and restored database, then promotes
-its incomplete sentinel to `.ensemble-standalone` as its final commit. The
+The restore command verifies the snapshot and restored database, creates a
+fresh empty `.ensemble-owner.sqlite` as destination installation metadata, then
+promotes its incomplete sentinel to `.ensemble-standalone` as its final commit.
+It never copies the source owner file or SQLite WAL/journal files. The
 second `verify` checks the snapshot, not the restored directory. Do not start a
 restore destination unless `restore` exits successfully; successful restore
 returns the matching manifest identity. Generate a new reviewed LaunchAgent
@@ -163,8 +169,9 @@ disposable launchd proof instead preserves a paused project and unready task
 across restore/restart and admits no work; it does not claim to inject a live
 recovery receipt because #704 does not own the later operator recovery surface.
 
-If backup fails, the source is not changed; an operation-created snapshot path
-may remain incomplete and is never a valid backup. If restore fails after its
+If backup fails, the source is not changed; a missing owner file is rejected
+before it can be created. An operation-created snapshot path may remain
+incomplete and is never a valid backup. If restore fails after its
 sentinel is created, the destination retains
 `.ensemble-restore-incomplete`, and both verification and service startup refuse
 it. Inspect and remove only the exact private path created by that failed

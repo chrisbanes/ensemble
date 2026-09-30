@@ -15,20 +15,14 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import {
-  join,
-  basename,
-  dirname,
-  isAbsolute,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { join, relative, sep } from "node:path";
 import { backup, DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { z } from "zod";
 import {
   STANDALONE_MARKER_CONTENTS,
   STANDALONE_MARKER_NAME,
+  STANDALONE_OWNER_NAME,
+  assertCanonicalDirectoryPath,
   StandaloneDataDirectory,
 } from "./data-directory.js";
 
@@ -232,17 +226,16 @@ function validateDatabase(db: DatabaseSync): DatabaseMetadata {
   };
 }
 
-function canonicalTargetPath(input: string, label: string): string {
-  if (!isAbsolute(input)) throw new Error(`${label} path must be absolute`);
-  const requested = resolve(input);
-  const name = basename(requested);
-  if (!name || name === "." || name === "..")
-    throw new Error(`${label} path is invalid`);
-  const parent = dirname(requested);
-  const parentInfo = lstatSync(parent);
-  if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory())
-    throw new Error(`${label} parent must be a real directory`);
-  return join(realpathSync(parent), name);
+function canonicalTargetPath(
+  input: string,
+  label: string,
+  allowMissingLeaf = false,
+): string {
+  return assertCanonicalDirectoryPath(
+    input,
+    label,
+    allowMissingLeaf ? "leaf" : "none",
+  );
 }
 
 function isWithin(parent: string, candidate: string): boolean {
@@ -388,12 +381,13 @@ export async function createSnapshot(
   snapshotDirectory: string,
   options: OperationsOptions = {},
 ): Promise<SnapshotManifestV1> {
-  const snapshotPath = canonicalTargetPath(snapshotDirectory, "Snapshot");
+  const snapshotPath = canonicalTargetPath(snapshotDirectory, "Snapshot", true);
   let dataDirectory: StandaloneDataDirectory | undefined;
   let sourceDb: DatabaseSync | undefined;
   try {
     dataDirectory = StandaloneDataDirectory.openExclusive(sourceDirectory, {
       createFreshMarker: false,
+      requireExistingOwner: true,
     });
     assertDisjoint(dataDirectory.root, snapshotPath);
     sourceDb = openVerifiedDatabase(dataDirectory.databasePath);
@@ -482,7 +476,11 @@ export async function restoreSnapshot(
   options: OperationsOptions = {},
 ): Promise<SnapshotManifestV1> {
   const snapshotPath = canonicalTargetPath(snapshotDirectory, "Snapshot");
-  const destinationPath = canonicalTargetPath(destinationDirectory, "Restore");
+  const destinationPath = canonicalTargetPath(
+    destinationDirectory,
+    "Restore",
+    true,
+  );
   assertDisjoint(snapshotPath, destinationPath);
   reserveDirectory(destinationPath);
 
@@ -513,6 +511,11 @@ export async function restoreSnapshot(
   }
 
   options.fault?.("before-restore-commit");
+  const ownerPath = join(destinationPath, STANDALONE_OWNER_NAME);
+  writeFileSync(ownerPath, Buffer.alloc(0), { flag: "wx", mode: 0o600 });
+  chmodSync(ownerPath, 0o600);
+  fsyncPath(ownerPath);
+  fsyncPath(destinationPath);
   renameSync(sentinelPath, join(destinationPath, STANDALONE_MARKER_NAME));
   fsyncPath(destinationPath);
   return manifest;

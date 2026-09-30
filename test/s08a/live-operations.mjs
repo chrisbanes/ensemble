@@ -731,7 +731,14 @@ async function run() {
     readFileSync(join(restoredDataDirectory, ".ensemble-standalone"), "utf8"),
     "ensemble-standalone-v1\n",
   );
+  const restoredOwner = lstatSync(
+    join(restoredDataDirectory, ".ensemble-owner.sqlite"),
+  );
+  assert.equal(restoredOwner.isFile(), true);
+  assert.equal(restoredOwner.mode & 0o777, 0o600);
+  assert.equal(restoredOwner.size, 0);
   EVIDENCE.operations.restoreToNewMarkedDirectory = true;
+  EVIDENCE.operations.freshEmptyOwnerMetadataCreated = true;
 
   stage = "restored-launchagent-start";
   stageLog(stage);

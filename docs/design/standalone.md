@@ -296,11 +296,18 @@ the final commit marker. The manifest binds the supported schema version and
 fingerprint, SQLite file digest, deterministic typed logical-content digest,
 and source marker. Restore reserves a distinct nonexistent data directory,
 creates `.ensemble-restore-incomplete` immediately, verifies the copied
-database, and atomically promotes the sentinel to `.ensemble-standalone` last.
-Restore does not copy owner/WAL files, workspace trees or credentials, and it
-does not migrate or clear persisted domain, execution, Stop, writer, capacity
-or recovery holds. Ordinary service startup performs migrations, workspace
-recovery and execution reconciliation before scheduler admission.
+database, writes a new empty `.ensemble-owner.sqlite`, and atomically promotes
+the sentinel to `.ensemble-standalone` last. The destination owner file is
+fresh installation metadata, not a copy of the source owner or any WAL/journal
+file. Offline backup requires the existing owner file to be a regular,
+non-symlink file and acquires its SQLite lock; it never creates source metadata.
+A successfully restored directory can therefore be backed up before its first
+service start, while an older or incomplete marked directory without the owner
+file is refused without changing the source tree. Restore does not copy
+workspace trees or credentials, and it does not migrate or clear persisted
+domain, execution, Stop, writer, capacity or recovery holds. Ordinary service
+startup performs migrations, workspace recovery and execution reconciliation
+before scheduler admission.
 
 The operations procedure generates a private per-user LaunchAgent with
 caller-supplied absolute runtime/data/auth/log paths and an explicit loopback or

@@ -197,11 +197,7 @@ export class StandaloneService {
         const bindingRootMismatch =
           workspaceBinding !== undefined &&
           workspaceBinding.path !==
-            join(workspacePath, workspaceBinding.workspaceId) &&
-          workspaceBinding.state === "held" &&
-          workspaceBinding.reason?.includes(
-            "Stored workspace path does not match its identity",
-          );
+            join(workspacePath, workspaceBinding.workspaceId);
         if (bindingRootMismatch) continue;
         this.options.workspaceManager?.beforePathAccess?.(item.workspace);
         let workspaceKey: string;

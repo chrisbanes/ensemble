@@ -4,9 +4,11 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   copyFileSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -15,10 +17,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { tmpdir } from "./temp.js";
 import type {
   Runtime,
   RuntimeToolCall,
@@ -41,6 +43,33 @@ import {
 
 const digest = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
+
+function treeDigest(root: string): string {
+  const hash = createHash("sha256");
+  const visit = (path: string, relativePath: string): void => {
+    const info = lstatSync(path);
+    const type = info.isDirectory()
+      ? "directory"
+      : info.isFile()
+        ? "file"
+        : info.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    hash.update(
+      `${relativePath}\0${type}\0${info.mode & 0o777}\0${info.size}\n`,
+    );
+    if (info.isSymbolicLink()) {
+      hash.update(readlinkSync(path));
+    } else if (info.isFile()) {
+      hash.update(readFileSync(path));
+    } else if (info.isDirectory()) {
+      for (const entry of readdirSync(path).sort())
+        visit(join(path, entry), `${relativePath}/${entry}`);
+    }
+  };
+  visit(root, ".");
+  return hash.digest("hex");
+}
 
 function createLargeMarkedSource(data: string): void {
   const owner = StandaloneDataDirectory.openExclusive(data);
@@ -482,6 +511,176 @@ test("snapshot verification rejects malformed, mismatched, unsupported, and link
   }
 });
 
+test("service, snapshot, and restore paths reject symlinked ancestors", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-operation-ancestor-link-")),
+  );
+  const realAncestor = join(root, "real-ancestor");
+  const realSource = join(realAncestor, "real-child");
+  const realSnapshotParent = join(realAncestor, "snapshots");
+  const alias = join(root, "ancestor-link");
+  const sourceAlias = join(alias, "real-child");
+  const snapshot = join(realSnapshotParent, "snapshot");
+  const snapshotTargetAlias = join(alias, "snapshots", "through-link");
+  const restoreTargetAlias = join(alias, "restored-child");
+  const canonicalRestoreTarget = join(root, "restored-canonical");
+  const nonCanonicalSource = `${realAncestor}/unused/../real-child`;
+  const nonCanonicalSnapshotTarget = `${root}/unused/../noncanonical-snapshot`;
+  mkdirSync(realSnapshotParent, { recursive: true });
+  const bootstrap = new StandaloneService(
+    realSource,
+    () => new OperationsJourneyRuntime(),
+  );
+  await bootstrap.start();
+  await stopAfterSchedulerDrain(bootstrap);
+  symlinkSync(realAncestor, alias, "dir");
+  await createSnapshot(realSource, snapshot);
+
+  const service = new StandaloneService(sourceAlias, () => {
+    throw new Error("runtime must not start for a linked source ancestor");
+  });
+  try {
+    await assert.rejects(service.start(), /ancestor|real directory|canonical/i);
+    await assert.rejects(
+      new StandaloneService(nonCanonicalSource, () => {
+        throw new Error("runtime must not start for a noncanonical source");
+      }).start(),
+      /lexically canonical/i,
+    );
+    await assert.rejects(
+      createSnapshot(sourceAlias, join(root, "source-alias-snapshot")),
+      /ancestor|real directory|canonical/i,
+    );
+    await assert.rejects(
+      createSnapshot(realSource, snapshotTargetAlias),
+      /ancestor|real directory|canonical/i,
+    );
+    await assert.rejects(
+      createSnapshot(realSource, nonCanonicalSnapshotTarget),
+      /lexically canonical/i,
+    );
+    await assert.rejects(
+      verifySnapshot(join(alias, "snapshots", "snapshot")),
+      /ancestor|real directory|canonical/i,
+    );
+    await assert.rejects(
+      restoreSnapshot(snapshot, restoreTargetAlias),
+      /ancestor|real directory|canonical/i,
+    );
+    await assert.rejects(
+      restoreSnapshot(
+        join(alias, "snapshots", "snapshot"),
+        canonicalRestoreTarget,
+      ),
+      /ancestor|real directory|canonical/i,
+    );
+    assert.equal(existsSync(join(realAncestor, "restored-child")), false);
+    assert.equal(
+      existsSync(join(realAncestor, "snapshots", "through-link")),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restored offline backups preserve the full source tree and share service ownership", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-restored-backup-owner-")),
+  );
+  const source = join(root, "source");
+  const originalSnapshot = join(root, "original-snapshot");
+  const restored = join(root, "restored-never-started");
+  const successfulBackup = join(root, "successful-backup");
+  const failedBackup = join(root, "failed-backup");
+  const backupOwnedSnapshot = join(root, "backup-owned-snapshot");
+  const serviceFirstRestored = join(root, "service-first-restored");
+  const serviceSource = join(root, "service-source");
+  const serviceSourceSnapshot = join(root, "service-source-snapshot");
+  const serviceOwnedSnapshot = join(root, "service-owned-snapshot");
+  const ownerlessLegacy = join(root, "ownerless-legacy-restore");
+  let service: StandaloneService | undefined;
+  try {
+    createLargeMarkedSource(source);
+    await createSnapshot(source, originalSnapshot);
+    await restoreSnapshot(originalSnapshot, restored);
+    const ownerPath = join(restored, ".ensemble-owner.sqlite");
+    assert.equal(existsSync(ownerPath), true);
+    assert.equal(statSync(ownerPath).size, 0);
+    const restoredBefore = treeDigest(restored);
+
+    await createSnapshot(restored, successfulBackup);
+    assert.equal(treeDigest(restored), restoredBefore);
+
+    await assert.rejects(
+      createSnapshot(restored, failedBackup, {
+        fault(stage) {
+          if (stage === "before-snapshot-commit")
+            throw new Error("injected restored-source backup failure");
+        },
+      }),
+      /injected restored-source backup failure/,
+    );
+    assert.equal(treeDigest(restored), restoredBefore);
+
+    mkdirSync(ownerlessLegacy, { mode: 0o700 });
+    for (const name of readdirSync(restored)) {
+      if (name !== ".ensemble-owner.sqlite")
+        copyFileSync(join(restored, name), join(ownerlessLegacy, name));
+    }
+    const ownerlessBefore = treeDigest(ownerlessLegacy);
+    const ownerlessSnapshot = join(root, "ownerless-backup");
+    await assert.rejects(
+      createSnapshot(ownerlessLegacy, ownerlessSnapshot),
+      /owner file is required/i,
+    );
+    assert.equal(treeDigest(ownerlessLegacy), ownerlessBefore);
+    assert.equal(existsSync(ownerlessSnapshot), false);
+
+    service = new StandaloneService(
+      restored,
+      () => new OperationsJourneyRuntime(),
+    );
+    const backupWhileStarting = createSnapshot(restored, backupOwnedSnapshot);
+    await assert.rejects(service.start(), /already owned/);
+    await backupWhileStarting;
+    assert.equal(treeDigest(restored), restoredBefore);
+
+    const serviceSourceService = new StandaloneService(
+      serviceSource,
+      () => new OperationsJourneyRuntime(),
+    );
+    await serviceSourceService.start();
+    await stopAfterSchedulerDrain(serviceSourceService);
+    await createSnapshot(serviceSource, serviceSourceSnapshot);
+    await restoreSnapshot(serviceSourceSnapshot, serviceFirstRestored);
+    service = new StandaloneService(
+      serviceFirstRestored,
+      () => new OperationsJourneyRuntime(),
+    );
+    const starting = service.start();
+    await assert.rejects(
+      createSnapshot(serviceFirstRestored, serviceOwnedSnapshot),
+      /already owned/,
+    );
+    await starting;
+    const serviceOwnerPath = join(
+      serviceFirstRestored,
+      ".ensemble-owner.sqlite",
+    );
+    const serviceOwnerBytes = readFileSync(serviceOwnerPath);
+    await stopAfterSchedulerDrain(service);
+    service = undefined;
+    assert.equal(
+      readFileSync(serviceOwnerPath).equals(serviceOwnerBytes),
+      true,
+    );
+  } finally {
+    if (service) await stopAfterSchedulerDrain(service).catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("exclusive source ownership and exact destination reservations preserve existing paths", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-snapshot-exclusivity-"));
   const sourceOne = join(root, "source-one");
@@ -573,7 +772,8 @@ test("operations npm commands are strict, secret-safe, and do not start the serv
     assert.equal(restore.status, 0, restore.stderr);
     assert.equal(cliJson(restore.stdout).operation, "restore");
     assert.equal(existsSync(join(restored, ".ensemble-standalone")), true);
-    assert.equal(existsSync(join(restored, ".ensemble-owner.sqlite")), false);
+    assert.equal(existsSync(join(restored, ".ensemble-owner.sqlite")), true);
+    assert.equal(statSync(join(restored, ".ensemble-owner.sqlite")).size, 0);
 
     const preserved = join(root, "existing-destination");
     mkdirSync(preserved);
@@ -821,6 +1021,21 @@ test("restored public state reconciles exact execution evidence before one eligi
 
     await stopAfterSchedulerDrain(sourceService);
     sourceService = undefined;
+    const stoppedSourceDb = new DatabaseSync(
+      join(sourceData, "standalone.sqlite"),
+    );
+    try {
+      stoppedSourceDb
+        .prepare(
+          "UPDATE task_workspace_bindings SET state = 'held', reason = ? WHERE taskId = ?",
+        )
+        .run(
+          "An unrelated persisted hold must not bypass identity validation",
+          routedTaskId,
+        );
+    } finally {
+      stoppedSourceDb.close();
+    }
     assert.equal(runOperations("backup", sourceData, snapshot).status, 0);
     assert.equal(runOperations("verify", snapshot).status, 0);
     assert.equal(runOperations("restore", snapshot, destinationData).status, 0);

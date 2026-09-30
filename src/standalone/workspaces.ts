@@ -307,6 +307,14 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   async recover(): Promise<void> {
     for (const binding of this.store.list()) {
       await this.withTaskLock(binding.taskId, async () => {
+        if (binding.path !== join(this.workspaceRoot, binding.workspaceId)) {
+          this.store.update(
+            binding.taskId,
+            "held",
+            "Stored workspace path does not match its identity",
+          );
+          return;
+        }
         if (binding.state === "provisioning") {
           await this.provisionBinding(binding);
         } else if (binding.state === "ready") {
