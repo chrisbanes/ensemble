@@ -461,7 +461,8 @@ async function bootoutAndVerify(dataDirectory) {
 
 async function run() {
   EVIDENCE.optIn = true;
-  stageLog("preflight");
+  stage = "preflight-runtime";
+  stageLog(stage);
   assert.equal(
     process.platform,
     "darwin",
@@ -490,10 +491,14 @@ async function run() {
   });
   assert.match(loginStatus, /Logged in/);
   const domain = `gui/${process.getuid()}`;
+  stage = "preflight-gui-domain";
+  stageLog(stage);
   execFileSync(LAUNCHCTL, ["print", domain], {
     encoding: "utf8",
     timeout: 15_000,
   });
+  stage = "preflight-source-revision";
+  stageLog(stage);
   EVIDENCE.source = {
     gitRevision: execFileSync(gitExecutable, ["rev-parse", "HEAD"], {
       encoding: "utf8",
@@ -505,6 +510,8 @@ async function run() {
         timeout: 10_000,
       }).trim().length === 0,
   };
+  stage = "preflight-binary-identities";
+  stageLog(stage);
   EVIDENCE.runtime = {
     node: process.version,
     nodeExecutable: PINNED_NODE,
@@ -519,11 +526,15 @@ async function run() {
       "existing ChatGPT login reported authenticated; no credential content read",
     launchdPath: LAUNCHD_PATH,
     gitExecutable: realpathSync(gitExecutable),
+    gitSha256: await fileSha256(gitExecutable),
     caffeinateExecutable: realpathSync(caffeinateExecutable),
+    caffeinateSha256: await fileSha256(caffeinateExecutable),
     compiledServiceCli: cliPath,
     compiledOperationsCli: operationsCli,
   };
 
+  stage = "preflight-disposable-label";
+  stageLog(stage);
   label = `com.chrisbanes.ensemble.s08a-${randomBytes(6).toString("hex")}`;
   target = `${domain}/${label}`;
   assert.equal(
@@ -566,6 +577,8 @@ async function run() {
   password = randomBytes(32).toString("base64url");
   await OperatorAuth.initialize(authFile, password);
   assert.equal(statSync(authFile).mode & 0o777, 0o600);
+  stage = "preflight-launchagent-render";
+  stageLog(stage);
   await writeLaunchAgent(sourceDataDirectory, sourceLogs);
   EVIDENCE.launchd = {
     domain,
