@@ -167,10 +167,12 @@ class ObservedCodexRuntime extends CodexRuntime {
 
 async function waitForTool(runtimeInstance, tool, offset = 0) {
   await waitUntil(
-    () =>
-      runtimeInstance.callbacks
+    () => {
+      const call = runtimeInstance.callbacks
         .slice(offset)
-        .some((item) => item.tool === tool),
+        .find((item) => item.tool === tool);
+      return call !== undefined && call.success !== null;
+    },
     240_000,
     `registered callback ${tool}`,
   );
