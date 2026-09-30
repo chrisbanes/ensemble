@@ -9,9 +9,10 @@ restart-recovery receipts, constrained retries and macOS power-event admission
 quarantine. S04b adds durable task-scoped coordination, results/inboxes,
 operator-attention interactions, follow-up revisions, lead-gated completion,
 bounded routing provenance, and a typed task coordination view. Its deterministic
-service contract does not establish the production operator UI or resumed-thread
-runtime behavior: the disposable Codex probe and its evidence are a separate
-qualification. The #694 operator scheduling/capacity controls and recovery
+service contract does not establish the production operator UI. The separate
+[disposable Codex probe](../evidence/s04b-live-runtime-2026-09-29.md) qualifies
+resumed-thread coordination callbacks for its bounded tested journey only. The
+#694 operator scheduling/capacity controls and recovery
 presentation, authenticated remote UI, physical sleep/wake qualification and
 operational host-restart qualification remain separate work. See the
 [S04b coordination boundary](s04b-coordination-boundary.md).

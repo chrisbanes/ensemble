@@ -27,8 +27,9 @@ and a typed task-scoped coordination view. Deterministic service tests cover
 restart and capacity-one delivery. `test/s04b/local-view.mjs` is a disposable,
 read-only integration probe, not a production operator route. The explicit live
 Codex probe separately checks registered tools after service/App Server restart;
-its recorded evidence, not the fixture, determines whether that runtime surface
-is qualified. The BB plugin, packaging and integration harness have been removed.
+the [bounded live evidence](docs/evidence/s04b-live-runtime-2026-09-29.md)
+qualifies the observed resumed-thread coordination callbacks, not universal
+reattachment. The BB plugin, packaging and integration harness have been removed.
 #694 retains final operator scheduling/capacity controls and recovery
 presentation; #703 retains the authenticated remote operator UI. S05 physical
 sleep/wake qualification and the installed Haze prototype's reviewed cutover

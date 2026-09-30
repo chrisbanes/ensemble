@@ -4,9 +4,10 @@ S04b connects the standalone domain, scheduler, execution state, Codex dynamic
 tools, and a task-scoped operator-facing facade. The service owns durable
 coordination effects; runtime history is not used to infer results, recipients,
 approvals, or completion. The deterministic contract is covered by SQLite-backed
-tests. A separate bounded live probe is required to establish that registered
-tools remain callable after service/App Server restart and thread resume; until
-its report is recorded, that runtime capability is unproved.
+tests. The [bounded live probe](../evidence/s04b-live-runtime-2026-09-29.md)
+observed registered tools on resumed lead and worker threads after service/App
+Server restart. This establishes the tested journey only, not universal runtime
+reattachment.
 
 ## Trusted caller and durable effects
 
