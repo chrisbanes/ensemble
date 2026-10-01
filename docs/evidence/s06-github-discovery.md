@@ -110,5 +110,28 @@ the filesystem sandbox denied loopback listeners. Final `npm run check` with
 loopback access passed type checking, lint, formatting, build and all 323 tests.
 The four existing lint warnings and schema information message remain.
 
+## Review repairs — 1 October 2026
+
+Commit `cdc2739e614a96988febabfc5442a553c1cfbaaa` rechecks current linked
+repository grants at effective turn admission, including repository identity,
+source path, ref and Git common directory. Removing a grant holds new turns
+without deleting the retained workspace. Configuration changes retire obsolete
+selection memberships, sync and activation records in the same transaction;
+remaining selections can qualify again, while removal of the last source
+preserves the task with a withdrawal hold. Persisted repository bindings and
+Project field arrays are validated before use. Operator preview uses the same
+selection reader as synchronization, and README now records the passing bounded
+qualification.
+
+`test/github-review-regressions.test.ts` covers malformed persisted data,
+overlapping and obsolete selection removal, last-source withdrawal, valid
+repository admission and revoked grants on retained workspaces. Pinned
+`npm ci --offline` and `npm run check` passed all 327 tests with loopback access.
+The same read-only live fixture passed again at `2026-10-01T15:43:54.430Z`
+against this repair commit, with all six expected cases and `providerWrites: 0`.
+The credential and runtime boundaries above still apply.
+The independent repair audit returned **ship** for this implementation, with
+all reported findings resolved and no remaining material finding.
+
 External GitHub writes and completion reconciliation belong to S07; this
 report does not claim A24, A26 or operational release qualification.

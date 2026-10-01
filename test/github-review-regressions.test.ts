@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { DomainStore, type DomainCommand } from "../src/core/domain.js";
@@ -243,7 +244,7 @@ for (const revoke of [false, true])
       : "a current repository grant permits a new turn in an imported workspace",
     async () => {
       const root = realpathSync(
-        mkdtempSync("/private/tmp/ensemble-github-revocation-"),
+        mkdtempSync(join(tmpdir(), "ensemble-github-revocation-")),
       );
       const path = join(root, "repo");
       mkdirSync(path);
