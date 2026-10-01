@@ -294,7 +294,60 @@ without trusting agent-supplied project or assignment IDs.
 Provide project/task lists, task detail, conversations and execution history,
 configuration and a shared attention inbox. Show capacity, source health, the lead, assignees,
 results and artifacts. Distinguish empty, loading, stale, failed, paused, waiting,
-stopping and uncertain states. Start with a list; Kanban is optional.
+stopping, disconnected and uncertain states. Start with a list; Kanban is optional.
+Keep known state and uncertainty legible and retain unfinished drafts across
+transient failures.
+
+### Everyday navigation and attention
+
+Open on an attention-first overview, with actionable items above a compact
+cross-project work list and recent results shown separately. Keep projects in the
+desktop sidebar. Present task activity, assignments, dependencies, results and
+relevant controls together in task detail. Cover attention needed, normal work in
+progress and first-project/first-task experiences.
+
+The attention inbox contains unresolved questions, approvals and problems requiring
+operator intervention. Routine progress, completions requiring no decision and
+normal dependency waiting do not create attention items. Order attention by
+urgency, then age: execution uncertainty and problems requiring intervention first,
+then questions and approvals oldest first. Show project and task context on each
+item. Unresolved questions, pending approvals and failures remain visible even
+when related history is collapsed.
+
+### Task creation and project setup
+
+Provide a substantial task composer with project selection, desired outcome and
+detailed brief, optional reference links, permitted explicit assignee selection
+and task dependencies. Use Create and start as the primary action and Save draft
+as the secondary action. Explain before submission that starting is subject to
+project state, dependencies, capacity and execution holds. Show the persisted
+state and reason for any wait after submission; creation does not imply running.
+These controls must preserve existing readiness and admission rules.
+
+Use a short guided project setup: project name, lead profile, instructions and
+optional repository access. Advanced routing and external source configuration
+can follow later. Source selection does not grant repository access.
+
+Phone layouts support checking progress, creating tasks, messaging, answering
+questions and reviewing approvals. Complex configuration and recovery are
+desktop-first; narrow screens must still explain the current state and next step.
+
+### Readable task histories
+
+Default to meaningful task activity and group conversation content by durable
+assignment. Identify each group by assignment, assignee, latest status and time,
+with a source-faithful excerpt rather than an invented summary. Older completed
+groups can be collapsed. Opening a group initially shows the latest three available
+messages and its result, with Show earlier for the rest. Long messages have
+expandable previews. Provide Expand all, Collapse all and a chronological view of
+available captured conversation content, retaining omission and redaction notices.
+
+Preserve expansion choices, unfinished replies and reading position as updates
+arrive. Follow new messages only when the operator is already at the end of the
+conversation; otherwise show a new-updates control without moving their position.
+Updates must not reopen collapsed groups or replace unfinished replies.
+
+### Human requests and execution controls
 
 Questions and approvals are durable and scoped. Approval includes the action,
 target, requester and reviewed material; changed material invalidates approval.
@@ -305,6 +358,10 @@ Ensemble displays conversation history and accepts durable messages to the task-
 for the next eligible turn. They cannot bypass pause, stop or other admission
 controls. Live steering is deferred; stop is a separate control. Exact transcript
 and message transport is part of Codex App Server qualification.
+Stop is best effort; the UI must distinguish stopping from stopped and explain
+uncertain execution. Recovery must not imply that Resume can clear unresolved
+ownership or force a capacity release.
+
 The implemented assignment view retains sanitized completed assistant text bound
 to the exact task, assignment, work and runtime turn, including its instruction
 and conversation revisions. Partial text is not persisted. The view labels
