@@ -427,8 +427,9 @@ try {
   assert.equal(repository.node_id, m.repository.nodeId);
   assert.equal(repository.full_name, m.repository.fullName);
   guard.assertRepositoryVisibility(repository.private);
-  evidence.provider.repositoryVisibility =
-    repository.private ? "private" : "public";
+  evidence.provider.repositoryVisibility = repository.private
+    ? "private"
+    : "public";
   guard.assertDefaultBranch(repository.default_branch);
   for (const j of m.journeys) {
     const pr = z

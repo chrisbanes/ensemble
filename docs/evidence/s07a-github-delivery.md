@@ -137,3 +137,12 @@ Visibility regression: missing explicit authority failed before repair; after re
 the affected harness tests pass 4/4. The pinned full check passes 358/358 with zero
 failures/skips and the same four existing warnings. The live script syntax check
 passes; no live invocation, visibility mutation or credential access ran here.
+
+
+Final-head CI found a formatting-only gap in the visibility evidence assignment.
+The local 358-test full check preceded that final script edit; subsequent syntax
+and diff checks did not verify formatting. Exact-file Biome validation reproduced
+the CI failure, and formatter-equivalent whitespace repaired it. Exact-file format,
+script syntax and diff checks now pass; behavior and prior test coverage are
+unchanged. Final repaired-head CI remains for root-controlled publication/readback.
+No live or visibility mutation ran during this repair.
