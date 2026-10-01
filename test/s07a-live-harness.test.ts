@@ -64,14 +64,19 @@ const manifest = () => ({
     },
   ],
 });
-function fixture() {
-  const raw = JSON.stringify(manifest()),
+function fixture(isPrivate = true) {
+  const source = manifest();
+  source.repository.private = isPrivate;
+  const raw = JSON.stringify(source),
     m = fixtureManifestSchema.parse(JSON.parse(raw));
   const grant = {
     version: 1,
     manifestSha256: createHash("sha256").update(raw).digest("hex"),
     accountNodeId: m.account.nodeId,
     repositoryNodeId: m.repository.nodeId,
+    repositoryVisibility: isPrivate
+      ? ("private" as const)
+      : ("public" as const),
     projectNodeId: m.project.nodeId,
     credentialRef: m.credentialRef,
     actions: m.actions,
@@ -156,6 +161,53 @@ test("live guard rejects absent/changed grant and unexpected resources before pr
     }),
     "failed",
   );
+});
+test("fixture visibility must be explicitly granted before any effect", () => {
+  const f = fixture();
+  const { repositoryVisibility: _visibility, ...missing } = f.grant;
+  assert.throws(() => new FixtureGuard(f.raw, missing), /visibility/i);
+  assert.throws(
+    () =>
+      new FixtureGuard(f.raw, {
+        ...f.grant,
+        repositoryVisibility: "public",
+      }),
+    /manifest/,
+  );
+  const publicFixture = fixture(false);
+  assert.throws(
+    () =>
+      new FixtureGuard(publicFixture.raw, {
+        ...publicFixture.grant,
+        repositoryVisibility: "private",
+      }),
+    /manifest/,
+  );
+  for (const current of [f, publicFixture]) {
+    const guard = new FixtureGuard(current.raw, current.grant);
+    guard.assertRepositoryVisibility(current.m.repository.private);
+    assert.throws(
+      () => guard.assertRepositoryVisibility(!current.m.repository.private),
+      /visibility/,
+    );
+    assert.throws(() => guard.assertRepositoryVisibility(undefined));
+    guard.assertRequest(
+      `https://api.github.com/repos/${current.m.repository.fullName}/statuses/${"2".repeat(40)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ context: "s07a-ci", state: "failure" }),
+      },
+    );
+    assert.throws(() =>
+      guard.assertRequest(
+        `https://api.github.com/repos/${current.m.repository.fullName}/statuses/${"2".repeat(40)}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ context: "unrequired-ci", state: "success" }),
+        },
+      ),
+    );
+  }
 });
 test("live guard permits only exact recorded progress, status, merge and separately granted cleanup", () => {
   const f = fixture(),

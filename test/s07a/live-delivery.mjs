@@ -88,6 +88,7 @@ const evidence = {
   provider: {
     accountNodeId: m.account.nodeId,
     repositoryNodeId: m.repository.nodeId,
+    repositoryVisibility: null,
     projectNodeId: m.project.nodeId,
     api: "2022-11-28",
   },
@@ -425,7 +426,9 @@ try {
     .parse(await provider(repoPath));
   assert.equal(repository.node_id, m.repository.nodeId);
   assert.equal(repository.full_name, m.repository.fullName);
-  assert.equal(repository.private, true);
+  guard.assertRepositoryVisibility(repository.private);
+  evidence.provider.repositoryVisibility =
+    repository.private ? "private" : "public";
   guard.assertDefaultBranch(repository.default_branch);
   for (const j of m.journeys) {
     const pr = z

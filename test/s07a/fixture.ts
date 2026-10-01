@@ -38,7 +38,7 @@ export const fixtureManifestSchema = z
       .object({
         nodeId: id,
         fullName: z.literal("chrisbanes/ensemble-s07a-fixture"),
-        private: z.literal(true),
+        private: z.boolean(),
         defaultBranch: ref,
       })
       .strict(),
@@ -88,6 +88,7 @@ const grantSchema = z
     manifestSha256: z.string().regex(/^[0-9a-f]{64}$/),
     accountNodeId: id,
     repositoryNodeId: id,
+    repositoryVisibility: z.enum(["private", "public"]),
     projectNodeId: id,
     credentialRef: z.string().regex(/^env:[A-Z][A-Z0-9_]*$/),
     actions: z.array(z.enum(actionKinds)),
@@ -120,6 +121,8 @@ export class FixtureGuard {
       g.manifestSha256 !==
         createHash("sha256").update(manifestText).digest("hex") ||
       g.repositoryNodeId !== m.repository.nodeId ||
+      g.repositoryVisibility !==
+        (m.repository.private ? "private" : "public") ||
       g.accountNodeId !== m.account.nodeId ||
       g.projectNodeId !== m.project.nodeId ||
       g.credentialRef !== m.credentialRef ||
@@ -141,6 +144,17 @@ export class FixtureGuard {
   assertDefaultBranch(value: string) {
     if (value !== this.manifest.repository.defaultBranch)
       throw new Error("Fixture base is not the observed default branch");
+  }
+  assertRepositoryVisibility(value: unknown) {
+    this.currentGrant();
+    const observed = z.boolean().parse(value);
+    if (
+      observed !== this.manifest.repository.private ||
+      this.grant.repositoryVisibility !== (observed ? "private" : "public")
+    )
+      throw new Error(
+        "Observed fixture visibility does not match the explicit grant",
+      );
   }
   private currentGrant() {
     if (Date.now() >= Date.parse(this.grant.expiresAt))

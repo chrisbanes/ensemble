@@ -1,8 +1,12 @@
 # S07a GitHub delivery evidence
 
 Status: **implementation qualification pending**. Required live GitHub/service/
-existing-login Codex/operator journeys have not run. No named S07a write/merge,
-credential, runtime or cleanup grant exists in this implementation session.
+existing-login Codex/operator journeys have not run. Root provisioned the approved
+bounded private fixture; no live execution manifest is frozen. The required private
+branch-protection operation and reconciled read returned HTTP 403: "Upgrade to GitHub
+Pro or make this repository public to enable this feature". This does not waive the
+required `s07a-ci` gate. A public fixture variant is prepared; changing visibility
+still requires an explicit supplemental grant and provider readback.
 Deterministic coverage and harness preparation do not complete #737.
 
 The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
@@ -63,7 +67,8 @@ Unproved field/search readiness or scope cases stay held, and fresh changed issu
 text retains the source review gate. Local settlement does not lock GitHub.
 
 The harness takes `--live --manifest ABSOLUTE_PATH --grant ABSOLUTE_PATH`, without a
-default target. It validates private `chrisbanes/ensemble-s07a-fixture`, exact account,
+default target. It validates fixed `chrisbanes/ensemble-s07a-fixture`, exact account,
+and explicit manifest/grant/provider visibility agreement,
 repository/Project/item/field/option/issue/PR/ref/SHA identities, qualification as the
 observed default base, explicit action and fixture status/feedback operations,
 credential reference, grant expiry, at most 12 runtime turns and separate cleanup
@@ -85,7 +90,7 @@ runtime/login configuration were preserved. No paid model/evaluation calls ran.
 
 Final local validation uses Node `24.21.0` and npm `12.2.0`; `npm ci` succeeded.
 The pinned full `npm run check` passed type checking, lint, formatting, build and
-all 357 tests after repairing the existing scoped-tool inventory expectation. Four
+all 358 tests after repairing the existing scoped-tool inventory expectation. Four
 pre-existing Biome warnings remain, plus the existing schema-version and npm
 environment notices; no new diagnostics remain. The full command needed local
 loopback permission after concrete HTTP/browser `EPERM` failures. Required live
@@ -114,3 +119,21 @@ SQLite and feedback transaction faults are outside the provider-only catch; the
 feedback fault regression proves it propagates. The affected tests passed 27/27,
 and the final pinned full check passed 357/357 with the same four existing warnings.
 Both required live journeys remain unrun, and the repaired candidate awaits review.
+
+
+The visibility preparation changes only the finite fixture boundary. Manifest
+`repository.private` is a validated boolean; required grant `repositoryVisibility`
+is exactly `private` or `public` and must match that manifest. Provider readback
+must match both before the first fixture effect. No public default/fallback or
+arbitrary repository is supported. Missing visibility authority, changed or
+mismatched visibility and invalid provider data reject before effects. Existing
+private and explicitly granted public cases pass the guard tests; the required
+`s07a-ci` context, fixed identity/material, credential reference, expiry, 12-turn
+ceiling and separately granted cleanup remain enforced. Root retains all resource,
+visibility and live execution mutations. Public access remains pending explicit
+authorization; the required live journeys remain unrun.
+
+Visibility regression: missing explicit authority failed before repair; after repair
+the affected harness tests pass 4/4. The pinned full check passes 358/358 with zero
+failures/skips and the same four existing warnings. The live script syntax check
+passes; no live invocation, visibility mutation or credential access ran here.
