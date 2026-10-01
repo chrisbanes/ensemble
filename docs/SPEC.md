@@ -338,14 +338,49 @@ conditions; observed PR auto-closure is reconciled, not assumed to complete all 
 Writes record confirmed success, confirmed failure or uncertainty; local edits
 cannot masquerade as confirmed remote updates.
 
-Each project chooses reviewable PR or through-merge delivery in the operational
-release. Reviewable-PR handback waits for settlement; feedback/CI failures wake the
+The service implements operator-owned, versioned project delivery policy. Absent
+action grants deny writes; imported identity and repository access supply no write
+authority. Configured delivery credentials stay in service memory and are excluded
+from the Codex spawn environment, including nonempty exact-value aliases. Adding a
+credential already inherited by a running runtime holds activation until restart.
+Host-permitted reads and the existing login boundary remain accepted limitations.
+
+Each project chooses reviewable PR (default) or through-merge delivery. Reviewable-PR handback waits for settlement; feedback/CI failures wake the
 task-scoped project lead, while merge remains operator-owned. Through-merge requires granted authority,
 project instructions and actual GitHub requirements. No universal review count is
 imposed. Non-code tasks record the requested outcome and evidence; no universal
 human acceptance is required beyond configured instructions and permissions.
 Assignment completion alone cannot merge, close an issue, complete its task or
 remove a workspace.
+
+Stable operation IDs retain exact material and bound caller revisions, including
+denied outcomes. Intent commits before an effect. Successful write responses alone
+do not establish success: provider readback must prove the exact target. Ambiguous
+creates retain uncertainty across restart; a missing marker cannot authorize replay.
+Only positively confirmed transient no-effect failures receive up to two retries.
+
+The lead explicitly submits merge or issue closure with its current reviewed result
+set. Shared completion checks run with the current action intent transition, excluding
+only that lead's current work/turn, its result effect and that callback. Confirmed
+merge does not mark Done. A new eligible lead work revision must request completion,
+end successfully and pass all existing gates. Operator settlement and final
+PR-dependent completion inspect GitHub freshly and revalidate local revisions after
+the await. Changed heads invalidate settlement and wake the retained lead. New
+comment/review/check identities also wake it; unchanged polls are deduplicated.
+
+Only proven own closure permits the retained lead's completion continuation. The
+service obtains a fresh closed-issue snapshot before open-only source reconciliation;
+merge attribution requires the exact PR in GitHub's latest ClosedEvent. Current
+label readiness and repository-selection proof must still hold. Field/search cases
+without that proof, independent holds and changed source text remain held. Explicit
+issue closure requires observed open before the effect; a concurrent independent
+closure between that read and write remains an attribution limit.
+
+This implementation has deterministic service/provider/operator coverage. Required
+real GitHub/Codex/browser delivery journeys remain unrun without a named resource,
+operation, credential, runtime-turn and cleanup grant. See the
+[S07a evidence inventory](evidence/s07a-github-delivery.md). S07a is incomplete;
+release, operations, redesigned UI and cutover are separate gates.
 
 ## Review checkpoint
 

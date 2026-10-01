@@ -89,11 +89,80 @@ export interface CoordinationOperatorApi {
     | "readAssignmentHistory"
     | "readTask"
     | "reconcileResultRecipient"
+    | "settleHandback"
+    | "refreshDelivery"
   >;
   domain(): OperatorDomain;
   routingAvailability(projectId: string): RoutingAvailability;
 }
 
+const settlementFields = z
+  .object({
+    key: uuid,
+    taskId: uuid,
+    expectedTaskVersion: positiveInteger,
+    expectedDeliveryRevision: positiveInteger,
+    expectedPolicyVersion: positiveInteger,
+    repositoryId: z.string().min(1).max(512),
+    prNumber: positiveInteger,
+    expectedPrNodeId: z.string().min(1).max(512),
+    expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/),
+    decision: z.enum(["accepted", "closed"]),
+  })
+  .strict();
+function deliverySection(
+  view: CoordinationTaskView,
+  csrfToken: string,
+): string {
+  const delivery = view.delivery;
+  if (!delivery) return "";
+  const issue = delivery.issueObservation;
+  const sourceFacts = issue
+    ? `<p>Issue ${issue.issueNumber} (${escapeHtml(issue.nodeId)}): observed ${escapeHtml(issue.observedState)}. Labels: ${escapeHtml(issue.labels.join(", "))}.</p>`
+    : "<p>No imported issue observation.</p>";
+  const fieldFacts = `<p>Project field observations: ${escapeHtml(delivery.projectFieldObservations.map((f) => `${f.projectNodeId}/${f.fieldNodeId}: ${f.optionNodeId}`).join("; ") || "None observed")}.</p>`;
+  const b = delivery.binding,
+    p = b?.observation;
+  const actions = delivery.actions
+    .map(
+      (a) =>
+        `<li>${escapeHtml(a.kind)}: ${escapeHtml(a.state)}; attempts ${a.attempts}; ${escapeHtml(a.reason ?? "")}<time>${escapeHtml(new Date(a.updatedAt).toISOString())}</time>${a.receipt ? ` — confirmed identity ${escapeHtml(a.receipt.nodeId)}` : ""}</li>`,
+    )
+    .join("");
+  const pr = p
+    ? `<p>PR ${p.number} (${escapeHtml(p.nodeId)}); head ${escapeHtml(p.headSha)}; ${p.draft ? "Draft" : "Ready for review"}; provider state ${escapeHtml(p.state)}; ${p.merged ? "Confirmed merged" : "Not merged"}.</p><p>Review: ${escapeHtml(p.reviewDecision ?? "No decision")}. Checks: ${escapeHtml(p.checks.map((c) => `${c.name}: ${c.status}`).join(", ") || "None observed")}.</p><p>Merge gates: ${escapeHtml(p.mergeBlockers.join(", ") || "No blockers observed")}. Settlement: ${escapeHtml(b?.settlement?.decision ?? "Waiting")}. ${escapeHtml(b?.readError ?? "")}</p>` +
+      `<p>Provider feedback: ${escapeHtml((p.feedback ?? []).map((f) => `${f.kind} ${f.nodeId}: ${f.body}`).join("; ") || "None observed")}.</p>`
+    : "<p>No PR delivery registered.</p>";
+  const fields =
+    b && p
+      ? ([
+          ["taskId", view.task.id],
+          ["expectedTaskVersion", String(view.task.version)],
+          ["expectedDeliveryRevision", String(b.revision)],
+          ["expectedPolicyVersion", String(delivery.policyVersion)],
+          ["repositoryId", p.repositoryId],
+          ["prNumber", String(p.number)],
+          ["expectedPrNodeId", p.nodeId],
+          ["expectedHeadSha", p.headSha],
+        ] as Array<[string, string]>)
+      : [];
+  const settlement =
+    b && p && b.mode === "reviewable-pr"
+      ? form(
+          "/coordination/control/delivery/settle",
+          [...fields, ["decision", "accepted"]],
+          csrfToken,
+          "Accept handback",
+        ) +
+        form(
+          "/coordination/control/delivery/settle",
+          [...fields, ["decision", "closed"]],
+          csrfToken,
+          "Settle outcome as closed",
+        )
+      : "";
+  return `<section><h2>GitHub delivery</h2><p>Completion mode: ${escapeHtml(delivery.mode)}. Local task: ${escapeHtml(view.task.state)}. Delivery holds: ${escapeHtml(delivery.blockers.join(", ") || "None")}.</p>${sourceFacts}${fieldFacts}${pr}${actions ? `<ul>${actions}</ul>` : "<p>No external actions.</p>"}${settlement}${form("/coordination/control/delivery/refresh", [["taskId", view.task.id]], csrfToken, "Refresh delivery observations")}</section>`;
+}
 function form(
   action: string,
   fields: Array<[string, string]>,
@@ -452,7 +521,7 @@ function taskPage(
     .join("");
   const fallbackCount = view.attention.routingFallbacks.length;
   const availability = api.routingAvailability(String(view.task.projectId));
-  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
+  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${deliverySection(view, csrfToken)}${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
 }
 
 function capturedHistory(history: ConversationHistoryAssignmentRead): string {
@@ -592,6 +661,27 @@ export class CoordinationOperatorRoutes {
 
   get routes(): OperatorRoute[] {
     return [
+      {
+        method: "POST",
+        path: "/coordination/control/delivery/settle",
+        handler: async ({ fields }) => {
+          const input = settlementFields.parse(fields);
+          await this.api.view().settleHandback(input);
+          return { kind: "redirect", location: taskHref(input.taskId) };
+        },
+      },
+      {
+        method: "POST",
+        path: "/coordination/control/delivery/refresh",
+        handler: async ({ fields }) => {
+          const input = z
+            .object({ key: uuid, taskId: uuid })
+            .strict()
+            .parse(fields);
+          await this.api.view().refreshDelivery(input.taskId);
+          return { kind: "redirect", location: taskHref(input.taskId) };
+        },
+      },
       {
         method: "GET",
         path: "/coordination",

@@ -185,10 +185,32 @@ export class LocalOperatorUi {
       null,
       2,
     );
+    const delivery = this.store.deliveryConfiguration(projectId);
     const credentialReferenceStatus = routing.credentialAvailable
       ? "credential reference configured"
       : "credential reference not configured";
-    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("instructionsRevision", String(project.instructionsRevision), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}<h2>GitHub discovery</h2><p>${github.credentialRef ? "Credential reference configured" : "Credential reference not configured"}. Selections require preview before activation.</p>${form(
+    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("instructionsRevision", String(project.instructionsRevision), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}<h2>GitHub delivery</h2><p>${delivery.credentialConfigured ? "Credential reference configured" : "Credential reference not configured"}. Mode: ${escapeHtml(delivery.mode)}; external actions default to denied.</p>${form(
+      "delivery.configure",
+      hidden("projectId", projectId) +
+        hidden("expectedVersion", String(delivery.version)) +
+        selectField(
+          "mode",
+          [
+            { value: "reviewable-pr", label: "Reviewable PR" },
+            { value: "through-merge", label: "Through merge" },
+          ],
+          delivery.mode,
+        ) +
+        field("credentialRef") +
+        field("clearCredentialRef", "1", "checkbox") +
+        textarea("grants", JSON.stringify(delivery.grants, null, 2)) +
+        textarea(
+          "requiredChecks",
+          JSON.stringify(delivery.requiredChecks, null, 2),
+        ),
+      undefined,
+      csrfToken,
+    )}<h2>GitHub discovery</h2><p>${github.credentialRef ? "Credential reference configured" : "Credential reference not configured"}. Selections require preview before activation.</p>${form(
       "github.configure",
       field("projectId", projectId, "hidden") +
         field("expectedVersion", String(github.version), "hidden") +
@@ -405,6 +427,24 @@ export class LocalOperatorUi {
             : [],
         };
         break;
+      case "delivery.configure": {
+        const projectId = required("projectId"),
+          current = this.store.deliveryCredentialReference(projectId);
+        command = {
+          ...common,
+          type: "delivery.configure",
+          projectId,
+          expectedVersion: version(),
+          mode: required("mode") as "reviewable-pr" | "through-merge",
+          credentialRef:
+            fields.clearCredentialRef === "1"
+              ? null
+              : fields.credentialRef || current,
+          grants: JSON.parse(required("grants")),
+          requiredChecks: JSON.parse(required("requiredChecks")),
+        };
+        break;
+      }
       case "github.configure": {
         const current = this.store.githubConfiguration(required("projectId"));
         command = {
@@ -550,6 +590,7 @@ const COMMANDS = new Set([
   "profile.create",
   "profile.configure",
   "routing.configure",
+  "delivery.configure",
   "github.configure",
   "github.preview",
   "github.refresh",

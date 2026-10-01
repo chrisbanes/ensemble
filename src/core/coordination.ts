@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DomainStore } from "./domain.js";
+import {
+  DeliveryStore,
+  externalActionSchema,
+  actionKinds,
+  type DeliveryCaller,
+} from "./delivery.js";
 import type { Database } from "./store.js";
 
 const uuid = z.string().uuid();
@@ -335,7 +341,8 @@ export class CoordinationStore {
   migrate(): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_receipts (
+      this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_external_delivery_notices (taskId TEXT NOT NULL REFERENCES domain_tasks(id),identity TEXT NOT NULL,eventId TEXT NOT NULL,PRIMARY KEY(taskId,identity));
+      CREATE TABLE IF NOT EXISTS coordination_receipts (
         threadId TEXT NOT NULL, turnId TEXT NOT NULL, callId TEXT NOT NULL,
         tool TEXT NOT NULL, payloadHash TEXT NOT NULL,
         taskId TEXT NOT NULL REFERENCES domain_tasks(id),
@@ -508,6 +515,101 @@ export class CoordinationStore {
     }
   }
 
+  ensureDeliveryEventWithinTransaction(
+    taskId: string,
+    reason: string,
+    identity: string,
+  ): void {
+    const lead = this.required(
+      "SELECT assignmentId FROM task_lead_bindings WHERE taskId=?",
+      taskId,
+    );
+    const prior = this.one(
+      "SELECT 1 AS present FROM coordination_external_delivery_notices WHERE taskId=? AND identity=?",
+      taskId,
+      identity,
+    );
+    if (prior) return;
+    const event = this.newEvent(
+      taskId,
+      String(lead.assignmentId),
+      "pr-delivery",
+      null,
+      JSON.stringify({ reason, identity }),
+    );
+    this.db
+      .prepare(
+        "INSERT INTO coordination_external_delivery_notices VALUES (?,?,?)",
+      )
+      .run(taskId, identity, event.eventId);
+  }
+  deliveryActionBlockers(
+    caller: DeliveryCaller,
+    reviewedResultIds: string[],
+    exceptOperationId: string,
+  ): string[] {
+    const request: TaskCompletionRequest = {
+      requestId: exceptOperationId,
+      taskId: caller.taskId,
+      leadAssignmentId: caller.assignmentId,
+      leadWorkId: caller.workId,
+      leadWorkRevision: caller.workRevision,
+      taskVersion: caller.taskVersion,
+      reviewedResultIds: [...new Set(reviewedResultIds)].sort(),
+      status: "pending",
+      rejectionReasons: [],
+      revision: 1,
+      createdAt: Date.now(),
+      finalizedAt: null,
+    };
+    return [
+      ...new Set([
+        ...this.completionBlockers(request, "completed", true),
+        ...new DeliveryStore(this.db).actionBlockers(
+          caller.taskId,
+          exceptOperationId,
+        ),
+        ...this.domain
+          .admission(caller.taskId)
+          .reasons.filter((r) => !r.startsWith("external-action-")),
+      ]),
+    ];
+  }
+  deliveryCaller(call: CoordinationCall): DeliveryCaller {
+    const parsed = generalCallSchema.parse(call),
+      row = this.currentBinding(parsed.threadId, parsed.turnId);
+    if (!row) throw new Error("Delivery call is not bound to current work");
+    return {
+      projectId: String(row.projectId),
+      taskId: String(row.taskId),
+      taskVersion: Number(row.taskVersion),
+      assignmentId: String(row.assignmentId),
+      assignmentVersion: Number(row.assignmentVersion),
+      workId: String(row.workId),
+      workRevision: Number(row.workRevision),
+      conversationRevision: Number(row.conversationRevision),
+    };
+  }
+  recordAsyncReceipt(
+    call: CoordinationCall,
+    caller: DeliveryCaller,
+    response: CoordinationToolResponse,
+  ): CoordinationToolResponse {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const prior = this.cachedToolResponse(call);
+      if (prior) {
+        this.db.exec("COMMIT");
+        return prior;
+      }
+      this.insertToolReceipt(call, caller as unknown as Row, response);
+      this.db.exec("COMMIT");
+      return response;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   /** Matching lost-response retries replay before any current-generation query. */
   receipt(input: CoordinationCall): CoordinationReceipt | undefined {
     const call = generalCallSchema.parse(input);
@@ -1299,6 +1401,12 @@ export class CoordinationStore {
       );
       if (leadBinding?.assignmentId !== lead.assignmentId)
         throw new Error("Only the task lead may request completion");
+      const deliveryReasons = new DeliveryStore(this.db).completionBlockers(
+        String(lead.taskId),
+        Number(lead.taskVersion),
+      );
+      if (deliveryReasons.length)
+        throw new Error(`Completion held: ${deliveryReasons.join(", ")}`);
       const reviewed = [...new Set(call.arguments.reviewedResultIds)].sort();
       for (const resultId of reviewed) {
         const result = this.required(
@@ -1579,12 +1687,14 @@ export class CoordinationStore {
     requestId: string;
     workId: string;
     terminal: "completed" | "failed";
+    deliveryValidation?: () => string[];
   }): {
     completed: boolean;
     reasons: string[];
     request: TaskCompletionRequest;
   } {
-    const command = completionFinalizeSchema.parse(input);
+    const { deliveryValidation, ...material } = input;
+    const command = completionFinalizeSchema.parse(material);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const raw = this.required(
@@ -1609,7 +1719,17 @@ export class CoordinationStore {
           request,
         };
       }
-      const reasons = this.completionBlockers(request, command.terminal);
+      const reasons = [
+        ...this.completionBlockers(request, command.terminal),
+        ...new DeliveryStore(this.db).completionBlockers(
+          request.taskId,
+          request.taskVersion,
+        ),
+        ...(deliveryValidation?.() ??
+          (new DeliveryStore(this.db).delivery(request.taskId)
+            ? ["delivery-fresh-inspection-required"]
+            : [])),
+      ];
       if (reasons.length > 0) {
         const rejectionReasons = [...new Set(reasons)].slice(0, 32);
         const rejectedRow = this.db
@@ -2012,10 +2132,11 @@ export class CoordinationStore {
     const work = z.string().min(1).max(512).parse(workId);
     const assignment = uuid.parse(assignmentId);
     return Boolean(
-      this.one(
-        "SELECT 1 AS found FROM coordination_results WHERE workId = ?",
-        work,
-      ) ||
+      new DeliveryStore(this.db).hasWaitingPr(work) ||
+        this.one(
+          "SELECT 1 AS found FROM coordination_results WHERE workId = ?",
+          work,
+        ) ||
         this.one(
           `SELECT 1 AS found FROM coordination_interactions
         WHERE requestingWorkId = ? AND status = 'open' LIMIT 1`,
@@ -2531,6 +2652,26 @@ export class CoordinationStore {
           value.materialHash,
           value.materialJson,
         );
+      if (
+        kind === "approval" &&
+        actionKinds.some((action) => action === value.action)
+      ) {
+        const material = externalActionSchema.parse(
+          JSON.parse(value.materialJson ?? "null"),
+        );
+        if (
+          material.kind !== value.action ||
+          canonical(material.target) !== value.target
+        )
+          throw new Error(
+            "External approval requires exact action and target material",
+          );
+        new DeliveryStore(this.db).recordApprovalContextWithinTransaction(
+          interactionId,
+          this.deliveryCaller(call),
+          material,
+        );
+      }
       const attentionId = randomUUID();
       this.db
         .prepare(`INSERT INTO coordination_operator_attention
@@ -2774,8 +2915,11 @@ export class CoordinationStore {
   private completionBlockers(
     request: TaskCompletionRequest,
     terminal: "completed" | "failed",
+    externalAction = false,
   ): string[] {
     const reasons: string[] = [];
+    if (!externalAction)
+      reasons.push(...this.domain.admission(request.taskId, true).reasons);
     if (terminal !== "completed") reasons.push("lead-work-not-successful");
     const lead = this.one(
       `SELECT task.state AS taskState, task.version AS taskVersion,
@@ -2799,7 +2943,7 @@ export class CoordinationStore {
         AND assignment.version = binding.assignmentVersion
         AND assignment.state = 'running'
         AND lead.assignmentId = binding.assignmentId
-        AND intent.state = 'completed'
+        AND intent.state = '${externalAction ? "running" : "completed"}'
         AND NOT EXISTS (
           SELECT 1 FROM task_work_revisions newer
           WHERE newer.assignmentId = revision.assignmentId
@@ -2927,8 +3071,10 @@ export class CoordinationStore {
     if (
       this.one(
         `SELECT 1 AS queued FROM coordination_delivery_batches
-      WHERE taskId = ? AND state = 'queued' LIMIT 1`,
+      WHERE taskId = ? AND state = 'queued' AND (? = 0 OR deliveryWorkId <> ?) LIMIT 1`,
         request.taskId,
+        Number(externalAction),
+        request.leadWorkId,
       )
     )
       reasons.push("queued-inbox-delivery");
@@ -2940,7 +3086,9 @@ export class CoordinationStore {
       .all(request.taskId) as Array<{ workId: string }>;
     if (
       unfinishedWork.some(
-        (item) => !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
+        (item) =>
+          !(externalAction && item.workId === request.leadWorkId) &&
+          !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
       )
     )
       reasons.push("unfinished-execution");
@@ -2996,7 +3144,9 @@ export class CoordinationStore {
         .all(request.taskId) as Array<{ workId: string }>;
       if (
         unfinishedRequests.some(
-          (item) => !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
+          (item) =>
+            !(externalAction && item.workId === request.leadWorkId) &&
+            !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
         )
       )
         reasons.push("unfinished-turn-request");

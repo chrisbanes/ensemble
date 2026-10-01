@@ -1,0 +1,98 @@
+# S07a GitHub delivery evidence
+
+Status: **implementation qualification pending**. Required live GitHub/service/
+existing-login Codex/operator journeys have not run. No named S07a write/merge,
+credential, runtime or cleanup grant exists in this implementation session.
+Deterministic coverage and harness preparation do not complete #737.
+
+The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
+against `46e9fc8de5ab0a527732d9c24d2f9c6d7b20fac6`. This inventory records
+implementation evidence, not a parallel delivery plan.
+
+| Finite row | Evidence | Disposition |
+| --- | --- | --- |
+| 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
+| 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
+| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard | **Unrun / unproved; required** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent final review | Full pinned checks passed; **independent review/live identities pending** |
+
+The first policy/store cycle failed for absent new modules and then passed. The
+fresh-head settlement/completion and same-aggregate comment feedback tests failed
+at their missing seams and passed after implementation. Effective-rule merge-method
+and conditional conversation checks also failed before their repair. The harness
+helper build failed with its missing module, then its provider-free tests passed.
+A startup cleanup regression failed with retained delivery state after closed-DB
+startup failure, then passed after cleanup; retry starts from a clean service state.
+No live red run was attempted because it would create real effects.
+
+Targeted tests cover durable denied replay after policy expansion, immutable keys,
+Project/repository/option scope, bound transport spoofing, use-time revocation,
+actual operator approval followed by an eligible next lead turn, one-operation
+approval consumption, attempting intent visible before a provider effect,
+successful-write/lost-response reconciliation and no blind retry across restart,
+persisted two-retry ceiling, and exact-target serialization while other targets
+proceed. Provider fixtures exercise all nine action transports, paginated marker
+readback, identity/app/head spoofing, actual classic queue/strict/deployment fields,
+effective update restrictions and merge methods, legacy signature/update/linear
+history restrictions, exact ClosedEvent attribution.
+
+Mode and feedback fixtures cover retained lead waiting, explicit running-lead merge,
+new completion after merge/settlement, provider-only changed head, inspection outage,
+post-await local mutation, deduplicated comment/head transitions and recurrence across
+file-backed restart. The imported service fixture uses an open-only selection;
+fresh own-closure metadata precedes membership removal, permits final completion
+without restoring readiness, and rejects independent label/dependency/source holds.
+
+The Chromium delivery test checks unauthenticated, Origin and CSRF rejection,
+rendered H1 form rejected after provider-only H2 change, persisted changed-head
+attention, escaped hostile feedback and unavailable-read settlement rejection. A
+concrete sandbox `listen EPERM` required rerunning only that failed local check
+with loopback permission; the browser check then passed. Existing shared HTTP
+loopback failures were handled the same way. Tests use the current operator UI;
+no redesigned UI approval is claimed.
+
+Credentials are configured by reference only. Disposable child-runtime tests show
+both the configured key and exact-value alias absent with ordinary HOME/PATH and
+existing protocol/login controls retained. Service tests hold activation when a
+newly configured reference was inherited by the current runtime. Existing host and
+ambient reads remain accepted limits; this is not independent credential isolation
+from the host. Direct issue-close attribution requires pre-effect open observation;
+an independent closure between that read and effect cannot be atomically excluded.
+Merge closure attribution requires GitHub's exact latest ClosedEvent closer.
+Unproved field/search readiness or scope cases stay held, and fresh changed issue
+text retains the source review gate. Local settlement does not lock GitHub.
+
+The harness takes `--live --manifest ABSOLUTE_PATH --grant ABSOLUTE_PATH`, without a
+default target. It validates private `chrisbanes/ensemble-s07a-fixture`, exact account,
+repository/Project/item/field/option/issue/PR/ref/SHA identities, qualification as the
+observed default base, explicit action and fixture status/feedback operations,
+credential reference, grant expiry, at most 12 runtime turns and separate cleanup
+permissions. It guards exact GitHub methods/paths/GraphQL documents, rejects other
+resources before effects, filters the same service-owned spawn path and retains
+safe evidence. Source hashes, Node/npm/Codex identities, provider receipts, runtime
+thread/turn identities, committed dispositions, rendered controls and verified
+cleanup must be observed before required journeys can pass. Unknown effects or
+unproved cleanup retain records; fixture repository/Project disposal is not implicit.
+The full live script has only been syntax checked and its refusal path tested.
+
+Untouched [S05 evidence](s05-local-qualification.md) and
+[S06 evidence](s06-github-discovery.md) remain valid for their original boundaries;
+neither supplies S07a write authority or required live delivery evidence. Physical
+sleep/wake, S07b release qualification, redesigned UI, later recovery/operations,
+X01–X08 and Haze cutover remain separate/deferred. Installed Haze and shared
+runtime/login configuration were preserved. No paid model/evaluation calls ran.
+
+
+Final local validation uses Node `24.21.0` and npm `12.2.0`; `npm ci` succeeded.
+The pinned full `npm run check` passed type checking, lint, formatting, build and
+all 345 tests after repairing the existing scoped-tool inventory expectation. Four
+pre-existing Biome warnings remain, plus the existing schema-version and npm
+environment notices; no new diagnostics remain. The full command needed local
+loopback permission after concrete HTTP/browser `EPERM` failures. Required live
+journeys were never invoked. Independent review and root-controlled publication
+remain pending; this candidate cannot merge as completed S07a.
+
+One final full-load rerun exposed the unchanged scheduler capacity fixture's fixed
+25 ms wait: one waiting intent was not yet present. The same focused test passed
+unmodified; its capacity assertion was retained. The final full check passed after all repairs, including fail-closed legacy
+protection handling found in self-review.

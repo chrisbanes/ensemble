@@ -1,3 +1,11 @@
+import {
+  DeliveryStore,
+  canonicalMaterial,
+  type DeliveryCaller,
+  type DeliveryPolicy,
+} from "../core/delivery.js";
+import { DeliveryCoordinator, deliveryRuntimeEnvironment } from "./delivery.js";
+import type { GitHubDeliveryProvider } from "./github-delivery.js";
 import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { isAbsolute, join, resolve, sep } from "node:path";
@@ -96,7 +104,17 @@ const immutableRevisionMismatches = new Set([
   "task-revision-changed",
 ]);
 
+export interface RuntimeSpawnContext {
+  spawnEnvironment: () => NodeJS.ProcessEnv;
+}
 export interface StandaloneServiceOptions {
+  delivery?: {
+    fetcher?: typeof fetch;
+    providerFactory?: (
+      projectId: string,
+      policy: DeliveryPolicy,
+    ) => GitHubDeliveryProvider;
+  };
   github?: { readerFactory?: GitHubReaderFactory; intervalMs?: number };
   routingClient?: RoutingChoiceClient | null;
   /** Test-only values remain in memory and are never persisted. */
@@ -141,6 +159,9 @@ export class StandaloneService {
   private githubSynchronizer: GitHubSynchronizer | undefined;
   private githubPollTimer: NodeJS.Timeout | undefined;
   private coordination: CoordinationStore | undefined;
+  private deliveryStore: DeliveryStore | undefined;
+  private deliveryCoordinator: DeliveryCoordinator | undefined;
+  private runtimeSpawnSnapshot: NodeJS.ProcessEnv | undefined;
   private routingAttempts: RoutingAttemptStore | undefined;
   private workspaces: WorkspaceManager | undefined;
   private workspaceBindings: SqliteWorkspaceBindingStore | undefined;
@@ -166,7 +187,9 @@ export class StandaloneService {
 
   constructor(
     private readonly dataDir: string,
-    private readonly runtimeFactory: () => Runtime = () => new CodexRuntime(),
+    private readonly runtimeFactory: (
+      context: RuntimeSpawnContext,
+    ) => Runtime = (context) => new CodexRuntime("codex", context),
     private readonly markerWriter: (path: string, flag: "wx" | "w") => void = (
       path,
       flag,
@@ -262,7 +285,104 @@ export class StandaloneService {
       );
       coordination.migrate();
       this.coordination = coordination;
-      const runtime = this.runtimeFactory();
+      const deliveryStore = new DeliveryStore(db);
+      deliveryStore.migrate();
+      this.deliveryStore = deliveryStore;
+      this.deliveryCoordinator = new DeliveryCoordinator(deliveryStore, {
+        ...(this.options.delivery?.fetcher
+          ? { fetcher: this.options.delivery.fetcher }
+          : {}),
+        ...(this.options.delivery?.providerFactory
+          ? { providerFactory: this.options.delivery.providerFactory }
+          : {}),
+        authorize: (caller, exceptOperationId, request) => {
+          this.authorizeDelivery(caller, exceptOperationId);
+          if (
+            request &&
+            (request.action.kind === "pr.merge" ||
+              request.action.kind === "issue.close")
+          ) {
+            const reasons = coordination.deliveryActionBlockers(
+              caller,
+              request.action.reviewedResultIds,
+              request.operationId,
+            );
+            if ((this.callbacks.get(caller.workId)?.size ?? 0) > 1)
+              reasons.push("unfinished-callback");
+            if (request.action.kind === "pr.merge") {
+              const binding = deliveryStore.delivery(caller.taskId),
+                target = request.action.target;
+              if (
+                !binding ||
+                binding.observation.nodeId !== target.nodeId ||
+                binding.observation.repositoryId !== target.repositoryId ||
+                binding.observation.number !== target.number ||
+                binding.observation.headSha !== target.expectedHeadSha
+              )
+                reasons.push("merge-target-not-current-delivery");
+              if (!String(domain.project(caller.projectId).instructions).trim())
+                reasons.push("merge-instructions-unconfigured");
+            } else {
+              const imported = domain.importedTask(caller.taskId);
+              if (
+                !imported ||
+                imported.nodeId !== request.action.target.nodeId ||
+                imported.repositoryId !== request.action.target.repositoryId
+              )
+                reasons.push("closure-target-not-task-issue");
+            }
+            if (reasons.length) throw new Error("Completion action held");
+          }
+        },
+        taskVersion: (taskId) => Number(domain.task(taskId).version),
+        leadAssignmentId: (taskId) =>
+          String(
+            domain.leadBindings().find((b) => b.taskId === taskId)
+              ?.assignmentId ?? "",
+          ),
+        feedback: (taskId, reason, identity) =>
+          coordination.ensureDeliveryEventWithinTransaction(
+            taskId,
+            reason,
+            identity,
+          ),
+        approved: (request, caller) =>
+          Boolean(
+            request.approval &&
+              deliveryStore.approvalCurrent(
+                request.approval.interactionId,
+                caller,
+                request.action,
+                request.operationId,
+              ) &&
+              coordination.authorizationFor({
+                assignmentId: caller.assignmentId,
+                ...request.approval,
+                action: request.action.kind,
+                target: canonicalMaterial(request.action.target),
+                material: request.action,
+              }),
+          ),
+        activationAllowed: (policy) =>
+          !policy.credentialRef ||
+          (!this.runtimeSpawnSnapshot?.[policy.credentialRef.slice(4)] &&
+            !Object.values(this.runtimeSpawnSnapshot ?? {}).includes(
+              process.env[policy.credentialRef.slice(4)] ?? "",
+            )),
+      });
+      const context: RuntimeSpawnContext = {
+        spawnEnvironment: () => {
+          const policies = domain
+            .projects()
+            .map((p) => deliveryStore.configuration(String(p.id)));
+          const snapshot = deliveryRuntimeEnvironment(process.env, policies);
+          this.runtimeSpawnSnapshot = snapshot;
+          return { ...snapshot };
+        },
+      };
+      // Preserve the snapshot even for injected runtimes which do not spawn a child.
+      context.spawnEnvironment();
+      const runtime = this.runtimeFactory(context);
       this.runtime = runtime;
       this.supervisor = new ExecutionSupervisor(
         state,
@@ -356,6 +476,8 @@ export class StandaloneService {
       });
       await runtime.start();
       await this.supervisor.reconcileOnStart();
+      await this.deliveryCoordinator.refresh();
+      await this.reconcileOwnDeliveryClosures();
       await this.githubSynchronizer.refresh();
       this.emitSourceHoldNotices();
       const powerOptions = this.options.power;
@@ -427,6 +549,8 @@ export class StandaloneService {
           await this.power?.stop().catch(() => {});
           this.power = undefined;
           this.supervisor?.cancelObservations();
+          await this.githubSynchronizer?.stop().catch(() => {});
+          await this.deliveryCoordinator?.stop().catch(() => {});
           await this.runtime?.stop().catch(() => {});
           await this.supervisor?.settle();
         } finally {
@@ -436,6 +560,9 @@ export class StandaloneService {
           this.githubSourceStore = undefined;
           this.githubSynchronizer = undefined;
           this.coordination = undefined;
+          this.deliveryCoordinator = undefined;
+          this.deliveryStore = undefined;
+          this.runtimeSpawnSnapshot = undefined;
           this.routingAttempts = undefined;
           this.routingCoordinators.clear();
           this.schedulerStore = undefined;
@@ -464,6 +591,7 @@ export class StandaloneService {
     if (this.githubPollTimer) clearInterval(this.githubPollTimer);
     this.githubPollTimer = undefined;
     await this.githubSynchronizer?.stop();
+    await this.deliveryCoordinator?.stop();
     if (this.powerPollTimer) clearInterval(this.powerPollTimer);
     this.powerPollTimer = undefined;
     const supervisor = this.supervisor;
@@ -494,6 +622,9 @@ export class StandaloneService {
     this.githubSourceStore = undefined;
     this.githubSynchronizer = undefined;
     this.coordination = undefined;
+    this.deliveryCoordinator = undefined;
+    this.deliveryStore = undefined;
+    this.runtimeSpawnSnapshot = undefined;
     this.routingAttempts = undefined;
     this.routingCoordinators.clear();
     this.schedulerStore = undefined;
@@ -547,11 +678,117 @@ export class StandaloneService {
     return this.githubSourceStore;
   }
 
+  async settleHandback(input: unknown) {
+    if (!this.deliveryCoordinator) throw new Error("Service is not started");
+    const result = await this.deliveryCoordinator.settleHandback(input);
+    await this.wakeScheduler();
+    return result;
+  }
+  private async finalizeDeliveryCompletion(requestId: string, workId: string) {
+    const coordination = this.coordination;
+    if (!coordination) throw new Error("Service is not started");
+    const request = coordination
+      .completionRequests()
+      .find((r) => r.requestId === requestId);
+    if (!request) throw new Error("Unknown completion request");
+    const deliveryValidation =
+      await this.requireDeliveryCoordinator().qualifyCompletion(request.taskId);
+    await this.reconcileOwnDeliveryClosures();
+    return coordination.finalizeTaskCompletion({
+      requestId,
+      workId,
+      terminal: "completed",
+      deliveryValidation,
+    });
+  }
+  private requireDeliveryCoordinator(): DeliveryCoordinator {
+    if (!this.deliveryCoordinator) throw new Error("Service is not started");
+    return this.deliveryCoordinator;
+  }
+  delivery(): DeliveryStore {
+    if (!this.deliveryStore) throw new Error("Service is not started");
+    return this.deliveryStore;
+  }
+  private authorizeDelivery(
+    caller: DeliveryCaller,
+    exceptOperationId?: string,
+  ): void {
+    const state = this.requireState(),
+      coordination = this.coordination,
+      intent = state.byWorkId(caller.workId);
+    if (
+      !coordination ||
+      !intent?.threadId ||
+      !intent.turnId ||
+      intent.state !== "running"
+    )
+      throw new Error("Delivery caller is stale");
+    const current = coordination.deliveryCaller({
+      threadId: intent.threadId,
+      turnId: intent.turnId,
+      callId: "delivery-authority",
+      tool: "ensemble_external_action",
+      arguments: {},
+    });
+    if (canonicalMaterial(current) !== canonicalMaterial(caller))
+      throw new Error("Delivery caller revision changed");
+    if (state.taskHold(caller.taskId)) throw new Error("Task is held");
+    const reasons = this.domain()
+      .assignmentAdmission(caller.assignmentId)
+      .reasons.filter((reason) => !reason.startsWith("external-action-"));
+    if (
+      reasons.length ||
+      this.delivery().actionBlockers(caller.taskId, exceptOperationId).length
+    )
+      throw new Error("Task admission is held");
+  }
   async refreshGitHub(): Promise<void> {
     if (!this.githubSynchronizer) throw new Error("Service is not started");
+    await this.deliveryCoordinator?.refresh();
+    await this.reconcileOwnDeliveryClosures();
     await this.githubSynchronizer.refresh();
     this.emitSourceHoldNotices();
     await this.wakeScheduler();
+  }
+
+  private async reconcileOwnDeliveryClosures(): Promise<void> {
+    for (const project of this.domain().projects())
+      for (const task of this.domain().tasks(String(project.id))) {
+        const imported = this.domain().importedTask(String(task.id));
+        if (
+          !imported ||
+          !this.delivery().ownsConfirmedClosure(
+            String(task.id),
+            String(imported.nodeId),
+          )
+        )
+          continue;
+        const source = this.githubSources().issue(String(imported.nodeId));
+        if (!source) continue;
+        const config = this.domain().githubConfiguration(String(project.id));
+        try {
+          const proof =
+            await this.requireDeliveryCoordinator().inspectOwnClosure(
+              String(task.id),
+              {
+                repositoryId: String(source.repositoryId),
+                nodeId: String(source.nodeId),
+                number: Number(source.issueNumber),
+              },
+            );
+          this.githubSources().recordDeliveryClosure(
+            String(project.id),
+            config.version,
+            proof.snapshot,
+            proof.operationId,
+            proof.closerPrNodeId,
+          );
+        } catch {
+          this.githubSources().recordDeliveryClosureUnavailable(
+            String(imported.nodeId),
+          );
+        }
+      }
   }
 
   private emitSourceHoldNotices(): void {
@@ -628,6 +865,11 @@ export class StandaloneService {
       () => this.wakeScheduler(),
       (taskId, assignmentId) =>
         this.readConversationHistory(taskId, assignmentId),
+      {
+        readTask: (taskId) => this.delivery().publicTask(taskId),
+        settleHandback: (command) => this.settleHandback(command),
+        refresh: () => this.refreshGitHub(),
+      },
     );
   }
 
@@ -836,8 +1078,54 @@ export class StandaloneService {
         success: false,
       });
 
+    let capturedDeliveryCaller: DeliveryCaller | undefined;
     const pending = Promise.resolve()
       .then(async () => {
+        if (call.tool === "ensemble_external_action") {
+          const caller = coordination.deliveryCaller(call as CoordinationCall);
+          capturedDeliveryCaller = caller;
+          const result = await this.requireDeliveryCoordinator().submit(
+            call.arguments,
+            caller,
+          );
+          if (
+            result.state === "confirmed-success" &&
+            result.request.action.kind.startsWith("pr.")
+          )
+            await this.requireDeliveryCoordinator().refresh();
+          if (
+            result.state === "confirmed-success" &&
+            (result.request.action.kind === "pr.merge" ||
+              result.request.action.kind === "issue.close")
+          )
+            await this.refreshGitHub();
+          const response = coordination.recordAsyncReceipt(
+            call as CoordinationCall,
+            caller,
+            {
+              text: `External action ${result.operationId}: ${result.state}${result.observation?.reason ? ` (${result.observation.reason})` : ""}${result.observation?.receipt ? `; confirmed provider receipt ${JSON.stringify(result.observation.receipt)}` : ""}`,
+              success: result.state === "confirmed-success",
+            },
+          );
+          await this.wakeScheduler();
+          return response;
+        }
+        if (call.tool === "ensemble_register_pr") {
+          const caller = coordination.deliveryCaller(call as CoordinationCall);
+          capturedDeliveryCaller = caller;
+          const result = await this.requireDeliveryCoordinator().registerPr(
+            call.arguments,
+            caller,
+          );
+          return coordination.recordAsyncReceipt(
+            call as CoordinationCall,
+            caller,
+            {
+              text: `PR delivery retained ${result.observation.nodeId} at ${result.observation.headSha}`,
+              success: true,
+            },
+          );
+        }
         const response = dispatchCoordinationTool(
           coordination,
           call as CoordinationCall,
@@ -846,10 +1134,24 @@ export class StandaloneService {
         if (response.success) await this.wakeScheduler();
         return response;
       })
-      .catch((error: unknown) => ({
-        text: String(error).slice(0, 1000),
-        success: false,
-      }));
+      .catch((error: unknown) => {
+        const deliveryCall =
+          call.tool === "ensemble_external_action" ||
+          call.tool === "ensemble_register_pr";
+        const response = {
+          text: deliveryCall
+            ? "Delivery request rejected or held"
+            : String(error).slice(0, 1000),
+          success: false,
+        };
+        if (deliveryCall && capturedDeliveryCaller)
+          return coordination.recordAsyncReceipt(
+            call as CoordinationCall,
+            capturedDeliveryCaller,
+            response,
+          );
+        return response;
+      });
     this.registerExecutionCallback(binding.workId, pending);
     return pending;
   }
@@ -1019,11 +1321,10 @@ export class StandaloneService {
         binding.assignmentId !== completion.leadAssignmentId
       )
         continue;
-      coordination.finalizeTaskCompletion({
-        requestId: completion.requestId,
-        workId: completion.leadWorkId,
-        terminal: "completed",
-      });
+      await this.finalizeDeliveryCompletion(
+        completion.requestId,
+        completion.leadWorkId,
+      );
     }
     for (const workId of coordination.completedWorkNeedingDisposition())
       coordination.recordSuccessfulTerminal(workId);
@@ -1301,7 +1602,8 @@ export class StandaloneService {
       if (
         Number(assignment.version) !== delivery.assignmentVersion ||
         (assignment.state !== "pending" && assignment.state !== "running") ||
-        Number(task.ready) !== 1 ||
+        (Number(task.ready) !== 1 &&
+          !domain.hasOwnDeliveryClosure(String(task.id))) ||
         task.state !== "open"
       )
         continue;
@@ -1372,7 +1674,8 @@ export class StandaloneService {
       const task = domain.task(String(assignment.taskId));
       if (
         (assignment.state !== "pending" && assignment.state !== "running") ||
-        Number(task.ready) !== 1 ||
+        (Number(task.ready) !== 1 &&
+          !domain.hasOwnDeliveryClosure(String(task.id))) ||
         task.state !== "open" ||
         state.taskHold(String(assignment.taskId)) !== undefined ||
         state.assignmentHasUnfinishedExecution(recipientAssignmentId) ||
@@ -1430,7 +1733,8 @@ export class StandaloneService {
       if (
         Number(assignment.version) !== repair.assignmentVersion ||
         assignment.state === "held" ||
-        Number(task.ready) !== 1 ||
+        (Number(task.ready) !== 1 &&
+          !domain.hasOwnDeliveryClosure(String(task.id))) ||
         task.state !== "open"
       )
         continue;
@@ -1822,11 +2126,10 @@ export class StandaloneService {
                 completion.leadWorkId === request.workId &&
                 completion.status === "pending"
               )
-                coordination.finalizeTaskCompletion({
-                  requestId: completion.requestId,
-                  workId: request.workId,
-                  terminal: "completed",
-                });
+                await this.finalizeDeliveryCompletion(
+                  completion.requestId,
+                  request.workId,
+                );
             coordination.recordSuccessfulTerminal(request.workId);
           }
         }
@@ -2040,6 +2343,14 @@ export class StandaloneService {
         ...(reference ? [reference] : []),
         ...(credential ? [credential] : []),
         ...fixtureValues,
+        ...domain.projects().flatMap((p) => {
+          const ref = this.deliveryStore?.configuration(
+            String(p.id),
+          ).credentialRef;
+          return ref
+            ? [ref, ref.slice(4), process.env[ref.slice(4)] ?? ""]
+            : [];
+        }),
       ];
       return values.filter((value) => value.length > 0);
     } catch {
