@@ -473,6 +473,19 @@ not turn missing physical evidence into qualification.
 
 ## Verification and cleanup
 
+The first published draft head, `e7b6f0eae56c8ac3bcaf12b6a146d5276d485fb8`,
+failed required CI run `36811992684`, job `110208850475`: type checking, lint,
+format and build passed, but eight of 288 tests failed. All eight were fake
+sleep-safety tests whose London-local `pmset` timestamp literals were interpreted
+on the UTC runner. This is a fixture portability failure, not physical
+sleep/wake evidence. The repair explicitly selects Europe/London inside that
+isolated test process; production host-local conversion, absolute window guards
+and live harness code are unchanged. The affected suite passed all 18 tests
+when launched under both UTC and Europe/London. The full pinned CI-equivalent
+`npm run check` then passed 288/288 under UTC with four existing non-fatal lint
+warnings. Required CI must still confirm the reviewed repair at its published
+head; no actual power command is authorized by this repair.
+
 On the updated base, after the history and startup/cleanup repairs, pinned
 `npm run check` passed type checking, lint (four non-fatal warnings), format,
 build and all **284/284** tests. After the final helper repairs, a fresh full

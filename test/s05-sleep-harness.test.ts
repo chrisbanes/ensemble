@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
+// These fixed pmset rows are London-local; pin only this isolated test file so
+// the independent literals keep matching the approved UTC window in any CI TZ.
+process.env.TZ = "Europe/London";
+
 type CommandResult = { stdout: string; stderr: string };
 type CommandRunner = (
   file: string,
