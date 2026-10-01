@@ -53,7 +53,12 @@ try {
       ),
     );
     const ui = new LocalOperatorHttp(
-      new LocalOperatorUi(service.domain()),
+      new LocalOperatorUi(
+        service.domain(),
+        undefined,
+        service.githubSources(),
+        () => service.refreshGitHub(),
+      ),
       operatorAuth,
       { routes },
     );

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import {
   createServer,
   type IncomingMessage,
@@ -12,6 +13,14 @@ import {
   type DomainStore,
 } from "../core/domain.js";
 import type { OperatorAuth, OperatorSession } from "./operator-auth.js";
+import {
+  GitHubHttpSourceReader,
+  type GitHubSourceReader,
+} from "./github-source.js";
+import {
+  selectionSchema,
+  type GitHubSourceStore,
+} from "../core/github-source.js";
 import {
   OperatorRouteRegistry,
   type OperatorRouteResult,
@@ -82,7 +91,15 @@ function form(
 export class LocalOperatorUi {
   private readonly commands: DomainCommands;
 
-  constructor(private readonly store: DomainStore) {
+  constructor(
+    private readonly store: DomainStore,
+    private readonly githubPreviewReader: (
+      credentialRef: string,
+    ) => Pick<GitHubSourceReader, "readSelection"> = (credentialRef) =>
+      new GitHubHttpSourceReader(process.env[credentialRef.slice(4)]),
+    private readonly githubSources?: GitHubSourceStore,
+    private readonly githubRefresh?: () => Promise<void>,
+  ) {
     this.commands = new DomainCommands(store);
   }
 
@@ -114,6 +131,43 @@ export class LocalOperatorUi {
   project(projectId: string, csrfToken = ""): string {
     const project = this.store.project(projectId);
     const routing = this.store.routing(projectId);
+    const github = this.store.githubConfiguration(projectId);
+    const activeGithub = new Set(
+      this.store.githubActiveSelectionIds(projectId),
+    );
+    const previewForms = github.selections
+      .map((raw) => {
+        const selection = selectionSchema.parse(raw);
+        const sync = this.githubSources?.syncState(projectId, selection.id);
+        const status = !sync
+          ? "never synced"
+          : Number(sync.complete) === 1
+            ? "complete"
+            : `partial: ${escapeHtml(sync.reason)}`;
+        return `<li>${escapeHtml(selection.id)} (${escapeHtml(selection.kind)}; ${activeGithub.has(selection.id) ? "active" : "inactive"}; ${status}; ${escapeHtml(sync?.refreshedAt ?? "never")})${form("github.preview", field("projectId", projectId, "hidden") + field("selectionId", selection.id, "hidden") + field("expectedVersion", String(github.version), "hidden"), undefined, csrfToken)}</li>`;
+      })
+      .join("");
+    const conflicts =
+      this.githubSources
+        ?.conflicts()
+        .filter((conflict) => conflict.projectIds.includes(projectId))
+        .map((conflict) => {
+          const task = this.store.task(conflict.taskId);
+          return `<li>Issue ${escapeHtml(conflict.nodeId)}: unresolved placement among ${escapeHtml(conflict.projectIds.join(", "))}${form(
+            "github.place",
+            field("projectId", String(task.projectId), "hidden") +
+              field("taskId", conflict.taskId, "hidden") +
+              field("expectedVersion", String(task.version), "hidden") +
+              selectField(
+                "chosenProjectId",
+                conflict.projectIds.map((id) => ({ value: id, label: id })),
+                String(task.projectId),
+              ),
+            undefined,
+            csrfToken,
+          )}</li>`;
+        })
+        .join("") ?? "";
     const profiles = this.store.profiles();
     const currentLead = profiles.find(
       (profile) => profile.id === project.leadProfileId,
@@ -151,13 +205,86 @@ export class LocalOperatorUi {
     const credentialReferenceStatus = routing.credentialAvailable
       ? "credential reference configured"
       : "credential reference not configured";
-    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("instructionsRevision", String(project.instructionsRevision), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}</main>`;
+    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("instructionsRevision", String(project.instructionsRevision), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}<h2>GitHub discovery</h2><p>${github.credentialRef ? "Credential reference configured" : "Credential reference not configured"}. Selections require preview before activation.</p>${form(
+      "github.configure",
+      field("projectId", projectId, "hidden") +
+        field("expectedVersion", String(github.version), "hidden") +
+        field("credentialRef") +
+        field("clearCredentialRef", "1", "checkbox") +
+        textarea("selections", JSON.stringify(github.selections, null, 2)) +
+        textarea("readiness", JSON.stringify(github.readiness, null, 2)) +
+        textarea(
+          "repositories",
+          JSON.stringify(
+            github.repositories.map(
+              ({ gitCommonDirectory: _ignored, ...repository }) => repository,
+            ),
+            null,
+            2,
+          ),
+        ),
+      undefined,
+      csrfToken,
+    )}<ul>${previewForms}</ul>${this.githubRefresh ? form("github.refresh", field("projectId", projectId, "hidden"), undefined, csrfToken) : ""}<h3>Unresolved placement</h3><ul>${conflicts}</ul></main>`;
   }
 
   task(taskId: string, csrfToken = ""): string {
     const task = this.store.task(taskId);
     const admission = this.store.admission(taskId);
-    return `<main><h1>${escapeHtml(task.title)}</h1><p>Outcome: ${escapeHtml(task.outcome)}</p><p>${task.ready ? "Ready" : "Not ready"}; ${escapeHtml(task.state)}.</p><p>Configuration eligibility only: ${admission.eligible ? "eligible for future admission" : `held: ${escapeHtml(admission.reasons.join(", "))}`}.</p><p>Readiness and configuration eligibility do not confirm runtime admission or execution.</p><p><a href="/runtime/task/${escapeHtml(taskId)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/task/${escapeHtml(taskId)}">Task-scoped coordination and history</a></p>${form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + textarea("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)), undefined, csrfToken)}</main>`;
+    const imported = this.store.importedTask(taskId);
+    const external = imported
+      ? this.githubSources?.issue(String(imported.nodeId))
+      : undefined;
+    const memberships = imported
+      ? (this.githubSources?.memberships(String(imported.nodeId)) ?? [])
+      : [];
+    const blockers = imported
+      ? (this.githubSources?.nativeBlockers(String(imported.nodeId)) ?? [])
+      : [];
+    const review = imported
+      ? this.githubSources?.review(String(imported.nodeId))
+      : undefined;
+    const hold = imported
+      ? this.githubSources?.hold(String(imported.nodeId))
+      : undefined;
+    const provenance = external
+      ? `<h2>GitHub source</h2><p>${escapeHtml(external.providerInstance)} ${escapeHtml(external.repositoryName)}#${escapeHtml(external.issueNumber)} (${escapeHtml(external.nodeId)}); observed ${escapeHtml(external.observedState)}.</p><p>Observed title: ${escapeHtml(external.observedTitle)}. Observed body: ${escapeHtml(external.observedBody)}</p><p>Memberships: ${escapeHtml(memberships.map((item) => `${item.projectId}/${item.selectionId}`).join(", ") || "none")}. Fields: ${escapeHtml(memberships.map((item) => item.projectFields).join(", "))}</p><p>Native blockers: ${escapeHtml(blockers.map((item) => `${item.repositoryName}#${item.issueNumber}: ${item.status}`).join(", ") || task.importedBlockers)}</p><p>Source hold: ${hold?.active ? escapeHtml(hold.reason) : "none"}.</p>${
+          review &&
+          (review.observedDigest !== review.acceptedDigest || hold?.active)
+            ? form(
+                "source.review",
+                field("projectId", String(task.projectId), "hidden") +
+                  field("taskId", taskId, "hidden") +
+                  field("expectedVersion", String(task.version), "hidden") +
+                  field(
+                    "observedDigest",
+                    String(review.observedDigest),
+                    "hidden",
+                  ) +
+                  selectField(
+                    "decision",
+                    [
+                      { value: "clarification", label: "Clarification" },
+                      {
+                        value: "accept-revised-scope",
+                        label: "Accept revised scope",
+                      },
+                      {
+                        value: "resume-source-hold",
+                        label: "Resume source hold",
+                      },
+                    ],
+                    review.observedDigest !== review.acceptedDigest
+                      ? "accept-revised-scope"
+                      : "resume-source-hold",
+                  ),
+                undefined,
+                csrfToken,
+              )
+            : ""
+        }`
+      : "";
+    return `<main><h1>${escapeHtml(task.title)}</h1><p>Outcome: ${escapeHtml(task.outcome)}</p><p>${task.ready ? "Ready" : "Not ready"}; ${escapeHtml(task.state)}.</p><p>Configuration eligibility only: ${admission.eligible ? "eligible for future admission" : `held: ${escapeHtml(admission.reasons.join(", "))}`}.</p><p>Readiness and configuration eligibility do not confirm runtime admission or execution.</p>${provenance}<p><a href="/runtime/task/${escapeHtml(taskId)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/task/${escapeHtml(taskId)}">Task-scoped coordination and history</a></p>${imported ? "" : form("task.configure", field("projectId", String(task.projectId), "hidden") + field("taskId", taskId, "hidden") + field("expectedVersion", String(task.version), "hidden") + field("title", String(task.title)) + textarea("outcome", String(task.outcome)) + field("ready", "1", "checkbox", Boolean(task.ready)), undefined, csrfToken)}</main>`;
   }
 
   profile(profileId: string, csrfToken = ""): string {
@@ -181,6 +308,11 @@ export class LocalOperatorUi {
   }
 
   async submit(fields: Record<string, string>): Promise<unknown> {
+    if (fields.type === "github.refresh") {
+      if (!this.githubRefresh) throw new Error("GitHub refresh unavailable");
+      await this.githubRefresh();
+      return { refreshed: true };
+    }
     const common = {
       key: fields.key || randomUUID(),
       actor: "operator" as const,
@@ -290,6 +422,78 @@ export class LocalOperatorUi {
             : [],
         };
         break;
+      case "github.configure": {
+        const current = this.store.githubConfiguration(required("projectId"));
+        command = {
+          ...common,
+          type: "github.configure",
+          projectId: required("projectId"),
+          expectedVersion: version(),
+          credentialRef:
+            fields.clearCredentialRef === "1"
+              ? null
+              : fields.credentialRef || current.credentialRef,
+          selections: JSON.parse(required("selections")),
+          readiness: JSON.parse(required("readiness")),
+          repositories: JSON.parse(required("repositories")),
+        };
+        break;
+      }
+      case "github.preview": {
+        const projectId = required("projectId");
+        const config = this.store.githubConfiguration(projectId);
+        if (config.version !== version())
+          throw new DomainConflictError("Version conflict");
+        const selection = config.selections
+          .map((raw) => selectionSchema.parse(raw))
+          .find((item) => item.id === required("selectionId"));
+        if (!selection)
+          throw new DomainConflictError("Unknown GitHub selection");
+        if (!config.credentialRef)
+          throw new DomainConflictError("GitHub credential reference required");
+        const preview = await this.githubPreviewReader(
+          config.credentialRef,
+        ).readSelection(selection);
+        if (!preview.complete)
+          throw new DomainConflictError(
+            `GitHub preview incomplete: ${preview.reason}`,
+          );
+        command = {
+          ...common,
+          type: "github.activate",
+          projectId,
+          selectionId: selection.id,
+          expectedVersion: config.version,
+        };
+        break;
+      }
+      case "source.review":
+        command = {
+          ...common,
+          type: "source.review",
+          projectId: required("projectId"),
+          taskId: required("taskId"),
+          expectedVersion: version(),
+          observedDigest: required("observedDigest"),
+          decision: z
+            .enum([
+              "clarification",
+              "accept-revised-scope",
+              "resume-source-hold",
+            ])
+            .parse(required("decision")),
+        };
+        break;
+      case "github.place":
+        command = {
+          ...common,
+          type: "github.place",
+          projectId: required("projectId"),
+          taskId: required("taskId"),
+          chosenProjectId: required("chosenProjectId"),
+          expectedVersion: version(),
+        };
+        break;
       case "assignment.create":
         command = {
           ...common,
@@ -363,6 +567,11 @@ const COMMANDS = new Set([
   "profile.create",
   "profile.configure",
   "routing.configure",
+  "github.configure",
+  "github.preview",
+  "github.refresh",
+  "github.place",
+  "source.review",
   "task.create",
   "task.configure",
 ]);

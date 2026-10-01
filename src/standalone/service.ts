@@ -6,6 +6,9 @@ import {
   StandaloneDataDirectory,
 } from "./data-directory.js";
 import { Store } from "../core/store.js";
+import { verifiedRepository } from "../core/github-source.js";
+import { GitHubSourceStore } from "../core/github-source.js";
+import { GitHubSynchronizer, type GitHubReaderFactory } from "./github-sync.js";
 import {
   CoordinationStore,
   type CoordinationCall,
@@ -94,6 +97,7 @@ const immutableRevisionMismatches = new Set([
 ]);
 
 export interface StandaloneServiceOptions {
+  github?: { readerFactory?: GitHubReaderFactory; intervalMs?: number };
   routingClient?: RoutingChoiceClient | null;
   /** Test-only values remain in memory and are never persisted. */
   conversationHistoryExclusions?: () => readonly string[];
@@ -133,6 +137,9 @@ export class StandaloneService {
   private db: DatabaseSync | undefined;
   private state: ExecutionState | undefined;
   private domainState: DomainStore | undefined;
+  private githubSourceStore: GitHubSourceStore | undefined;
+  private githubSynchronizer: GitHubSynchronizer | undefined;
+  private githubPollTimer: NodeJS.Timeout | undefined;
   private coordination: CoordinationStore | undefined;
   private routingAttempts: RoutingAttemptStore | undefined;
   private workspaces: WorkspaceManager | undefined;
@@ -204,6 +211,15 @@ export class StandaloneService {
       });
       domain.migrate();
       this.domainState = domain;
+      const githubSources = new GitHubSourceStore(db);
+      githubSources.migrate();
+      githubSources.invalidateProviderObservations();
+      this.githubSourceStore = githubSources;
+      this.githubSynchronizer = new GitHubSynchronizer(
+        domain,
+        githubSources,
+        this.options.github?.readerFactory,
+      );
       const routingAttempts = new RoutingAttemptStore(db);
       routingAttempts.migrate();
       this.routingAttempts = routingAttempts;
@@ -340,6 +356,8 @@ export class StandaloneService {
       });
       await runtime.start();
       await this.supervisor.reconcileOnStart();
+      await this.githubSynchronizer.refresh();
+      this.emitSourceHoldNotices();
       const powerOptions = this.options.power;
       const powerEnabled =
         powerOptions?.enabled ??
@@ -378,6 +396,19 @@ export class StandaloneService {
       this.scheduler = scheduler;
       scheduler.start();
       await this.wakeScheduler();
+      const githubInterval = this.options.github?.intervalMs ?? 60_000;
+      if (
+        !Number.isSafeInteger(githubInterval) ||
+        githubInterval < 1000 ||
+        githubInterval > 3_600_000
+      )
+        throw new Error(
+          "GitHub refresh interval must be between 1000 and 3600000 milliseconds",
+        );
+      this.githubPollTimer = setInterval(() => {
+        void this.refreshGitHub().catch(() => {});
+      }, githubInterval);
+      this.githubPollTimer.unref();
     } catch (error) {
       try {
         if (this.state)
@@ -390,6 +421,8 @@ export class StandaloneService {
       } finally {
         try {
           if (this.powerPollTimer) clearInterval(this.powerPollTimer);
+          if (this.githubPollTimer) clearInterval(this.githubPollTimer);
+          this.githubPollTimer = undefined;
           this.powerPollTimer = undefined;
           await this.power?.stop().catch(() => {});
           this.power = undefined;
@@ -400,6 +433,8 @@ export class StandaloneService {
           this.runtime = undefined;
           this.supervisor = undefined;
           this.domainState = undefined;
+          this.githubSourceStore = undefined;
+          this.githubSynchronizer = undefined;
           this.coordination = undefined;
           this.routingAttempts = undefined;
           this.routingCoordinators.clear();
@@ -426,6 +461,9 @@ export class StandaloneService {
   async stop(): Promise<void> {
     this.scheduler?.stop();
     this.scheduler = undefined;
+    if (this.githubPollTimer) clearInterval(this.githubPollTimer);
+    this.githubPollTimer = undefined;
+    await this.githubSynchronizer?.stop();
     if (this.powerPollTimer) clearInterval(this.powerPollTimer);
     this.powerPollTimer = undefined;
     const supervisor = this.supervisor;
@@ -453,6 +491,8 @@ export class StandaloneService {
     this.db = undefined;
     this.state = undefined;
     this.domainState = undefined;
+    this.githubSourceStore = undefined;
+    this.githubSynchronizer = undefined;
     this.coordination = undefined;
     this.routingAttempts = undefined;
     this.routingCoordinators.clear();
@@ -500,6 +540,48 @@ export class StandaloneService {
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;
+  }
+
+  githubSources(): GitHubSourceStore {
+    if (!this.githubSourceStore) throw new Error("Service is not started");
+    return this.githubSourceStore;
+  }
+
+  async refreshGitHub(): Promise<void> {
+    if (!this.githubSynchronizer) throw new Error("Service is not started");
+    await this.githubSynchronizer.refresh();
+    this.emitSourceHoldNotices();
+    await this.wakeScheduler();
+  }
+
+  private emitSourceHoldNotices(): void {
+    const sources = this.githubSourceStore;
+    const domain = this.domainState;
+    const coordination = this.coordination;
+    if (!sources || !domain || !coordination) return;
+    const leadByTask = new Map(
+      domain
+        .leadBindings()
+        .map((binding) => [
+          String(binding.taskId),
+          String(binding.assignmentId),
+        ]),
+    );
+    for (const hold of sources.activeHolds()) {
+      const recipients = new Set(
+        domain
+          .assignments(hold.taskId)
+          .filter(
+            (assignment) =>
+              assignment.state === "pending" || assignment.state === "running",
+          )
+          .map((assignment) => String(assignment.id)),
+      );
+      const leadId = leadByTask.get(hold.taskId);
+      if (leadId) recipients.add(leadId);
+      for (const recipientAssignmentId of recipients)
+        coordination.ensureSourceHoldEvent({ ...hold, recipientAssignmentId });
+    }
   }
 
   routingAvailability(projectId: string): RoutingAvailability {
@@ -570,7 +652,51 @@ export class StandaloneService {
     taskId: string,
     repositories: TaskWorkspaceRepositoryInput[] = [],
   ) {
-    this.domain().task(taskId);
+    const task = this.domain().task(taskId);
+    const imported = this.domain().importedTask(taskId);
+    if (imported) {
+      const config = this.domain().githubConfiguration(String(task.projectId));
+      const linked = config.repositories;
+      for (const repository of repositories) {
+        const match = linked.find(
+          (candidate) => candidate.repositoryId === repository.repositoryId,
+        );
+        if (
+          !match ||
+          repository.path !== match.path ||
+          (repository.ref ?? "HEAD") !== match.ref
+        )
+          throw new Error(
+            "Imported task requires an exact linked repository binding",
+          );
+        const current = await verifiedRepository({
+          repositoryId: match.repositoryId,
+          path: match.path,
+          ref: match.ref,
+        });
+        if (
+          current.gitCommonDirectory !== match.gitCommonDirectory ||
+          current.path !== match.path
+        )
+          throw new Error("Linked repository identity changed");
+      }
+      const latestTask = this.domain().task(taskId);
+      const latestImported = this.domain().importedTask(taskId);
+      const latestConfig = this.domain().githubConfiguration(
+        String(task.projectId),
+      );
+      if (
+        latestTask.version !== task.version ||
+        latestTask.projectId !== task.projectId ||
+        latestImported?.nodeId !== imported.nodeId ||
+        latestImported?.repositoryId !== imported.repositoryId ||
+        latestConfig.version !== config.version ||
+        JSON.stringify(latestConfig.repositories) !== JSON.stringify(linked)
+      )
+        throw new Error(
+          "Imported task repository grant changed during verification",
+        );
+    }
     const binding = await this.requireWorkspaces().provision(
       taskId,
       repositories,
@@ -1437,13 +1563,35 @@ export class StandaloneService {
           profileRevision === null
         )
           throw new Error("Task request is missing captured revisions");
-        validateAssignment = () =>
-          this.domain().assignmentAdmission(assignmentId, {
+        validateAssignment = () => {
+          const domain = this.domain();
+          const reasons = domain.assignmentAdmission(assignmentId, {
             taskVersion,
             assignmentVersion,
             instructionsRevision,
             profileRevision,
           }).reasons;
+          if (domain.importedTask(binding.taskId)) {
+            const task = domain.task(binding.taskId);
+            const linked = domain.githubConfiguration(
+              String(task.projectId),
+            ).repositories;
+            if (
+              binding.repositories.some(
+                (repository) =>
+                  !linked.some(
+                    (link) =>
+                      link.repositoryId === repository.repositoryId &&
+                      link.path === repository.sourcePath &&
+                      link.ref === repository.ref &&
+                      link.gitCommonDirectory === repository.gitCommonDir,
+                  ),
+              )
+            )
+              reasons.push("repository-access-revoked");
+          }
+          return reasons;
+        };
       } else if (request.workspace) {
         workspaceKey = this.validateDirectWorkspace(request.workspace);
       } else throw new Error("Turn request has no workspace or task binding");

@@ -78,12 +78,17 @@ before storage, with current exclusions reapplied when reading history. This is
 a bounded diagnostic view, not a complete transcript or ownership-release proof.
 Missing history does not change admission or completion gates.
 
-The full assignment router, GitHub integration and complete release
-qualification remain ahead. In particular, physical sleep/wake behaviour and
+The service now includes local GitHub discovery for selected repository issues,
+searches and Projects, with provider-owned readiness and dependency holds.
+Operators can inspect source state and refresh it in the authenticated UI.
+External GitHub delivery and release cutover remain ahead.
+In particular, physical sleep/wake behaviour and
 access from an independent device still need qualification. Follow the
 [delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.
 The [S05 report](docs/evidence/s05-local-qualification.md) distinguishes completed
 bounded routing and journey checks from remaining milestone evidence.
+The [S06 report](docs/evidence/s06-github-discovery.md) records passing
+deterministic discovery tests and the bounded live fixture qualification.
 
 Ensemble relies on the execution runtime and host for isolation. Broad
 host-permitted reads remain enabled, and Stop is best-effort: unresolved work

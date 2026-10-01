@@ -482,6 +482,12 @@ export class CoordinationStore {
         batchId TEXT NOT NULL REFERENCES coordination_delivery_batches(batchId),
         ordinal INTEGER NOT NULL CHECK(ordinal > 0),
         UNIQUE(batchId, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS coordination_source_hold_notices (
+        nodeId TEXT NOT NULL, generation INTEGER NOT NULL,
+        recipientAssignmentId TEXT NOT NULL,
+        eventId TEXT NOT NULL UNIQUE REFERENCES coordination_inbox_events(eventId),
+        PRIMARY KEY(nodeId, generation, recipientAssignmentId)
       );`);
       const interactionColumns = this.db
         .prepare("PRAGMA table_info(coordination_interactions)")
@@ -581,7 +587,7 @@ export class CoordinationStore {
         );
       const undeliveredInboxEvent = this.one(
         `SELECT 1 FROM coordination_inbox_events event
-        WHERE event.recipientAssignmentId = ? AND (
+        WHERE event.recipientAssignmentId = ? AND event.eventType <> 'source-hold' AND (
           NOT EXISTS (
             SELECT 1 FROM coordination_delivery_events delivered
             WHERE delivered.eventId = event.eventId
@@ -1892,6 +1898,62 @@ export class CoordinationStore {
         null,
         command.routingOperationId,
       );
+      this.db.exec("COMMIT");
+      return event;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  ensureSourceHoldEvent(input: {
+    nodeId: string;
+    generation: number;
+    taskId: string;
+    recipientAssignmentId: string;
+    reason: string;
+  }): InboxEvent {
+    const recipient = uuid.parse(input.recipientAssignmentId);
+    const taskId = uuid.parse(input.taskId);
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1)
+      throw new Error("Invalid source hold generation");
+    const payload = JSON.stringify({
+      reason: input.reason,
+      disposition: "safe-stop-new-work",
+    });
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.one(
+        `SELECT event.sequence, event.eventId, event.taskId, event.recipientAssignmentId,
+        event.eventType, event.resultId, event.interactionId, event.payload, event.createdAt
+        FROM coordination_source_hold_notices notice JOIN coordination_inbox_events event ON event.eventId = notice.eventId
+        WHERE notice.nodeId = ? AND notice.generation = ? AND notice.recipientAssignmentId = ?`,
+        input.nodeId,
+        input.generation,
+        recipient,
+      );
+      if (existing) {
+        if (
+          existing.taskId !== taskId ||
+          existing.eventType !== "source-hold" ||
+          existing.payload !== payload
+        )
+          throw new Error("Source hold notice conflict");
+        this.db.exec("COMMIT");
+        return this.parseEvent(existing);
+      }
+      const event = this.newEvent(
+        taskId,
+        recipient,
+        "source-hold",
+        null,
+        payload,
+      );
+      this.db
+        .prepare(
+          "INSERT INTO coordination_source_hold_notices (nodeId, generation, recipientAssignmentId, eventId) VALUES (?, ?, ?, ?)",
+        )
+        .run(input.nodeId, input.generation, recipient, event.eventId);
       this.db.exec("COMMIT");
       return event;
     } catch (error) {
