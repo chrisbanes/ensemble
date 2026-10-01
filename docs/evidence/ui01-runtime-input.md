@@ -108,3 +108,42 @@ new harness tests passed. The initial sandboxed check failed eight existing
 loopback HTTP/browser tests with `listen EPERM`; the exact check passed when
 rerun with local process/network permissions. Existing lint warnings and the
 Biome schema-version informational diagnostic remain. `git diff --check` passed.
+
+## Startup envelope repair
+
+The lead's first protocol attempt at `ab7d786836a2406f3d9cd2b4cfd10b1cb4f0acff`
+stopped during `initialize-and-policy` with `oversized-message`. It created
+**zero threads and zero turns**, with no native request, answer or report. The
+exact created process `49274` was independently verified absent on the same boot.
+Its sanitized evidence remains at
+`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-ui01-protocol-UzleQs.json`.
+This attempt proves a harness startup defect, not a native capability failure.
+
+The subsequent lead-owned startup-only diagnostic observed initialize at 180
+bytes, account/read at 274 bytes, notifications at 210/105 bytes, and the
+**config/read response at 1,601,330 bytes**. It retained message types and byte
+counts only, no configuration payload. It also created **zero threads and zero
+turns**; exact process `50666` was independently verified absent on the same boot.
+The diagnostic is `/tmp/ensemble-ui01-startup-diagnostic.json`.
+
+The repaired probe keeps the 1 MiB limit for every other message. Only an exact
+typed pending `config/read` response with no RPC error can use an envelope up to
+2 MiB. The pending request records its method; type-coerced or unknown ids do not
+qualify for the exception. Message size uses UTF-8 bytes rather than string length.
+The response is projected immediately to `approval_policy` and `sandbox_mode`;
+unrelated config fields are discarded and never serialized into evidence.
+Startup evidence records only the fixed method and byte count. Execution settings,
+native callback/receipt semantics, total/request budgets and cleanup are unchanged.
+
+Executable-fixture regressions first failed for the observed-size config response
+and oversized multibyte native input, then passed after this repair. Native/unknown
+messages, other responses, wrong-typed config ids, config error responses and
+config above 2 MiB still fail closed. **27 harness tests pass.** This is an ordinary
+harness interoperability repair; no factual-plan-mismatch budget is consumed.
+Live native availability and the operational receipt remain **unproved**.
+
+The repaired candidate passed pinned `npm run check`: **341 tests**, no failures,
+cancellations or skips. All 27 harness tests passed. The sandboxed check again
+failed only the eight existing loopback HTTP/browser tests; the exact rerun with
+local process/network permissions passed. Final diff whitespace validation passed.
+No App Server or real model turn was executed by the repair owner.

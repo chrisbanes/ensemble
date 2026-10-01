@@ -13,14 +13,39 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (message.params.capabilities.experimentalApi !== true) process.exit(4);
     write({ id: message.id, result: {} });
   } else if (message.method === "account/read") {
-    write({ id: message.id, result: { account: { type: "chatgpt" } } });
-  } else if (message.method === "config/read") {
     write({
       id: message.id,
       result: {
-        config: { approval_policy: "never", sandbox_mode: "workspace-write" },
+        account: { type: "chatgpt" },
+        ...(mode === "oversized-account"
+          ? { padding: "x".repeat(1_048_576) }
+          : {}),
       },
     });
+  } else if (message.method === "config/read") {
+    const response = {
+      id:
+        mode === "oversized-config-wrong-id-type"
+          ? String(message.id)
+          : message.id,
+      result: {
+        config: { approval_policy: "never", sandbox_mode: "workspace-write" },
+      },
+    };
+    if (mode.startsWith("oversized-config")) {
+      response.result.config.discarded = "PRIVATE_CONFIG_PAYLOAD_DO_NOT_RETAIN";
+      const bytes =
+        mode === "oversized-config-overbound" ? 2_097_153 : 1_601_330;
+      response.result.config.discarded += "x".repeat(
+        bytes - Buffer.byteLength(JSON.stringify(response)),
+      );
+      if (mode === "oversized-config-error")
+        response.error = {
+          code: -1,
+          message: "PRIVATE_CONFIG_ERROR_DO_NOT_RETAIN",
+        };
+    }
+    write(response);
   } else if (message.method === "thread/start") {
     threads++;
     if (
@@ -69,6 +94,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         },
       ],
     };
+    if (mode === "oversized-native")
+      params.questions[0].question = "😀".repeat(350_000);
+    if (mode === "oversized-unknown")
+      write({
+        method: "unknown/notification",
+        params: { padding: "x".repeat(1_048_576) },
+      });
     write({ id: requestId, method: "item/tool/requestUserInput", params });
     write({
       id: message.id,

@@ -230,3 +230,49 @@ test("an unresponsive cleanup verifier cannot exceed the total proof budget", {
   assert.equal(evidence.cleanup.verified, false);
   assert.ok(Date.now() - start < 1500);
 });
+
+test("observed large config response reaches the same-turn proof without retaining config payload", async (t) => {
+  const evidence = await fixture(t, "oversized-config");
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.receipt.kind, "confirmed");
+  assert.deepEqual(evidence.counts, {
+    threads: 1,
+    turns: 1,
+    requests: 1,
+    replies: 1,
+    reports: 1,
+  });
+  assert.deepEqual(evidence.startupMessages, [
+    { method: "config/read", bytes: 1_601_330 },
+  ]);
+  assert.equal(
+    JSON.stringify(evidence).includes("PRIVATE_CONFIG_PAYLOAD_DO_NOT_RETAIN"),
+    false,
+  );
+  assert.equal(
+    readFileSync(evidence.evidencePath, "utf8").includes(
+      "PRIVATE_CONFIG_PAYLOAD_DO_NOT_RETAIN",
+    ),
+    false,
+  );
+});
+
+for (const mode of [
+  "oversized-native",
+  "oversized-unknown",
+  "oversized-config-overbound",
+  "oversized-config-wrong-id-type",
+  "oversized-config-error",
+  "oversized-account",
+]) {
+  test(`config envelope exception refuses ${mode}`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, "oversized-message");
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.cleanup.verified, true);
+    if (mode.startsWith("oversized-config") || mode === "oversized-account")
+      assert.equal(evidence.counts.turns, 0);
+    assert.equal(JSON.stringify(evidence).includes("PRIVATE_CONFIG"), false);
+  });
+}

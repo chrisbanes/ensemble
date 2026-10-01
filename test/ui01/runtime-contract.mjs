@@ -210,6 +210,7 @@ export async function runProtocol(options = {}) {
     identity: null,
     counts: { threads: 0, turns: 0, requests: 0, replies: 0, reports: 0 },
     observations: [],
+    startupMessages: [],
     capabilities: {
       nativeAvailability: "unproved",
       supported: [],
@@ -285,7 +286,7 @@ export async function runProtocol(options = {}) {
   async function request(method, params) {
     const rpcId = ++clientId;
     const response = new Promise((resolve, reject) =>
-      pending.set(rpcId, { resolve, reject }),
+      pending.set(rpcId, { method, resolve, reject }),
     );
     await bounded(send({ id: rpcId, method, params }));
     return bounded(response);
@@ -317,9 +318,22 @@ export async function runProtocol(options = {}) {
   function receive(line) {
     if (stopped || failure) return;
     try {
-      assert.ok(line.length <= 1_048_576, "oversized-message");
+      const bytes = Buffer.byteLength(line);
+      assert.ok(bytes <= 2_097_152, "oversized-message");
       const message = JSON.parse(line);
       assert.ok(object(message), "invalid-message");
+      // Installed config/read includes unrelated operator configuration. Only its
+      // exact typed pending response gets the larger envelope; callbacks do not.
+      if (bytes > 1_048_576) {
+        assert.ok(
+          message.method === undefined &&
+            id(message.id) &&
+            pending.get(message.id)?.method === "config/read" &&
+            message.error === undefined &&
+            object(message.result),
+          "oversized-message",
+        );
+      }
       if (message.method === undefined) {
         assert.ok(
           id(message.id) && pending.has(message.id),
@@ -329,7 +343,18 @@ export async function runProtocol(options = {}) {
           message.error === undefined && object(message.result),
           "rpc-failed",
         );
-        pending.get(message.id).resolve(message.result);
+        const response = pending.get(message.id);
+        if (response.method === "config/read") {
+          // Never retain the full configuration in a caller, receipt or evidence.
+          const config = message.result.config;
+          evidence.startupMessages.push({ method: "config/read", bytes });
+          response.resolve({
+            config: {
+              approval_policy: config?.approval_policy,
+              sandbox_mode: config?.sandbox_mode,
+            },
+          });
+        } else response.resolve(message.result);
         pending.delete(message.id);
         return;
       }
