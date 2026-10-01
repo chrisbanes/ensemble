@@ -294,7 +294,129 @@ without trusting agent-supplied project or assignment IDs.
 Provide project/task lists, task detail, conversations and execution history,
 configuration and a shared attention inbox. Show capacity, source health, the lead, assignees,
 results and artifacts. Distinguish empty, loading, stale, failed, paused, waiting,
-stopping and uncertain states. Start with a list; Kanban is optional.
+stopping, disconnected and uncertain states. Provide both list and Kanban board
+views, with the list as the initial default.
+Keep known state and uncertainty legible and retain unfinished drafts across
+transient failures.
+
+### Everyday navigation and attention
+
+Open on an attention-first overview, with actionable items above a compact
+cross-project work list and recent results shown separately. Keep projects in the
+desktop sidebar. Present task activity, assignments, dependencies, results and
+relevant controls together in task detail. Cover attention needed, normal work in
+progress and first-project/first-task experiences.
+
+The attention inbox contains unresolved questions, approvals and problems requiring
+operator intervention. Routine progress, completions requiring no decision and
+normal dependency waiting do not create attention items. Order attention by
+urgency, then age: execution uncertainty and problems requiring intervention first,
+then questions and approvals oldest first. Show project and task context on each
+item. Unresolved questions, pending approvals and failures remain visible even
+when related history is collapsed.
+
+### Kanban board
+
+Provide a List/Board switch for cross-project and project task views. Both views
+show the same tasks and respect the current project and task filters. Switching
+views preserves those filters and does not change task state.
+
+Group board cards by Ensemble work state, showing the task title, project, lead,
+source identity when imported, and the reason for waiting or intervention. Keep
+readiness and dependency holds distinct: a Ready task can still be blocked. Keep
+uncertain and stopping work visible rather than implying completion. Cards open
+the same task detail as list rows; the attention inbox remains available in either
+view. Provide readable narrow-screen navigation between columns.
+
+Board columns describe Ensemble work, not GitHub issue state or Project fields.
+The board does not grant arbitrary status changes or require drag-and-drop for the
+MVP. Any offered transition must use an existing permitted command and preserve
+readiness, dependency, approval and source-ownership rules; moving a card cannot
+bypass a hold or silently write to GitHub.
+
+### Task creation and project setup
+
+Provide a substantial task composer with project selection, desired outcome and
+detailed brief, optional reference links, permitted explicit assignee selection
+and task dependencies. Use Create and start as the primary action and Save draft
+as the secondary action. Explain before submission that starting is subject to
+project state, dependencies, capacity and execution holds. Show the persisted
+state and reason for any wait after submission; creation does not imply running.
+These controls must preserve existing readiness and admission rules.
+
+Use a short guided project setup: project name, lead profile, instructions and
+optional repository access. Advanced routing and external source configuration
+can follow later. Source selection does not grant repository access.
+
+Phone layouts support checking progress, creating tasks, messaging, answering
+questions and reviewing approvals. Complex configuration and recovery are
+desktop-first; narrow screens must still explain the current state and next step.
+
+### Imported issues and source ownership
+
+Make the distinction between local tasks and imported issues visible. Imported task
+detail shows the provider, repository and issue identifier, a source link, the last
+successful sync, refresh and any sync failure or stale state. Present external
+issue status and Project fields separately from Ensemble execution state; an open
+GitHub issue can have work waiting for approval in Ensemble.
+
+For the MVP, imported titles and descriptions are read-only in the operator UI,
+with Edit on GitHub linking to the source. The local task composer does not edit
+imported issue content or create a competing local brief. This UI restriction does
+not replace the separate approval required for any integration title/body edit.
+
+Label native GitHub dependencies as source-owned and link to the source; do not
+offer local overrides. Distinguish Message lead from any permitted Post comment to
+GitHub action, including the destination before submission. Local messages do not
+implicitly publish comments or edit issues. Keep assignments, conversations,
+execution controls and results distinct from provider-owned fields.
+
+Show remote writes as pending until their outcome is known, then as confirmed
+success, confirmed failure or uncertain. Do not present local or optimistic state
+as a confirmed GitHub update. Refreshing or retrying must preserve the existing
+remote-write reconciliation and permission rules.
+
+### Readable task histories
+
+Default to meaningful task activity and group conversation content by durable
+assignment. Identify each group by assignment, assignee, latest status and time,
+with a source-faithful excerpt rather than an invented summary. Older completed
+groups can be collapsed. Opening a group initially shows the latest three available
+messages and its result, with Show earlier for the rest. Long messages have
+expandable previews. Provide Expand all, Collapse all and a chronological view of
+available captured conversation content, retaining omission and redaction notices.
+
+Preserve expansion choices, unfinished replies and reading position as updates
+arrive. Follow new messages only when the operator is already at the end of the
+conversation; otherwise show a new-updates control without moving their position.
+Updates must not reopen collapsed groups or replace unfinished replies.
+
+### Human requests and execution controls
+
+Support agent requests for user input as first-class durable questions, including
+structured question interactions such as AskUserQuestion or the selected runtime's
+equivalent. Adapt supported runtime requests into the same Ensemble question model
+as `ensemble_ask_question`; tool names alone do not establish runtime support.
+Preserve the originating task, assignment, conversation and request identity, and
+surface the question in the attention inbox and task detail.
+
+Support a single question or a related set, free-text answers, single-choice and
+multiple-choice answers. Preserve question text, option labels and descriptions,
+selection constraints, and an explicit recommended option when supplied. Allow
+custom text when the request permits it. A recommended or preselected option is
+not a submitted answer. Validate each answer against its question and keep
+unfinished input on submission failure.
+
+Persist answers before confirming submission and route them to the requesting
+assignment/runtime request, rather than treating them as an unrelated message to
+the lead. Replayed submissions must not answer or resume work twice. Restart must
+preserve unresolved questions and recorded answers; stale, cancelled or already
+answered requests must not accept a new answer as current. Answer delivery and
+continuation respect pause, stop, dependencies and ownership holds. Present an
+unavailable or unsupported runtime interaction explicitly rather than fabricating
+an answer or silently treating it as ordinary chat. Structured runtime bridging
+requires qualification; the existing plain-text question tool alone is not evidence
+of support for these interactions.
 
 Questions and approvals are durable and scoped. Approval includes the action,
 target, requester and reviewed material; changed material invalidates approval.
@@ -305,6 +427,10 @@ Ensemble displays conversation history and accepts durable messages to the task-
 for the next eligible turn. They cannot bypass pause, stop or other admission
 controls. Live steering is deferred; stop is a separate control. Exact transcript
 and message transport is part of Codex App Server qualification.
+Stop is best effort; the UI must distinguish stopping from stopped and explain
+uncertain execution. Recovery must not imply that Resume can clear unresolved
+ownership or force a capacity release.
+
 The implemented assignment view retains sanitized completed assistant text bound
 to the exact task, assignment, work and runtime turn, including its instruction
 and conversation revisions. Partial text is not persisted. The view labels

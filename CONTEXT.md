@@ -5,6 +5,11 @@ how work proceeds; Ensemble owns durable coordination.
 
 ## Language
 
+**Attention inbox**:
+A cross-project collection of unresolved questions, approvals and problems requiring operator action.
+Routine progress and completed work that needs no decision belong outside this inbox.
+_Avoid_: Notification feed or conversation history
+
 **Project**:
 A container for tasks, optional linked repositories, agent profiles, instructions, and permissions.
 Its identity belongs to Ensemble and is independent of the application hosting it.
