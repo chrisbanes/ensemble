@@ -92,6 +92,15 @@ can remain held for reconciliation. See the
 [acceptance plan](docs/acceptance.md) for the boundaries and required evidence.
 The existing Haze prototype stays in place until a reviewed cutover.
 
+On 1 October Chris deferred optional ChatGPT daily operations/events and native
+Codex task visibility/handover until after the standalone MVP. Planning, probes and
+implementation are paused under [epic #734](https://github.com/chrisbanes/ensemble/issues/734)
+until Chris explicitly reopens the work. Ensemble's web UI and Codex App Server
+execution remain the MVP path; these deferred integrations do not gate release.
+Their requirements and unproved feasibility evidence are retained. See
+[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md) and the
+[integration design](docs/design/chatgpt-and-native-codex.md).
+
 ## Development
 
 Use Node **24.21.0** and npm **12.1.0**, pinned in

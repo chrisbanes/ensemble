@@ -17,6 +17,9 @@ Routing and accountability were amended on 28 September 2026 under
    A25, A27, local A28/A30 and R07–R10. GitHub-dependent portions wait for integration.
 3. **Operational release:** all A01–A30 and R01–R10, including both PR completion modes,
    real provider access and external-write recovery, with reviewed cutover.
+   Chris deferred X01–X08 after the MVP on 1 October 2026; they do not gate this
+   release or cutover. Native desktop visibility/handover is separate from the
+   retained Codex App Server execution requirements.
 
 Use real SQLite files and deterministic runtime doubles for fault coverage;
 separately test the actual runtime and service/UI. Record exact source/runtime
@@ -162,6 +165,35 @@ These extend A01–A30; they are required alongside the product scenarios.
 | R09 | Nested results resume their delegator, initial results resume the task-scoped lead, including restart and capacity-one cases. Two tasks using the lead profile keep separate histories. Worker success alone cannot complete a task; lead completion requests satisfy service gates. | S04; verified in S05 |
 | R10 | Duplicate requests, delayed responses, timeout, restart, task/brief/profile changes, opt-out and permission revocation cannot cause duplicate or stale dispatch. Persist routing provenance and disposition; rejected stale recommendations do not grant authority. Representative routing evidence records mistakes, fallback, latency and cost without assuming calibrated thresholds or savings. | S04; verified in S05 |
 
+## ChatGPT and native Codex acceptance
+
+Chris deferred this integration after the MVP on 1 October 2026, superseding the
+30 September first-release extension under
+[ADR-1006](adr/1006-chatgpt-and-native-codex.md). X01–X08 retain future acceptance
+without reopening completed standalone slices or gating MVP release/cutover.
+Neither integration has passed. X01–X05 delivery slices are paused under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734) until Chris explicitly
+reopens the work and current APIs, scope and dependencies are revalidated.
+
+| ID | Required observable result |
+| --- | --- |
+| X01 | In a disposable local repository/worktree, supported integration creates a main native task with linked, inspectable worker conversations, opens its task/change view and uses the retained Ensemble worktree. Record Ensemble project, native host/thread and workspace identities; saved host project placement/linkage is optional. Unsupported or failed native visibility or handover returns evidence and scope for review; App Server thread creation alone is not a pass. |
+| X02 | Human inspection starts no turn. Explicit handover holds all further Ensemble dispatch for the task before human continuation; explicit return reconciles settled execution and workspace changes and rechecks permissions, revisions and other holds. Restart, stale/replayed actions, idle status and known active execution neither duplicate launch nor implicitly return ownership. Existing recovery holds remain; no physical containment claim is added. |
+| X03 | With the plugin disabled, Ensemble remains fully usable. With it enabled, both web UI and ChatGPT exercise daily task creation/tracking, durable messages, answers and exact-material approvals through the same service rules. Replay/stale inputs, pause, Stop, dependencies and capacity preserve their existing semantics. Setup and recovery may use the web UI. |
+| X04 | Only explicitly enabled projects are available to the connected operator. Tools, components, context, errors and events exclude credentials, private instructions and raw runtime logs. Unauthorised/cross-project requests, project opt-out and access revocation fail closed, including retained UI state and later delivery. |
+| X05 | Guided installation links an authenticated HTTPS MCP endpoint; authorised tools work, invalid/expired/wrong-audience credentials fail and revocation takes effect. Only the plugin and required authentication/discovery surfaces are public; the operator UI and runtime remain private. No automatic endpoint provisioning or hosted relay is required. |
+| X06 | Explicit filtered subscriptions deliver completion, question and approval events. Callback verification/signatures, stable identity across bounded retries, duplicate/out-of-order events, restart, expiry, unsubscribe, opt-out and revocation behave correctly. Inbox/read state survives missing deliveries; webhook receipt is not acknowledgement. Events explain or request input and cannot authorise writes. |
+| X07 | Against the chosen real ChatGPT host, connect the packaged plugin, open project/task navigation and task detail beside a conversation, create a task, send a durable message, answer a question, approve/deny exact material and receive a subscribed event. Verify committed provider/service state and fixture cleanup; host feature gaps are recorded rather than inferred from screenshots or protocol doubles. |
+| X08 | Qualify the assembled native Codex and optional ChatGPT journeys against the release candidate, including identity/ownership after service restart, workspace preservation and plugin subscription/auth state. Reuse still-valid evidence; record source/runtime/host versions, limitations and cleanup. Self-hosted setup and operational restore preserve the new durable records and require relinking/reconciliation when applicable. |
+
+When this work resumes, use real SQLite and deterministic protocol/transport faults
+for negative coverage, then bounded disposable native Codex and ChatGPT journeys. Existing operational
+backup/restore and reviewed cutover remain required. The implementation agent owns
+validation; do not hand incremental testing to the operator. Composer mentions,
+full admin/recovery parity, historical task import and stronger runtime containment
+are not additional gates. A failed native proof pauses its dependent implementation
+for the approved scope review; it does not silently remove X01/X02.
+
 ## Evidence ownership
 
 The [S05 local qualification report](evidence/s05-local-qualification.md) records
@@ -180,7 +212,8 @@ pass the operational release gate. S06–S07 complete GitHub portions and all
 A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
 qualification. S08b verifies final-schema and external-effect recovery and operational
 cutover against the S07 release candidate, reusing valid S08a evidence. The operational
-release gate requires both the S07 release candidate and S08 operational evidence;
+release gate requires the S07 release candidate and S08 operational evidence;
+X01–X08 are deferred and do not block the MVP. The #698 prerequisite on #728 is removed;
 a cutover is not a prerequisite for building or testing the release candidate.
 S08a evidence is composed deliberately: deterministic T4 tests prove exact
 restored-execution receipt reconciliation, independent Stop/Resume and one
