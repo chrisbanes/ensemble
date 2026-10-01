@@ -1,20 +1,24 @@
 # S05 local qualification
 
-**In progress; the local milestone is not qualified.** Repository and
-repository-free assembled journeys have passed their bounded assertions. The
-local-dependency probe and affected repository-free rerun have also passed.
+**S05 evidence assembled under amended #695 scope; operational release not qualified.**
+Repository and repository-free assembled journeys have passed their bounded
+assertions. The local-dependency probe and affected repository-free rerun have
+also passed.
 The most recent full check passed 300 tests. The repaired routing helper passed
 its provider-free check and the supplemental current-source paid run below.
-Independent bounded source/evidence applicability review is complete. Required CI passed on published head
-`af836964100e1d3721c65c3a5f627c37ffe49aa0` before the supplemental allowance
-changes. Those changes still require CI on their final published head; the
-physical sleep/wake check remains pending. A safe host-sleep
-window has not been authorised. This report records completed evidence without
-releasing #695's dependent capabilities.
+Independent bounded source/evidence applicability review is complete. Required
+CI passed on code head
+`05050208c230a6a2bc49e051dddea954050f6d10` in [run 36826012548](https://github.com/chrisbanes/ensemble/actions/runs/36826012548).
+At Chris's decision, physical sleep/wake proof is deferred from immediate #695
+completion to [follow-up #732](https://github.com/chrisbanes/ensemble/issues/732).
+R03 remains unproved; this deferral does not waive later release qualification
+or cutover evidence. This report records bounded evidence and its limits; it
+does not qualify operational release.
 
 Scope is [#695](https://github.com/chrisbanes/ensemble/issues/695), against
 merged baseline `31e800a68fe45dd50d1d16f442a818dbcad8cfc3`, following the
-[published plan](https://github.com/chrisbanes/ensemble/issues/695#issuecomment-5917049479).
+[original execution plan](https://github.com/chrisbanes/ensemble/issues/695#issuecomment-5917049479).
+The current scope and delivery amendment is recorded in [revision 2](https://github.com/chrisbanes/ensemble/issues/695#issuecomment-5926864838).
 The candidate subsequently fast-forwarded to
 `3ea92d43323b01330f155185cedf7ac29db32357`. Incoming changes were only the
 new README/artwork, development reference and X01 native-feasibility report;
@@ -365,7 +369,7 @@ are stage deadlines, not a guarantee that the whole command exits in 30 seconds.
 The new thread/file witness subsequently passed in the affected repository-free
 journey described below.
 
-### Physical sleep preparation, not physical proof
+### Physical sleep preparation; R03 proof deferred
 
 The prepared harness has 18 passing deterministic safety tests and an
 independent code-readiness review. It requires an exact approved host/time
@@ -375,13 +379,16 @@ fixture and uncertainty; it never cancels unrelated events. Its narrow timing
 guards bound dispatch, not an atomic OS-transition guarantee.
 
 No wake was scheduled, no privileged sleep command was run and no physical
-sleep/wake was performed. The missing prerequisite is one directly approved
-safe host-wide test window. R03 remains **unproved**, not passed by fake events.
+sleep/wake was performed. Chris chose to skip this test for immediate #695
+completion and schedule it in [follow-up #732](https://github.com/chrisbanes/ensemble/issues/732).
+No safe host-wide test window has been authorised. R03 remains **unproved**,
+not passed by fake events or waived for later release qualification.
 
 ## Finite acceptance coverage
 
-The dispositions below are bounded observations and reused evidence, not local
-milestone qualification. Partial/unproved rows remain so; R03 is not a pass.
+The dispositions below are bounded observations under amended #695 scope and
+reused evidence. They do not qualify operational release. Partial rows remain
+partial; R03 is deferred to #732 and remains unproved.
 
 | Scenario | Current disposition and remaining check |
 | --- | --- |
@@ -409,7 +416,7 @@ milestone qualification. Partial/unproved rows remain so; R03 is not a pass.
 | Local A30 | Deterministic dependency completeness coverage passed; real GitHub is S06. |
 | R01 | Existing runtime login and assembled repository-free restart passed. |
 | R02 | Full actual capacity-one journey and deterministic default/lowered limits passed. |
-| R03 | Unproved: required physical sleep/wake lacks an approved safe window. |
+| R03 | Unproved: physical sleep/wake is deferred from immediate #695 completion to follow-up #732; it remains required for later release qualification. |
 | R04 | Prior same-host private HTTPS proof plus current history HTTP/browser guards apply. No separate-device reachability claim. |
 | R05 | Actual repository-free restart, captured histories, private UI and explicit revision continuation passed. |
 | R06 fresh separation | Fresh disposable fixtures used; no prototype data imported. Backup/cutover excluded. |
@@ -489,8 +496,10 @@ isolated test process; production host-local conversion, absolute window guards
 and live harness code are unchanged. The affected suite passed all 18 tests
 when launched under both UTC and Europe/London. The full pinned CI-equivalent
 `npm run check` then passed 288/288 under UTC with four existing non-fatal lint
-warnings. Required CI must still confirm the reviewed repair at its published
-head; no actual power command is authorized by this repair.
+warnings. Required CI later passed for the reviewed code on head
+`05050208c230a6a2bc49e051dddea954050f6d10` in run 36826012548. This records
+CI evidence for that code head; no actual power command is authorized by this
+repair.
 
 On the updated base, after the history and startup/cleanup repairs, pinned
 `npm run check` passed type checking, lint (four non-fatal warnings), format,
@@ -762,7 +771,8 @@ final-source provider-free run. These are two bounded integration observations,
 not a routing-quality sample or calibrated threshold evaluation. Monetary cost
 remains unknown: the routing adapter did not return it.
 
-This grant does not authorise host power changes or satisfy R03. The physical
-sleep/wake pause, A25's disclosed partial attribution, the failed retained
-fixture and downstream dependencies remain unchanged. The milestone is not
-qualified, and PR #731 remains a draft without a closing keyword.
+This grant does not authorise host power changes or satisfy R03. Physical
+sleep/wake is deferred to follow-up #732, not recorded as passed. A25's
+disclosed partial attribution, the failed retained fixture and downstream
+dependencies remain disclosed. This evidence does not qualify operational
+release.
