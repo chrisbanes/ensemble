@@ -30,7 +30,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
+    "@biomejs/biome": "2.5.15",
     "@types/node": "26.6.3",
     "playwright": "1.63.0",
     "typescript": "7.0.2"
