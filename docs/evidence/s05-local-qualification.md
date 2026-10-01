@@ -3,10 +3,12 @@
 **In progress; the local milestone is not qualified.** Repository and
 repository-free assembled journeys have passed their bounded assertions. The
 local-dependency probe and affected repository-free rerun have also passed.
-The final full check passed 288 tests, and the repaired routing helper passed
-its provider-free live check. Independent bounded source/evidence applicability
-review is complete; required CI and the physical sleep/wake check remain pending.
-A safe host-sleep
+The most recent full check passed 300 tests. The repaired routing helper passed
+its provider-free check and the supplemental current-source paid run below.
+Independent bounded source/evidence applicability review is complete. Required CI passed on published head
+`af836964100e1d3721c65c3a5f627c37ffe49aa0` before the supplemental allowance
+changes. Those changes still require CI on their final published head; the
+physical sleep/wake check remains pending. A safe host-sleep
 window has not been authorised. This report records completed evidence without
 releasing #695's dependent capabilities.
 
@@ -122,7 +124,9 @@ queued request storage, and history remains outside admission/control decisions.
 Chris [authorised four jev-1.13.0 calls](https://github.com/chrisbanes/ensemble/issues/695#issuecomment-5916722689).
 One retained SQLite ledger reserved all four calls before the provider boundary;
 failed downstream probes consumed their reservations. SDK retries were zero.
-The call allowance is exhausted. Monetary cost was not returned by the adapter;
+That original four-call allowance was exhausted. Chris subsequently increased
+the total allowance to twenty, as recorded in the supplemental checkpoint below;
+the original four reservations are retained. Monetary cost was not returned by the adapter;
 no cost or savings estimate is claimed.
 
 | Probe | Observed result |
@@ -409,10 +413,10 @@ milestone qualification. Partial/unproved rows remain so; R03 is not a pass.
 | R04 | Prior same-host private HTTPS proof plus current history HTTP/browser guards apply. No separate-device reachability claim. |
 | R05 | Actual repository-free restart, captured histories, private UI and explicit revision continuation passed. |
 | R06 fresh separation | Fresh disposable fixtures used; no prototype data imported. Backup/cutover excluded. |
-| R07 | Historical bounded enabled routing and final-source disabled/explicit live paths passed; current deterministic tests cover the changed interaction. |
+| R07 | Supplemental current-source enabled routing and disabled/explicit live paths passed; current deterministic tests cover the changed interaction. |
 | R08 | Retained implementer repair and actual lead completion passed; deterministic fallback/busy/admission checks passed. |
 | R09 | Exact nested requester, capacity-one scheduling, both reviews and lead completion passed; repository-free restart and simultaneous histories passed. |
-| R10 | Partial: current deterministic routing races/failures plus bounded historical live telemetry. |
+| R10 | Partial: current deterministic routing races/failures plus bounded current and historical live telemetry; not statistical routing-quality evidence. |
 
 A19–A24/A26/A29, GitHub-dependent work and R06 backup/cutover are later slices,
 not passes or S05 gaps. Existing evidence reused here includes
@@ -453,11 +457,13 @@ red/green regressions and the final-source repository-free history/restart/UI
 journey exercise those affected surfaces. Startup/cleanup helper changes have
 separate fake failure tests and successful affected live cleanup observations.
 
-Earlier paid routing observations remain historical, not final-source reruns.
+The earlier four paid routing observations remain historical, not final-source reruns.
 The SDK, adapter and bounded selection snapshots are unchanged; current routing
 race/hold/admission tests and final-source provider-free disabled/explicit paths
-cover the subsequently changed coordination interaction. No new paid call,
-statistical quality claim or monetary-cost estimate is inferred from that reuse.
+cover the subsequently changed coordination interaction. The supplemental run
+below subsequently made two authorised calls on current source and exercised
+both enabled paths. No statistical quality claim or monetary-cost estimate is
+inferred from the historical reuse or the two new observations.
 
 S02–S04 component evidence is retained only for the named unchanged contracts,
 with the final full regression suite covering their interaction with instruction
@@ -603,8 +609,8 @@ Full independent review additionally found that the separate routing harness
 could swallow browser/HTTP cleanup errors, or let an authentication-close error
 skip later service/ledger cleanup. These source defects were subsequently repaired;
 prior successful cleanup observations remain specific to those runs, not proof
-of the faulty failure paths. The paid call ledger remains 4/4; repair and tests
-must not make additional TypeSafe calls.
+of the faulty failure paths. At that repair stage, the paid call ledger remained
+4/4 and further TypeSafe calls were not authorised.
 
 The revised non-live harness suite passes 15 tests, including four routing
 cleanup tests and a mid-stage
@@ -674,8 +680,8 @@ removal. All shared the observed boot identity
 `Wed Sep 30 22:37:13 2026`, and the passing provider-free process at
 `Wed Sep 30 22:42:23 2026`. The post-repair provider-free process started at
 `Wed Sep 30 23:53:54 2026`; its exact PID was absent on independent readback
-after the harness verified exit and fixture removal. The call ledger remains
-retained at 4/4. Credentials
+after the harness verified exit and fixture removal. At that point the call
+ledger remained retained at 4/4. Credentials
 were removed from the launch environment before Codex/fixture subprocesses;
 no credentials, private prompt bodies or control paths are published here.
 Provider-side thread records may remain; their deletion was not requested.
@@ -686,3 +692,77 @@ not claim strict outside-read denial, universal descendant containment, an
 independent Ensemble sandbox or universal live reattachment. The launchd
 `/usr/sbin` PATH issue already recorded for S08 and the S01 approval limitation
 remain visible; deployment/cutover is not authorised by this qualification work.
+
+## Supplemental twenty-call allowance
+
+Chris directly instructed: “Keep going. Increase the Typesafe allowance to 20”.
+The [verified supplemental authority checkpoint](https://github.com/chrisbanes/ensemble/issues/695#issuecomment-5925586401)
+records twenty **total attempted** `jev-1.13.0` calls, not twenty additional
+calls or a monetary cap. The existing ledger was independently read as four
+reserved calls with a ceiling of four. A recoverable SQLite snapshot retains
+that exact row before the guarded ceiling increase; neither a replacement
+ledger nor a reset is authorised. Failed attempts still consume reservations.
+
+The test-only helper now supports an explicit controller-owned increase to
+twenty while refusing ordinary constructor ceiling changes and new budget rows
+above the legacy ceiling. Real SQLite regressions verify snapshot mismatch,
+reservation-before-provider failure, reopen/exhaustion, atomic rollback and
+unrelated data preservation. Review found and repaired quoted post-rename
+schema handling, mixed-case foreign-key references, view/trigger dependencies
+and existing empty-file creation. Unsupported schema dependencies fail closed;
+this is not a generic database migrator or a global provider-quota boundary.
+The original worker reproduced the failures before repairing them. Independent
+review returned ship across correctness/security, reuse/efficiency and
+overengineering for the exact controller-owned ledger operation. The pinned
+UTC full check passed type checking, lint, formatting, build and all 300 tests,
+with the four existing non-fatal lint warnings; focused budget tests passed 13/13.
+
+The guarded migration succeeded, with independent readback of ceiling twenty
+and four reservations. The retained snapshot still read ceiling four and four
+reservations; both databases passed SQLite integrity checks. The first live
+attempt stopped during fixture setup in the sandbox, before runtime start or
+any new reservation. Its fixture and owned resources were cleaned. A separate
+listener diagnostic returned `EPERM` for loopback `listen`; only the failed
+live command was retried outside the sandbox.
+
+The supplemental current-source run exited zero. It reserved exactly two more
+calls, taking the same ledger from four to **six of twenty**; fourteen attempts
+remain. Each routing operation had one successful provider attempt, with SDK
+retries disabled:
+
+| Scenario | Provider observation | Assembled outcome |
+| --- | --- | --- |
+| Clear exact-marker brief | Eligible candidate selected; confidence 1; 351 ms; 742 input / 132 output tokens. | Actual candidate Codex turn completed with the exact marker, two captured history items and no omissions; its result was delivered and the lead finalised completion reviewing that exact result. Task durably Done, no open question/approval, callback or execution hold. |
+| Ambiguous brief | Lead review selected; confidence 0.83, lead-review probability 0.88; 251 ms; 697 input / 101 output tokens. | Actual lead Codex turn completed with two captured history items and no omissions, then finalised completion with no reviewed results. Task durably Done, no open question/approval, callback or execution hold. |
+
+Disabled routing used the project lead, and explicit assignment used the
+operator-selected candidate. Both completed through real Codex to durable
+Done with zero routing operations and no additional reservations. Operator
+authentication/logout passed. All owned browser, HTTP, auth, service and
+ledger resources closed; exact App Server exit was verified, the disposable
+fixture was removed, and cleanup errors were empty. Independent process readback
+confirmed PID 97100 absent after its recorded start at `Thu Oct 1 07:31:04 2026`;
+independent read-only ledger readback confirmed ceiling twenty, reserved six.
+The credential was removed from the environment before Codex started. No
+credential, private prompt or control path is published here; provider-side
+thread deletion was not requested.
+
+The live candidate recorded base HEAD
+`af836964100e1d3721c65c3a5f627c37ffe49aa0` with these frozen affected source
+hashes: routing harness
+`5bbf076fe5b2b70b336ce1ddd2bf846ec56063fa975aaa51721dae94a322ea25`,
+budget helper
+`4f7feea64162952e3cd862ce8306e20e463ce51819faa1afd91f9732a7eb98cb`,
+budget tests
+`c3826c6cfc3494c6a900221233bb7784bca48812fc74020f87a3d5469cf9d675`
+and harness tests
+`f74509ca22b889194502b9d95a894a793bf5e38a3bf6e4cb93938ac0280c73a2`.
+The cleanup helper and production source were unchanged from the earlier
+final-source provider-free run. These are two bounded integration observations,
+not a routing-quality sample or calibrated threshold evaluation. Monetary cost
+remains unknown: the routing adapter did not return it.
+
+This grant does not authorise host power changes or satisfy R03. The physical
+sleep/wake pause, A25's disclosed partial attribution, the failed retained
+fixture and downstream dependencies remain unchanged. The milestone is not
+qualified, and PR #731 remains a draft without a closing keyword.

@@ -95,11 +95,67 @@ test("live routing harness requires explicit live authorization before reading c
   );
 });
 
-test("live routing harness refuses a provider-call budget above four", () => {
+test("live routing harness refuses a provider-call budget above twenty", () => {
   assertRefusesLiveHarness(
-    ["--live", "--max-calls", "5"],
-    /--max-calls must be from 1 through 4/,
+    ["--live", "--max-calls", "21"],
+    /--max-calls must be from 1 through 20/,
   );
+});
+
+test("live routing harness accepts the authorized maximum before ledger access", () => {
+  assertRefusesLiveHarness(
+    ["--live", "--max-calls", "20"],
+    /absolute controller-owned --ledger path/,
+  );
+});
+
+test("live routing harness refuses a fresh twenty-call ledger before credential setup", () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-s05-fresh-high-budget-cli-"),
+  );
+  const ledgerPath = join(root, "controller-owned.sqlite");
+  try {
+    let report:
+      | {
+          failure: { stage: string };
+          provider: { accessOutcome: string; reservedCalls: number };
+        }
+      | undefined;
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          join(process.cwd(), "test/s05/live-routing.mjs"),
+          "--live",
+          "--max-calls",
+          "20",
+          "--ledger",
+          ledgerPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, TYPESAFE_API_KEY: "" },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (error) {
+      const result = error as NodeJS.ErrnoException & {
+        status?: number;
+        stdout?: string | Buffer;
+      };
+      assert.equal(result.status, 1);
+      report = JSON.parse(String(result.stdout ?? "")) as NonNullable<
+        typeof report
+      >;
+    }
+    assert.ok(report, "missing fresh ledger unexpectedly continued");
+    assert.equal(report.failure.stage, "controller-owned-durable-ledger");
+    assert.equal(report.provider.accessOutcome, "not-started");
+    assert.equal(report.provider.reservedCalls, 0);
+    assert.equal(existsSync(ledgerPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("live routing harness requires a controller-owned absolute ledger path", () => {

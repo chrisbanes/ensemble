@@ -28,6 +28,7 @@ import { runtimeOperatorRoutes } from "../../dist/src/standalone/operator-runtim
 import { TypeSafeRoutingChoiceClient } from "../../dist/src/standalone/routing.js";
 import { MacProcessTerminationVerifier } from "../../dist/src/standalone/termination.js";
 import {
+  MAX_LIVE_CALLS,
   SqliteLiveCallBudget,
   withLiveCallBudget,
 } from "../../dist/test/s05/live-call-budget.js";
@@ -47,10 +48,10 @@ if (!args.includes("--live")) {
 if (
   !Number.isSafeInteger(requestedCallLimit) ||
   requestedCallLimit < 1 ||
-  requestedCallLimit > 4
+  requestedCallLimit > MAX_LIVE_CALLS
 ) {
   process.stderr.write(
-    "Refusing live execution: --max-calls must be from 1 through 4.\n",
+    `Refusing live execution: --max-calls must be from 1 through ${MAX_LIVE_CALLS}.\n`,
   );
   process.exit(2);
 }
