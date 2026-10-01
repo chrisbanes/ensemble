@@ -161,12 +161,12 @@ test("a version-matched successful source preview activates only that selection"
     });
     let previewComplete = true;
     const reader = {
-      async previewSelection() {
+      async readSelection() {
         return previewComplete
           ? ({ complete: true, issues: [], reason: null } as const)
           : ({ complete: false, issues: [], reason: "http-403" } as const);
       },
-    } as Pick<GitHubSourceReader, "previewSelection">;
+    } as Pick<GitHubSourceReader, "readSelection">;
     const ui = new LocalOperatorUi(domain, () => reader);
     const fields = {
       type: "github.preview",

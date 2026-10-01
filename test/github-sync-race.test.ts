@@ -70,9 +70,6 @@ test("a selection response from the previous configuration cannot commit after s
     async readIssueStatus() {
       return { status: "open" };
     },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
-    },
   };
   const service = new StandaloneService(
     join(root, "data"),
@@ -178,9 +175,6 @@ test("a native blocker response from the previous configuration cannot clear the
     },
     async readIssueStatus() {
       return { status: "open" };
-    },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
     },
   };
   const service = new StandaloneService(
@@ -291,9 +285,6 @@ test("a retained status response cannot release a local dependent after credenti
       return statusReads === 1
         ? { status: "unknown" as const, reason: "http-403" }
         : { status: "closed" as const };
-    },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
     },
   };
   const service = new StandaloneService(

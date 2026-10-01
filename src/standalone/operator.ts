@@ -95,7 +95,7 @@ export class LocalOperatorUi {
     private readonly store: DomainStore,
     private readonly githubPreviewReader: (
       credentialRef: string,
-    ) => Pick<GitHubSourceReader, "previewSelection"> = (credentialRef) =>
+    ) => Pick<GitHubSourceReader, "readSelection"> = (credentialRef) =>
       new GitHubHttpSourceReader(process.env[credentialRef.slice(4)]),
     private readonly githubSources?: GitHubSourceStore,
     private readonly githubRefresh?: () => Promise<void>,
@@ -453,7 +453,7 @@ export class LocalOperatorUi {
           throw new DomainConflictError("GitHub credential reference required");
         const preview = await this.githubPreviewReader(
           config.credentialRef,
-        ).previewSelection(selection);
+        ).readSelection(selection);
         if (!preview.complete)
           throw new DomainConflictError(
             `GitHub preview incomplete: ${preview.reason}`,

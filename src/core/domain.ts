@@ -4,6 +4,9 @@ import type { Database } from "./store.js";
 import {
   GitHubSourceStore,
   githubConfigurationSchema,
+  linkedRepositorySchema,
+  readinessSchema,
+  selectionSchema,
   verifiedRepository,
   type LinkedRepository,
 } from "./github-source.js";
@@ -553,8 +556,8 @@ export class DomainStore {
   githubConfiguration(projectId: string): {
     version: number;
     credentialRef: string | null;
-    selections: unknown[];
-    readiness: unknown;
+    selections: z.output<typeof selectionSchema>[];
+    readiness: z.output<typeof readinessSchema>;
     repositories: LinkedRepository[];
   } {
     this.project(projectId);
@@ -566,9 +569,13 @@ export class DomainStore {
       version: Number(row.version),
       credentialRef:
         row.credentialRef === null ? null : String(row.credentialRef),
-      selections: JSON.parse(String(row.selections)) as unknown[],
-      readiness: JSON.parse(String(row.readiness)) as unknown,
-      repositories: JSON.parse(String(row.repositories)) as LinkedRepository[],
+      selections: z
+        .array(selectionSchema)
+        .parse(JSON.parse(String(row.selections))),
+      readiness: readinessSchema.parse(JSON.parse(String(row.readiness))),
+      repositories: z
+        .array(linkedRepositorySchema)
+        .parse(JSON.parse(String(row.repositories))),
     };
   }
 
@@ -1375,6 +1382,27 @@ export class DomainStore {
             "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'github_sync_state'",
           )
         ) {
+          const selectionIds = JSON.stringify(
+            command.selections.map((selection) => selection.id),
+          );
+          const members = this.db
+            .prepare(`SELECT DISTINCT e.taskId FROM github_memberships m
+            JOIN github_external_issues e ON e.nodeId = m.nodeId
+            WHERE m.projectId = ? AND m.selectionId NOT IN (SELECT value FROM json_each(?))`)
+            .all(command.projectId, selectionIds) as Row[];
+          const affectedTasks = members.map((member) => String(member.taskId));
+          for (const table of [
+            "github_memberships",
+            "github_sync_state",
+            "project_github_active",
+          ])
+            this.db
+              .prepare(
+                `DELETE FROM ${table} WHERE projectId = ? AND selectionId NOT IN (SELECT value FROM json_each(?))`,
+              )
+              .run(command.projectId, selectionIds);
+          const sources = new GitHubSourceStore(this.db);
+          for (const taskId of affectedTasks) sources.updateReadiness(taskId);
           this.db
             .prepare(
               "UPDATE github_sync_state SET complete = 0, reason = 'configuration-changed' WHERE projectId = ?",

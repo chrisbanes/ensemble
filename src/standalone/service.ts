@@ -1563,13 +1563,35 @@ export class StandaloneService {
           profileRevision === null
         )
           throw new Error("Task request is missing captured revisions");
-        validateAssignment = () =>
-          this.domain().assignmentAdmission(assignmentId, {
+        validateAssignment = () => {
+          const domain = this.domain();
+          const reasons = domain.assignmentAdmission(assignmentId, {
             taskVersion,
             assignmentVersion,
             instructionsRevision,
             profileRevision,
           }).reasons;
+          if (domain.importedTask(binding.taskId)) {
+            const task = domain.task(binding.taskId);
+            const linked = domain.githubConfiguration(
+              String(task.projectId),
+            ).repositories;
+            if (
+              binding.repositories.some(
+                (repository) =>
+                  !linked.some(
+                    (link) =>
+                      link.repositoryId === repository.repositoryId &&
+                      link.path === repository.sourcePath &&
+                      link.ref === repository.ref &&
+                      link.gitCommonDirectory === repository.gitCommonDir,
+                  ),
+              )
+            )
+              reasons.push("repository-access-revoked");
+          }
+          return reasons;
+        };
       } else if (request.workspace) {
         workspaceKey = this.validateDirectWorkspace(request.workspace);
       } else throw new Error("Turn request has no workspace or task binding");

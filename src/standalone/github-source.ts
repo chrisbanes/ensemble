@@ -116,7 +116,6 @@ export interface GitHubSourceReader {
   readSelection(selection: GitHubSelection): Promise<SelectionSnapshot>;
   readIssueStatus(reference: IssueReference): Promise<IssueStatus>;
   readBlockers(reference: IssueReference): Promise<BlockerSnapshot>;
-  previewSelection(selection: GitHubSelection): Promise<SelectionSnapshot>;
 }
 
 const MAX_PAGES = 100;
@@ -305,12 +304,6 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
     } catch (error) {
       return { complete: false, issues, reason: safeReason(error) };
     }
-  }
-
-  async previewSelection(
-    selection: GitHubSelection,
-  ): Promise<SelectionSnapshot> {
-    return this.readSelection(selection);
   }
 
   async readIssueStatus(reference: IssueReference): Promise<IssueStatus> {

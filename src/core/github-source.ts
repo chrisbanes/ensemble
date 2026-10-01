@@ -49,6 +49,15 @@ export interface GitHubObservationBinding {
 
 const nonempty = z.string().trim().min(1).max(512);
 const envReference = z.string().regex(/^env:[A-Z][A-Z0-9_]*$/);
+const projectFieldsSchema = z.array(
+  z
+    .object({
+      projectNodeId: nonempty,
+      fieldNodeId: nonempty,
+      optionNodeId: nonempty,
+    })
+    .strict(),
+);
 
 export const selectionSchema = z.discriminatedUnion("kind", [
   z
@@ -128,9 +137,10 @@ export type GitHubConfigurationInput = z.input<
   typeof githubConfigurationSchema
 >;
 export type GitHubSelection = z.output<typeof selectionSchema>;
-export type LinkedRepository = z.output<typeof repositoryLinkSchema> & {
-  gitCommonDirectory: string;
-};
+export const linkedRepositorySchema = repositoryLinkSchema.extend({
+  gitCommonDirectory: z.string().min(1).refine(isAbsolute),
+});
+export type LinkedRepository = z.output<typeof linkedRepositorySchema>;
 
 const execFileAsync = promisify(execFile);
 
@@ -751,9 +761,8 @@ export class GitHubSourceStore {
         "SELECT projectFields FROM github_memberships WHERE nodeId = ? AND projectId = ?",
       )
       .all(String(external.nodeId), String(external.projectId)) as Row[];
-    const fields = memberships.flatMap(
-      (row) =>
-        JSON.parse(String(row.projectFields)) as IssueSnapshot["projectFields"],
+    const fields = memberships.flatMap((row) =>
+      projectFieldsSchema.parse(JSON.parse(String(row.projectFields))),
     );
     const labels = z
       .array(z.string())

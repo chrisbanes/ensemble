@@ -55,9 +55,6 @@ test("startup invalidates prior clear source/dependency evidence before the firs
     async readIssueStatus() {
       return { status: readsFail ? "unknown" : "open" };
     },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
-    },
   };
   const runtime = (): Runtime => ({
     async start() {},
@@ -216,9 +213,6 @@ test("a runnable imported assignment starts on complete evidence, then a failed 
     },
     async readIssueStatus() {
       return { status: failed ? "unknown" : "open" };
-    },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
     },
   };
   const runtime = (): Runtime => ({
@@ -475,9 +469,6 @@ test("a held canonical lead receives one source-hold notice without changing ass
     async readIssueStatus() {
       return { status: "open" };
     },
-    async previewSelection() {
-      return { complete: true, issues: [{ ...issue, title }], reason: null };
-    },
   };
   const runtime = (): Runtime => ({
     async start() {},
@@ -622,9 +613,6 @@ test("an unassigned routing-enabled source hold does not invent a lead assignmen
     },
     async readIssueStatus() {
       return { status: "open" };
-    },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
     },
   };
   const runtime = (): Runtime => ({
@@ -858,9 +846,6 @@ test("explicit and timer refresh converge, and stop settles an in-flight read be
     },
     async readIssueStatus() {
       return { status: "open" };
-    },
-    async previewSelection() {
-      return { complete: true, issues: [issue], reason: null };
     },
   };
   const runtime = (): Runtime => ({
