@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { promisify } from "node:util";
 import { z } from "zod";
 import type { Database } from "./store.js";
 
@@ -38,6 +39,12 @@ export interface IssueReference {
   repositoryId: string;
   repositoryName: string;
   number: number;
+}
+
+export interface GitHubObservationBinding {
+  projectId: string;
+  configVersion: number;
+  credentialRef: string | null;
 }
 
 const nonempty = z.string().trim().min(1).max(512);
@@ -125,25 +132,31 @@ export type LinkedRepository = z.output<typeof repositoryLinkSchema> & {
   gitCommonDirectory: string;
 };
 
-export function verifiedRepository(
+const execFileAsync = promisify(execFile);
+
+export async function verifiedRepository(
   input: z.output<typeof repositoryLinkSchema>,
-): LinkedRepository {
+): Promise<LinkedRepository> {
   if (!isAbsolute(input.path))
     throw new Error("Linked repository path must be absolute");
-  const path = realpathSync(input.path);
-  const common = execFileSync(
-    "git",
-    ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    { encoding: "utf8", timeout: 5000 },
-  ).trim();
-  const ref = execFileSync(
-    "git",
-    ["-C", path, "rev-parse", "--verify", input.ref],
-    { encoding: "utf8", timeout: 5000 },
-  ).trim();
+  const path = await realpath(input.path);
+  const common = (
+    await execFileAsync(
+      "git",
+      ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { encoding: "utf8", timeout: 5000 },
+    )
+  ).stdout.trim();
+  const ref = (
+    await execFileAsync(
+      "git",
+      ["-C", path, "rev-parse", "--verify", input.ref],
+      { encoding: "utf8", timeout: 5000 },
+    )
+  ).stdout.trim();
   if (!/^[0-9a-f]{40,64}$/.test(ref))
     throw new Error("Linked repository ref is invalid");
-  return { ...input, path, gitCommonDirectory: realpathSync(common) };
+  return { ...input, path, gitCommonDirectory: await realpath(common) };
 }
 
 type Row = Record<string, string | number | null>;
@@ -157,6 +170,33 @@ export function sourceTextDigest(title: string, body: string): string {
 /** Provider-owned observations. Each selection's complete generation commits atomically. */
 export class GitHubSourceStore {
   constructor(private readonly db: Database) {}
+
+  private currentBinding(
+    binding: GitHubObservationBinding,
+    selectionId?: string,
+  ): boolean {
+    const current = this.db
+      .prepare(
+        "SELECT version, credentialRef FROM project_github_sources WHERE projectId = ?",
+      )
+      .get(binding.projectId) as Row | undefined;
+    if (
+      !current ||
+      Number(current.version) !== binding.configVersion ||
+      current.credentialRef !== binding.credentialRef
+    )
+      return false;
+    return (
+      !selectionId ||
+      Boolean(
+        this.db
+          .prepare(
+            "SELECT 1 FROM project_github_active WHERE projectId = ? AND selectionId = ? AND configVersion = ?",
+          )
+          .get(binding.projectId, selectionId, binding.configVersion),
+      )
+    );
+  }
 
   migrate(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS github_external_issues (
@@ -322,10 +362,31 @@ export class GitHubSourceStore {
     }));
   }
 
-  recordIssueStatus(nodeId: string, observation: IssueStatus): void {
+  recordIssueStatus(
+    nodeId: string,
+    observation: IssueStatus,
+    binding?: GitHubObservationBinding & { reference: IssueReference },
+  ): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const issue = this.issue(nodeId);
+      if (
+        binding &&
+        (!this.currentBinding(binding) ||
+          !issue ||
+          issue.nodeId !== binding.reference.nodeId ||
+          issue.repositoryId !== binding.reference.repositoryId ||
+          issue.repositoryName !== binding.reference.repositoryName ||
+          Number(issue.issueNumber) !== binding.reference.number ||
+          !this.db
+            .prepare(
+              "SELECT 1 FROM domain_tasks WHERE id = ? AND projectId = ?",
+            )
+            .get(String(issue.taskId), binding.projectId))
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
       if (!issue) throw new Error("Unknown imported issue");
       const prior = this.db
         .prepare("SELECT status FROM github_issue_status WHERE nodeId = ?")
@@ -347,6 +408,7 @@ export class GitHubSourceStore {
           )
           .run(String(issue.taskId));
       this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -388,11 +450,34 @@ export class GitHubSourceStore {
     }
   }
 
-  reconcileBlockers(nodeId: string, snapshot: BlockerSnapshot): void {
+  reconcileBlockers(
+    nodeId: string,
+    snapshot: BlockerSnapshot,
+    binding?: GitHubObservationBinding & {
+      selectionId: string;
+      reference: IssueReference;
+    },
+  ): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const issue = this.issue(nodeId);
       if (!issue) throw new Error("Unknown imported issue");
+      if (
+        binding &&
+        (!this.currentBinding(binding, binding.selectionId) ||
+          nodeId !== binding.reference.nodeId ||
+          issue.repositoryId !== binding.reference.repositoryId ||
+          issue.repositoryName !== binding.reference.repositoryName ||
+          Number(issue.issueNumber) !== binding.reference.number ||
+          !this.db
+            .prepare(
+              "SELECT 1 FROM github_memberships WHERE projectId = ? AND selectionId = ? AND nodeId = ?",
+            )
+            .get(binding.projectId, binding.selectionId, nodeId))
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
       if (snapshot.complete) {
         this.db
           .prepare("DELETE FROM github_native_blockers WHERE nodeId = ?")
@@ -441,6 +526,7 @@ export class GitHubSourceStore {
           )
           .run(state, String(issue.taskId));
       this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -451,9 +537,18 @@ export class GitHubSourceStore {
     projectId: string,
     selectionId: string,
     snapshot: SelectionSnapshot,
-  ): void {
+    binding?: GitHubObservationBinding,
+  ): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (
+        binding &&
+        (binding.projectId !== projectId ||
+          !this.currentBinding(binding, selectionId))
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
       const config = this.db
         .prepare(
           "SELECT version, readiness, selections FROM project_github_sources WHERE projectId = ?",
@@ -630,13 +725,14 @@ export class GitHubSourceStore {
           WHERE m.projectId = ? AND m.selectionId = ?)`)
           .run(projectId, selectionId);
       this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
   }
 
-  private updateReadiness(taskId: string): void {
+  updateReadiness(taskId: string): void {
     const external = this.db
       .prepare(
         "SELECT e.nodeId, e.labels, e.observedState, t.projectId FROM github_external_issues e JOIN domain_tasks t ON t.id = e.taskId WHERE e.taskId = ?",

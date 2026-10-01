@@ -369,6 +369,78 @@ test("a runnable imported assignment starts on complete evidence, then a failed 
       assert.equal(count(), 2);
       await service.refreshGitHub();
       assert.equal(count(), 2);
+      const ordinaryEventId = randomUUID();
+      const boundAssignmentId = String(
+        (
+          noticeDb
+            .prepare(
+              "SELECT assignmentId FROM task_execution_bindings WHERE workId = (SELECT workId FROM execution_intents WHERE threadId = 'thread' AND turnId = 'turn-1')",
+            )
+            .get() as { assignmentId: string }
+        ).assignmentId,
+      );
+      noticeDb
+        .prepare(
+          "INSERT INTO coordination_inbox_events (eventId, taskId, recipientAssignmentId, eventType, payload) VALUES (?, ?, ?, 'operator-message', '{}')",
+        )
+        .run(ordinaryEventId, taskId, boundAssignmentId);
+      assert.equal(
+        Number(
+          (
+            noticeDb
+              .prepare(
+                "SELECT count(*) AS count FROM coordination_inbox_events WHERE eventId = ? AND recipientAssignmentId = ? AND eventType = 'operator-message'",
+              )
+              .get(ordinaryEventId, boundAssignmentId) as { count: number }
+          ).count,
+        ),
+        1,
+      );
+      assert.equal(
+        Number(
+          (
+            noticeDb
+              .prepare(
+                "SELECT count(*) AS count FROM coordination_delivery_events WHERE eventId = ?",
+              )
+              .get(ordinaryEventId) as { count: number }
+          ).count,
+        ),
+        0,
+      );
+      const ordinaryBlocked = await toolCall({
+        threadId: "thread",
+        turnId: "turn-1",
+        callId: "report-with-ordinary-inbox",
+        tool: "ensemble_report_result",
+        arguments: { summary: "Finished admitted work" },
+      });
+      assert.equal(ordinaryBlocked.success, false);
+      assert.match(ordinaryBlocked.text, /inbox events remain undelivered/);
+      noticeDb
+        .prepare("DELETE FROM coordination_inbox_events WHERE eventId = ?")
+        .run(ordinaryEventId);
+      const report = await toolCall({
+        threadId: "thread",
+        turnId: "turn-1",
+        callId: "report-after-source-hold",
+        tool: "ensemble_report_result",
+        arguments: { summary: "Finished admitted work" },
+      });
+      assert.equal(report.success, true, report.text);
+      assert.equal(
+        Number(
+          (
+            noticeDb
+              .prepare(
+                "SELECT count(*) AS count FROM coordination_results WHERE taskId = ? AND assignmentId = ?",
+              )
+              .get(taskId, boundAssignmentId) as { count: number }
+          ).count,
+        ),
+        1,
+      );
+      assert.equal(count(), 2);
     } finally {
       noticeDb.close();
     }
@@ -381,6 +453,136 @@ test("a runnable imported assignment starts on complete evidence, then a failed 
     assert.equal(turns, 1);
   } finally {
     release();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a held canonical lead receives one source-hold notice without changing assignment state", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-github-held-lead-")),
+  );
+  const projectId = randomUUID();
+  const profileId = randomUUID();
+  let title = "Original";
+  const reader: GitHubSourceReader = {
+    async readSelection() {
+      return { complete: true, issues: [{ ...issue, title }], reason: null };
+    },
+    async readBlockers() {
+      return { complete: true, blockers: [], reason: null };
+    },
+    async readIssueStatus() {
+      return { status: "open" };
+    },
+    async previewSelection() {
+      return { complete: true, issues: [{ ...issue, title }], reason: null };
+    },
+  };
+  const runtime = (): Runtime => ({
+    async start() {},
+    async stop() {},
+    onUnexpectedRequest() {},
+    async startThread() {
+      return "thread";
+    },
+    async resumeThread() {},
+    async startTurn() {
+      throw new Error("Paused fixture must not start");
+    },
+    async interruptTurn() {},
+    async waitForTurn() {
+      return "completed";
+    },
+  });
+  const service = new StandaloneService(
+    join(root, "data"),
+    runtime,
+    undefined,
+    {
+      github: { readerFactory: () => reader, intervalMs: 60_000 },
+      power: { enabled: false },
+    },
+  );
+  try {
+    await service.start();
+    const domain = service.domain();
+    domain.execute({
+      type: "profile.create",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      name: "Lead",
+      instructions: "Lead",
+      capabilities: "work",
+    });
+    domain.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Alpha",
+      leadProfileId: profileId,
+    });
+    domain.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      credentialRef: "env:TEST_GITHUB",
+      selections: [
+        {
+          id: "repo",
+          kind: "repository",
+          repositoryId: "R_1",
+          owner: "org",
+          name: "repo",
+        },
+      ],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    domain.execute({
+      type: "github.activate",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 2,
+      selectionId: "repo",
+    });
+    await service.refreshGitHub();
+    const taskId = String(service.githubSources().issue("I_1")?.taskId);
+    const leadId = String(domain.ensureLeadAssignment(taskId)?.id);
+    const db = new DatabaseSync(join(root, "data", "standalone.sqlite"));
+    try {
+      db.prepare(
+        "UPDATE domain_assignments SET state = 'held' WHERE id = ?",
+      ).run(leadId);
+      title = "Revised";
+      await service.refreshGitHub();
+      assert.ok(domain.admission(taskId).reasons.includes("source-hold"));
+      const count = () =>
+        Number(
+          (
+            db
+              .prepare(
+                "SELECT count(*) AS count FROM coordination_inbox_events WHERE recipientAssignmentId = ? AND eventType = 'source-hold'",
+              )
+              .get(leadId) as { count: number }
+          ).count,
+        );
+      assert.equal(count(), 1);
+      await service.refreshGitHub();
+      assert.equal(count(), 1);
+      assert.equal(domain.assignment(leadId).state, "held");
+    } finally {
+      db.close();
+    }
+  } finally {
     await service.stop();
     rmSync(root, { recursive: true, force: true });
   }

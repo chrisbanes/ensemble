@@ -55,7 +55,17 @@ export class GitHubSynchronizer {
           reason: "reader-error",
         }));
         if (this.stopped) return;
-        this.sources.reconcileSelection(projectId, selection.id, snapshot);
+        const committed = this.sources.reconcileSelection(
+          projectId,
+          selection.id,
+          snapshot,
+          {
+            projectId,
+            configVersion: config.version,
+            credentialRef: config.credentialRef,
+          },
+        );
+        if (!committed) continue;
         if (!snapshot.complete) continue;
         for (const issue of snapshot.issues) {
           const reference: IssueReference = {
@@ -70,7 +80,13 @@ export class GitHubSynchronizer {
             reason: "reader-error",
           }));
           if (this.stopped) return;
-          this.sources.reconcileBlockers(issue.nodeId, blockers);
+          this.sources.reconcileBlockers(issue.nodeId, blockers, {
+            projectId,
+            configVersion: config.version,
+            credentialRef: config.credentialRef,
+            selectionId: selection.id,
+            reference,
+          });
         }
       }
     }
@@ -87,7 +103,12 @@ export class GitHubSynchronizer {
           }))
         : { status: "unknown" as const, reason: "missing-credential" };
       if (this.stopped) return;
-      this.sources.recordIssueStatus(retained.reference.nodeId, status);
+      this.sources.recordIssueStatus(retained.reference.nodeId, status, {
+        projectId: retained.projectId,
+        configVersion: config.version,
+        credentialRef: config.credentialRef,
+        reference: retained.reference,
+      });
     }
   }
 }

@@ -151,10 +151,22 @@ export class LocalOperatorUi {
       this.githubSources
         ?.conflicts()
         .filter((conflict) => conflict.projectIds.includes(projectId))
-        .map(
-          (conflict) =>
-            `<li>Issue ${escapeHtml(conflict.nodeId)}: unresolved placement among ${escapeHtml(conflict.projectIds.join(", "))}</li>`,
-        )
+        .map((conflict) => {
+          const task = this.store.task(conflict.taskId);
+          return `<li>Issue ${escapeHtml(conflict.nodeId)}: unresolved placement among ${escapeHtml(conflict.projectIds.join(", "))}${form(
+            "github.place",
+            field("projectId", String(task.projectId), "hidden") +
+              field("taskId", conflict.taskId, "hidden") +
+              field("expectedVersion", String(task.version), "hidden") +
+              selectField(
+                "chosenProjectId",
+                conflict.projectIds.map((id) => ({ value: id, label: id })),
+                String(task.projectId),
+              ),
+            undefined,
+            csrfToken,
+          )}</li>`;
+        })
         .join("") ?? "";
     const profiles = this.store.profiles();
     const currentLead = profiles.find(
@@ -472,6 +484,16 @@ export class LocalOperatorUi {
             .parse(required("decision")),
         };
         break;
+      case "github.place":
+        command = {
+          ...common,
+          type: "github.place",
+          projectId: required("projectId"),
+          taskId: required("taskId"),
+          chosenProjectId: required("chosenProjectId"),
+          expectedVersion: version(),
+        };
+        break;
       case "assignment.create":
         command = {
           ...common,
@@ -548,6 +570,7 @@ const COMMANDS = new Set([
   "github.configure",
   "github.preview",
   "github.refresh",
+  "github.place",
   "source.review",
   "task.create",
   "task.configure",

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./store.js";
 import {
+  GitHubSourceStore,
   githubConfigurationSchema,
   verifiedRepository,
   type LinkedRepository,
@@ -248,6 +249,7 @@ export class DomainStore {
   constructor(
     private readonly db: Database,
     private readonly onChange?: () => void,
+    private readonly verifyRepository: typeof verifiedRepository = verifiedRepository,
   ) {}
 
   migrate(): void {
@@ -444,6 +446,66 @@ export class DomainStore {
 
   execute(input: DomainCommand): unknown {
     const command = commandSchema.parse(input);
+    if (
+      command.type === "github.configure" &&
+      command.repositories.length > 0
+    ) {
+      const hash = createHash("sha256")
+        .update(canonical(command))
+        .digest("hex");
+      const prior = this.one(
+        "SELECT payloadHash, result FROM command_receipts WHERE scope = ? AND key = ?",
+        command.projectId,
+        command.key,
+      );
+      if (prior) {
+        if (prior.payloadHash !== hash)
+          throw new DomainConflictError(
+            "Command key already used with different payload",
+          );
+        return JSON.parse(String(prior.result));
+      }
+      throw new Error(
+        "Linked GitHub configuration requires asynchronous verification",
+      );
+    }
+    return this.executeParsed(command);
+  }
+
+  async configureGitHub(
+    input: Extract<DomainCommand, { type: "github.configure" }>,
+  ): Promise<unknown> {
+    const command = commandSchema.parse(input);
+    if (command.type !== "github.configure")
+      throw new Error("Expected GitHub configuration");
+    const hash = createHash("sha256").update(canonical(command)).digest("hex");
+    const prior = this.one(
+      "SELECT payloadHash, result FROM command_receipts WHERE scope = ? AND key = ?",
+      command.projectId,
+      command.key,
+    );
+    if (prior) {
+      if (prior.payloadHash !== hash)
+        throw new DomainConflictError(
+          "Command key already used with different payload",
+        );
+      return JSON.parse(String(prior.result));
+    }
+    this.operator(command);
+    this.version(
+      { version: this.githubConfiguration(command.projectId).version },
+      command.expectedVersion,
+    );
+    const verified = await Promise.all(
+      command.repositories.map((link) => this.verifyRepository(link)),
+    );
+    return this.executeParsed(command, verified);
+  }
+
+  private executeParsed(
+    command: ParsedCommand,
+    verifiedRepositories?: LinkedRepository[],
+  ): unknown {
     const scope =
       "projectId" in command
         ? command.projectId
@@ -466,7 +528,7 @@ export class DomainStore {
         this.db.exec("COMMIT");
         return JSON.parse(String(receipt.result));
       }
-      const result = this.apply(command);
+      const result = this.apply(command, verifiedRepositories);
       this.db
         .prepare(
           "INSERT INTO command_receipts (scope, key, payloadHash, result) VALUES (?, ?, ?, ?)",
@@ -1108,7 +1170,10 @@ export class DomainStore {
     );
   }
 
-  private apply(command: ParsedCommand): unknown {
+  private apply(
+    command: ParsedCommand,
+    verifiedRepositories?: LinkedRepository[],
+  ): unknown {
     switch (command.type) {
       case "project.create": {
         this.operator(command);
@@ -1289,7 +1354,11 @@ export class DomainStore {
         this.operator(command);
         const current = this.githubConfiguration(command.projectId);
         this.version({ version: current.version }, command.expectedVersion);
-        const repositories = command.repositories.map(verifiedRepository);
+        const repositories = verifiedRepositories ?? [];
+        if (command.repositories.length !== repositories.length)
+          throw new Error(
+            "Linked GitHub configuration requires asynchronous verification",
+          );
         this.db
           .prepare(
             "UPDATE project_github_sources SET version = version + 1, credentialRef = ?, selections = ?, readiness = ?, repositories = ? WHERE projectId = ?",
@@ -1310,6 +1379,26 @@ export class DomainStore {
             .prepare(
               "UPDATE github_sync_state SET complete = 0, reason = 'configuration-changed' WHERE projectId = ?",
             )
+            .run(command.projectId);
+          this.db
+            .prepare(`UPDATE domain_tasks SET importedBlockers = 'unknown'
+            WHERE projectId = ? AND id IN (SELECT taskId FROM github_imported_tasks)`)
+            .run(command.projectId);
+          this.db
+            .prepare(`UPDATE github_dependency_observations SET complete = 0, reason = 'configuration-changed'
+            WHERE nodeId IN (SELECT nodeId FROM github_imported_tasks WHERE taskId IN
+              (SELECT id FROM domain_tasks WHERE projectId = ?))`)
+            .run(command.projectId);
+          this.db
+            .prepare(`UPDATE domain_tasks SET version = version + 1 WHERE id IN (
+            SELECT d.taskId FROM local_dependencies d JOIN github_imported_tasks i ON i.taskId = d.blockerTaskId
+            JOIN domain_tasks b ON b.id = i.taskId JOIN github_issue_status s ON s.nodeId = i.nodeId
+            WHERE b.projectId = ? AND s.status = 'closed')`)
+            .run(command.projectId);
+          this.db
+            .prepare(`UPDATE github_issue_status SET status = 'unknown', reason = 'configuration-changed'
+            WHERE nodeId IN (SELECT i.nodeId FROM github_imported_tasks i
+              JOIN domain_tasks t ON t.id = i.taskId WHERE t.projectId = ?)`)
             .run(command.projectId);
           this.db
             .prepare(
@@ -1396,6 +1485,7 @@ export class DomainStore {
             "INSERT INTO github_placement_decisions (nodeId, projectId) VALUES (?, ?) ON CONFLICT(nodeId) DO UPDATE SET projectId = excluded.projectId",
           )
           .run(String(imported.nodeId), command.chosenProjectId);
+        new GitHubSourceStore(this.db).updateReadiness(command.taskId);
         this.db
           .prepare("UPDATE domain_tasks SET version = version + 1 WHERE id = ?")
           .run(command.taskId);
@@ -1546,6 +1636,10 @@ export class DomainStore {
         if (command.taskId === command.blockerTaskId)
           throw new Error("Task cannot block itself");
         if (command.type === "dependency.add") {
+          if (this.importedTask(command.taskId))
+            throw new DomainConflictError(
+              "Imported dependent cannot own a local dependency edge",
+            );
           const cycle = this.one(
             "WITH RECURSIVE walk(id) AS (SELECT blockerTaskId FROM local_dependencies WHERE taskId = ? UNION SELECT d.blockerTaskId FROM local_dependencies d JOIN walk w ON d.taskId = w.id) SELECT id FROM walk WHERE id = ?",
             command.blockerTaskId,
@@ -1757,7 +1851,11 @@ export class DomainCommands {
         );
       return existing.promise;
     }
-    const promise = Promise.resolve().then(() => this.store.execute(command));
+    const promise = Promise.resolve().then(() =>
+      command.type === "github.configure" && command.repositories.length > 0
+        ? this.store.configureGitHub(command)
+        : this.store.execute(command),
+    );
     this.inFlight.set(key, { hash, promise });
     void promise.finally(() => this.inFlight.delete(key)).catch(() => {});
     return promise;

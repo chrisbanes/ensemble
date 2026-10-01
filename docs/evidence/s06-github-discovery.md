@@ -19,21 +19,34 @@ used rather than a source-specific owner. For a task held before it has an
 assignment, the task-scoped hold in the operator UI is the attention record;
 there is no assignment inbox recipient yet. Existing lead and active assignment
 recipients receive idempotent source-hold notices.
+The canonical task lead also receives a notice while its assignment is held.
+A source-hold safety notice does not prevent a valid already-running assignment
+from recording its result; other undelivered inbox events still do. Imported
+tasks cannot author outgoing local dependency edges. Placement recalculates
+readiness using the chosen project's rule in the placement transaction.
+Linked repository verification is asynchronous and rechecks configuration and
+task identity before committing or provisioning, so a stale verification cannot
+restore an invalidated grant.
 
 ## Deterministic checks
 
 The real-SQLite/fake-reader suites are `github-source-config`,
-`github-source-reader`, `github-reconciliation`, `github-dependencies` and
-`github-service`. They cover preview/version activation, pagination and
+`github-source-reader`, `github-reconciliation`, `github-dependencies`,
+`github-sync-race` and `github-service`. They cover preview/version activation, pagination and
 partial errors, identity and cross-project placement, retained blocker
 references, initial and repeated unknown states, active-turn and stale-routing
-holds, operator review receipts, timer/explicit refresh and stop. The
+holds, operator review receipts, timer/explicit refresh and stop. Audit-repair
+fixtures cover delayed selection/blocker/status observations across
+reconfiguration, differing placement-readiness rules, active result reporting
+with independent inbox guards, held-lead notices, outgoing-edge authority,
+and asynchronous Git identity verification with stale version/credential and
+provisioning grants. The
 authenticated HTTP and Chromium source-view fixture checks HTML escaping,
 local-task visibility, credential exclusion, login, Origin and CSRF guards.
 These checks do not qualify current provider permissions or fixture content.
 With Node.js 24.21.0 and npm 12.2.0, `npm ci` completed with zero reported
 vulnerabilities and `npm run check` passed type checking, lint, formatting,
-build and all 318 tests on 1 October 2026. Biome reported four pre-existing
+build and all 323 tests on 1 October 2026. Biome reported four pre-existing
 warnings in unrelated S05/standalone code and a schema-version information
 message; it reported no lint or format errors. The focused HTTP/Chromium test
 was run with loopback access after the filesystem sandbox denied a local listen.

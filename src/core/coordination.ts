@@ -587,7 +587,7 @@ export class CoordinationStore {
         );
       const undeliveredInboxEvent = this.one(
         `SELECT 1 FROM coordination_inbox_events event
-        WHERE event.recipientAssignmentId = ? AND (
+        WHERE event.recipientAssignmentId = ? AND event.eventType <> 'source-hold' AND (
           NOT EXISTS (
             SELECT 1 FROM coordination_delivery_events delivered
             WHERE delivered.eventId = event.eventId

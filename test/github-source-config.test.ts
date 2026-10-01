@@ -15,6 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 import { DomainStore } from "../src/core/domain.js";
+import { DomainCommands } from "../src/core/domain.js";
 import { GitHubSourceStore } from "../src/core/github-source.js";
 import { Store } from "../src/core/store.js";
 import { StandaloneService } from "../src/standalone/service.js";
@@ -391,6 +392,63 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
       reason: null,
     });
     const taskId = String(sources.issue("I_1")?.taskId);
+    const otherProjectId = randomUUID();
+    domain.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: otherProjectId,
+      name: "Beta",
+      leadProfileId: null,
+    });
+    domain.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: otherProjectId,
+      expectedVersion: 1,
+      credentialRef: "env:ENSEMBLE_TEST_GITHUB",
+      selections: [
+        {
+          id: "repo",
+          kind: "repository",
+          repositoryId: "R_1",
+          owner: "org",
+          name: "repo",
+        },
+      ],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    domain.execute({
+      type: "github.activate",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: otherProjectId,
+      selectionId: "repo",
+      expectedVersion: 2,
+    });
+    sources.reconcileSelection(otherProjectId, "repo", {
+      complete: true,
+      issues: [
+        {
+          providerInstance: "github.com",
+          nodeId: "I_1",
+          repositoryId: "R_1",
+          repositoryName: "org/repo",
+          number: 1,
+          title: "<img src=x>",
+          body: "Observed body",
+          state: "open",
+          labels: ["ready"],
+          projectFields: [],
+        },
+      ],
+      reason: null,
+    });
     let refreshes = 0;
     const ui = new LocalOperatorUi(domain, undefined, sources, async () => {
       refreshes++;
@@ -445,6 +503,8 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
     const csrfToken = html.match(/name="csrfToken"[^>]*value="([^"]+)"/)?.[1];
     assert.ok(csrfToken);
     assert.match(html, /data-command="github\.refresh"/);
+    assert.match(html, /data-command="github\.place"/);
+    assert.match(html, /name="chosenProjectId"/);
     const fields = new URLSearchParams({
       type: "github.refresh",
       key: randomUUID(),
@@ -481,6 +541,45 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
     assert.equal(refreshes, 0);
     assert.equal((await post({ origin }, fields)).status, 303);
     assert.equal(refreshes, 1);
+    const placeFields = new URLSearchParams({
+      type: "github.place",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      chosenProjectId: otherProjectId,
+      expectedVersion: String(domain.task(taskId).version),
+      csrfToken,
+    });
+    assert.equal(
+      (await post({ origin: "https://elsewhere.example" }, placeFields)).status,
+      403,
+    );
+    assert.equal(
+      (
+        await post(
+          { origin },
+          new URLSearchParams({
+            ...Object.fromEntries(placeFields),
+            csrfToken: "wrong",
+          }),
+        )
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await post(
+          { origin },
+          new URLSearchParams({
+            ...Object.fromEntries(placeFields),
+            expectedVersion: "1",
+          }),
+        )
+      ).status,
+      409,
+    );
+    assert.equal((await post({ origin }, placeFields)).status, 303);
+    assert.equal(String(domain.task(taskId).projectId), otherProjectId);
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const [cookieName, cookieValue] = cookie.split("=", 2);
@@ -501,6 +600,94 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
     await browser?.close();
     await http?.stop();
     auth?.close();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linked repository verification is asynchronous and stale configuration cannot commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-github-async-config-"));
+  const db = new DatabaseSync(join(root, "db.sqlite"));
+  const projectId = randomUUID();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false;
+  let verifications = 0;
+  try {
+    new Store(db).ensureHost("test");
+    const domain = new DomainStore(db, undefined, async (link) => {
+      entered = true;
+      verifications++;
+      await gate;
+      return { ...link, gitCommonDirectory: root };
+    });
+    domain.migrate();
+    domain.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Alpha",
+      leadProfileId: null,
+    });
+    const command = {
+      type: "github.configure" as const,
+      actor: "operator" as const,
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      credentialRef: "env:ENSEMBLE_TEST_GITHUB",
+      selections: [],
+      readiness: {
+        mode: "any" as const,
+        conditions: [{ kind: "label" as const, name: "ready" }],
+      },
+      repositories: [{ repositoryId: "R_1", path: root, ref: "main" }],
+    };
+    const pending = new DomainCommands(domain).execute(command);
+    for (let i = 0; i < 100 && !entered; i++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(entered, true);
+    assert.equal(domain.githubConfiguration(projectId).version, 1);
+    domain.execute({
+      ...command,
+      key: randomUUID(),
+      repositories: [],
+      credentialRef: null,
+    });
+    release();
+    await assert.rejects(pending, /version conflict/i);
+    assert.equal(domain.githubConfiguration(projectId).version, 2);
+    assert.deepEqual(domain.githubConfiguration(projectId).repositories, []);
+    await assert.rejects(
+      domain.configureGitHub({
+        ...command,
+        key: randomUUID(),
+        actor: "agent",
+        expectedVersion: 2,
+      }),
+      /operator/i,
+    );
+    await assert.rejects(
+      domain.configureGitHub({ ...command, key: randomUUID() }),
+      /version conflict/i,
+    );
+    assert.equal(verifications, 1);
+    const accepted = { ...command, key: randomUUID(), expectedVersion: 2 };
+    const first = await domain.configureGitHub(accepted);
+    assert.equal(verifications, 2);
+    assert.deepEqual(await domain.configureGitHub(accepted), first);
+    assert.deepEqual(domain.execute(accepted), first);
+    assert.equal(verifications, 2);
+    await assert.rejects(
+      domain.configureGitHub({ ...accepted, credentialRef: null }),
+      /different payload/i,
+    );
+    assert.equal(verifications, 2);
+  } finally {
+    release?.();
     db.close();
     rmSync(root, { recursive: true, force: true });
   }
@@ -607,7 +794,7 @@ test("imported task provisioning requires the project's exact linked Git reposit
       ]),
       /linked repository/i,
     );
-    domain.execute({
+    await domain.configureGitHub({
       type: "github.configure",
       actor: "operator",
       key: randomUUID(),
@@ -639,6 +826,40 @@ test("imported task provisioning requires the project's exact linked Git reposit
       { repositoryId: "R_1", path: repository, ref: "main" },
     ]);
     assert.equal(binding.state, "ready");
+    const delayedImportedId = randomUUID();
+    domain.execute({
+      type: "task.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId: delayedImportedId,
+      title: "Delayed import",
+      outcome: "Verify stale grant",
+      ready: false,
+    });
+    domain.markImportedTask(delayedImportedId, "I_2", "R_1");
+    const delayedProvision = service.provisionTask(delayedImportedId, [
+      { repositoryId: "R_1", path: repository, ref: "main" },
+    ]);
+    domain.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 2,
+      credentialRef: null,
+      selections: [],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    await assert.rejects(
+      delayedProvision,
+      /grant changed during verification/i,
+    );
+    assert.equal(await service.taskWorkspace(delayedImportedId), undefined);
     const local = await service.provisionTask(localId);
     assert.equal(local.state, "ready");
   } finally {

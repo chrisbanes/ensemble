@@ -152,6 +152,14 @@ test("initial and later incomplete native blocker reads hold imported admission"
       issues: [selected],
       reason: null,
     });
+    assert.ok(
+      domain.admission(taskId).reasons.includes("imported-blockers-unknown"),
+    );
+    sources.reconcileBlockers("I_1", {
+      complete: true,
+      blockers: [],
+      reason: null,
+    });
     assert.equal(domain.admission(taskId).eligible, true);
     sources.reconcileSelection(projectId, "repo", {
       complete: true,
@@ -323,6 +331,19 @@ test("initial and later incomplete native blocker reads hold imported admission"
       outcome: "Wait for issue",
       ready: true,
     });
+    assert.throws(
+      () =>
+        domain.execute({
+          type: "dependency.add",
+          actor: "operator",
+          key: randomUUID(),
+          projectId,
+          taskId,
+          blockerTaskId: localId,
+          expectedVersion: Number(domain.task(taskId).version),
+        }),
+      /imported.*dependent|provider-owned/i,
+    );
     domain.execute({
       type: "dependency.add",
       actor: "operator",

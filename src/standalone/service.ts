@@ -559,6 +559,14 @@ export class StandaloneService {
     const domain = this.domainState;
     const coordination = this.coordination;
     if (!sources || !domain || !coordination) return;
+    const leadByTask = new Map(
+      domain
+        .leadBindings()
+        .map((binding) => [
+          String(binding.taskId),
+          String(binding.assignmentId),
+        ]),
+    );
     for (const hold of sources.activeHolds()) {
       const recipients = new Set(
         domain
@@ -569,6 +577,8 @@ export class StandaloneService {
           )
           .map((assignment) => String(assignment.id)),
       );
+      const leadId = leadByTask.get(hold.taskId);
+      if (leadId) recipients.add(leadId);
       for (const recipientAssignmentId of recipients)
         coordination.ensureSourceHoldEvent({ ...hold, recipientAssignmentId });
     }
@@ -643,10 +653,10 @@ export class StandaloneService {
     repositories: TaskWorkspaceRepositoryInput[] = [],
   ) {
     const task = this.domain().task(taskId);
-    if (this.domain().importedTask(taskId)) {
-      const linked = this.domain().githubConfiguration(
-        String(task.projectId),
-      ).repositories;
+    const imported = this.domain().importedTask(taskId);
+    if (imported) {
+      const config = this.domain().githubConfiguration(String(task.projectId));
+      const linked = config.repositories;
       for (const repository of repositories) {
         const match = linked.find(
           (candidate) => candidate.repositoryId === repository.repositoryId,
@@ -659,7 +669,7 @@ export class StandaloneService {
           throw new Error(
             "Imported task requires an exact linked repository binding",
           );
-        const current = verifiedRepository({
+        const current = await verifiedRepository({
           repositoryId: match.repositoryId,
           path: match.path,
           ref: match.ref,
@@ -670,6 +680,22 @@ export class StandaloneService {
         )
           throw new Error("Linked repository identity changed");
       }
+      const latestTask = this.domain().task(taskId);
+      const latestImported = this.domain().importedTask(taskId);
+      const latestConfig = this.domain().githubConfiguration(
+        String(task.projectId),
+      );
+      if (
+        latestTask.version !== task.version ||
+        latestTask.projectId !== task.projectId ||
+        latestImported?.nodeId !== imported.nodeId ||
+        latestImported?.repositoryId !== imported.repositoryId ||
+        latestConfig.version !== config.version ||
+        JSON.stringify(latestConfig.repositories) !== JSON.stringify(linked)
+      )
+        throw new Error(
+          "Imported task repository grant changed during verification",
+        );
     }
     const binding = await this.requireWorkspaces().provision(
       taskId,

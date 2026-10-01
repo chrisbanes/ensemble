@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { DomainStore } from "../src/core/domain.js";
 import { GitHubSourceStore } from "../src/core/github-source.js";
 import { Store } from "../src/core/store.js";
+import { LocalOperatorUi } from "../src/standalone/operator.js";
 import type { IssueSnapshot } from "../src/standalone/github-source.js";
 
 const issue: IssueSnapshot = {
@@ -190,7 +191,7 @@ test("overlapping complete selections converge on one imported task; partial rea
   }
 });
 
-test("unowned cross-project overlap waits for operator placement; assigned task keeps its chosen project", () => {
+test("unowned cross-project overlap waits for operator placement; assigned task keeps its chosen project", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-github-placement-"));
   const db = new DatabaseSync(join(root, "db.sqlite"));
   const first = randomUUID();
@@ -238,7 +239,12 @@ test("unowned cross-project overlap waits for operator placement; assigned task 
         ],
         readiness: {
           mode: "any",
-          conditions: [{ kind: "label", name: "ready" }],
+          conditions: [
+            {
+              kind: "label",
+              name: projectId === first ? "ready" : "approved-for-second",
+            },
+          ],
         },
         repositories: [],
       });
@@ -277,17 +283,70 @@ test("unowned cross-project overlap waits for operator placement; assigned task 
         }),
       /operator/i,
     );
-    domain.execute({
+    const ui = new LocalOperatorUi(domain, undefined, sources);
+    const html = ui.project(first, "test-csrf");
+    assert.match(html, /data-command="github.place"/);
+    assert.match(html, new RegExp(`name="taskId"[^>]*value="${taskId}"`));
+    assert.match(html, /name="chosenProjectId"/);
+    await ui.submit({
       type: "github.place",
-      actor: "operator",
       key: randomUUID(),
       projectId: first,
       taskId,
       chosenProjectId: second,
-      expectedVersion: version,
+      expectedVersion: String(version),
     });
+    await assert.rejects(
+      () =>
+        ui.submit({
+          type: "github.place",
+          key: randomUUID(),
+          projectId: first,
+          taskId,
+          chosenProjectId: second,
+          expectedVersion: String(version),
+        }),
+      /project|version/i,
+    );
     assert.equal(sources.conflicts().length, 0);
     assert.equal(domain.tasks(second).length, 1);
+    assert.equal(domain.task(taskId).ready, 0);
+    assert.equal(domain.admission(taskId).eligible, false);
+    domain.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: second,
+      expectedVersion: 2,
+      credentialRef: "env:TEST_GITHUB",
+      selections: [
+        {
+          id: "repo",
+          kind: "repository",
+          repositoryId: "R_1",
+          owner: "org",
+          name: "repo",
+        },
+      ],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    domain.execute({
+      type: "github.activate",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: second,
+      expectedVersion: 3,
+      selectionId: "repo",
+    });
+    sources.reconcileSelection(second, "repo", {
+      complete: true,
+      issues: [issue],
+      reason: null,
+    });
     domain.execute({
       type: "assignment.create",
       actor: "agent",
@@ -300,6 +359,19 @@ test("unowned cross-project overlap waits for operator placement; assigned task 
       resultDestination: "lead",
       requesterAssignmentId: null,
     });
+    assert.throws(
+      () =>
+        domain.execute({
+          type: "github.place",
+          actor: "operator",
+          key: randomUUID(),
+          projectId: second,
+          taskId,
+          chosenProjectId: first,
+          expectedVersion: Number(domain.task(taskId).version),
+        }),
+      /assigned imported task/i,
+    );
     sources.reconcileSelection(first, "repo", {
       complete: true,
       issues: [issue],
