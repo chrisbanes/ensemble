@@ -8,6 +8,10 @@ not passing results. No previous BB test qualifies the standalone service.
 Routing and accountability were amended on 28 September 2026 under
 [ADR-1005](adr/1005-service-assignment-routing.md); R07–R10 cover the added scope.
 
+On 1 October 2026 Chris added structured user questions and a required Kanban
+view to the operator UI scope. A12 and UI01–UI03 below define their required
+evidence; they do not claim implementation or runtime qualification.
+
 ## Gates
 
 1. **Runtime feasibility:** S01 proves the minimum Codex integration and bounded
@@ -16,7 +20,7 @@ Routing and accountability were amended on 28 September 2026 under
 2. **Local-task milestone:** service, UI and real-runtime journeys cover A01–A18,
    A25, A27, local A28/A30 and R07–R10. GitHub-dependent portions wait for integration.
 3. **Operational release:** all A01–A30 and R01–R10, including both PR completion modes,
-   real provider access and external-write recovery, with reviewed cutover.
+   real provider access and external-write recovery, plus UI01–UI03 below, with reviewed cutover.
    Chris deferred X01–X08 after the MVP on 1 October 2026; they do not gate this
    release or cutover. Native desktop visibility/handover is separate from the
    retained Codex App Server execution requirements.
@@ -42,7 +46,7 @@ that successfully detects an unsafe effect still records a failed capability.
 | A09 | Crash before/after result commit, send acceptance or acknowledgement | Durable result/inbox retained; accepted sends reconciled; no duplicate work | Runtime fault injection |
 | A10 | Lead delegates implementation and review; review finds a defect | Lead chooses revision and follow-up from instructions; findings refer to artifact revision | Service scripted journey |
 | A11 | Edit instructions/profile during existing work, then explicitly apply | Existing assignments retain recorded revisions until explicit apply for their next turn; new assignments use current revisions; process changes need no new stages or schema; permission revocations still apply | Service + UI |
-| A12 | Agent asks a question; operator answers during restart | Question appears in Ensemble beside a link to the requesting conversation; response is durable, correctly scoped, and resumes the right assignment | UI + runtime |
+| A12 | Agent asks a plain-text or structured question; operator answers during restart | Question appears in inbox and task detail beside a link to the requesting conversation; response is durable and bound to the originating task, assignment and runtime request; one eligible continuation receives it, respecting pause, Stop, dependency and ownership holds; see UI01–UI02 | UI + runtime |
 | A13 | Approval denied or reviewed material changes | Action cannot execute using denied/stale approval; reason visible | Service + access integration |
 | A14 | Pause project A while B has work | Current turns in A may finish; no new turns or follow-ups in A; B continues; results retained; resume revalidates | Service + UI |
 | A15 | Stop a task with active lead and worker turns; supervisor loses contact or reports a writer still active | All active task execution, including its lead turn, receives best-effort cancellation requests; bounded observation never releases holds; effects may continue; Stop/writer/capacity holds survive restart until independently resolved; explicit resume alone cannot release ownership; files/history retained and uncertainty visible | Runtime fault injection |
@@ -61,6 +65,21 @@ that successfully detects an unsafe effect still records a failed capability.
 | A28 | Ready local task depends on another local or imported task in its project | Blocked task stays Ready and visible but starts no task execution or new turn through Ensemble; local blocker Done or confirmed imported issue closure releases it automatically; cancellation does not; only operator can edit edges, with retries/version conflicts handled; self/cyclic and cross-project authored edges are rejected | UI + SQLite + runtime |
 | A29 | Ready imported issue has native GitHub blocker outside selection or project | Full native dependency read holds Ensemble dispatch while blocker is open; no task import or repository access is inferred; closure or edge removal releases it, and reopening re-applies the gate | Adapter + Service + UI |
 | A30 | Initial or later native dependency read or an imported blocker of a local task is incomplete, or a blocker appears during active work | Unknown state holds dispatch even before the first successful read and after a previously clear read; current turn may finish, but queued/new turns and delegation wait; ownership/results persist across restart; complete confirmed refresh resumes only when other controls permit | Adapter fault injection + runtime |
+
+## Operator UI additions
+
+These scenarios qualify the corresponding contracts in [SPEC.md](SPEC.md).
+Use deterministic integration/browser coverage for fault cases and a bounded
+actual-runtime journey for structured request/answer transport. Existing plain-text
+question evidence cannot qualify structured runtime interactions. Keep delivery
+sequencing in [#736](https://github.com/chrisbanes/ensemble/issues/736); these additions
+do not reopen the completed bounded S01 feasibility gate.
+
+| ID | Given / when | Required observable result | Layer |
+| --- | --- | --- | --- |
+| UI01 | Agent issues individual and grouped questions using free text, single choice and multiple choice; operator answers from inbox or task detail on desktop and phone | Question/option text, descriptions, explicit recommendations and selection constraints are preserved; custom text is available when permitted; recommended/preselected choices do not submit themselves; validation identifies the affected question; failed submission retains input and unresolved status; confirmed submission shows a recorded answer, distinct from approval or ordinary messaging | Service + UI + SQLite |
+| UI02 | Selected runtime issues its supported AskUserQuestion-style equivalent; restart around answer persistence/delivery, replay submissions, or answer a stale/cancelled/already answered request | The durable question maps to the exact requesting assignment/runtime request; persisted answers survive restart and produce no duplicate answer or continuation; stale/cancelled requests reject new answers and conflicting repeats cannot replace accepted answers; pause, Stop, dependency and ownership holds remain effective; unsupported/unavailable interactions are explicit, with no fabricated answer or silent chat fallback; record the actual runtime API/version and observed round trip | Runtime + service fault injection + UI |
+| UI03 | Switch List/Board in cross-project and project views with shared filters and a mix of local/imported tasks, including Ready-but-blocked, waiting, paused, stopping and uncertain work | Same filtered task set in both views; switching changes no task state; cards show title, project, lead, imported source identity and relevant wait/intervention reasons, and open the same detail; all states remain reachable on desktop and narrow screens with keyboard-accessible controls; readiness remains distinct from execution holds; GitHub state/Project fields remain source-owned; any offered card transition uses a permitted command and cannot bypass holds or silently write to GitHub; drag-and-drop is not required | UI + service + adapter |
 
 ## Implemented service and integration proofs
 
