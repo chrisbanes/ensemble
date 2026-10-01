@@ -7,6 +7,7 @@ import type {
   RuntimeProcessIdentity,
   VerifiedTermination,
 } from "./recovery-types.js";
+import type { ConversationHistoryBinding } from "./conversation-history.js";
 
 const intentSchema = z.object({
   id: z.string().uuid(),
@@ -94,6 +95,21 @@ const powerEventCursorSchema = z
     value: z.string().min(1).max(512),
   })
   .strict();
+const refusedRevisionPrefix =
+  "Request refused: captured revisions no longer match (";
+const safeRefusedAssignmentRevisionReasons = new Set([
+  "assignment-revision-changed",
+  "assignment-instructions-changed",
+  "assignment-profile-changed",
+  "assignment-instructions-revision-stale",
+  "assignment-profile-revision-stale",
+  "project-paused",
+]);
+const refusedAssignmentRevisionReasons = new Set(
+  [...safeRefusedAssignmentRevisionReasons].filter(
+    (reason) => reason !== "project-paused",
+  ),
+);
 
 export interface FailureResolutionEvidence {
   workId: string;
@@ -478,12 +494,22 @@ export class ExecutionState {
         LEFT JOIN task_work_revisions revision ON revision.workId = e.workId
         WHERE e.state IN ('held','submitting','running')
         AND EXISTS (SELECT 1 FROM task_writer_admissions admission WHERE admission.workId = e.workId);
-      INSERT OR IGNORE INTO execution_pending_effects (workId, effectKey, state, reason)
-        SELECT binding.workId, 'assignment-result', 'pending',
-          'Assignment result has not been committed'
-        FROM task_execution_bindings binding
-        JOIN execution_intents intent ON intent.workId = binding.workId
-        WHERE intent.state IN ('held','submitting','running');`);
+      `);
+      const unresolvedAssignments = this.db
+        .prepare(`SELECT binding.workId
+          FROM task_execution_bindings binding
+          JOIN execution_intents intent ON intent.workId = binding.workId
+          WHERE intent.state IN ('held','submitting','running')`)
+        .all() as { workId: string }[];
+      const recordPendingAssignmentResult = this.db.prepare(
+        `INSERT OR IGNORE INTO execution_pending_effects
+          (workId, effectKey, state, reason)
+        VALUES (?, 'assignment-result', 'pending',
+          'Assignment result has not been committed')`,
+      );
+      for (const { workId } of unresolvedAssignments)
+        if (!this.isNeverAdmittedRefusedInboxWork(workId))
+          recordPendingAssignmentResult.run(workId);
     }
   }
 
@@ -869,6 +895,43 @@ export class ExecutionState {
       .get(workId) as TaskExecutionBinding | undefined;
   }
 
+  /** Historical diagnostic binding only; it does not authorize commands or recovery. */
+  conversationHistoryBinding(
+    workId: string,
+    threadId: string,
+    turnId: string,
+  ): ConversationHistoryBinding | undefined {
+    const rows = this.db
+      .prepare(`SELECT binding.workId, binding.taskId, binding.assignmentId,
+        binding.assignmentVersion, binding.instructionsRevision,
+        binding.profileRevision, binding.conversationRevision,
+        revision.workRevision, intent.threadId, intent.turnId
+        FROM task_execution_bindings binding
+        JOIN execution_intents intent ON intent.workId = binding.workId
+        JOIN task_work_revisions revision ON revision.workId = binding.workId
+        WHERE binding.workId = ? AND intent.threadId = ? AND intent.turnId = ?
+          AND (SELECT COUNT(*) FROM execution_intents duplicate
+            WHERE duplicate.threadId = intent.threadId
+              AND duplicate.turnId = intent.turnId) = 1
+        LIMIT 2`)
+      .all(workId, threadId, turnId) as Array<Record<string, unknown>>;
+    if (rows.length !== 1) return undefined;
+    return z
+      .object({
+        workId: z.string().min(1),
+        taskId: z.string().min(1),
+        assignmentId: z.string().min(1),
+        assignmentVersion: z.number().int().positive(),
+        instructionsRevision: z.number().int().positive(),
+        profileRevision: z.number().int().positive(),
+        conversationRevision: z.number().int().positive(),
+        workRevision: z.number().int().positive(),
+        threadId: z.string().min(1),
+        turnId: z.string().min(1),
+      })
+      .parse(rows[0]);
+  }
+
   coordinationBinding(
     threadId: string,
     turnId: string,
@@ -943,6 +1006,142 @@ export class ExecutionState {
           WHERE refusal.workId = intent.workId
         ) LIMIT 1`)
         .get(z.string().uuid().parse(assignmentId)) !== undefined
+    );
+  }
+
+  /**
+   * A revision refusal is ignorable only when the exact held request and
+   * intent still match their immutable refusal, identify a durable inbox
+   * event, and have no evidence of runtime admission or effects. Current
+   * assignment eligibility is deliberately checked by delivery withdrawal,
+   * not here, so this historical proof remains stable after later completion.
+   */
+  isNeverAdmittedRefusedInboxWork(workId: string): boolean {
+    const id = z.string().min(1).max(512).parse(workId);
+    if (
+      !this.hasTurnRequests ||
+      this.db
+        .prepare(`SELECT 1 FROM sqlite_master
+          WHERE type = 'table' AND name = 'coordination_inbox_events'`)
+        .get() === undefined
+    )
+      return false;
+    const row = this.db
+      .prepare(`SELECT request.kind, request.taskId, request.projectId,
+        request.assignmentId, request.taskVersion, request.assignmentVersion,
+        request.instructionsRevision, request.profileRevision,
+        request.state AS requestState, request.reason AS requestReason,
+        intent.state AS intentState, intent.reason AS intentReason,
+        intent.threadId, intent.turnId,
+        binding.taskId AS bindingTaskId,
+        binding.assignmentId AS bindingAssignmentId,
+        binding.assignmentVersion AS bindingAssignmentVersion,
+        binding.instructionsRevision AS bindingInstructionsRevision,
+        binding.profileRevision AS bindingProfileRevision,
+        refusal.reason AS refusalReason,
+        EXISTS (SELECT 1 FROM task_writer_admissions admission
+          WHERE admission.workId = intent.workId) AS hasWriterAdmission,
+        EXISTS (SELECT 1 FROM execution_capacity_reservations capacity
+          WHERE capacity.workId = intent.workId) AS hasCapacityReservation,
+        EXISTS (SELECT 1 FROM execution_recovery_identities recovery
+          WHERE recovery.workId = intent.workId) AS hasRecoveryIdentity,
+        EXISTS (SELECT 1 FROM execution_pending_effects effect
+          WHERE effect.workId = intent.workId AND effect.state = 'pending')
+          AS hasPendingEffect,
+        EXISTS (SELECT 1 FROM execution_stop_targets stop
+          WHERE stop.workId = intent.workId) AS hasStopTarget
+        FROM turn_requests request
+        JOIN execution_intents intent ON intent.workId = request.workId
+        JOIN task_execution_bindings binding ON binding.workId = intent.workId
+        JOIN execution_request_refusals refusal ON refusal.workId = intent.workId
+        JOIN domain_tasks task ON task.id = request.taskId
+          AND task.projectId = request.projectId
+        JOIN domain_assignments assignment ON assignment.id = request.assignmentId
+          AND assignment.taskId = request.taskId
+          AND assignment.projectId = request.projectId
+        WHERE request.workId = ?`)
+      .get(id) as
+      | {
+          kind: string;
+          taskId: string | null;
+          projectId: string | null;
+          assignmentId: string | null;
+          taskVersion: number | null;
+          assignmentVersion: number | null;
+          instructionsRevision: number | null;
+          profileRevision: number | null;
+          requestState: string;
+          requestReason: string | null;
+          intentState: string;
+          intentReason: string | null;
+          threadId: string | null;
+          turnId: string | null;
+          bindingTaskId: string;
+          bindingAssignmentId: string;
+          bindingAssignmentVersion: number;
+          bindingInstructionsRevision: number;
+          bindingProfileRevision: number;
+          refusalReason: string;
+          hasWriterAdmission: number;
+          hasCapacityReservation: number;
+          hasRecoveryIdentity: number;
+          hasPendingEffect: number;
+          hasStopTarget: number;
+        }
+      | undefined;
+    if (
+      !row ||
+      row.kind !== "assignment" ||
+      !row.taskId ||
+      !row.projectId ||
+      !row.assignmentId ||
+      row.taskVersion === null ||
+      row.assignmentVersion === null ||
+      row.instructionsRevision === null ||
+      row.profileRevision === null ||
+      row.requestState !== "held" ||
+      row.intentState !== "held" ||
+      !row.refusalReason ||
+      row.requestReason !== row.refusalReason ||
+      row.intentReason !== row.refusalReason ||
+      row.bindingTaskId !== row.taskId ||
+      row.bindingAssignmentId !== row.assignmentId ||
+      row.bindingAssignmentVersion !== row.assignmentVersion ||
+      row.bindingInstructionsRevision !== row.instructionsRevision ||
+      row.bindingProfileRevision !== row.profileRevision ||
+      row.threadId !== null ||
+      row.turnId !== null ||
+      row.hasWriterAdmission !== 0 ||
+      row.hasCapacityReservation !== 0 ||
+      row.hasRecoveryIdentity !== 0 ||
+      row.hasPendingEffect !== 0 ||
+      row.hasStopTarget !== 0
+    )
+      return false;
+
+    const refusal = row.refusalReason;
+    if (!refusal.startsWith(refusedRevisionPrefix) || !refusal.endsWith(")"))
+      return false;
+    const reasons = refusal.slice(refusedRevisionPrefix.length, -1).split(", ");
+    if (
+      reasons.length === 0 ||
+      !reasons.some((reason) => refusedAssignmentRevisionReasons.has(reason)) ||
+      reasons.some(
+        (reason) => !safeRefusedAssignmentRevisionReasons.has(reason),
+      )
+    )
+      return false;
+
+    const eventPrefix = `assignment:${row.assignmentId}:v${row.assignmentVersion}:inbox:`;
+    if (!id.startsWith(eventPrefix)) return false;
+    const eventId = id.slice(eventPrefix.length);
+    if (!z.string().uuid().safeParse(eventId).success) return false;
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM coordination_inbox_events event
+          WHERE event.eventId = ? AND event.taskId = ?
+            AND event.recipientAssignmentId = ? LIMIT 1`)
+        .get(eventId, row.taskId, row.assignmentId) !== undefined
     );
   }
 

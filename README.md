@@ -70,10 +70,20 @@ to questions and approvals. It also includes offline database backup/restore
 commands and macOS service tooling. Automated tests and bounded live Codex and
 browser journeys exercise these foundations.
 
+Assignment pages now show captured assistant messages for the exact task,
+assignment and runtime turn. Only completed, sanitized text is retained;
+unfinished messages show progress metadata, and omitted text is labelled.
+Known private instructions, credential values and control paths are redacted
+before storage, with current exclusions reapplied when reading history. This is
+a bounded diagnostic view, not a complete transcript or ownership-release proof.
+Missing history does not change admission or completion gates.
+
 The full assignment router, GitHub integration and complete release
 qualification remain ahead. In particular, physical sleep/wake behaviour and
 access from an independent device still need qualification. Follow the
 [delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.
+The [S05 report](docs/evidence/s05-local-qualification.md) distinguishes completed
+bounded routing and journey checks from remaining milestone evidence.
 
 Ensemble relies on the execution runtime and host for isolation. Broad
 host-permitted reads remain enabled, and Stop is best-effort: unresolved work

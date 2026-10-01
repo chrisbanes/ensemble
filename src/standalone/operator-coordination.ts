@@ -5,6 +5,12 @@ import type { CoordinationView } from "./coordination-view.js";
 import type { DomainStore } from "../core/domain.js";
 import type { OperatorRoute } from "./operator-routes.js";
 import type { RoutingAvailability } from "./service.js";
+import type {
+  ConversationHistoryAssignmentRead,
+  ConversationHistoryBinding,
+  ConversationHistoryEntry,
+  ConversationHistoryTurnOmission,
+} from "./conversation-history.js";
 
 const uuid = z.string().uuid();
 const positiveInteger = z
@@ -79,6 +85,7 @@ export interface CoordinationOperatorApi {
     | "answerQuestion"
     | "decideApproval"
     | "postOperatorMessage"
+    | "readAssignmentHistory"
     | "readTask"
     | "reconcileResultRecipient"
   >;
@@ -465,6 +472,57 @@ function taskPage(
   return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
 }
 
+function capturedHistory(history: ConversationHistoryAssignmentRead): string {
+  const generations = new Map<
+    string,
+    {
+      binding: ConversationHistoryBinding;
+      items: ConversationHistoryEntry[];
+      omissions: ConversationHistoryTurnOmission[];
+    }
+  >();
+  const generation = (binding: ConversationHistoryBinding) => {
+    const key = JSON.stringify([
+      binding.workId,
+      binding.threadId,
+      binding.turnId,
+    ]);
+    let value = generations.get(key);
+    if (!value) {
+      value = { binding, items: [], omissions: [] };
+      generations.set(key, value);
+    }
+    return value;
+  };
+  for (const item of history.items) generation(item).items.push(item);
+  for (const omission of history.turnOmissions)
+    generation(omission).omissions.push(omission);
+  const groups = [...generations.values()]
+    .map(({ binding, items, omissions }) => {
+      const messages = items
+        .map((item) => {
+          let content: string;
+          if (item.lifecycle === "completed")
+            content = `<pre>${escapeHtml(item.text ?? "")}</pre>`;
+          else if (item.lifecycle === "omitted")
+            content = `Assistant item omitted: ${escapeHtml(item.omissionReason)}.`;
+          else
+            content = `Partial assistant item; ${escapeHtml(item.deltaBytes)} streamed bytes; text not retained.`;
+          return `<li data-conversation-item="${escapeHtml(item.itemId)}">${content}</li>`;
+        })
+        .join("");
+      const gaps = omissions
+        .map(
+          (omission) =>
+            `<p>History may be incomplete: ${escapeHtml(omission.reason)}.</p>`,
+        )
+        .join("");
+      return `<section><h4>Conversation revision ${escapeHtml(binding.conversationRevision)}; work revision ${escapeHtml(binding.workRevision)}</h4><p>Assignment revision ${escapeHtml(binding.assignmentVersion)}; instruction revision ${escapeHtml(binding.instructionsRevision)}; profile revision ${escapeHtml(binding.profileRevision)}.</p><p>Work ${escapeHtml(binding.workId)}; thread ${escapeHtml(binding.threadId)}; turn ${escapeHtml(binding.turnId)}.</p>${messages ? `<ol>${messages}</ol>` : ""}${gaps}</section>`;
+    })
+    .join("");
+  return `<h3>Captured assistant messages</h3><p>History is diagnostic and may be incomplete. It does not establish completion, active execution or safe recovery.</p>${history.omittedItemCount ? `<p>${escapeHtml(history.omittedItemCount)} older history item(s) not shown; only the latest 200 items are displayed.</p>` : ""}${groups || "<p>No captured assistant messages are recorded.</p>"}`;
+}
+
 function assignmentPage(
   assignmentId: string,
   api: CoordinationOperatorApi,
@@ -479,6 +537,9 @@ function assignmentPage(
   );
   if (!summary) throw new Error("Assignment is not in its task view");
   const profile = domain.profile(String(assignment.profileId));
+  const conversation = capturedHistory(
+    api.view().readAssignmentHistory(assignmentId),
+  );
   const history = view.history
     .filter((entry) => entry.assignmentId === assignmentId)
     .map(
@@ -524,7 +585,7 @@ function assignmentPage(
         csrfToken,
       )
     : "<p>Messages are only queued for a pending or running assignment.</p>";
-  return `<main><h1>${escapeHtml(profile.name)} task assignment</h1><p>Task: <a href="${taskHref(taskId)}">${escapeHtml(view.task.title)}</a>.</p><p>Assignment state: ${escapeHtml(summary.state)}; execution: ${escapeHtml(executionStatus(summary, view))}.</p><p>Results remain directed to the configured project lead or requesting assignment; the project lead remains accountable.</p><section><h2>Conversation history</h2>${history ? `<ul>${history}</ul>` : "<p>No conversation history is recorded.</p>"}</section><section><h2>Coordination messages</h2>${messages ? `<ul>${messages}</ul>` : "<p>No messages.</p>"}${nextTurnMessage}</section><section><h2>Questions and approvals</h2>${interactions ? `<ul>${interactions}</ul>` : "<p>No questions or approvals.</p>"}</section><section><h2>Results</h2>${results ? `<ul>${results}</ul>` : "<p>No results.</p>"}</section><p><a href="${taskHref(taskId)}">Back to task coordination</a></p></main>`;
+  return `<main><h1>${escapeHtml(profile.name)} task assignment</h1><p>Task: <a href="${taskHref(taskId)}">${escapeHtml(view.task.title)}</a>.</p><p>Assignment state: ${escapeHtml(summary.state)}; execution: ${escapeHtml(executionStatus(summary, view))}.</p><p>Results remain directed to the configured project lead or requesting assignment; the project lead remains accountable.</p><section><h2>Conversation history</h2>${history ? `<ul>${history}</ul>` : "<p>No conversation history is recorded.</p>"}${conversation}</section><section><h2>Coordination messages</h2>${messages ? `<ul>${messages}</ul>` : "<p>No messages.</p>"}${nextTurnMessage}</section><section><h2>Questions and approvals</h2>${interactions ? `<ul>${interactions}</ul>` : "<p>No questions or approvals.</p>"}</section><section><h2>Results</h2>${results ? `<ul>${results}</ul>` : "<p>No results.</p>"}</section><p><a href="${taskHref(taskId)}">Back to task coordination</a></p></main>`;
 }
 
 function overview(domain: OperatorDomain): string {

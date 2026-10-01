@@ -164,11 +164,20 @@ These extend A01–A30; they are required alongside the product scenarios.
 
 ## Evidence ownership
 
+The [S05 local qualification report](evidence/s05-local-qualification.md) records
+the current partial evidence and unproved rows; it does not qualify the
+operational release. Chris deferred the physical R03 sleep/wake proof from
+immediate #695 completion to [follow-up #732](https://github.com/chrisbanes/ensemble/issues/732).
+R03 remains unproved and required for later release qualification; the deferral
+does not waive that gate or cutover evidence.
+
 S01 is a disposable runtime feasibility proof of A08/A09/A14–A16/A18/A25 and
 R01 boundaries, not full product acceptance of those scenarios. S02–S04 implement
-the contracts and their tests; S05 qualifies A01–A18, A25, A27, local A28/A30 and
-R01–R05, R07–R10 plus R06 fresh-database separation. S06–S07 complete GitHub portions and
-all A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
+the contracts and their tests; S05 assembles evidence for A01–A18, A25, A27, local
+A28/A30 and R01–R05, R07–R10 plus R06 fresh-database separation. Physical R03
+sleep/wake proof is deferred to follow-up #732; it remains unproved and does not
+pass the operational release gate. S06–S07 complete GitHub portions and all
+A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
 qualification. S08b verifies final-schema and external-effect recovery and operational
 cutover against the S07 release candidate, reusing valid S08a evidence. The operational
 release gate requires both the S07 release candidate and S08 operational evidence;

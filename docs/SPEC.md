@@ -272,6 +272,15 @@ Ensemble displays conversation history and accepts durable messages to the task-
 for the next eligible turn. They cannot bypass pause, stop or other admission
 controls. Live steering is deferred; stop is a separate control. Exact transcript
 and message transport is part of Codex App Server qualification.
+The implemented assignment view retains sanitized completed assistant text bound
+to the exact task, assignment, work and runtime turn, including its instruction
+and conversation revisions. Partial text is not persisted. The view labels
+unfinished or omitted items and limits the displayed item history; it is not a
+complete model/tool transcript. Known private instructions, declared credential
+references and values, and workspace/control paths are excluded before storage;
+current exclusions are also applied when reading history. If safe redaction is
+unavailable, text is omitted. Diagnostic capture failures and missing history
+cannot establish completion, release ownership or bypass an execution hold.
 The durable attention inbox is the notification source of truth; suppress unchanged
 alerts. OS/push delivery is optional, not a release dependency. Credentials must not
 appear in UI payloads or exposed transcripts. The current #703 authentication

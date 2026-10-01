@@ -9,16 +9,17 @@ import type {
   UnresolvedResultDestination,
 } from "../core/coordination.js";
 import type { DomainStore } from "../core/domain.js";
-import type {
-  ExecutionIntent,
-  ExecutionState,
-  TaskTurnRequest,
-} from "./state.js";
+import type { ConversationHistoryAssignmentRead } from "./conversation-history.js";
 import type {
   RoutingAttempt,
   RoutingAttemptStore,
   RoutingOperation,
 } from "./routing.js";
+import type {
+  ExecutionIntent,
+  ExecutionState,
+  TaskTurnRequest,
+} from "./state.js";
 
 const uuid = z.string().uuid();
 const commandKey = z.string().uuid();
@@ -115,6 +116,7 @@ export interface CoordinationRoutingAttemptView {
       | "attempt"
       | "status"
       | "failureClass"
+      | "failureCode"
       | "requestedModel"
       | "returnedModel"
       | "confidence"
@@ -263,7 +265,32 @@ export class CoordinationView {
     private readonly state: ExecutionState,
     private readonly routingAttempts: RoutingAttemptStore,
     private readonly onCommand: () => Promise<void>,
+    private readonly readConversationHistory?: (
+      taskId: string,
+      assignmentId: string,
+    ) => ConversationHistoryAssignmentRead,
   ) {}
+
+  /** Assignment identity determines its task; history never authorizes execution. */
+  readAssignmentHistory(
+    assignmentId: string,
+  ): ConversationHistoryAssignmentRead {
+    const assignment = this.domain.assignment(uuid.parse(assignmentId));
+    const taskId = String(assignment.taskId);
+    const history = this.readConversationHistory?.(taskId, assignmentId) ?? {
+      items: [],
+      turnOmissions: [],
+      omittedItemCount: 0,
+    };
+    if (
+      [...history.items, ...history.turnOmissions].some(
+        (entry) =>
+          entry.taskId !== taskId || entry.assignmentId !== assignmentId,
+      )
+    )
+      throw new Error("Assignment history contains an out-of-scope entry");
+    return history;
+  }
 
   readTask(taskId: string): CoordinationTaskView {
     const task = this.domain.task(uuid.parse(taskId));
@@ -362,6 +389,7 @@ export class CoordinationView {
             attempt,
             status,
             failureClass,
+            failureCode,
             requestedModel,
             returnedModel,
             confidence,
@@ -373,6 +401,7 @@ export class CoordinationView {
             attempt,
             status,
             failureClass,
+            failureCode,
             requestedModel,
             returnedModel,
             confidence,

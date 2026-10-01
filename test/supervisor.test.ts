@@ -402,7 +402,10 @@ test("Stop before capacity admission keeps queued work stopped until explicit re
     activeGate.resolve();
     assert.equal((await active).state, "completed");
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
-    assert.equal(f.runtime.prompts.includes("Queued worker"), false);
+    assert.equal(
+      f.runtime.prompts.some((prompt) => prompt.startsWith("Queued worker")),
+      false,
+    );
     assert.notEqual(
       f.service.list().find((item) => item.workId === queuedWorkId)?.state,
       "running",
@@ -410,11 +413,14 @@ test("Stop before capacity admission keeps queued work stopped until explicit re
 
     await f.service.resumeTask(stoppedTaskId);
     assert.equal(
-      await waitUntil(() => f.runtime.prompts.includes("Queued worker")),
+      await waitUntil(() =>
+        f.runtime.prompts.some((prompt) => prompt.startsWith("Queued worker")),
+      ),
       true,
     );
     assert.equal(
-      f.runtime.prompts.filter((prompt) => prompt === "Queued worker").length,
+      f.runtime.prompts.filter((prompt) => prompt.startsWith("Queued worker"))
+        .length,
       1,
     );
   } finally {
