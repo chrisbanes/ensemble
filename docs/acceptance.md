@@ -164,6 +164,10 @@ These extend A01–A30; they are required alongside the product scenarios.
 
 ## Evidence ownership
 
+The [S05 local qualification report](evidence/s05-local-qualification.md) records
+the current partial evidence and required unproved checks; it does not yet pass
+the local milestone.
+
 S01 is a disposable runtime feasibility proof of A08/A09/A14–A16/A18/A25 and
 R01 boundaries, not full product acceptance of those scenarios. S02–S04 implement
 the contracts and their tests; S05 qualifies A01–A18, A25, A27, local A28/A30 and

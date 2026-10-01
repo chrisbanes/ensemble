@@ -1,13 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  StandaloneService,
-  type StandaloneServiceOptions,
-} from "../src/standalone/service.js";
 import type {
   Runtime,
   RuntimeToolCall,
@@ -15,6 +10,12 @@ import type {
   RuntimeToolResult,
   UnexpectedRequest,
 } from "../src/standalone/codex.js";
+import { RoutingFailure } from "../src/standalone/routing.js";
+import {
+  StandaloneService,
+  type StandaloneServiceOptions,
+} from "../src/standalone/service.js";
+import { tmpdir } from "./temp.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -97,7 +98,9 @@ function command(service: StandaloneService, body: Record<string, unknown>) {
   return service.domain().execute({ key: randomUUID(), ...body } as never);
 }
 
-async function fixture() {
+async function fixture(
+  routingClient: StandaloneServiceOptions["routingClient"] = null,
+) {
   const root = mkdtempSync(join(tmpdir(), "ensemble-coordination-view-"));
   const runtime = new ViewRuntime();
   const service = new StandaloneService(
@@ -106,7 +109,7 @@ async function fixture() {
     undefined,
     {
       power: { enabled: false },
-      routingClient: null,
+      routingClient,
     } satisfies StandaloneServiceOptions,
   );
   const leadProfileId = randomUUID();
@@ -250,6 +253,37 @@ async function fixture() {
     turnId: leadWork.turnId,
   };
 }
+
+test("coordination routing view exposes only the bounded provider failure code", async () => {
+  const f = await fixture({
+    choose: async () => {
+      throw new RoutingFailure(
+        "PRIVATE_PROVIDER_ERROR_BODY_SENTINEL",
+        "permanent",
+        "http-401",
+      );
+    },
+  });
+  try {
+    await waitUntil(() => {
+      const attempts = f.service.coordinationView().readTask(f.taskId)
+        .routing.attempts;
+      return attempts.some((operation) => operation.attempts.length > 0);
+    });
+    const dto = f.service.coordinationView().readTask(f.taskId);
+    const attempts = dto.routing.attempts.flatMap(
+      (operation) => operation.attempts,
+    );
+    assert.equal(attempts[0]?.failureCode, "http-401");
+    assert.doesNotMatch(
+      JSON.stringify(dto),
+      /PRIVATE_PROVIDER_ERROR_BODY_SENTINEL|S04B_VIEW_ROUTING_SECRET|env:S04B_VIEW_ROUTING_SECRET/,
+    );
+  } finally {
+    await f.service.stop();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
 
 test("task coordination view is scoped, durable, and excludes runtime internals", async () => {
   const f = await fixture();

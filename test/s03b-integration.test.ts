@@ -447,7 +447,13 @@ test("S03b integrates yielding, pause, Stop, restart reconciliation and exact re
       paused: false,
     });
     await restartRuntime.waitForTurnNumber(2);
-    assert.equal(restartRuntime.prompts[1], "Independent worker task");
+    assert.ok(
+      restartRuntime.prompts[1]?.startsWith("Independent worker task\n\n"),
+    );
+    assert.match(
+      restartRuntime.prompts[1] ?? "",
+      /Assignment role: project assignee/,
+    );
     restartRuntime.complete(2);
     await waitUntil(
       () =>

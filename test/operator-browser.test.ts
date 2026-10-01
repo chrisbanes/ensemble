@@ -61,6 +61,7 @@ function deferred<T>() {
 class BrowserJourneyRuntime implements Runtime {
   turns = 0;
   threads = 0;
+  prompts: string[] = [];
   private readonly outcomes = new Map<
     string,
     ReturnType<typeof deferred<"completed" | "failed">>
@@ -87,8 +88,9 @@ class BrowserJourneyRuntime implements Runtime {
     _tools?: readonly RuntimeToolDefinition[],
   ) {}
 
-  async startTurn(_threadId: string, _workspace: string, _prompt: string) {
+  async startTurn(_threadId: string, _workspace: string, prompt: string) {
     const turnId = `browser-turn-${++this.turns}`;
+    this.prompts.push(prompt);
     this.outcomes.set(turnId, deferred());
     return turnId;
   }
@@ -605,6 +607,244 @@ test("Chromium verifies the independent login and guarded browser session", asyn
       /Private browser project/,
     );
     assert.equal(domain.projects().length, 2);
+  } finally {
+    await context?.close();
+    await browser?.close();
+    await http?.stop();
+    auth?.close();
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("authenticated project pause and resume preserve captured instructions while changed instructions require apply", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-operator-project-revision-"),
+  );
+  chmodSync(directory, 0o700);
+  const authFile = join(directory, "operator-auth.json");
+  const runtime = new BrowserJourneyRuntime();
+  const service = new StandaloneService(directory, () => runtime, undefined, {
+    power: { enabled: false },
+  });
+  let browser: Browser | undefined;
+  let http: LocalOperatorHttp | undefined;
+  let auth: OperatorAuth | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    await service.start();
+    const port = await unusedPort();
+    const origin = `http://127.0.0.1:${port}`;
+    await OperatorAuth.initialize(authFile, password);
+    auth = await OperatorAuth.open({ authFile, origin });
+    http = new LocalOperatorHttp(new LocalOperatorUi(service.domain()), auth, {
+      routes: serviceRoutes(service),
+    });
+    await http.start(port);
+    browser = await chromium.launch({ headless: true });
+    context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`${origin}/login`);
+    assert.equal((await signIn(page, password)).status(), 303);
+
+    await page.goto(`${origin}/`);
+    const profileForm = page.locator('form[data-command="profile.create"]');
+    const profileId = await profileForm
+      .locator('input[name="profileId"]')
+      .inputValue();
+    await profileForm.locator('input[name="name"]').fill("Revision test lead");
+    await profileForm
+      .locator('textarea[name="instructions"]')
+      .fill("Use only the registered Ensemble tools.");
+    await profileForm
+      .locator('textarea[name="capabilities"]')
+      .fill("coordinate bounded work");
+    await save(page, profileForm);
+
+    await page.goto(`${origin}/`);
+    const projectForm = page.locator('form[data-command="project.create"]');
+    const projectId = await projectForm
+      .locator('input[name="projectId"]')
+      .inputValue();
+    await projectForm
+      .locator('input[name="name"]')
+      .fill("Revision test project");
+    await projectForm
+      .locator('select[name="leadProfileId"]')
+      .selectOption(profileId);
+    await save(page, projectForm);
+
+    await page.goto(`${origin}/project/${projectId}`);
+    let projectConfig = page.locator('form[data-command="project.configure"]');
+    const capturedInstructions = "PROJECT_INSTRUCTIONS_REVISION_TWO";
+    await projectConfig
+      .locator('textarea[name="instructions"]')
+      .fill(capturedInstructions);
+    await save(page, projectConfig);
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      2,
+    );
+
+    await page.goto(`${origin}/project/${projectId}`);
+    const taskForm = page.locator('form[data-command="task.create"]');
+    const taskId = await taskForm.locator('input[name="taskId"]').inputValue();
+    await taskForm
+      .locator('input[name="title"]')
+      .fill("Captured instruction task");
+    await taskForm
+      .locator('textarea[name="outcome"]')
+      .fill("Remain held while the project is paused.");
+    await taskForm.locator('input[name="ready"]').check();
+    await save(page, taskForm);
+    await service.provisionTask(taskId);
+
+    await waitUntil(() => service.domain().assignments(taskId).length === 1);
+    const assignment = service.domain().assignments(taskId)[0];
+    assert.ok(assignment);
+    assert.equal(Number(assignment.instructionsRevision), 2);
+    assert.equal(service.domain().project(projectId).paused, 1);
+    assert.equal(runtime.turns, 0, "a ready task remains held while paused");
+
+    await page.goto(`${origin}/project/${projectId}`);
+    projectConfig = page.locator('form[data-command="project.configure"]');
+    await projectConfig.locator('input[name="paused"]').uncheck();
+    await save(page, projectConfig);
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      2,
+      "resuming with unchanged instructions must preserve the captured revision",
+    );
+    await waitUntil(() => runtime.turns === 1);
+    assert.ok(runtime.prompts[0]?.includes(capturedInstructions));
+    assert.equal(
+      Number(
+        service.domain().assignment(String(assignment.id)).instructionsRevision,
+      ),
+      2,
+    );
+    const activeWork = service
+      .list()
+      .find((item) => item.turnId === "browser-turn-1");
+    assert.ok(activeWork?.threadId && activeWork.turnId);
+    const question = await runtime.callTool({
+      threadId: activeWork.threadId,
+      turnId: activeWork.turnId,
+      callId: "revision-test-question",
+      tool: "ensemble_ask_question",
+      arguments: { question: "Which captured revision should I use?" },
+    });
+    assert.equal(question.success, true, "the fixture records a durable wait");
+    runtime.complete("browser-turn-1");
+    await waitUntil(() =>
+      service
+        .list()
+        .some(
+          (item) =>
+            item.turnId === "browser-turn-1" && item.state === "completed",
+        ),
+    );
+
+    await page.goto(`${origin}/project/${projectId}`);
+    projectConfig = page.locator('form[data-command="project.configure"]');
+    const changedInstructions = "PROJECT_INSTRUCTIONS_REVISION_THREE";
+    await projectConfig
+      .locator('textarea[name="instructions"]')
+      .fill(changedInstructions);
+    await projectConfig.locator('input[name="paused"]').check();
+    const changedCommand = await projectConfig.evaluate((element) => {
+      const form = element as HTMLFormElement;
+      return Object.fromEntries(new FormData(form).entries()) as Record<
+        string,
+        string
+      >;
+    });
+    await save(page, projectConfig);
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      3,
+      "a real instruction change still creates a revision",
+    );
+    const replay = await context.request.post(`${origin}/command`, {
+      headers: { origin },
+      form: changedCommand,
+      maxRedirects: 0,
+    });
+    assert.equal(replay.status(), 303, "same keyed project edit replays");
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      3,
+      "replay must not create another project instruction revision",
+    );
+
+    await page.goto(`${origin}/coordination/task/${taskId}`);
+    const answerForm = page.locator(
+      'form[action="/coordination/control/question/answer"]',
+    );
+    await answerForm
+      .locator('textarea[name="answer"]')
+      .fill("Use the captured revision after an explicit apply.");
+    await submitControl(
+      page,
+      answerForm,
+      "/coordination/control/question/answer",
+      "Submit",
+    );
+    const messageForm = page.locator(
+      'form[action="/coordination/control/message"]',
+    );
+    await messageForm
+      .locator('textarea[name="message"]')
+      .fill("Continue using the changed project instructions.");
+    await submitControl(
+      page,
+      messageForm,
+      "/coordination/control/message",
+      "Submit",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(runtime.turns, 1, "paused work cannot start a follow-up turn");
+
+    await page.goto(`${origin}/project/${projectId}`);
+    projectConfig = page.locator('form[data-command="project.configure"]');
+    await projectConfig.locator('input[name="paused"]').uncheck();
+    await save(page, projectConfig);
+    assert.equal(
+      Number(service.domain().project(projectId).instructionsRevision),
+      3,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      runtime.turns,
+      1,
+      "a stale assignment does not silently adopt new instructions",
+    );
+    assert.equal(
+      Number(
+        service.domain().assignment(String(assignment.id)).instructionsRevision,
+      ),
+      2,
+    );
+
+    await page.goto(`${origin}/runtime/assignment/${assignment.id}`);
+    const applyForm = page.locator(
+      'form[action="/runtime/control/instruction-apply"]',
+    );
+    await submitControl(
+      page,
+      applyForm,
+      "/runtime/control/instruction-apply",
+      "Apply current instructions for the next turn",
+    );
+    await waitUntil(() => runtime.turns === 2);
+    assert.ok(runtime.prompts[1]?.includes(changedInstructions));
+    assert.ok(!runtime.prompts[0]?.includes(changedInstructions));
+    assert.equal(
+      Number(
+        service.domain().assignment(String(assignment.id)).instructionsRevision,
+      ),
+      3,
+    );
   } finally {
     await context?.close();
     await browser?.close();

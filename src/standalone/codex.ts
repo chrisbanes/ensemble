@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { z } from "zod";
@@ -98,6 +98,64 @@ export interface RuntimeToolResult {
   text: string;
   success: boolean;
 }
+
+export type RuntimeConversationEvent =
+  | {
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      kind: "started";
+    }
+  | {
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      kind: "delta";
+      bytes: number;
+    }
+  | {
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      kind: "completed";
+      text: string;
+    }
+  | {
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      kind: "omitted";
+      reason:
+        | "size-limit"
+        | "item-limit"
+        | "active-turn-limit"
+        | "turn-ended"
+        | "missing-text";
+    };
+
+type PendingConversationItem =
+  | { kind: "capturing"; chunks: string[]; bytes: number; fragments: number }
+  | { kind: "size-limit" };
+
+interface PendingConversationTurn {
+  items: Map<string, PendingConversationItem>;
+  completedItems: Set<string>;
+  totalItems: number;
+  truncated: boolean;
+}
+
+const maxConversationItemBytes = 64 * 1024;
+const maxPendingConversationItems = 64;
+const maxConversationItemsPerTurn = 256;
+const maxActiveConversationTurns = 16;
+const maxConversationBufferBytes = 4 * 1024 * 1024;
+const maxConversationFragmentsPerItem = 4096;
+const maxConversationIdentityLength = 256;
+
+const conversationIdentity = z
+  .string()
+  .min(1)
+  .max(maxConversationIdentityLength);
 
 export function parseRuntimeToolCall(
   input: unknown,
@@ -278,6 +336,9 @@ export interface Runtime {
       reason: string;
     }) => void,
   ): void;
+  onConversationEvent?(
+    listener: (event: RuntimeConversationEvent) => void,
+  ): void;
   processIdentity?():
     | RuntimeProcessIdentity
     | null
@@ -320,6 +381,15 @@ export class CodexRuntime implements Runtime {
     turnId?: string;
     reason: string;
   }) => void;
+  private conversationEvent?: (event: RuntimeConversationEvent) => void;
+  private readonly conversationTurns = new Map<
+    string,
+    PendingConversationTurn
+  >();
+  private conversationBufferBytes = 0;
+  private conversationCaptureSaturated = false;
+  private readonly overflowedConversationTurns = new Set<string>();
+  private conversationOverflowIdentityCapExceeded = false;
   private failure: Error | undefined;
 
   constructor(private readonly executable = "codex") {}
@@ -344,10 +414,17 @@ export class CodexRuntime implements Runtime {
     this.terminalAnomaly = listener;
   }
 
+  onConversationEvent(
+    listener: (event: RuntimeConversationEvent) => void,
+  ): void {
+    this.conversationEvent = listener;
+  }
+
   async start(): Promise<void> {
     if (this.child) throw new Error("Runtime already started");
     this.failure = undefined;
     this.failures.clear();
+    this.clearConversationCaptures();
     const child = spawn(
       this.executable,
       [
@@ -400,6 +477,7 @@ export class CodexRuntime implements Runtime {
     this.fail(new Error("Runtime stopped"));
     this.terminals.clear();
     this.failures.clear();
+    this.clearConversationCaptures();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       let timeout: NodeJS.Timeout | undefined;
@@ -682,6 +760,10 @@ export class CodexRuntime implements Runtime {
           reason: "Missing terminal identity or status",
         });
       } else {
+        this.finishConversationTurn(
+          terminal.data.threadId,
+          terminal.data.turn.id,
+        );
         const key = `${terminal.data.threadId}:${terminal.data.turn.id}`;
         if (terminal.data.turn.status === "failed")
           this.failures.set(
@@ -705,7 +787,305 @@ export class CodexRuntime implements Runtime {
         this.terminals.set(key, prior && prior !== status ? "failed" : status);
       }
     }
-    if (message.method) this.events.emit(message.method, message.params);
+    if (message.method)
+      this.projectConversationEvent(message.method, message.params);
+    // EventEmitter throws when an unhandled `error` event is emitted. Codex
+    // uses this notification for progress such as reconnect retries; turn
+    // completion remains the only terminal signal.
+    if (message.method && message.method !== "error")
+      this.events.emit(message.method, message.params);
+  }
+
+  private projectConversationEvent(method: string, params: unknown): void {
+    if (method === "item/started") {
+      const parsed = z
+        .object({
+          threadId: conversationIdentity,
+          turnId: conversationIdentity,
+          item: z.object({
+            id: conversationIdentity,
+            type: z.string().max(64),
+          }),
+        })
+        .safeParse(params);
+      if (!parsed.success || parsed.data.item.type !== "agentMessage") return;
+      const { threadId, turnId, item } = parsed.data;
+      const turn = this.conversationTurn(threadId, turnId, item.id);
+      if (!turn || turn.truncated) return;
+      if (turn.completedItems.has(item.id) || turn.items.has(item.id)) return;
+      if (
+        turn.totalItems >= maxConversationItemsPerTurn ||
+        turn.items.size >= maxPendingConversationItems
+      ) {
+        this.truncateConversationTurn(threadId, turnId, turn, item.id);
+        return;
+      }
+      turn.totalItems += 1;
+      turn.items.set(item.id, {
+        kind: "capturing",
+        chunks: [],
+        bytes: 0,
+        fragments: 0,
+      });
+      this.emitConversationEvent({
+        threadId,
+        turnId,
+        itemId: item.id,
+        kind: "started",
+      });
+      return;
+    }
+
+    if (method === "item/agentMessage/delta") {
+      const parsed = z
+        .object({
+          threadId: conversationIdentity,
+          turnId: conversationIdentity,
+          itemId: conversationIdentity,
+          delta: z.string(),
+        })
+        .safeParse(params);
+      if (!parsed.success) return;
+      const { threadId, turnId, itemId, delta } = parsed.data;
+      const turn = this.conversationTurns.get(
+        this.conversationTurnKey(threadId, turnId),
+      );
+      const item = turn?.items.get(itemId);
+      if (!turn || turn.truncated || !item || item.kind !== "capturing") return;
+      const bytes = Buffer.byteLength(delta, "utf8");
+      if (bytes === 0) return;
+      if (
+        item.bytes + bytes > maxConversationItemBytes ||
+        this.conversationBufferBytes + bytes > maxConversationBufferBytes ||
+        item.fragments >= maxConversationFragmentsPerItem
+      ) {
+        this.conversationBufferBytes -= item.bytes;
+        turn.items.set(itemId, { kind: "size-limit" });
+        return;
+      }
+      item.chunks.push(delta);
+      item.bytes += bytes;
+      item.fragments += 1;
+      this.conversationBufferBytes += bytes;
+      this.emitConversationEvent({
+        threadId,
+        turnId,
+        itemId,
+        kind: "delta",
+        bytes,
+      });
+      return;
+    }
+
+    if (method === "item/completed") {
+      const parsed = z
+        .object({
+          threadId: conversationIdentity,
+          turnId: conversationIdentity,
+          item: z.object({
+            id: conversationIdentity,
+            type: z.string().max(64),
+            text: z.unknown().optional(),
+          }),
+        })
+        .safeParse(params);
+      if (!parsed.success || parsed.data.item.type !== "agentMessage") return;
+      const { threadId, turnId, item } = parsed.data;
+      const turn = this.conversationTurn(threadId, turnId, item.id);
+      if (!turn || turn.truncated) return;
+      if (turn.completedItems.has(item.id)) return;
+      const pending = turn.items.get(item.id);
+      if (!pending && turn.totalItems >= maxConversationItemsPerTurn) {
+        this.truncateConversationTurn(threadId, turnId, turn, item.id);
+        return;
+      }
+      if (!pending) turn.totalItems += 1;
+      turn.items.delete(item.id);
+      turn.completedItems.add(item.id);
+      this.releaseConversationItem(pending);
+      if (typeof item.text === "string") {
+        this.emitConversationText(threadId, turnId, item.id, item.text);
+      } else if (pending?.kind === "size-limit") {
+        this.emitConversationOmission(threadId, turnId, item.id, "size-limit");
+      } else if (pending?.kind === "capturing") {
+        if (pending.bytes > 0) {
+          this.emitConversationText(
+            threadId,
+            turnId,
+            item.id,
+            pending.chunks.join(""),
+          );
+        } else {
+          this.emitConversationOmission(
+            threadId,
+            turnId,
+            item.id,
+            "missing-text",
+          );
+        }
+      } else {
+        this.emitConversationOmission(
+          threadId,
+          turnId,
+          item.id,
+          "missing-text",
+        );
+      }
+    }
+  }
+
+  private conversationTurn(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+  ): PendingConversationTurn | undefined {
+    const key = this.conversationTurnKey(threadId, turnId);
+    if (this.terminalHistory.has(`${threadId}:${turnId}`)) return undefined;
+    const existing = this.conversationTurns.get(key);
+    if (existing) return existing;
+    if (this.conversationCaptureSaturated) {
+      this.trackOverflowedConversationTurn(key);
+      return undefined;
+    }
+    if (this.conversationTurns.size >= maxActiveConversationTurns) {
+      this.conversationCaptureSaturated = true;
+      this.trackOverflowedConversationTurn(key);
+      this.emitConversationOmission(
+        threadId,
+        turnId,
+        itemId,
+        "active-turn-limit",
+      );
+      return undefined;
+    }
+    const turn: PendingConversationTurn = {
+      items: new Map(),
+      completedItems: new Set(),
+      totalItems: 0,
+      truncated: false,
+    };
+    this.conversationTurns.set(key, turn);
+    return turn;
+  }
+
+  private conversationTurnKey(threadId: string, turnId: string): string {
+    return JSON.stringify([threadId, turnId]);
+  }
+
+  private finishConversationTurn(threadId: string, turnId: string): void {
+    const key = this.conversationTurnKey(threadId, turnId);
+    const turn = this.conversationTurns.get(key);
+    const overflowed = this.overflowedConversationTurns.delete(key);
+    if (!turn) {
+      if (overflowed) this.maybeResumeConversationCapture();
+      return;
+    }
+    for (const [itemId, item] of turn.items) {
+      this.emitConversationOmission(
+        threadId,
+        turnId,
+        itemId,
+        item.kind === "size-limit" ? "size-limit" : "turn-ended",
+      );
+      this.releaseConversationItem(item);
+    }
+    this.conversationTurns.delete(key);
+    this.maybeResumeConversationCapture();
+  }
+
+  private trackOverflowedConversationTurn(key: string): void {
+    if (
+      this.overflowedConversationTurns.has(key) ||
+      this.conversationOverflowIdentityCapExceeded
+    )
+      return;
+    if (this.overflowedConversationTurns.size >= maxActiveConversationTurns) {
+      this.conversationOverflowIdentityCapExceeded = true;
+      return;
+    }
+    this.overflowedConversationTurns.add(key);
+  }
+
+  private maybeResumeConversationCapture(): void {
+    if (
+      this.conversationTurns.size === 0 &&
+      this.overflowedConversationTurns.size === 0 &&
+      !this.conversationOverflowIdentityCapExceeded
+    )
+      this.conversationCaptureSaturated = false;
+  }
+
+  private truncateConversationTurn(
+    threadId: string,
+    turnId: string,
+    turn: PendingConversationTurn,
+    itemId: string,
+  ): void {
+    turn.truncated = true;
+    for (const [pendingId, pending] of turn.items) {
+      this.emitConversationOmission(threadId, turnId, pendingId, "item-limit");
+      this.releaseConversationItem(pending);
+    }
+    turn.items.clear();
+    turn.completedItems.clear();
+    this.emitConversationOmission(threadId, turnId, itemId, "item-limit");
+  }
+
+  private releaseConversationItem(
+    item: PendingConversationItem | undefined,
+  ): void {
+    if (item?.kind !== "capturing") return;
+    this.conversationBufferBytes -= item.bytes;
+  }
+
+  private clearConversationCaptures(): void {
+    this.conversationTurns.clear();
+    this.conversationBufferBytes = 0;
+    this.conversationCaptureSaturated = false;
+    this.overflowedConversationTurns.clear();
+    this.conversationOverflowIdentityCapExceeded = false;
+  }
+
+  private emitConversationText(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    text: string,
+  ): void {
+    if (Buffer.byteLength(text, "utf8") > maxConversationItemBytes) {
+      this.emitConversationOmission(threadId, turnId, itemId, "size-limit");
+      return;
+    }
+    this.emitConversationEvent({
+      threadId,
+      turnId,
+      itemId,
+      kind: "completed",
+      text,
+    });
+  }
+
+  private emitConversationOmission(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    reason: Extract<RuntimeConversationEvent, { kind: "omitted" }>["reason"],
+  ): void {
+    this.emitConversationEvent({
+      threadId,
+      turnId,
+      itemId,
+      kind: "omitted",
+      reason,
+    });
+  }
+
+  private emitConversationEvent(event: RuntimeConversationEvent): void {
+    try {
+      this.conversationEvent?.(event);
+    } catch {
+      // History is diagnostic: a consumer failure must not alter runtime control.
+    }
   }
 
   private receiveToolCall(
@@ -791,6 +1171,7 @@ export class CodexRuntime implements Runtime {
       pending.reject(error);
     }
     this.pending.clear();
+    this.clearConversationCaptures();
     this.events.emit("failure", error);
     if (this.child?.exitCode === null && this.child.signalCode === null)
       this.child.kill("SIGTERM");
