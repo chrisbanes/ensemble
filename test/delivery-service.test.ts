@@ -598,6 +598,106 @@ test("newly configured delivery credentials inherited by the current runtime hol
 });
 
 import { StandaloneService } from "../src/standalone/service.js";
+test("restart retains one unavailable PR binding while independent feedback and operator views continue", async () => {
+  const f = await deliveryFixture();
+  try {
+    const register = (p: ReturnType<typeof f.getPr>) =>
+      f.call("ensemble_register_pr", {
+        repositoryId: p.repositoryId,
+        prNumber: p.number,
+        expectedPrNodeId: p.nodeId,
+        expectedHeadSha: p.headSha,
+      });
+    assert.equal((await register(f.getPr())).success, true);
+    f.turns[0]?.release();
+    const waitCompleted = async (index: number) => {
+      const deadline = Date.now() + 3000;
+      while (
+        !f.service
+          .list()
+          .some(
+            (i) =>
+              i.turnId === f.turns[index]?.turnId && i.state === "completed",
+          )
+      ) {
+        if (Date.now() > deadline) throw new Error("Lead terminal not settled");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    await waitCompleted(0);
+    const healthyTaskId = randomUUID();
+    f.domain.execute({
+      type: "task.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: f.projectId,
+      taskId: healthyTaskId,
+      title: "Healthy",
+      outcome: "Healthy",
+      ready: true,
+    });
+    await f.service.provisionTask(healthyTaskId);
+    await f.waitTurn(1);
+    const healthyPr = {
+      ...f.getPr(),
+      nodeId: "P8",
+      number: 8,
+      headRef: "cb/healthy",
+    };
+    f.setOtherPr(healthyPr);
+    assert.equal((await register(healthyPr)).success, true);
+    f.turns[1]?.release();
+    await waitCompleted(1);
+    await f.service.stop();
+    f.failReads(true);
+    f.setOtherPr({
+      ...healthyPr,
+      checks: [
+        {
+          name: "build",
+          status: "failure",
+          sha: healthyPr.headSha,
+          appId: null,
+        },
+      ],
+    });
+    await f.service.start();
+    const held = f.service.coordinationView().readTask(f.taskId).delivery;
+    assert.equal(held?.binding?.readError, "provider-read-unavailable");
+    assert.ok(held?.blockers.includes("delivery-provider-read-unavailable"));
+    assert.equal(
+      f.service.coordinationView().readTask(healthyTaskId).delivery?.binding
+        ?.readError,
+      null,
+    );
+    await f.waitTurn(2);
+    assert.equal(f.turns[2]?.threadId, f.turns[1]?.threadId);
+    const binding = f.service.delivery().delivery(f.taskId);
+    assert.ok(binding);
+    await assert.rejects(
+      () =>
+        f.service.settleHandback({
+          actor: "operator",
+          key: randomUUID(),
+          taskId: f.taskId,
+          expectedTaskVersion: Number(
+            f.service.domain().task(f.taskId).version,
+          ),
+          expectedDeliveryRevision: binding.revision,
+          expectedPolicyVersion: 2,
+          repositoryId: "R1",
+          prNumber: 7,
+          expectedPrNodeId: "P7",
+          expectedHeadSha: f.getPr().headSha,
+          decision: "accepted",
+        }),
+      /inspection unavailable/,
+    );
+    assert.equal(f.service.domain().task(f.taskId).state, "open");
+  } finally {
+    await f.close();
+  }
+});
 test("failed startup releases delivery state before a clean retry", async () => {
   const root = realpathSync(
     mkdtempSync(join(tmpdir(), "ensemble-delivery-startup-")),

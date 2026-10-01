@@ -10,12 +10,20 @@ import {
   type ExternalActionArguments,
   type DeliveryPolicy,
   type PrDeliveryBinding,
+  type PrDeliveryObservation,
   type ProviderActionObservation,
 } from "../core/delivery.js";
 import {
   type GitHubDeliveryProvider,
   GitHubHttpDeliveryProvider,
 } from "./github-delivery.js";
+
+/** Only provider inspection failures are recoverable per-binding read holds. */
+class DeliveryReadUnavailable extends Error {
+  constructor() {
+    super("Delivery provider inspection unavailable");
+  }
+}
 
 export interface DeliveryCoordinatorOptions {
   fetcher?: typeof fetch;
@@ -129,10 +137,21 @@ export class DeliveryCoordinator {
         receipt: null,
       });
     }
+    // Reuse final-completion evidence under the already-held task serialization.
+    // The action's own prepared intent is the only delivery effect excluded.
+    const closureGuard =
+      record.request.action.kind === "issue.close"
+        ? await this.qualifyCompletionWithinTask(
+            caller.taskId,
+            record.operationId,
+          )
+        : undefined;
     // All new authority is checked synchronously after the final provider await.
     let attempting: DeliveryActionRecord;
     try {
       attempting = this.store.beginAttempt(record.operationId, before, () => {
+        if (closureGuard?.().length)
+          throw new Error("PR delivery boundary held");
         if (this.stopped || this.options.activationAllowed?.(policy) === false)
           throw new Error(
             "Delivery credential activation requires safe runtime restart",
@@ -247,19 +266,22 @@ export class DeliveryCoordinator {
     for (const binding of this.store.deliveries())
       await this.serialize([`task:${binding.taskId}`], async () => {
         if (this.stopped) return;
-        await this.inspectBinding(binding.taskId);
+        try {
+          await this.inspectBinding(binding.taskId);
+        } catch (error) {
+          if (!(error instanceof DeliveryReadUnavailable)) throw error;
+        }
       });
   }
   private async inspectBinding(taskId: string) {
     const binding = this.store.delivery(taskId);
     if (!binding) throw new Error("Unknown PR delivery");
     const policy = this.store.configuration(binding.projectId),
-      p = binding.observation;
+      p = binding.observation,
+      provider = this.provider(binding.projectId, policy);
+    let observation: PrDeliveryObservation;
     try {
-      const observation = await this.provider(
-        binding.projectId,
-        policy,
-      ).inspectPr(
+      observation = await provider.inspectPr(
         {
           repositoryId: p.repositoryId,
           prNumber: p.number,
@@ -268,31 +290,28 @@ export class DeliveryCoordinator {
         },
         policy,
       );
-      return this.store.transaction(() => {
-        const current = this.store.delivery(taskId);
-        if (!current || current.revision !== binding.revision)
-          throw new Error("PR delivery changed during inspection");
-        const result = this.store.observePrWithinTransaction(
-          taskId,
-          observation,
-        );
-        if (result.changed)
-          this.options.feedback?.(
-            taskId,
-            `PR delivery feedback changed: ${observation.checks.map((c) => `${c.name}: ${c.status}`).join("; ")}. ${(
-              observation.feedback ?? []
-            )
-              .slice(-10)
-              .map((f) => `${f.kind} ${f.nodeId} (${f.state}): ${f.body}`)
-              .join("\n")}`,
-            `${result.binding.revision}:${result.binding.observationDigest}`,
-          );
-        return result.binding;
-      });
     } catch {
       this.store.recordPrReadFailure(taskId);
-      throw new Error("Delivery provider inspection unavailable or changed");
+      throw new DeliveryReadUnavailable();
     }
+    return this.store.transaction(() => {
+      const current = this.store.delivery(taskId);
+      if (!current || current.revision !== binding.revision)
+        throw new Error("PR delivery changed during inspection");
+      const result = this.store.observePrWithinTransaction(taskId, observation);
+      if (result.changed)
+        this.options.feedback?.(
+          taskId,
+          `PR delivery feedback changed: ${observation.checks.map((c) => `${c.name}: ${c.status}`).join("; ")}. ${(
+            observation.feedback ?? []
+          )
+            .slice(-10)
+            .map((f) => `${f.kind} ${f.nodeId} (${f.state}): ${f.body}`)
+            .join("\n")}`,
+          `${result.binding.revision}:${result.binding.observationDigest}`,
+        );
+      return result.binding;
+    });
   }
   async settleHandback(input: unknown) {
     const command = handbackSettlementSchema.parse(input);
@@ -337,17 +356,31 @@ export class DeliveryCoordinator {
     });
   }
   async qualifyCompletion(taskId: string): Promise<() => string[]> {
+    return this.serialize([`task:${taskId}`], () =>
+      this.qualifyCompletionWithinTask(taskId),
+    );
+  }
+  private async qualifyCompletionWithinTask(
+    taskId: string,
+    exceptOperationId?: string,
+  ): Promise<() => string[]> {
     const binding = this.store.delivery(taskId),
       taskVersion = this.options.taskVersion?.(taskId);
     if (!binding)
-      return () => this.store.completionBlockers(taskId, taskVersion);
+      return () =>
+        this.store.delivery(taskId)
+          ? ["delivery-completion-evidence-changed"]
+          : this.store.completionBlockers(
+              taskId,
+              taskVersion,
+              exceptOperationId,
+            );
     const policyVersion = this.store.configuration(binding.projectId).version;
     let observed: PrDeliveryBinding;
     try {
-      observed = await this.serialize([`task:${taskId}`], () =>
-        this.inspectBinding(taskId),
-      );
-    } catch {
+      observed = await this.inspectBinding(taskId);
+    } catch (error) {
+      if (!(error instanceof DeliveryReadUnavailable)) throw error;
       return () => ["delivery-provider-read-unavailable"];
     }
     const revision = observed.revision,
@@ -364,7 +397,11 @@ export class DeliveryCoordinator {
         return ["delivery-completion-evidence-changed"];
       if (revision !== binding.revision)
         return ["delivery-changed-before-completion"];
-      return this.store.completionBlockers(taskId, taskVersion);
+      return this.store.completionBlockers(
+        taskId,
+        taskVersion,
+        exceptOperationId,
+      );
     };
   }
   async reconcile(): Promise<void> {

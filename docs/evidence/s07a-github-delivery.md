@@ -85,14 +85,32 @@ runtime/login configuration were preserved. No paid model/evaluation calls ran.
 
 Final local validation uses Node `24.21.0` and npm `12.2.0`; `npm ci` succeeded.
 The pinned full `npm run check` passed type checking, lint, formatting, build and
-all 345 tests after repairing the existing scoped-tool inventory expectation. Four
+all 357 tests after repairing the existing scoped-tool inventory expectation. Four
 pre-existing Biome warnings remain, plus the existing schema-version and npm
 environment notices; no new diagnostics remain. The full command needed local
 loopback permission after concrete HTTP/browser `EPERM` failures. Required live
-journeys were never invoked. Independent review and root-controlled publication
+journeys were never invoked. Affected-range independent re-review and root-controlled publication
 remain pending; this candidate cannot merge as completed S07a.
 
 One final full-load rerun exposed the unchanged scheduler capacity fixture's fixed
 25 ms wait: one waiting intent was not yet present. The same focused test passed
 unmodified; its capacity assertion was retained. The final full check passed after all repairs, including fail-closed legacy
 protection handling found in self-review.
+
+
+Independent review found two delivery gaps, reproduced before repair. Explicit
+issue closure now reuses the fresh PR completion guard inside the already-held task
+serialization and verifies that guard in the attempting transaction. Bound service
+regressions cover waiting rejection and current settlement/merge success in both
+modes, non-code closure without a PR, provider-only changed head/outage, and
+post-await task/policy/delivery/work revision holds. Only the current operation is
+excluded from delivery effect blockers; shared completion gates remain active.
+
+A provider inspection outage now persists one binding's read hold while refresh,
+startup, authenticated operator views and healthy independent feedback/work continue.
+A file-backed service restart reproduced the previous startup failure and now
+passes. Fresh settlement/completion still reject unavailable evidence. Configuration,
+SQLite and feedback transaction faults are outside the provider-only catch; the
+feedback fault regression proves it propagates. The affected tests passed 27/27,
+and the final pinned full check passed 357/357 with the same four existing warnings.
+Both required live journeys remain unrun, and the repaired candidate awaits review.

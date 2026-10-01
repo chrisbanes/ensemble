@@ -833,8 +833,12 @@ export class DeliveryStore {
       .run(command.key, materialDigest(command), canonicalMaterial(binding));
     return binding;
   }
-  completionBlockers(taskId: string, taskVersion?: number): string[] {
-    const reasons = this.actionBlockers(taskId),
+  completionBlockers(
+    taskId: string,
+    taskVersion?: number,
+    exceptOperationId?: string,
+  ): string[] {
+    const reasons = this.actionBlockers(taskId, exceptOperationId),
       binding = this.delivery(taskId);
     if (!binding) return reasons;
     if (binding.readError) reasons.push("delivery-provider-read-unavailable");

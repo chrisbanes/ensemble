@@ -148,6 +148,196 @@ test("handback settlement inspects provider-only head changes and rechecks local
 });
 
 import { deliveryFixture } from "./delivery-fixture.js";
+for (const mode of ["reviewable-pr", "through-merge"] as const)
+  test(`${mode} issue close cannot bypass the configured PR delivery boundary`, async () => {
+    const f = await deliveryFixture(mode, true);
+    try {
+      const p = f.getPr();
+      assert.equal(
+        (
+          await f.call("ensemble_register_pr", {
+            repositoryId: "R1",
+            prNumber: 7,
+            expectedPrNodeId: "P7",
+            expectedHeadSha: p.headSha,
+          })
+        ).success,
+        true,
+      );
+      const result = await f.call("ensemble_external_action", {
+        operationId: randomUUID(),
+        action: {
+          kind: "issue.close",
+          target: { repositoryId: "R1", nodeId: "I1", number: 1 },
+          reviewedResultIds: [],
+        },
+      });
+      assert.equal(result.success, false, result.text);
+      assert.equal(f.effects.length, 0);
+    } finally {
+      await f.close();
+    }
+  });
+async function registerFixturePr(
+  f: Awaited<ReturnType<typeof deliveryFixture>>,
+) {
+  assert.equal(
+    (
+      await f.call("ensemble_register_pr", {
+        repositoryId: "R1",
+        prNumber: 7,
+        expectedPrNodeId: "P7",
+        expectedHeadSha: f.getPr().headSha,
+      })
+    ).success,
+    true,
+  );
+}
+async function settleFixturePr(f: Awaited<ReturnType<typeof deliveryFixture>>) {
+  f.turns[0]?.release();
+  const deadline = Date.now() + 3000;
+  while (
+    !f.service
+      .list()
+      .some((i) => i.turnId === f.turns[0]?.turnId && i.state === "completed")
+  ) {
+    if (Date.now() > deadline) throw new Error("Lead did not enter PR waiting");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const b = f.service.delivery().delivery(f.taskId);
+  assert.ok(b);
+  await f.service.settleHandback({
+    actor: "operator",
+    key: randomUUID(),
+    taskId: f.taskId,
+    expectedTaskVersion: Number(f.domain.task(f.taskId).version),
+    expectedDeliveryRevision: b.revision,
+    expectedPolicyVersion: f.service.delivery().configuration(f.projectId)
+      .version,
+    repositoryId: "R1",
+    prNumber: 7,
+    expectedPrNodeId: "P7",
+    expectedHeadSha: f.getPr().headSha,
+    decision: "accepted",
+  });
+  await f.waitTurn(1);
+}
+async function closeFixtureIssue(
+  f: Awaited<ReturnType<typeof deliveryFixture>>,
+) {
+  return f.call("ensemble_external_action", {
+    operationId: randomUUID(),
+    action: {
+      kind: "issue.close",
+      target: { repositoryId: "R1", nodeId: "I1", number: 1 },
+      reviewedResultIds: [],
+    },
+  });
+}
+test("non-code issue close remains permitted without a PR delivery binding", async () => {
+  const f = await deliveryFixture("reviewable-pr", true);
+  try {
+    const result = await closeFixtureIssue(f);
+    assert.equal(result.success, true, result.text);
+    assert.deepEqual(
+      f.effects.map((a) => a.kind),
+      ["issue.close"],
+    );
+  } finally {
+    await f.close();
+  }
+});
+for (const mode of ["reviewable-pr", "through-merge"] as const)
+  test(`${mode} issue close passes a current settled or merged PR boundary`, async () => {
+    const f = await deliveryFixture(mode, true);
+    try {
+      if (mode === "through-merge")
+        f.setPr({ ...f.getPr(), state: "MERGED", merged: true });
+      await registerFixturePr(f);
+      if (mode === "reviewable-pr") await settleFixturePr(f);
+      const result = await closeFixtureIssue(f);
+      assert.equal(result.success, true, result.text);
+      assert.deepEqual(
+        f.effects.map((a) => a.kind),
+        ["issue.close"],
+      );
+    } finally {
+      await f.close();
+    }
+  });
+for (const fault of [
+  "provider-head",
+  "provider-outage",
+  "task-revision",
+  "policy-revision",
+  "delivery-revision",
+  "work-revision",
+] as const)
+  test(`issue close holds fresh PR evidence after ${fault}`, async () => {
+    const f = await deliveryFixture("reviewable-pr", true);
+    try {
+      await registerFixturePr(f);
+      await settleFixturePr(f);
+      if (fault === "provider-head")
+        f.setPr({ ...f.getPr(), headSha: "3".repeat(40) });
+      else if (fault === "provider-outage") f.failReads(true);
+      else
+        f.onInspection(async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          if (fault === "delivery-revision")
+            f.service.delivery().transaction(() => {
+              f.service.delivery().observePrWithinTransaction(f.taskId, {
+                ...f.getPr(),
+                headSha: "4".repeat(40),
+              });
+            });
+          else if (fault === "work-revision") {
+            f.turns[1]?.release();
+            const deadline = Date.now() + 3000;
+            while (
+              f.service
+                .list()
+                .some(
+                  (i) =>
+                    i.turnId === f.turns[1]?.turnId && i.state === "running",
+                )
+            ) {
+              if (Date.now() > deadline)
+                throw new Error("Work did not leave running state");
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
+          } else if (fault === "task-revision")
+            f.domain.execute({
+              type: "task.configure",
+              actor: "operator",
+              key: randomUUID(),
+              taskId: f.taskId,
+              projectId: f.projectId,
+              expectedVersion: Number(f.domain.task(f.taskId).version),
+              outcome: "Changed",
+            });
+          else {
+            const policy = f.service.delivery().configuration(f.projectId);
+            f.domain.execute({
+              type: "delivery.configure",
+              actor: "operator",
+              key: randomUUID(),
+              projectId: f.projectId,
+              expectedVersion: policy.version,
+              mode: policy.mode,
+              credentialRef: null,
+              grants: policy.grants,
+              requiredChecks: [],
+            });
+          }
+        });
+      const result = await closeFixtureIssue(f);
+      assert.equal(result.success, false, result.text);
+      assert.equal(f.effects.length, 0);
+    } finally {
+      await f.close();
+    }
+  });
 test("running retained lead performs explicit through-merge only after all existing action gates pass", async () => {
   const f = await deliveryFixture("through-merge");
   try {

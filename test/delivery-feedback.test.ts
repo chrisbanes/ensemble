@@ -71,6 +71,7 @@ test("unchanged feedback is deduplicated and cached settlement never qualifies a
     allowedMethods: ["squash"],
   };
   let fail = false;
+  let feedbackFailure = false;
   const events: string[] = [];
   const provider: GitHubDeliveryProvider = {
     async inspectPr() {
@@ -93,6 +94,7 @@ test("unchanged feedback is deduplicated and cached settlement never qualifies a
     approved: () => false,
     taskVersion: () => 1,
     feedback: (_task: string, _reason: string, key: string) => {
+      if (feedbackFailure) throw new Error("feedback-transaction-fault");
       events.push(key);
     },
   };
@@ -169,6 +171,14 @@ test("unchanged feedback is deduplicated and cached settlement never qualifies a
     await coordinator.refresh();
     assert.equal(events.length, changedCount + 2);
     assert.equal(new Set(events).size, events.length);
+    feedbackFailure = true;
+    p = { ...p, headSha: "4".repeat(40) };
+    await assert.rejects(
+      () => coordinator.refresh(),
+      /feedback-transaction-fault/,
+    );
+    assert.equal(store.delivery(taskId)?.readError, null);
+    feedbackFailure = false;
     fail = true;
     assert.deepEqual((await coordinator.qualifyCompletion(taskId))(), [
       "delivery-provider-read-unavailable",

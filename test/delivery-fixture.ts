@@ -38,9 +38,12 @@ export async function deliveryFixture(
   }> = [];
   let waiter: (() => void) | undefined;
   let sequence = 0;
+  let threadSequence = 0;
   let spawnContext: RuntimeSpawnContext | undefined;
   const runtime: Runtime = {
-    async start() {},
+    async start() {
+      stopped = false;
+    },
     async stop() {
       stopped = true;
       waiter?.();
@@ -50,7 +53,7 @@ export async function deliveryFixture(
       tool = handler;
     },
     async startThread() {
-      return "thread";
+      return `thread-${++threadSequence}`;
     },
     async resumeThread() {},
     async startTurn(threadId) {
@@ -89,6 +92,8 @@ export async function deliveryFixture(
   const effects: ExternalAction[] = [];
   let preflightWait: Promise<void> | undefined;
   let readFailure = false;
+  let otherPr: PrDeliveryObservation | undefined;
+  let inspectionHook: (() => Promise<void> | void) | undefined;
   const provider: GitHubDeliveryProvider = {
     async inspectClosedIssue() {
       return {
@@ -133,8 +138,10 @@ export async function deliveryFixture(
     async inspectAction() {
       return { state: "uncertain", reason: "unproved", receipt: null };
     },
-    async inspectPr() {
+    async inspectPr(identity) {
+      if (identity.expectedPrNodeId === otherPr?.nodeId) return otherPr;
       if (readFailure) throw new Error("unavailable");
+      await inspectionHook?.();
       return pr;
     },
   };
@@ -264,6 +271,7 @@ export async function deliveryFixture(
     grants: [
       { action: "issue.comment", repositoryId: "R1", mode: "allow" },
       { action: "issue.edit", repositoryId: "R1", mode: "allow" },
+      { action: "issue.close", repositoryId: "R1", mode: "allow" },
       { action: "pr.merge", repositoryId: "R1", mode: "allow" },
     ],
     requiredChecks: [],
@@ -327,11 +335,17 @@ export async function deliveryFixture(
     setPr: (value: PrDeliveryObservation) => {
       pr = value;
     },
+    setOtherPr: (value: PrDeliveryObservation) => {
+      otherPr = value;
+    },
     holdPreflight: (value: Promise<void> | undefined) => {
       preflightWait = value;
     },
     failReads: (value: boolean) => {
       readFailure = value;
+    },
+    onInspection: (hook: (() => Promise<void> | void) | undefined) => {
+      inspectionHook = hook;
     },
     async close() {
       stopped = true;
