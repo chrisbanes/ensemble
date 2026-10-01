@@ -264,10 +264,6 @@ const operationRowSchema = z.object({
   staleReason: staleReasonSchema.nullable(),
 });
 
-function stableJson(value: unknown): string {
-  return JSON.stringify(value);
-}
-
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -341,7 +337,7 @@ export class RoutingAttemptStore {
 
   ensureOperation(input: RoutingSnapshot): RoutingOperation {
     const snapshot = routingSnapshotSchema.parse(input);
-    const snapshotJson = stableJson(snapshot);
+    const snapshotJson = JSON.stringify(snapshot);
     const snapshotHash = hash(snapshotJson);
     return transaction(this.db, () => {
       const existing = this.db
@@ -450,7 +446,7 @@ export class RoutingAttemptStore {
         .run(
           response.model,
           response.confidence,
-          stableJson(response.probabilities),
+          JSON.stringify(response.probabilities),
           response.usage.inputTokens,
           response.usage.outputTokens,
           now,
@@ -462,7 +458,7 @@ export class RoutingAttemptStore {
         currentAttempt = NULL, updatedAt = ? WHERE operationId = ?`)
         .run(
           outcome.kind === "assigned" ? "assigned" : "lead-review",
-          stableJson(outcome),
+          JSON.stringify(outcome),
           now,
           operationId,
         );
@@ -548,7 +544,7 @@ export class RoutingAttemptStore {
       this.db
         .prepare(`UPDATE routing_attempt_operations SET status = 'lead-review', outcomeJson = ?,
         updatedAt = ? WHERE operationId = ?`)
-        .run(stableJson(validated), now, operationId);
+        .run(JSON.stringify(validated), now, operationId);
     });
     return this.operationById(operationId).outcome ?? validated;
   }

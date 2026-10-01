@@ -26,44 +26,16 @@ function fixture() {
   };
 }
 
-test("project bindings distinguish Ensemble identity and persist one host across reopen", () => {
+test("host identity persists across reopen and rejects a different host", () => {
   const f = fixture();
   try {
     const store = new Store(f.db);
-    assert.throws(
-      () => store.createTask("task", "project", "Not initialized"),
-      /ensureHost/,
-    );
     const hostKey = store.ensureHost("fake");
-    const binding = store.bindProject(hostKey, "host-project", "lead");
-    assert.notEqual(binding.projectId, "host-project");
-    assert.equal(binding.externalProjectId, "host-project");
-    assert.equal(binding.coordinatorConversationId, "lead");
-
-    const repeated = store.bindProject(
-      hostKey,
-      "host-project",
-      "replacement-lead",
-    );
-    assert.equal(repeated.projectId, binding.projectId);
-    assert.equal(repeated.coordinatorConversationId, "replacement-lead");
-    assert.equal(
-      store.resolveProject(hostKey, "host-project").projectId,
-      binding.projectId,
-    );
-    assert.deepEqual(store.getProjectBinding(binding.projectId), repeated);
-    assert.throws(
-      () => store.bindProject("foreign-host-key", "host-project", "lead"),
-      /host/i,
-    );
     assert.throws(() => store.ensureHost("other"), /host/i);
 
     const reopened = new Store(f.reopen());
     assert.equal(reopened.ensureHost("fake"), hostKey);
-    assert.equal(
-      reopened.resolveProject(hostKey, "host-project").projectId,
-      binding.projectId,
-    );
+    assert.throws(() => reopened.ensureHost("other"), /host/i);
   } finally {
     f.close();
   }

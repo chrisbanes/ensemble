@@ -25,26 +25,13 @@ import {
   OperatorRouteRegistry,
   type OperatorRouteResult,
 } from "./operator-routes.js";
+import { escapeHtml, hidden } from "./operator-html.js";
 
 function containsControlCharacters(value: string): boolean {
   return value.split("").some((character) => {
     const code = character.charCodeAt(0);
     return code < 32 || code === 127;
   });
-}
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "").replace(
-    /[&<>"']/g,
-    (character) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[character] ?? character,
-  );
 }
 
 function field(
@@ -72,10 +59,6 @@ function selectField(
         `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}${option.disabled ? " disabled" : ""}>${escapeHtml(option.label)}</option>`,
     )
     .join("")}</select></label>`;
-}
-
-function hidden(name: string, value: string): string {
-  return `<input name="${name}" type="hidden" value="${escapeHtml(value)}">`;
 }
 
 function form(
