@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "repository": {
+    "fullName": "chrisbanes/ensemble-s06-fixture",
+    "id": "R_kgDOU3TyZQ"
+  },
+  "projectNodeId": "PVT_kwHOAAN4ns4BlV3Y",
+  "searchQuery": "repo:chrisbanes/ensemble-s06-fixture label:s06-ready",
+  "projectFilter": "label:s06-selected",
+  "credentialRef": "env:ENSEMBLE_S06_GITHUB_TOKEN",
+  "readiness": {
+    "mode": "all",
+    "conditions": [
+      {
+        "kind": "label",
+        "name": "s06-ready"
+      }
+    ]
+  },
+  "issues": [
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZsbUQ",
+      "number": 1,
+      "state": "open",
+      "memberships": ["repository", "search", "project"],
+      "blockers": [],
+      "expectedAdmission": "eligible"
+    },
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZsc3w",
+      "number": 2,
+      "state": "open",
+      "memberships": ["repository", "search", "project"],
+      "blockers": [
+        {
+          "nodeId": "I_kwDOU3TyZc8AAAABUZsg9A",
+          "state": "open"
+        }
+      ],
+      "expectedAdmission": "blocked"
+    },
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZsemA",
+      "number": 3,
+      "state": "open",
+      "memberships": ["repository", "search", "project"],
+      "blockers": [
+        {
+          "nodeId": "I_kwDOU3TyZc8AAAABUZshiw",
+          "state": "closed"
+        }
+      ],
+      "expectedAdmission": "eligible"
+    },
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZsfuw",
+      "number": 4,
+      "state": "open",
+      "memberships": ["repository", "project"],
+      "blockers": [],
+      "expectedAdmission": "blocked"
+    },
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZsg9A",
+      "number": 5,
+      "state": "open",
+      "memberships": ["repository"],
+      "blockers": [],
+      "expectedAdmission": "blocked"
+    },
+    {
+      "nodeId": "I_kwDOU3TyZc8AAAABUZshiw",
+      "number": 6,
+      "state": "closed",
+      "memberships": ["repository"],
+      "blockers": [],
+      "expectedAdmission": "blocked"
+    }
+  ]
+}

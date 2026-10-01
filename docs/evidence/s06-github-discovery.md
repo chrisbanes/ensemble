@@ -51,26 +51,64 @@ warnings in unrelated S05/standalone code and a schema-version information
 message; it reported no lint or format errors. The focused HTTP/Chromium test
 was run with loopback access after the filesystem sandbox denied a local listen.
 
-## Required live check: unproved
+## Required live check: passed
 
-`test/s06/live-github-source.mjs` is a read-only harness. It has **not** been
-run because no designated prepared repository/Project and exact fixture
-manifest/credential reference have been provided. It exits before any provider
-request if `ENSEMBLE_S06_FIXTURE_MANIFEST` is absent. Do not substitute a
-production backlog or create remote fixture data without a separate grant.
+On 1 October 2026 Chris authorised creation of a private synthetic fixture
+repository and Project, and use of the existing `gh` credential only in process
+memory behind the harness's provider-write guard. This explicitly amends the
+planned least-privilege credential prerequisite for this qualification run.
+The credential has broader write scopes; this evidence does not establish
+token-level read-only permissions. No token was printed or written to disk.
 
-After a fixture is provided, build the service and invoke
-`ENSEMBLE_S06_FIXTURE_MANIFEST=/absolute/path/to/manifest.json node test/s06/live-github-source.mjs`
-with the credential available only to that process. The manifest contains
-`version: 1`, `repository: { fullName, id }`, `projectNodeId`, `searchQuery`,
-optional `projectFilter`, `credentialRef: "env:NAME"`, a configured `readiness`
-rule, and `issues` with exact `nodeId`, `number`, `state`, `memberships`,
-`blockers: [{ nodeId, state }]` and `expectedAdmission: "eligible" | "blocked"`.
-The harness checks complete read-only selections, membership and blocker
-identity, imports them into disposable local SQLite with a fake runtime,
-compares admission and operator views, and asserts zero provider writes. It
-reports observed identities and time without printing the credential. A
-missing or changed expected case fails rather than being manufactured.
+`test/s06/live-github-source.mjs` passed at
+`2026-10-01T14:49:23.935Z`, against implementation
+`cb43790e0f909777bf4e73de7992227d3d661255`, using Node.js 24.21.0.
+The prepared identities and expected cases are retained in
+[`test/s06/fixture-manifest.json`](../../test/s06/fixture-manifest.json):
+
+- Repository: [chrisbanes/ensemble-s06-fixture](https://github.com/chrisbanes/ensemble-s06-fixture),
+  node `R_kgDOU3TyZQ`.
+- Project: [Ensemble S06 qualification, #11](https://github.com/users/chrisbanes/projects/11),
+  node `PVT_kwHOAAN4ns4BlV3Y`; private, with four issue memberships.
+- Search: `repo:chrisbanes/ensemble-s06-fixture label:s06-ready`.
+- Project filter: `label:s06-selected`; readiness requires `s06-ready`.
+
+| Issue | Prepared case | Expected and observed admission |
+| --- | --- | --- |
+| #1 | Ready, no native blockers; repository/search/Project overlap | Eligible |
+| #2 | Ready, blocked by open #5 | Blocked |
+| #3 | Ready, blocked by closed #6 | Eligible |
+| #4 | Selected, missing readiness label | Blocked |
+| #5 | Open blocker, outside filtered search and Project | Blocked |
+| #6 | Closed blocker, outside filtered search and Project | Blocked |
+
+All three provider selections completed. The harness verified expected issue
+identities, memberships, native dependency reads and current issue states,
+then refreshed the service into disposable local SQLite with a fake runtime.
+Admission and rendered operator project/task views matched every expected case.
+The repository selection includes #5 and #6; this live run does not demonstrate
+a blocker outside every configured selection. Deterministic outside-selection,
+pagination, outage, reopening and mid-work cases retain the coverage above.
+
+The guarded qualification recorded `providerWrites: 0`. Fixture setup separately
+created six issues, two labels, four Project memberships and two native edges,
+and closed #6; those were authorised setup writes, not read-only harness effects.
+The repository and Project remain available for repeatable checks. The temporary
+service database was removed; no model calls, repository execution grants,
+production backlog import, deployment or cutover occurred.
+
+To repeat, build the service, provide `ENSEMBLE_S06_GITHUB_TOKEN` only to the
+qualification process, and invoke
+`ENSEMBLE_S06_FIXTURE_MANIFEST="$PWD/test/s06/fixture-manifest.json" node test/s06/live-github-source.mjs`.
+The manifest contains references and expected cases, not a credential.
+A missing manifest or credential fails before provider requests; a missing or
+changed expected case fails rather than being manufactured.
+
+Validation in this checkout used pinned Node.js 24.21.0/npm 12.2.0.
+`npm ci` reported zero vulnerabilities. The initial test stage failed because
+the filesystem sandbox denied loopback listeners. Final `npm run check` with
+loopback access passed type checking, lint, formatting, build and all 323 tests.
+The four existing lint warnings and schema information message remain.
 
 External GitHub writes and completion reconciliation belong to S07; this
 report does not claim A24, A26 or operational release qualification.
