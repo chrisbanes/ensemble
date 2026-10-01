@@ -12,6 +12,7 @@ import type { TurnRequest } from "./scheduler.js";
 import type { ExecutionIntent } from "./state.js";
 import type { StandaloneService } from "./service.js";
 import type { StopObservation } from "./supervisor.js";
+import { escapeHtml, hidden } from "./operator-html.js";
 
 const positiveIntegerString = z
   .string()
@@ -78,24 +79,6 @@ export interface RuntimeOperatorApi {
   stopTask(taskId: string): Promise<StopObservation>;
   resumeTask(taskId: string): Promise<void>;
   taskHold(taskId: string): string | undefined;
-}
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "").replace(
-    /[&<>"']/g,
-    (character) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[character] ?? character,
-  );
-}
-
-function hidden(name: string, value: string): string {
-  return `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
 }
 
 function overview(api: RuntimeOperatorApi, csrfToken: string): string {

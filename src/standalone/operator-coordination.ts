@@ -11,6 +11,7 @@ import type {
   ConversationHistoryEntry,
   ConversationHistoryTurnOmission,
 } from "./conversation-history.js";
+import { escapeHtml, hidden } from "./operator-html.js";
 
 const uuid = z.string().uuid();
 const positiveInteger = z
@@ -91,24 +92,6 @@ export interface CoordinationOperatorApi {
   >;
   domain(): OperatorDomain;
   routingAvailability(projectId: string): RoutingAvailability;
-}
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "").replace(
-    /[&<>"']/g,
-    (character) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[character] ?? character,
-  );
-}
-
-function hidden(name: string, value: string): string {
-  return `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`;
 }
 
 function form(

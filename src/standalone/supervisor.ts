@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { Runtime } from "./codex.js";
 import type {
@@ -44,23 +45,14 @@ export interface ExecutionSupervisorOptions {
 
 const defaultClock: SupervisorClock = {
   monotonicNow: () => performance.now(),
-  sleep: (milliseconds, signal) =>
-    new Promise<void>((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(done, milliseconds);
-      function done() {
-        signal.removeEventListener("abort", abort);
-        resolve();
-      }
-      function abort() {
-        clearTimeout(timer);
-        done();
-      }
-      signal.addEventListener("abort", abort, { once: true });
-    }),
+  async sleep(milliseconds, signal) {
+    try {
+      await delay(milliseconds, undefined, { signal });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      throw error;
+    }
+  },
 };
 
 const processIdentitySchema = z.object({

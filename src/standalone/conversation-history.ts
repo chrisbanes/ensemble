@@ -2,50 +2,17 @@ import { z } from "zod";
 import type { Database } from "../core/store.js";
 import type { RuntimeConversationEvent } from "./codex.js";
 
-export interface ConversationHistoryBinding {
-  workId: string;
-  taskId: string;
-  assignmentId: string;
-  assignmentVersion: number;
-  instructionsRevision: number;
-  profileRevision: number;
-  conversationRevision: number;
-  workRevision: number;
-  threadId: string;
-  turnId: string;
-}
-
-export type ConversationHistoryLifecycle =
-  | "started"
-  | "streaming"
-  | "completed"
-  | "omitted";
-
-export type ConversationHistoryOmissionReason =
-  | "size-limit"
-  | "item-limit"
-  | "active-turn-limit"
-  | "turn-ended"
-  | "missing-text"
-  | "redaction-unavailable";
-
-export interface ConversationHistoryEntry extends ConversationHistoryBinding {
-  sequence: number;
-  itemId: string;
-  lifecycle: ConversationHistoryLifecycle;
-  text: string | null;
-  omissionReason: ConversationHistoryOmissionReason | null;
-  deltaBytes: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ConversationHistoryTurnOmission
-  extends ConversationHistoryBinding {
-  sequence: number;
-  reason: "early-buffer-limit";
-  createdAt: number;
-}
+export type ConversationHistoryBinding = z.infer<typeof bindingSchema>;
+export type ConversationHistoryLifecycle = z.infer<
+  typeof historyEntrySchema
+>["lifecycle"];
+export type ConversationHistoryOmissionReason = NonNullable<
+  z.infer<typeof historyEntrySchema>["omissionReason"]
+>;
+export type ConversationHistoryEntry = z.infer<typeof historyEntrySchema>;
+export type ConversationHistoryTurnOmission = z.infer<
+  typeof turnOmissionSchema
+>;
 
 export interface ConversationHistoryAssignmentRead {
   items: ConversationHistoryEntry[];
