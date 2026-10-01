@@ -17,7 +17,20 @@ export type {
   CapacityLimits,
 } from "../core/domain.js";
 export { CodexRuntime, executionPolicy } from "./codex.js";
-export type { Runtime } from "./codex.js";
+export type { Runtime, RuntimeConversationEvent } from "./codex.js";
+export {
+  ConversationHistoryCapture,
+  ConversationHistoryStore,
+  sanitizeConversationText,
+} from "./conversation-history.js";
+export type {
+  ConversationHistoryBinding,
+  ConversationHistoryAssignmentRead,
+  ConversationHistoryEntry,
+  ConversationHistoryLifecycle,
+  ConversationHistoryOmissionReason,
+  ConversationHistoryTurnOmission,
+} from "./conversation-history.js";
 export { ExecutionState } from "./state.js";
 export type {
   ExecutionIntent,

@@ -27,9 +27,15 @@ import {
   CodexRuntime,
   parseFailureEvidence,
   type Runtime,
+  type RuntimeConversationEvent,
   type RuntimeToolCall,
   type RuntimeToolResult,
 } from "./codex.js";
+import {
+  ConversationHistoryCapture,
+  ConversationHistoryStore,
+} from "./conversation-history.js";
+import type { ConversationHistoryAssignmentRead } from "./conversation-history.js";
 import type {
   RecoveryRecord,
   RecoveryReceipt,
@@ -89,6 +95,8 @@ const immutableRevisionMismatches = new Set([
 
 export interface StandaloneServiceOptions {
   routingClient?: RoutingChoiceClient | null;
+  /** Test-only values remain in memory and are never persisted. */
+  conversationHistoryExclusions?: () => readonly string[];
   supervisor?: ExecutionSupervisorOptions;
   terminationVerifier?: TerminationVerifier;
   workspaceManager?: WorkspaceManagerOptions;
@@ -128,12 +136,18 @@ export class StandaloneService {
   private coordination: CoordinationStore | undefined;
   private routingAttempts: RoutingAttemptStore | undefined;
   private workspaces: WorkspaceManager | undefined;
+  private workspaceBindings: SqliteWorkspaceBindingStore | undefined;
   private schedulerStore: SchedulerStore | undefined;
   private scheduler: TurnScheduler | undefined;
   private supervisor: ExecutionSupervisor | undefined;
   private power: ExecutionPower | undefined;
   private powerPollTimer: NodeJS.Timeout | undefined;
   private runtime: Runtime | undefined;
+  private conversationHistory: ConversationHistoryStore | undefined;
+  private readonly conversationCaptures = new Map<
+    string,
+    ConversationHistoryCapture
+  >();
   private lastCompletedWorkId: string | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
   private readonly activeByWorkId = new Map<string, Promise<ExecutionIntent>>();
@@ -184,6 +198,7 @@ export class StandaloneService {
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL",
       );
       new Store(db).ensureHost("standalone-codex");
+      this.conversationHistory = new ConversationHistoryStore(db);
       const domain = new DomainStore(db, () => {
         void this.wakeScheduler().catch(() => {});
       });
@@ -195,6 +210,7 @@ export class StandaloneService {
       const schedulerStore = new SchedulerStore(db);
       this.schedulerStore = schedulerStore;
       const workspaceBindings = new SqliteWorkspaceBindingStore(db);
+      this.workspaceBindings = workspaceBindings;
       const workspaces = new WorkspaceManager(
         workspaceBindings,
         workspacePath,
@@ -225,7 +241,9 @@ export class StandaloneService {
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
-      const coordination = new CoordinationStore(db, domain);
+      const coordination = new CoordinationStore(db, domain, (workId) =>
+        state.isNeverAdmittedRefusedInboxWork(workId),
+      );
       coordination.migrate();
       this.coordination = coordination;
       const runtime = this.runtimeFactory();
@@ -296,6 +314,9 @@ export class StandaloneService {
         }
       });
       runtime.onToolCall?.((call) => this.handleToolCall(call));
+      runtime.onConversationEvent?.((event) =>
+        this.receiveConversationEvent(event),
+      );
       runtime.onTerminalAnomaly?.((anomaly) => {
         const items = state.list();
         const matched =
@@ -385,6 +406,9 @@ export class StandaloneService {
           this.schedulerStore = undefined;
           this.scheduler = undefined;
           this.workspaces = undefined;
+          this.workspaceBindings = undefined;
+          this.clearConversationCaptures();
+          this.conversationHistory = undefined;
           this.state = undefined;
           try {
             this.db?.close();
@@ -408,6 +432,7 @@ export class StandaloneService {
     supervisor?.cancelObservations();
     const runtime = this.runtime;
     this.runtime = undefined;
+    this.clearConversationCaptures();
     let failure: unknown;
     try {
       if (runtime) await runtime.stop();
@@ -433,6 +458,8 @@ export class StandaloneService {
     this.routingCoordinators.clear();
     this.schedulerStore = undefined;
     this.workspaces = undefined;
+    this.workspaceBindings = undefined;
+    this.conversationHistory = undefined;
     this.activeByWorkId.clear();
     try {
       db?.close();
@@ -517,6 +544,8 @@ export class StandaloneService {
       this.state,
       this.routingAttempts,
       () => this.wakeScheduler(),
+      (taskId, assignmentId) =>
+        this.readConversationHistory(taskId, assignmentId),
     );
   }
 
@@ -813,7 +842,7 @@ export class StandaloneService {
     return undefined;
   }
 
-  private async wakeScheduler(): Promise<void> {
+  private async wakeScheduler(refusalRebindPass = 0): Promise<void> {
     const scheduler = this.scheduler;
     const store = this.schedulerStore;
     const domain = this.domainState;
@@ -843,6 +872,15 @@ export class StandaloneService {
     for (const delivery of coordination.queuedDeliveries())
       if (deliveryWorkCompleted(delivery))
         coordination.completeDeliveryBatch(delivery.deliveryWorkId);
+
+    const withdrawStaleRefusedDeliveries = (): number => {
+      let withdrawn = 0;
+      for (const delivery of coordination.queuedDeliveries())
+        if (coordination.withdrawStaleRefusedDelivery(delivery.deliveryWorkId))
+          withdrawn++;
+      return withdrawn;
+    };
+    withdrawStaleRefusedDeliveries();
 
     for (const completion of coordination.completionRequests()) {
       if (completion.status !== "pending") continue;
@@ -1172,13 +1210,45 @@ export class StandaloneService {
       try {
         assignment = domain.assignment(recipientAssignmentId);
       } catch {
-        continue;
+        const pendingLeadResult = coordination
+          .pendingEvents(recipientAssignmentId)
+          .find((event) => {
+            if (event.eventType !== "assignment-result" || !event.resultId)
+              return false;
+            const leadBinding = domain
+              .leadBindings()
+              .find(
+                (binding) =>
+                  binding.taskId === event.taskId &&
+                  binding.assignmentId === recipientAssignmentId,
+              );
+            if (!leadBinding) return false;
+            return coordination
+              .results(event.taskId)
+              .some(
+                (result) =>
+                  result.resultId === event.resultId &&
+                  result.recipientAssignmentId === recipientAssignmentId &&
+                  result.destinationDisposition === "delivered",
+              );
+          });
+        if (!pendingLeadResult) continue;
+        const leadAssignment = domain.ensureLeadAssignment(
+          pendingLeadResult.taskId,
+        );
+        if (
+          !leadAssignment ||
+          String(leadAssignment.id) !== recipientAssignmentId
+        )
+          continue;
+        assignment = leadAssignment;
       }
       const task = domain.task(String(assignment.taskId));
       if (
         (assignment.state !== "pending" && assignment.state !== "running") ||
         Number(task.ready) !== 1 ||
         task.state !== "open" ||
+        state.taskHold(String(assignment.taskId)) !== undefined ||
         state.assignmentHasUnfinishedExecution(recipientAssignmentId) ||
         store
           .list()
@@ -1187,7 +1257,8 @@ export class StandaloneService {
               item.assignmentId === recipientAssignmentId &&
               (item.state === "queued" ||
                 item.state === "active" ||
-                item.state === "held"),
+                item.state === "held") &&
+              !state.isNeverAdmittedRefusedInboxWork(item.workId),
           )
       )
         continue;
@@ -1256,6 +1327,8 @@ export class StandaloneService {
       );
     }
     await scheduler.wake();
+    if (refusalRebindPass === 0 && withdrawStaleRefusedDeliveries() > 0)
+      await this.wakeScheduler(1);
   }
 
   private assignmentPrompt(brief: string, delivery?: InboxDelivery): string {
@@ -1264,6 +1337,63 @@ export class StandaloneService {
       (event) => `- ${event.eventType}: ${event.payload}`,
     );
     return `${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
+  }
+
+  private executionPrompt(request: TurnRequest): string {
+    if (
+      request.kind !== "assignment" ||
+      request.taskId === null ||
+      request.projectId === null ||
+      request.assignmentId === null
+    )
+      return request.prompt;
+
+    const state = this.requireState();
+    const domain = this.domain();
+    const binding = state.taskBinding(request.workId);
+    if (
+      !binding ||
+      binding.taskId !== request.taskId ||
+      binding.assignmentId !== request.assignmentId
+    )
+      throw new Error(
+        "Assignment prompt is missing its exact execution binding",
+      );
+    const assignment = domain.assignment(binding.assignmentId);
+    const projectId = String(assignment.projectId);
+    if (
+      String(assignment.taskId) !== binding.taskId ||
+      projectId !== request.projectId
+    )
+      throw new Error("Assignment prompt binding no longer matches its task");
+
+    const leadBinding = domain
+      .leadBindings()
+      .find(
+        (item) =>
+          item.taskId === binding.taskId &&
+          item.projectId === projectId &&
+          item.assignmentId === binding.assignmentId,
+      );
+    const profileInstructions = String(
+      domain.profileRevision(
+        String(assignment.profileId),
+        binding.profileRevision,
+      ).instructions,
+    );
+    const projectInstructions = domain.instructionRevision(
+      projectId,
+      binding.instructionsRevision,
+    );
+    const roleContext = leadBinding
+      ? "Assignment role: project lead. You are accountable for coordinating this task, reviewing its results, and deciding whether to request completion."
+      : "Assignment role: project assignee. The project lead remains accountable for coordinating this task and reviewing its results before completion. Report your result and durable next action through Ensemble.";
+    return [
+      request.prompt,
+      roleContext,
+      `Captured project instructions (revision ${binding.instructionsRevision}):\n${projectInstructions || "(none)"}`,
+      `Captured profile instructions (revision ${binding.profileRevision}):\n${profileInstructions || "(none)"}`,
+    ].join("\n\n");
   }
 
   private async attemptRequest(request: TurnRequest): Promise<void> {
@@ -1459,6 +1589,8 @@ export class StandaloneService {
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
+    let captureThreadId: string | undefined;
+    let conversationCapture: ConversationHistoryCapture | undefined;
     try {
       let threadId: string;
       const tools =
@@ -1478,17 +1610,39 @@ export class StandaloneService {
       const threadBound = state.bindThread(intent.id, threadId);
       this.requireSupervisor().threadBound(request.workId, threadId);
       if (!threadBound) throw new Error("Thread binding was held or changed");
+      captureThreadId = threadId;
       if (state.get(intent.id).state !== "submitting")
         throw new Error("Execution admission was held");
+      conversationCapture = this.beginConversationCapture(
+        request,
+        workspace,
+        threadId,
+      );
       const turnId = await runtime.startTurn(
         threadId,
         workspace,
-        request.prompt,
+        this.executionPrompt(request),
       );
       const turnBound = state.bindTurn(intent.id, turnId);
       this.requireSupervisor().turnBound(request.workId, threadId, turnId);
-      if (!turnBound) throw new Error("Turn binding was held or changed");
+      if (!turnBound) {
+        conversationCapture?.discard();
+        if (conversationCapture)
+          this.removeConversationCapture(threadId, conversationCapture);
+        throw new Error("Turn binding was held or changed");
+      }
+      const exactBinding = this.safeConversationHistoryBinding(
+        state,
+        request.workId,
+        threadId,
+        turnId,
+      );
+      if (exactBinding) conversationCapture?.bind(exactBinding);
+      else conversationCapture?.discard();
       const outcome = await runtime.waitForTurn(threadId, turnId);
+      conversationCapture?.finish();
+      if (conversationCapture)
+        this.removeConversationCapture(threadId, conversationCapture);
       this.requireSupervisor().terminalObserved(
         request.workId,
         threadId,
@@ -1582,8 +1736,167 @@ export class StandaloneService {
           intent.id,
           `Runtime submission or observation uncertain: ${String(error)}`,
         );
+    } finally {
+      if (conversationCapture) {
+        conversationCapture.discard();
+        if (captureThreadId)
+          this.removeConversationCapture(captureThreadId, conversationCapture);
+      }
     }
     return state.get(intent.id);
+  }
+
+  private beginConversationCapture(
+    request: TurnRequest,
+    workspace: string,
+    threadId: string,
+  ): ConversationHistoryCapture | undefined {
+    try {
+      const history = this.conversationHistory;
+      const state = this.state;
+      if (!history || !state || !request.taskId) return undefined;
+      const binding = state.taskBinding(request.workId);
+      if (!binding || binding.taskId !== request.taskId) return undefined;
+      const capture = new ConversationHistoryCapture({
+        store: history,
+        workId: request.workId,
+        threadId,
+        captureStartExclusions: this.conversationExclusions(
+          binding,
+          workspace,
+          true,
+        ),
+        currentExclusions: () =>
+          this.conversationExclusions(binding, workspace, false),
+      });
+      const previous = this.conversationCaptures.get(threadId);
+      previous?.discard();
+      this.conversationCaptures.set(threadId, capture);
+      return capture;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private safeConversationHistoryBinding(
+    state: ExecutionState,
+    workId: string,
+    threadId: string,
+    turnId: string,
+  ) {
+    try {
+      return state.conversationHistoryBinding(workId, threadId, turnId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private receiveConversationEvent(event: RuntimeConversationEvent): void {
+    this.conversationCaptures.get(event.threadId)?.receive(event);
+  }
+
+  private removeConversationCapture(
+    threadId: string,
+    capture: ConversationHistoryCapture,
+  ): void {
+    if (this.conversationCaptures.get(threadId) === capture)
+      this.conversationCaptures.delete(threadId);
+  }
+
+  private clearConversationCaptures(): void {
+    for (const capture of this.conversationCaptures.values()) capture.discard();
+    this.conversationCaptures.clear();
+  }
+
+  private conversationExclusions(
+    binding: TaskExecutionBinding,
+    workspace: string,
+    captureStart: boolean,
+  ): readonly string[] | undefined {
+    return this.conversationExclusionsForAssignment(
+      binding.taskId,
+      binding.assignmentId,
+      captureStart
+        ? {
+            profileRevision: binding.profileRevision,
+            instructionsRevision: binding.instructionsRevision,
+          }
+        : undefined,
+      [workspace],
+    );
+  }
+
+  private readConversationHistory(
+    taskId: string,
+    assignmentId: string,
+  ): ConversationHistoryAssignmentRead {
+    const history = this.conversationHistory;
+    if (!history) throw new Error("Service is not started");
+    return history.readAssignment(
+      taskId,
+      assignmentId,
+      200,
+      this.conversationExclusionsForAssignment(taskId, assignmentId),
+    );
+  }
+
+  private conversationExclusionsForAssignment(
+    taskId: string,
+    assignmentId: string,
+    revisions?: { profileRevision: number; instructionsRevision: number },
+    additionalPaths: readonly string[] = [],
+  ): readonly string[] | undefined {
+    const domain = this.domainState;
+    if (!domain) return undefined;
+    try {
+      const assignment = domain.assignment(assignmentId);
+      if (String(assignment.taskId) !== taskId) return undefined;
+      const projectId = String(assignment.projectId);
+      const profileId = String(assignment.profileId);
+      const profileInstructions = revisions
+        ? domain.profileRevision(profileId, revisions.profileRevision)
+            .instructions
+        : domain.profile(profileId).instructions;
+      const project = domain.project(projectId);
+      const projectInstructions = domain.instructionRevision(
+        projectId,
+        revisions?.instructionsRevision ?? Number(project.instructionsRevision),
+      );
+      const reference = domain.routingCredentialReference(projectId);
+      const credential = reference?.startsWith("env:")
+        ? process.env[reference.slice("env:".length)]
+        : undefined;
+      const fixtureValues =
+        this.options.conversationHistoryExclusions?.() ?? [];
+      const workspace = this.workspaceBindings?.get(taskId);
+      const managedPaths = workspace
+        ? [
+            workspace.path,
+            ...workspace.repositories.flatMap((repository) => [
+              repository.sourcePath,
+              repository.workspacePath,
+              ...(repository.gitCommonDir ? [repository.gitCommonDir] : []),
+            ]),
+          ]
+        : [];
+      const canonicalDataDir = existsSync(this.dataDir)
+        ? realpathSync(this.dataDir)
+        : this.dataDir;
+      const values = [
+        String(profileInstructions ?? ""),
+        projectInstructions,
+        this.dataDir,
+        canonicalDataDir,
+        ...managedPaths,
+        ...additionalPaths,
+        ...(reference ? [reference] : []),
+        ...(credential ? [credential] : []),
+        ...fixtureValues,
+      ];
+      return values.filter((value) => value.length > 0);
+    } catch {
+      return undefined;
+    }
   }
 
   private validateDirectWorkspace(workspace: string): string {

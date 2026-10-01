@@ -1,13 +1,17 @@
 # ChatGPT and native Codex integration
 
-The 30 September 2026 decision is accepted in
-[ADR-1006](../adr/1006-chatgpt-and-native-codex.md). This document describes required
-behaviour and evidence gaps. Neither integration is implemented or qualified.
-GitHub issues under [#649](https://github.com/chrisbanes/ensemble/issues/649) own
+The 1 October 2026 amendment to
+[ADR-1006](../adr/1006-chatgpt-and-native-codex.md) defers X01–X05 after the standalone
+MVP and supersedes the original first-release requirement. Planning, probes and
+implementation are paused until Chris explicitly reopens the work and current
+APIs, requirements and dependencies are revalidated. This document retains future
+behaviour and evidence gaps. Neither integration is implemented or qualified;
+X01–X08 do not gate MVP release or cutover. GitHub issues under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734) own
 delivery sequencing and slice completion; this document is not a delivery plan.
 [Native feasibility #724](https://github.com/chrisbanes/ensemble/issues/724) owns
 the bounded proof; [integration qualification #728](https://github.com/chrisbanes/ensemble/issues/728)
-owns the assembled release evidence.
+owns the future assembled integration evidence.
 
 ## Operator experience
 
@@ -73,11 +77,13 @@ service integration. GitHub inbound discovery webhooks remain deferred.
 
 ## Native Codex tasks and ownership
 
-An Ensemble project can be explicitly linked to a saved Codex project. A task keeps
+Saved Codex project placement/linkage is optional under Chris's 1 October amendment.
+No saved-project create/list/select/assign API is required. A task keeps
 its Ensemble identity and main lead conversation; assignments bind to worker
 threads and may continue across replacement conversations. Preserve native host,
-project, thread and workspace identity without deriving policy from those IDs or
-unioning project permissions. Creating and following new tasks is in scope;
+thread and workspace identity, and host project identity when available, without
+deriving policy from those IDs or unioning project permissions. Creating and
+following new tasks is in scope;
 automatic import/adoption of historical native tasks is not.
 
 Present one main native task with linked, inspectable worker conversations. For
@@ -103,9 +109,10 @@ Its thread listing distinguishes appServer sources from the default interactive
 sources. Codex's project-aware app tools are host-mediated; their presence in an
 agent session does not establish a supported standalone API.
 
-The bounded native proof must create a new task in a disposable saved local project,
-verify actual project placement/opening and worker navigation, observe a harmless
-worktree change, exercise settled handover in both directions, and restart Ensemble
+When reopened, the bounded native proof must create a new task in a disposable
+local repository/worktree, verify actual native visibility/opening and worker
+navigation, observe a harmless worktree change, exercise settled handover in both
+directions, and restart Ensemble
 without duplicate launch. Record installed versions, integration entrypoints,
 identity, observed effects, failure/unproved rows and exact fixture cleanup. Do not
 modify production tasks, shared configuration/login or the installed Haze prototype.

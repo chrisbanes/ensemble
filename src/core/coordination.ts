@@ -319,12 +319,17 @@ export interface ReportingRepair {
 /** Durable result, receipt, inbox, and delivery state over the service SQLite DB. */
 export class CoordinationStore {
   private readonly domain: DomainStore;
+  private readonly isNeverAdmittedRefusedInboxWork:
+    | ((workId: string) => boolean)
+    | undefined;
 
   constructor(
     private readonly db: Database,
     domain?: DomainStore,
+    isNeverAdmittedRefusedInboxWork?: (workId: string) => boolean,
   ) {
     this.domain = domain ?? new DomainStore(db);
+    this.isNeverAdmittedRefusedInboxWork = isNeverAdmittedRefusedInboxWork;
   }
 
   migrate(): void {
@@ -2111,6 +2116,181 @@ export class CoordinationStore {
     }
   }
 
+  /** Withdraw only a queued inbox batch whose exact request was safely refused
+   * before admission and whose assignment has since been explicitly applied
+   * to the current project/profile instruction revisions. */
+  withdrawStaleRefusedDelivery(deliveryWorkId: string): boolean {
+    const workId = z.string().min(1).max(512).parse(deliveryWorkId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const batch = this.one(
+        `SELECT batch.batchId, batch.taskId, batch.recipientAssignmentId,
+          batch.assignmentVersion, batch.highWaterSequence, batch.state,
+          request.kind, request.taskId AS requestTaskId,
+          request.projectId AS requestProjectId,
+          request.assignmentId AS requestAssignmentId,
+          request.taskVersion AS requestTaskVersion,
+          request.assignmentVersion AS requestAssignmentVersion,
+          request.state AS requestState,
+          task.version AS taskVersion, task.state AS taskState,
+          assignment.projectId, assignment.profileId,
+          assignment.version AS currentAssignmentVersion,
+          assignment.instructionsRevision,
+          assignment.profileRevision,
+          assignment.state AS assignmentState,
+          project.instructionsRevision AS currentInstructionsRevision,
+          project.leadProfileId, profile.version AS currentProfileRevision,
+          profile.revoked, routing.candidateProfileIds
+        FROM coordination_delivery_batches batch
+        JOIN turn_requests request ON request.workId = batch.deliveryWorkId
+        JOIN domain_tasks task ON task.id = batch.taskId
+          JOIN domain_assignments assignment
+          ON assignment.id = batch.recipientAssignmentId
+            AND assignment.taskId = batch.taskId
+        JOIN domain_projects project ON project.id = assignment.projectId
+          AND task.projectId = project.id
+        JOIN profiles profile ON profile.id = assignment.profileId
+        JOIN project_routing routing ON routing.projectId = assignment.projectId
+        WHERE batch.deliveryWorkId = ?`,
+        workId,
+      ) as
+        | {
+            batchId: string;
+            taskId: string;
+            recipientAssignmentId: string;
+            assignmentVersion: number;
+            highWaterSequence: number;
+            state: string;
+            kind: string;
+            requestTaskId: string;
+            requestProjectId: string;
+            requestAssignmentId: string;
+            requestTaskVersion: number;
+            requestAssignmentVersion: number;
+            requestState: string;
+            taskVersion: number;
+            taskState: string;
+            projectId: string;
+            profileId: string;
+            currentAssignmentVersion: number;
+            instructionsRevision: number;
+            profileRevision: number;
+            assignmentState: string;
+            currentInstructionsRevision: number;
+            leadProfileId: string | null;
+            currentProfileRevision: number;
+            revoked: number;
+            candidateProfileIds: string;
+          }
+        | undefined;
+      if (
+        !batch ||
+        batch.state !== "queued" ||
+        batch.kind !== "assignment" ||
+        batch.taskId !== batch.requestTaskId ||
+        batch.projectId !== batch.requestProjectId ||
+        batch.recipientAssignmentId !== batch.requestAssignmentId ||
+        batch.assignmentVersion !== batch.requestAssignmentVersion ||
+        batch.requestState !== "held" ||
+        batch.currentAssignmentVersion <= batch.assignmentVersion ||
+        batch.taskState !== "open" ||
+        batch.taskVersion !== batch.requestTaskVersion ||
+        (batch.assignmentState !== "pending" &&
+          batch.assignmentState !== "running") ||
+        batch.instructionsRevision !== batch.currentInstructionsRevision ||
+        batch.profileRevision !== batch.currentProfileRevision ||
+        batch.revoked !== 0 ||
+        !this.isNeverAdmittedRefusedInboxWork?.(workId)
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+
+      if (
+        this.domain
+          .assignmentAdmission(String(batch.recipientAssignmentId))
+          .reasons.some((reason) => reason !== "project-paused")
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+
+      let candidateProfileIds: unknown;
+      try {
+        candidateProfileIds = JSON.parse(String(batch.candidateProfileIds));
+      } catch {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const permittedCandidates = z.array(uuid).safeParse(candidateProfileIds);
+      if (
+        !permittedCandidates.success ||
+        (batch.profileId !== batch.leadProfileId &&
+          !permittedCandidates.data.includes(String(batch.profileId))) ||
+        this.one(
+          `SELECT 1 AS held FROM task_writer_holds WHERE taskId = ?
+          UNION ALL SELECT 1 FROM task_writer_ambiguity_holds WHERE taskId = ?
+          UNION ALL SELECT 1 FROM task_archival_holds WHERE taskId = ? LIMIT 1`,
+          String(batch.taskId),
+          String(batch.taskId),
+          String(batch.taskId),
+        )
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+
+      const events = this.db
+        .prepare(`SELECT delivery.eventId, delivery.ordinal, event.sequence,
+          event.taskId, event.recipientAssignmentId
+        FROM coordination_delivery_events delivery
+        JOIN coordination_inbox_events event ON event.eventId = delivery.eventId
+        WHERE delivery.batchId = ? ORDER BY delivery.ordinal`)
+        .all(String(batch.batchId)) as Array<{
+        eventId: string;
+        ordinal: number;
+        sequence: number;
+        taskId: string;
+        recipientAssignmentId: string;
+      }>;
+      if (
+        events.length === 0 ||
+        events.some(
+          (event, index) =>
+            event.ordinal !== index + 1 ||
+            event.taskId !== batch.taskId ||
+            event.recipientAssignmentId !== batch.recipientAssignmentId ||
+            event.sequence > batch.highWaterSequence,
+        ) ||
+        Math.max(...events.map((event) => event.sequence)) !==
+          batch.highWaterSequence
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+
+      this.db
+        .prepare("DELETE FROM coordination_delivery_events WHERE batchId = ?")
+        .run(String(batch.batchId));
+      this.db
+        .prepare(
+          "DELETE FROM coordination_delivery_batches WHERE batchId = ? AND state = 'queued'",
+        )
+        .run(String(batch.batchId));
+      const remains = this.one(
+        "SELECT 1 AS present FROM coordination_delivery_batches WHERE batchId = ?",
+        String(batch.batchId),
+      );
+      if (remains)
+        throw new Error("Refused delivery batch changed during withdrawal");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private currentBinding(threadId: string, turnId: string): Row | undefined {
     const rows = this.db
       .prepare(`SELECT binding.taskId, task.version AS taskVersion,
@@ -2690,13 +2870,15 @@ export class CoordinationStore {
       )
     )
       reasons.push("queued-inbox-delivery");
-    if (
-      this.one(
-        `SELECT 1 AS active FROM execution_intents intent
+    const unfinishedWork = this.db
+      .prepare(`SELECT intent.workId FROM execution_intents intent
       JOIN task_execution_bindings binding ON binding.workId = intent.workId
       WHERE binding.taskId = ? AND intent.state IN
-        ('ready','capacity-waiting','held','submitting','running') LIMIT 1`,
-        request.taskId,
+        ('ready','capacity-waiting','held','submitting','running')`)
+      .all(request.taskId) as Array<{ workId: string }>;
+    if (
+      unfinishedWork.some(
+        (item) => !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
       )
     )
       reasons.push("unfinished-execution");
@@ -2746,11 +2928,13 @@ export class CoordinationStore {
       this.one(`SELECT 1 AS queued FROM sqlite_master
       WHERE type = 'table' AND name = 'turn_requests'`)
     ) {
+      const unfinishedRequests = this.db
+        .prepare(`SELECT request.workId FROM turn_requests request
+        WHERE request.taskId = ? AND request.state IN ('queued','active','held')`)
+        .all(request.taskId) as Array<{ workId: string }>;
       if (
-        this.one(
-          `SELECT 1 AS queued FROM turn_requests request
-        WHERE request.taskId = ? AND request.state IN ('queued','active','held') LIMIT 1`,
-          request.taskId,
+        unfinishedRequests.some(
+          (item) => !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
         )
       )
         reasons.push("unfinished-turn-request");

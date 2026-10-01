@@ -151,7 +151,7 @@ export class LocalOperatorUi {
     const credentialReferenceStatus = routing.credentialAvailable
       ? "credential reference configured"
       : "credential reference not configured";
-    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}</main>`;
+    return `<main><h1>${escapeHtml(project.name)}</h1><p>${project.paused ? "Paused" : "Active"}. Lead profile ${escapeHtml(project.leadProfileId ?? "unconfigured")}. Instructions revision ${escapeHtml(project.instructionsRevision)}.</p><h2>Tasks</h2><ul>${tasks}</ul>${form("task.create", field("projectId", projectId, "hidden") + field("title") + textarea("outcome") + field("ready", "1", "checkbox", false, "Create and start (mark Ready)"), "taskId", csrfToken)}<h2>Project configuration</h2>${form("project.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(project.version), "hidden") + field("instructionsRevision", String(project.instructionsRevision), "hidden") + field("name", String(project.name)) + selectField("leadProfileId", leadOptions, String(project.leadProfileId ?? "")) + textarea("instructions", String(project.instructions)) + field("paused", "1", "checkbox", Boolean(project.paused)), undefined, csrfToken)}<h2>Routing</h2><p>${routing.enabled ? "Enabled" : "Disabled"}; ${credentialReferenceStatus}</p>${form("routing.configure", field("projectId", projectId, "hidden") + field("expectedVersion", String(routing.version), "hidden") + field("enabled", "1", "checkbox", Boolean(routing.enabled)) + textarea("guidance", String(routing.guidance)) + field("credentialRef") + field("clearCredentialRef", "1", "checkbox") + textarea("candidateProfileIds", candidateProfileIds), undefined, csrfToken)}</main>`;
   }
 
   task(taskId: string, csrfToken = ""): string {
@@ -202,21 +202,32 @@ export class LocalOperatorUi {
           leadProfileId: fields.leadProfileId || null,
         };
         break;
-      case "project.configure":
+      case "project.configure": {
+        const projectId = required("projectId");
+        const instructions = fields.instructions;
+        const capturedRevision = Number(fields.instructionsRevision);
+        const capturedInstructions =
+          Number.isSafeInteger(capturedRevision) && capturedRevision > 0
+            ? this.store.instructionRevision(projectId, capturedRevision)
+            : undefined;
         command = {
           ...common,
           type: "project.configure",
-          projectId: required("projectId"),
+          projectId,
           expectedVersion: version(),
           name: required("name"),
           leadProfileId:
             fields.leadProfileId === undefined
               ? undefined
               : fields.leadProfileId || null,
-          instructions: fields.instructions ?? "",
+          ...(instructions === undefined ||
+          instructions === capturedInstructions
+            ? {}
+            : { instructions }),
           paused: fields.paused === "1",
         };
         break;
+      }
       case "task.create":
         command = {
           ...common,

@@ -1,186 +1,132 @@
+![Colourful abstract shapes coming together as an ensemble.](docs/assets/ensemble-hero.png)
+
 # Ensemble
 
-Ensemble is being built as a standalone service for agents working on project-scoped
-tasks. **BB is no longer part of the target architecture.** Ensemble will own
-scheduling, execution supervision, task workspaces and its operator interface,
-alongside durable tasks, assignments, results and recovery.
+**Delegate the task. Keep the bigger picture.**
 
-Project leads are accountable for task outcomes, with separate conversations per
-task. Optional service-driven TypeSafe routing selects assignment assignees using
-profile capabilities and project guidance; uncertainty returns to the lead.
-Agents decide how work proceeds through instructions and coordination tools;
-Ensemble enforces ownership, admission and permissions. Projects have reusable
-profiles, local tasks and optional GitHub sources. There is no configured process
-graph or separate persistent-bot model.
+Ensemble is being built to coordinate a team of agents across your projects.
+Give a task to a project lead, let it organise the work, and keep track of the
+results and decisions that need you. Your instructions shape how the agents
+work; Ensemble keeps track of who's responsible and what happens next.
 
-## Current status
+> **In development.** The service and operator UI exist, but the complete
+> task-to-delivery journey is still being built and qualified. This isn't a
+> ready-to-install release yet.
 
-The repository contains a TypeScript/SQLite coordination core in `src/core` and
-a standalone service with a durable turn scheduler and execution supervisor in
-`src/standalone`. The S03b service slice implements shared writer/capacity
-admission, capacity-waiting, bounded Stop observation, conservative restart
-reconciliation, exact recovery receipts, narrow retry accounting and a macOS
-sleep/wake admission gate. S04b adds task-scoped coordination tools and durable
-results, recipient inboxes, operator attention/interactions, same-assignment
-follow-up revisions, revision-bound lead completion, bounded routing provenance,
-and a typed task-scoped coordination view. Deterministic service tests cover
-restart and capacity-one delivery. `test/s04b/local-view.mjs` is a disposable,
-read-only integration probe, not a production operator route. The explicit live
-Codex probe separately checks registered tools after service/App Server restart;
-the [bounded live evidence](docs/evidence/s04b-live-runtime-2026-09-29.md)
-qualifies the observed resumed-thread coordination callbacks, not universal
-reattachment. The BB plugin, packaging and integration harness have been removed.
-Issue #694 now adds authenticated runtime and task-scoped coordination pages to
-the production operator command. The operator can inspect capacity, assignments,
-dependencies, instruction revisions, interactions, results and recovery state;
-keyed controls configure capacity, dependencies and next-turn instructions,
-answer questions, make exact-material approval decisions, reconcile result
-destinations, queue next-turn messages, and request best-effort Stop or Resume.
-The pages disclose that broad host-permitted reads remain enabled and never
-claim a Stop or elapsed wait proves effects ended. The built-in routes use the
-same login, exact-Origin, CSRF, malformed-input and response-header boundary as
-the existing operator pages. See the [S04d integration boundary](docs/design/s04d-operator-integration.md).
+[Follow the roadmap](https://github.com/chrisbanes/ensemble/issues/649) ·
+[Current status](#where-it-stands) · [Development](#development)
 
-The bounded [real-runtime operator proof](docs/evidence/s04d-operator-2026-09-30.md)
-observed an actual Codex coordination callback through Chromium, then verified
-Stop/writer holds and retained history after service/App Server restart. The
-bounded same-host private HTTPS proof through an approved disposable Tailscale
-route has passed; it verifies the private route and browser boundary from the
-fixture host, not independent-device reachability or S05 acceptance. The full
-assignment router and S05 physical sleep/wake qualification remain pending. The
-[S04c boundary](docs/design/s04c-operator-ui.md) records the earlier #703
-foundation and limits. The installed Haze prototype stays in place until the
-reviewed operational cutover.
-S08a adds offline generic SQLite backup/restore commands and a separate
-operations CLI, plus a private per-user LaunchAgent renderer. Its exact
-reconciliation receipt/admission journey remains deterministic T4 evidence;
-the bounded T5 launchd journey preserves a paused project and unready task
-across start/restart/backup/restore without admitting work. Neither is final
-schema/external-effect recovery, production deployment or cutover evidence.
-See the [macOS operations procedure](docs/operations/standalone-macos.md) and
-[S08a evidence](docs/evidence/s08a-operations-2026-09-30.md).
+## Give it an outcome
 
-## Planning checkpoint
+The intended experience starts with a task, such as:
 
-Chris reviewed and confirmed the standalone product scope, design choices,
-acceptance plan and delivery sequence on 27 September 2026.
-First prove a real execution runtime's admission, cancellation and recovery boundary;
-then build the complete local-task journey, followed by GitHub integration.
-The reviewed choices are Codex with the existing login, macOS first, and a web
-interface over Tailscale with a separate Ensemble login. Start with a fresh database.
-Chris approved the minimum S01 Codex App Server contract on 28 September: qualify
-authenticated execution and durable coordination feasibility, with best-effort
-cancellation, cooperative successful handoff and conservative uncertainty holds.
-Strict outside-read denial and complete descendant containment are separate choices;
-the [default policy](docs/design/standalone.md#default-execution-policy) discloses broad
-reads and runtime limits. S01 was accepted with recorded limits; the service reuses Codex for execution.
-The same-day routing amendment adds optional TypeSafe assignment routing to the
-first release and defers a separate task-owner role. TypeSafe uses separately
-configured API credentials and explicit project opt-in.
+> “Add keyboard navigation to the settings screen. Follow the project's
+> accessibility conventions and have the changes reviewed.”
 
-On 30 September Chris confirmed optional ChatGPT daily operations, subscribed
-attention/completion events and native Codex task visibility/handover as first-release
-scope for individual self-hosters. Ensemble remains independently usable. Native
-Codex integration first requires a disposable feasibility proof; failure returns
-evidence and scope for review. These capabilities are not implemented. See
+The project lead would organise the work, delegate assignments and bring the
+results together. Independent assignments could run concurrently. A reviewer
+could ask for revisions. A decision needing your input would appear in the
+operator interface, alongside the work it belongs to.
+
+The lead stays accountable for the outcome. Planning, implementation and review
+come from the agents' instructions, so each project can have its own way of
+working.
+
+## A team with a shared memory of the work
+
+Ensemble's design centres on a few things that become important once several
+agents are working at once:
+
+- **Projects with their own context.** Keep tasks, repositories, agent profiles,
+  instructions and permissions together. Coordinate multiple projects through
+  one service.
+- **Assignments that outlast a chat.** Retain ownership, follow-ups and results
+  when an agent needs a new conversation. Keep the task's working files with
+  the task.
+- **Room for parallel work.** Let agents delegate independent assignments while
+  Ensemble manages shared execution capacity and access to task workspaces.
+- **A place for your attention.** See questions, approval requests, results and
+  recovery state in the operator UI, with the context needed to respond.
+
+## Why I'm building this
+
+Ensemble grew out of my `run-github-project` workflow. I'm building a standalone
+service to coordinate work across multiple projects, with project leads
+responsible for outcomes and a durable record of the work between agents.
+
+The development method belongs in the instructions I give those agents.
+Ensemble's job is to support their coordination and give me somewhere to see
+what's happening and step in when needed.
+
+## Where it stands
+
+The current implementation uses **TypeScript, Node.js and SQLite**, with
+**Codex App Server** executing agent turns. The first release targets macOS and
+a private web interface, using a separate Ensemble login.
+
+The repository already has durable scheduling, task coordination, results and
+inboxes, plus authenticated operator pages for inspecting work and responding
+to questions and approvals. It also includes offline database backup/restore
+commands and macOS service tooling. Automated tests and bounded live Codex and
+browser journeys exercise these foundations.
+
+Assignment pages now show captured assistant messages for the exact task,
+assignment and runtime turn. Only completed, sanitized text is retained;
+unfinished messages show progress metadata, and omitted text is labelled.
+Known private instructions, credential values and control paths are redacted
+before storage, with current exclusions reapplied when reading history. This is
+a bounded diagnostic view, not a complete transcript or ownership-release proof.
+Missing history does not change admission or completion gates.
+
+The full assignment router, GitHub integration and complete release
+qualification remain ahead. In particular, physical sleep/wake behaviour and
+access from an independent device still need qualification. Follow the
+[delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.
+The [S05 report](docs/evidence/s05-local-qualification.md) distinguishes completed
+bounded routing and journey checks from remaining milestone evidence.
+
+Ensemble relies on the execution runtime and host for isolation. Broad
+host-permitted reads remain enabled, and Stop is best-effort: unresolved work
+can remain held for reconciliation. See the
+[execution policy](docs/design/standalone.md#default-execution-policy) and
+[acceptance plan](docs/acceptance.md) for the boundaries and required evidence.
+The existing Haze prototype stays in place until a reviewed cutover.
+
+On 1 October Chris deferred optional ChatGPT daily operations/events and native
+Codex task visibility/handover until after the standalone MVP. Planning, probes and
+implementation are paused under [epic #734](https://github.com/chrisbanes/ensemble/issues/734)
+until Chris explicitly reopens the work. Ensemble's web UI and Codex App Server
+execution remain the MVP path; these deferred integrations do not gate release.
+Their requirements and unproved feasibility evidence are retained. See
 [ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md) and the
 [integration design](docs/design/chatgpt-and-native-codex.md).
 
 ## Development
 
-Use Node **24.21.0** (`.node-version`) and npm **12.1.0** (`package.json`):
+Use Node **24.21.0** and npm **12.1.0**, pinned in
+[`.node-version`](.node-version) and [`package.json`](package.json):
 
 ```sh
 npm ci
 npm run check
 ```
 
-`check` runs strict type checking, lint, formatting, compilation and tests,
-including deterministic S03b scheduler, supervision, recovery, power and
-service-integration fixtures, S04b coordination, routing, inbox, interaction and
-completion tests, and the operator auth, HTTP and Chromium browser tests. CI
-installs the pinned Chromium engine used by those browser tests. Real App Server
-qualification is separate and must be run explicitly with `npm run s03b:live`
-and `npm run s04b:live`; each harness requires its `--live` opt-in. These checks
-do not prove physical sleep/wake behavior, operational host-restart recovery or
-private remote Tailscale access.
+The checks cover types, lint, formatting, compilation and tests, including the
+operator's browser tests. Live runtime qualification is a separate, explicit
+step. See the [development reference](docs/development.md) for commands and
+service contracts, or the [macOS operations guide](docs/operations/standalone-macos.md)
+for authentication, service management and backups.
 
-The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
-`run` also takes `workId`, `prompt`, an existing absolute workspace directory,
-and optionally `previousWorkId` for a follow-up in a completed conversation.
-`serve` initializes the database and App Server, then waits for SIGINT or SIGTERM.
-Reusing a work ID never resubmits it. A held result requires independent
-reconciliation; there is no force unlock. Automatic retry is limited to an exact
-terminal `serverOverloaded` or `rateLimitExceeded` failure with known retry
-telemetry, settled effects, ended callbacks, and no Stop or known survivor. Codex
-and Ensemble retries share a two-retry limit; uncertain or other failures remain
-held.
-On first use, the directory must be empty or carry Ensemble's standalone marker.
-Startup can also recover an interrupted first start when the only files are an
-empty `.ensemble-owner.sqlite`, its SQLite journal if present, and an absent or
-partial marker whose contents match the beginning of the expected marker.
-Unrelated unmarked contents, including prototype data, remain refused.
-The service database is `standalone.sqlite`; `.ensemble-owner.sqlite` provides
-cross-process ownership of the marked directory.
-Initialize a separate operator password with
-`npm run operator-auth -- init ABSOLUTE_AUTH_FILE`, then set
-`ENSEMBLE_OPERATOR_AUTH_FILE` and `ENSEMBLE_OPERATOR_ORIGIN` before starting the
-`operator` command. Use the exact loopback origin (including port) for local
-access or an HTTPS origin for a separately managed private transport. Use a
-canonical origin without a trailing slash. The server still binds only to
-`127.0.0.1`; it does not configure Tailscale Serve.
-Sessions are in-memory and reset on restart. The [S04a boundary](docs/design/s04a-command-boundary.md)
-describes domain commands and admission records; [S04c](docs/design/s04c-operator-ui.md)
-describes the authenticated web boundary and current UI limits.
+## Read further
 
-`StandaloneService.provisionTask` durably binds a domain task to one retained
-workspace, including repository-free and multiple-repository tasks.
-`submitTask` resolves that binding and captured assignment revisions before
-writer admission. Capacity-waiting turns own neither a writer nor a reservation.
-A bound successful terminal report admits a successor only after registered
-Ensemble callbacks finish and no hold or known survivor remains. `stopTask`
-synchronously persists the Stop hold and returns a bounded observation; only
-`resumeTask` clears the independent Stop hold. Startup reconciliation observes
-exact execution identities and never replays an ambiguous generation. A validated
-recovery receipt releases only the exact generation's writer and capacity holds.
-`replaceConversation` keeps assignment snapshots while advancing its conversation
-revision, and `recordTaskResult` rejects early or stale results. `archiveTask`
-requires delivery and preservation evidence and refuses unresolved task work.
-These service contracts do not provide physical process containment. An untracked
-detached child may overlap a later writer after qualified normal success.
+- [Behavioural specification](docs/SPEC.md): the intended product experience.
+- [Standalone design](docs/design/standalone.md): how the service fits together.
+- [Architecture decisions](docs/adr/): the choices behind the design.
+- [Operator UI and evidence](docs/design/s04d-operator-integration.md): what the current interface supports and what's been tested.
+- [Glossary](CONTEXT.md): projects, tasks, assignments and conversations.
+- [Agent workflows](docs/agents/): repository contribution conventions.
 
-## Design documents
+## License
 
-The specification owns product behaviour, the design owns component boundaries,
-and the acceptance plan owns product evidence requirements. GitHub issues own
-delivery scope, sequencing, native dependencies, status and slice completion
-criteria; ADRs explain decisions. Current confirmed choices take precedence
-over historical documents. A reviewed requirement is not an implemented capability.
-
-- [ADR-1004](docs/adr/1004-standalone-service.md): accepted standalone direction and tradeoff.
-- [ADR-1005](docs/adr/1005-service-assignment-routing.md): service routing and project-lead accountability.
-- [ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md): optional ChatGPT operations and native Codex first-release scope.
-- [Assignment-routing design](docs/design/assignment-routing.md): selection, fallback and durable result destinations.
-- [S04b coordination boundary](docs/design/s04b-coordination-boundary.md): durable task coordination, completion and evidence boundaries.
-- [Behavioural specification](docs/SPEC.md): retained product semantics and local-task journey.
-- [Standalone design](docs/design/standalone.md): proposed ownership and execution boundaries.
-- [Acceptance plan](docs/acceptance.md): runtime proof and product release gates.
-- [Delivery backlog](https://github.com/chrisbanes/ensemble/issues/649): authoritative issues and native dependencies; [S01](https://github.com/chrisbanes/ensemble/issues/688) owns its bounded proof checklist.
-- [Glossary](CONTEXT.md): canonical language.
-- [Agent workflows](docs/agents/): contribution conventions.
-
-Historical references: [BB specification](docs/SPEC-bb.md), [BB design](docs/design/bb-plugin.md),
-[BB acceptance](docs/acceptance-bb.md), [BB delivery](docs/delivery-bb.md),
-[capability evidence](docs/bb-capabilities.md), and [prototype guide](docs/bb-prototype.md).
-These do not authorize new BB feature development. Earlier ADRs retain product
-policy except where explicitly superseded by ADR-1004.
-
-## Previous implementation and license
-
-The Rust pipeline implementation remains on `cb/pipeline-implementation` at `272adb7`.
-Its configuration and persisted runs are not compatibility requirements. Finish or
-explicitly retire existing work before operational cutover; retained records do not
-prove safe resumption on another runtime.
-
-Apache-2.0. See [LICENSE](LICENSE). Taskboard informs the UI design. Dependencies
-retain their own licenses.
+[Apache-2.0](LICENSE). Taskboard informs the UI design. Dependencies retain their
+own licences.

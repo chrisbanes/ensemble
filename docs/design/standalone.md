@@ -21,15 +21,17 @@ host-restart qualification also remain separate work. See the
 [ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
 assignment-routing and project-lead accountability decisions.
 
-## Integration amendment — 30 September 2026
+## Deferred integration amendment — 1 October 2026
 
-[ADR-1006](../adr/1006-chatgpt-and-native-codex.md) extends first-release scope to
-individual self-hosters with optional ChatGPT daily operations/events and native
-Codex task visibility plus explicit human handover/return. The existing private web
-UI remains independently usable. The optional plugin adds a narrow authenticated
-HTTPS MCP endpoint; runtime access, existing holds and reviewed cutover are unchanged.
-The [integration design](chatgpt-and-native-codex.md) records the native feasibility
-checkpoint and the boundary between accepted requirements and unproved APIs.
+[ADR-1006](../adr/1006-chatgpt-and-native-codex.md) retains optional ChatGPT daily
+operations/events and native Codex visibility/handover as post-MVP requirements.
+Chris paused X01–X05 on 1 October under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734); explicit reopening
+is required before further planning, probes or implementation. The MVP uses the
+private web UI and Codex App Server and does not wait for X01–X08. The future plugin
+would add a narrow authenticated HTTPS MCP endpoint; runtime access, existing
+holds and reviewed cutover remain unchanged. The
+[integration design](chatgpt-and-native-codex.md) preserves the feasibility gaps.
 
 ## Confirmed review decisions
 

@@ -1103,8 +1103,16 @@ test("capacity one yields a completed requester to its child and resumes it once
     runtime.release = childGate.promise;
     parentGate.resolve();
     assert.equal(await waitUntil(() => entered === 2), true);
-    assert.equal(runtime.prompts[0], "Parent turn");
-    assert.equal(runtime.prompts[1], "Child turn");
+    assert.equal(
+      runtime.prompts[0]?.split("\n\nAssignment role:")[0],
+      "Parent turn",
+    );
+    assert.equal(
+      runtime.prompts[1]?.split("\n\nAssignment role:")[0],
+      "Child turn",
+    );
+    assert.match(runtime.prompts[0] ?? "", /Assignment role: project assignee/);
+    assert.match(runtime.prompts[1] ?? "", /Assignment role: project assignee/);
     assert.equal(
       service.list().find((intent) => intent.workId === parentWorkId)?.state,
       "completed",
@@ -1141,11 +1149,10 @@ test("capacity one yields a completed requester to its child and resumes it once
     runtime.release = continuationGate.promise;
     childGate.resolve();
     assert.equal(await waitUntil(() => entered === 3), true);
-    assert.deepEqual(runtime.prompts, [
-      "Parent turn",
-      "Child turn",
-      "Parent continuation",
-    ]);
+    assert.deepEqual(
+      runtime.prompts.map((prompt) => prompt.split("\n\nAssignment role:")[0]),
+      ["Parent turn", "Child turn", "Parent continuation"],
+    );
     const wake = (
       service as unknown as { wakeScheduler(): Promise<void> }
     ).wakeScheduler.bind(service);

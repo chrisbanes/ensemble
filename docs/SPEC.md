@@ -67,10 +67,16 @@ items; readiness is separate. Jira, Linear, GitHub Enterprise, a plugin marketpl
 multiple execution machines, team/RBAC administration and migration of old live
 runs are outside the first release. Source interfaces follow concrete integrations.
 
-## ChatGPT and native Codex amendment — 30 September 2026
+## Deferred ChatGPT and native Codex integration — 1 October 2026
 
-Chris confirmed optional ChatGPT operations and native Codex tasks as first-release
-scope for individual macOS self-hosters. Ensemble remains independently usable.
+Chris deferred X01–X05 after the standalone MVP, superseding the 30 September
+first-release amendment and earlier native release-gate retention. Planning,
+feasibility probes and implementation are paused under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734) until explicit
+reopening and revalidation. X01–X08 do not gate MVP release or cutover; Codex App
+Server execution and the independently usable web UI remain in scope. The
+following paragraphs retain future integration requirements for individual
+macOS self-hosters.
 Both operator interfaces support daily creation/tracking, durable messages, answers
 and approvals; setup and recovery may remain in the web UI. ChatGPT receives only
 explicitly enabled projects' task data, results and interaction material, excluding
@@ -79,16 +85,17 @@ question and approval events explain outcomes or request input; they grant no wr
 authority. Self-hosters supply a narrow authenticated HTTPS MCP endpoint using guided
 setup; the operator UI and runtime remain private.
 
-New tasks should appear in saved native Codex projects as a main task with linked
-worker conversations. Repository tasks use retained Ensemble worktrees. Inspection
+New tasks should appear as a main native Codex task with linked worker conversations.
+Saved host project placement/linkage is optional; tasks belong to Ensemble projects.
+Repository tasks use retained Ensemble worktrees. Inspection
 is allowed without handover; native continuation requires explicit human control,
 holding further Ensemble task dispatch. Explicit return checks settled execution,
 workspace changes and existing admission/ownership holds. Idleness or acknowledgement
 cannot release those holds. Native API, visibility and handover feasibility must be
-proved before dependent implementation; failed proof returns evidence and release
+proved before future dependent implementation; failed proof returns evidence and integration
 scope for review instead of silently substituting managed threads.
 
-These are accepted requirements, not implemented capabilities. See
+These are deferred requirements, not implemented capabilities. See
 [ADR-1006](adr/1006-chatgpt-and-native-codex.md), the
 [integration design](design/chatgpt-and-native-codex.md) and
 [acceptance additions](acceptance.md#chatgpt-and-native-codex-acceptance).
@@ -298,9 +305,18 @@ Ensemble displays conversation history and accepts durable messages to the task-
 for the next eligible turn. They cannot bypass pause, stop or other admission
 controls. Live steering is deferred; stop is a separate control. Exact transcript
 and message transport is part of Codex App Server qualification.
+The implemented assignment view retains sanitized completed assistant text bound
+to the exact task, assignment, work and runtime turn, including its instruction
+and conversation revisions. Partial text is not persisted. The view labels
+unfinished or omitted items and limits the displayed item history; it is not a
+complete model/tool transcript. Known private instructions, declared credential
+references and values, and workspace/control paths are excluded before storage;
+current exclusions are also applied when reading history. If safe redaction is
+unavailable, text is omitted. Diagnostic capture failures and missing history
+cannot establish completion, release ownership or bypass an execution hold.
 The durable attention inbox is the notification source of truth; suppress unchanged
-alerts. OS/push delivery is optional; the 30 September amendment separately requires
-subscribed ChatGPT events for the optional plugin. Credentials must not
+alerts. OS/push delivery is optional. Subscribed ChatGPT events belong to the
+deferred post-MVP integration and are not an MVP release gate. Credentials must not
 appear in UI payloads or exposed transcripts. The current #703 authentication
 boundary is defined in [S04c](design/s04c-operator-ui.md); complete remote access
 and release qualification remain separate acceptance work.
