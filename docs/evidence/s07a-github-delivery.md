@@ -1,13 +1,16 @@
 # S07a GitHub delivery evidence
 
-Status: **implementation qualification pending**. Required live GitHub/service/
-existing-login Codex/operator journeys have not run. Root provisioned the approved
-bounded private fixture; no live execution manifest is frozen. The required private
-branch-protection operation and reconciled read returned HTTP 403: "Upgrade to GitHub
-Pro or make this repository public to enable this feature". This does not waive the
-required `s07a-ci` gate. A public fixture variant is prepared; changing visibility
-still requires an explicit supplemental grant and provider readback.
-Deterministic coverage and harness preparation do not complete #737.
+Status: **implementation qualification failed; recovery pending**. On 2 October
+2026 Chris approved publication of the synthetic fixture, at most 12 existing-login
+Codex turns, one fixture squash merge and bounded recorded cleanup. Provider
+readback confirmed the fixture repository public, its Project private, and real
+required `s07a-ci` protection with administrator enforcement. This resolves the
+earlier private-repository protection gate; it does not qualify either journey.
+Three turns ran, two with successful terminal evidence. The interrupted third
+turn remains held. The subsequent through-merge continuation started no additional
+turn and retained a request refused for stale captured revisions. No recovery hold
+was released, fixture merge performed or final local Done claimed. See the
+[live outcome report](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5952402402).
 
 The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
 against `46e9fc8de5ab0a527732d9c24d2f9c6d7b20fac6`. This inventory records
@@ -17,8 +20,48 @@ implementation evidence, not a parallel delivery plan.
 | --- | --- | --- |
 | 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
 | 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
-| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard | **Unrun / unproved; required** |
-| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent final review | Full pinned checks passed; **independent review/live identities pending** |
+| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; retained partial live evidence | **Failed / unqualified; recovery and final completion required** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair check 484/484 passed; **final live qualification remains pending** |
+
+## 2 October qualification and checkpoint repair
+
+The first real journey confirmed scoped progress, label and Project-field writes,
+PR readiness, denied handback merge authority, rejection of wrong approval material,
+denial followed by a new exact approval, and the approved PR title edit. One review
+feedback comment was posted and observed. Handback acceptance has a durable
+settlement receipt, which must not be replayed. Final completion is unproved.
+
+The harness incorrectly checked `intent.taskId`, a field absent from execution
+intents. Its idle predicate therefore permitted a restart before the third turn's
+terminal. The repair joins task turn requests to executions by work ID and requires
+both completed request and completed execution state before a waiting checkpoint.
+Queued, active, held, missing and mismatched work cannot pass. The regression first
+failed for the missing helper, then passed; the pinned full check passed 484/484.
+Independent review cleared this repair and the bounded continuation.
+
+The one continuation used the original database, operation identities and grant,
+counted all three prior turns, recorded the attempt before startup, and reserved
+each potential new turn before submission. It skipped every completed handback
+step and restricted remote effects and cleanup to the untouched through-merge
+journey. Startup refused that journey's retained request for changed captured
+material before any turn began. It remains held; no new fixture effect or merge
+was confirmed. Original evidence and handback records remain intact. All created
+App Server processes have verified exact-identity cleanup. Remote cleanup remains
+unproved and the fixture is retained.
+
+These are qualification failures, not permission or completion waivers. Missing
+successful terminal evidence and stale request refusal require the existing
+independent recovery and revision rules. Remaining turn allowance alone does not
+authorize replay, hold release or inference of success. Downstream native
+dependencies remain gated.
+
+## Historical preparation (1 October 2026)
+
+The remaining paragraphs preserve the original preparation and repair evidence.
+Their unrun journeys, pending publication/visibility authority, earlier test counts
+and pending CI describe that historical candidate. They do not describe the
+2 October live attempts or the current repair PR; the current dispositions are
+recorded above.
 
 The first policy/store cycle failed for absent new modules and then passed. The
 fresh-head settlement/completion and same-aggregate comment feedback tests failed
@@ -27,7 +70,8 @@ and conditional conversation checks also failed before their repair. The harness
 helper build failed with its missing module, then its provider-free tests passed.
 A startup cleanup regression failed with retained delivery state after closed-DB
 startup failure, then passed after cleanup; retry starts from a clean service state.
-No live red run was attempted because it would create real effects.
+During the original preparation, no live red run was attempted because it would
+create real effects. The separately approved 2 October attempts are recorded above.
 
 Targeted tests cover durable denied replay after policy expansion, immutable keys,
 Project/repository/option scope, bound transport spoofing, use-time revocation,
