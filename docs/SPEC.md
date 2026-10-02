@@ -485,3 +485,17 @@ Codex protocol qualification, service lifecycle, authentication, scheduling
 fairness and concrete schema/lifecycle contracts still need design and evidence. Historical
 BB failures motivate the new proof cases; they do not establish that standalone
 execution already satisfies them.
+
+## React foundation implementation status
+
+Delivery [UI02 #740](https://github.com/chrisbanes/ensemble/issues/740) adds the
+staged React `/app` shell, same-origin validated APIs, existing session/security
+boundary, durable command receipts and retained-control navigation. Its scope
+and evidence are recorded in the [foundation contract](design/ui02-foundation.md)
+and [foundation evidence](evidence/ui02-foundation.md).
+
+This delivery name is distinct from the existing **UI02 native-question runtime
+acceptance scenario**. That scenario remains unproved; no native availability is
+claimed. UI01/UI03–UI07 screens, runtime-question integration and parent #736
+final acceptance remain separate. Existing controls stay available. This
+foundation does not authorize deployment or cutover.

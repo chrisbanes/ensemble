@@ -1,3 +1,6 @@
+import { fileURLToPath } from "node:url";
+import { OperatorApi } from "./operator-api.js";
+import { OperatorWebBundle, OperatorWebBoundary } from "./operator-web.js";
 import { StandaloneService } from "./service.js";
 import { LocalOperatorHttp, LocalOperatorUi } from "./operator.js";
 import { OperatorAuth } from "./operator-auth.js";
@@ -52,6 +55,9 @@ try {
         (projectId) => service.routingAvailability(projectId),
       ),
     );
+    const bundle = await OperatorWebBundle.open(
+      fileURLToPath(new URL("../../operator", import.meta.url)),
+    );
     const ui = new LocalOperatorHttp(
       new LocalOperatorUi(
         service.domain(),
@@ -60,10 +66,19 @@ try {
         () => service.refreshGitHub(),
       ),
       operatorAuth,
-      { routes },
+      {
+        routes,
+        web: new OperatorWebBoundary(
+          bundle,
+          new OperatorApi(service, [
+            dataDir,
+            process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+          ]),
+        ),
+      },
     );
     await ui.start(args[0] ? Number(args[0]) : 8787);
-    process.stdout.write(`${operatorAuth?.origin}/\n`);
+    process.stdout.write(`${operatorAuth?.origin}/app\n`);
     try {
       await new Promise<void>((resolve) => {
         process.once("SIGINT", resolve);
