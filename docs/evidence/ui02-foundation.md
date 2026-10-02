@@ -172,3 +172,41 @@ viewports described above. The previous screenshot evidence is preserved.
 The fixture/browser teardown implementation is unchanged and its explicit
 teardown probe remains applicable. No real runtime/model turn or remote write
 was performed during repair.
+
+## Global retained-revision privacy repair
+
+A subsequent public workspace probe demonstrated that global labels could
+still contain an old private profile instruction without a task binding.
+Three public-seam regressions failed before correction (0 passed, 3 failed),
+including strengthened admitted-generation label coverage, unbound global
+profile/project labels and excessive revision counters. Their log is
+`/private/tmp/ensemble-ui02-global-red.log`.
+
+Workspace, project, task, history and approval projections now share a global
+context containing every retained profile/project instruction revision,
+current configured credential references/values and repository paths. Existing
+domain revision APIs perform at most 128 revision lookups per context; invalid
+counts, missing rows or exhausted budget fail closed. Identity/version/state
+fields remain available while unsafe prose and approval material become
+unavailable. Workspace profiles are covered even when there are no projects.
+Task workspace paths remain scoped. Bounded captured request/recovery/history
+checks validate that exact revisions are covered, rather than silently ignoring
+an inconsistent binding; history preserves its identity/revision and records
+the existing `redaction-unavailable` omission. Redundant private snapshot loads
+are removed. No new core interface, policy engine or sanitizer is introduced.
+
+The focused API/contracts/HTTP/integration and existing coordination suite
+passed **31/31**, retained at `/private/tmp/ensemble-ui02-global-green.log`.
+The global regressions also verify old project/profile labels after apply,
+private approval material, service reopen, no-project profile labels and zero
+lookups for an excessive counter. The prior denial/replay/history/omission
+cases remain in the suite. This is an implementation gap repair within the
+approved privacy contract, not another plan-mismatch cycle.
+
+The final global privacy check passed **347/347**, with zero failures,
+cancellations or skips, strict types/formatting/builds and the same four baseline
+lint warnings. The log is `/private/tmp/ensemble-ui02-global-full-check.log`.
+Chromium reran unchanged UI/client/design code and retained screenshots at
+`/private/tmp/ensemble-ui02-evidence-36593`; earlier screenshot directories are
+preserved. Fixture teardown code and the explicit teardown proof are unchanged.
+`git diff --check` passed. No actual model/runtime turn or remote write occurred.

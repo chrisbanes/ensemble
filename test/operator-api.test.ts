@@ -812,6 +812,7 @@ test("admitted and historical instruction snapshots stay private after configure
     projectId: ids.projectId,
     expectedVersion: Number(d.project(ids.projectId).version),
     instructions: "NEW PROJECT INSTRUCTIONS",
+    name: old.project,
   });
   d.execute({
     type: "profile.configure",
@@ -820,6 +821,7 @@ test("admitted and historical instruction snapshots stay private after configure
     profileId: ids.profileId,
     expectedVersion: 1,
     instructions: "NEW PROFILE INSTRUCTIONS",
+    name: old.profile,
   });
   await api.execute({
     type: "assignment.apply",
@@ -842,12 +844,99 @@ test("admitted and historical instruction snapshots stay private after configure
   assert.doesNotMatch(JSON.stringify(read), /OLD PRIVATE/);
   assert.equal(read.data.approvals[0]?.materialUnavailable, true);
   assert.equal(read.data.approvals[0]?.approvable, false);
+  assert.doesNotMatch(JSON.stringify(await api.readWorkspace()), /OLD PRIVATE/);
+  assert.doesNotMatch(
+    JSON.stringify(await api.readProject(ids.projectId)),
+    /OLD PRIVATE/,
+  );
   await f.service.stop();
   await f.service.start();
   assert.doesNotMatch(
     JSON.stringify(await api.readTask(ids.taskId)),
     /OLD PRIVATE/,
   );
+});
+
+test("global labels exclude retained private revisions without any task or project binding", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f),
+    d = f.service.domain();
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 1,
+    instructions: "UNBOUND OLD PROJECT SNAPSHOT",
+  });
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 2,
+    name: "UNBOUND OLD PROJECT SNAPSHOT",
+    instructions: "CURRENT PROJECT SNAPSHOT",
+  });
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    name: "PRIVATE INSTRUCTIONS",
+    instructions: "CURRENT PROFILE SNAPSHOT",
+  });
+  const api = new OperatorApi(f.service);
+  const workspace = await api.readWorkspace(),
+    project = await api.readProject(ids.projectId);
+  assert.doesNotMatch(
+    JSON.stringify({ workspace, project }),
+    /PRIVATE INSTRUCTIONS|UNBOUND OLD PROJECT SNAPSHOT/,
+  );
+  assert.equal(workspace.data.profiles[0]?.id, ids.profileId);
+  assert.equal(workspace.data.profiles[0]?.version, 2);
+  const domain = {
+    profiles: () => d.profiles(),
+    profile: d.profile.bind(d),
+    profileRevision: d.profileRevision.bind(d),
+    projects: () => [],
+  };
+  const isolated = new OperatorApi({
+    domain: () => domain,
+  } as unknown as ConstructorParameters<typeof OperatorApi>[0]);
+  assert.doesNotMatch(
+    JSON.stringify(await isolated.readWorkspace()),
+    /PRIVATE INSTRUCTIONS/,
+  );
+});
+
+test("global snapshot privacy fails closed before excessive revision lookup work", async () => {
+  const profileId = randomUUID();
+  let lookups = 0;
+  const domain = {
+    projects: () => [],
+    profiles: () => [
+      {
+        id: profileId,
+        name: "UNSAFE NAME",
+        version: 1_000_000_000,
+        revoked: 0,
+      },
+    ],
+    profileRevision: () => {
+      lookups++;
+      return { instructions: "PRIVATE" };
+    },
+  };
+  const api = new OperatorApi({
+    domain: () => domain,
+  } as unknown as ConstructorParameters<typeof OperatorApi>[0]);
+  const read = await api.readWorkspace();
+  assert.equal(read.data.profiles[0]?.name, null);
+  assert.equal(read.data.profiles[0]?.id, profileId);
+  assert.equal(lookups, 0);
 });
 
 test("project task summaries share task workspace and repository exclusions", async (t) => {
@@ -982,6 +1071,36 @@ test("history supplements captured privacy with external auth and GitHub values 
     unavailable.data.items.find((i) => i.itemId === "private-history")
       ?.omissionReason,
     "redaction-unavailable",
+  );
+  f.seedPersistedState((db) => {
+    new ConversationHistoryStore(db).record(
+      { ...binding, profileRevision: 999 },
+      {
+        kind: "completed",
+        threadId: work.threadId ?? "",
+        turnId: work.turnId ?? "",
+        itemId: "inconsistent-revision",
+        text: "Unverified snapshot prose",
+      },
+      [],
+    );
+  });
+  const inconsistent = await new OperatorApi(f.service, [
+    authPath,
+  ]).readAssignmentHistory(String(a.id));
+  assert.equal(
+    inconsistent.data.items.find((i) => i.itemId === "inconsistent-revision")
+      ?.profileRevision,
+    999,
+  );
+  assert.equal(
+    inconsistent.data.items.find((i) => i.itemId === "inconsistent-revision")
+      ?.omissionReason,
+    "redaction-unavailable",
+  );
+  assert.equal(
+    inconsistent.data.items.find((i) => i.itemId === "private-history")?.text,
+    null,
   );
 });
 

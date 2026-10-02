@@ -84,61 +84,93 @@ export class OperatorApi {
     throw new OperatorApiError(404, "not-found");
   }
   private async exclusions(
-    projectId: string,
+    projectId?: string,
     taskId?: string,
     historyBindings: readonly ConversationHistoryBinding[] = [],
   ): Promise<string[] | undefined> {
     try {
       const d = this.domain(),
-        p = d.project(projectId),
-        g = d.githubConfiguration(projectId);
-      const values = [
-        ...this.controlPaths,
-        String(p.instructions),
-        ...d
-          .profiles()
-          .map((profile) => String(d.profile(String(profile.id)).instructions)),
-      ];
-      for (const ref of [
-        d.routingCredentialReference(projectId),
-        g.credentialRef,
-      ])
-        if (ref) {
-          values.push(ref);
-          const value = process.env[ref.slice(4)];
-          if (value) values.push(value);
+        profiles = d.profiles(),
+        projects = d.projects();
+      const values = [...this.controlPaths],
+        covered = new Set<string>();
+      // Bound retained-revision lookups before iterating persisted counters.
+      let remaining = 128;
+      if (profiles.length + projects.length > remaining) return undefined;
+      for (const profile of profiles) {
+        const count = Number(profile.version);
+        if (!Number.isSafeInteger(count) || count < 1 || count > remaining)
+          return undefined;
+        remaining -= count;
+        for (let revision = 1; revision <= count; revision++) {
+          values.push(
+            String(
+              d.profileRevision(String(profile.id), revision).instructions,
+            ),
+          );
+          covered.add(`profile:${profile.id}:${revision}`);
         }
-      for (const repo of g.repositories)
-        values.push(repo.path, repo.gitCommonDirectory);
+      }
+      for (const project of projects) {
+        const id = String(project.id),
+          count = Number(project.instructionsRevision);
+        if (!Number.isSafeInteger(count) || count < 1 || count > remaining)
+          return undefined;
+        remaining -= count;
+        for (let revision = 1; revision <= count; revision++) {
+          values.push(d.instructionRevision(id, revision));
+          covered.add(`project:${id}:${revision}`);
+        }
+        const g = d.githubConfiguration(id);
+        for (const ref of [d.routingCredentialReference(id), g.credentialRef])
+          if (ref) {
+            values.push(ref);
+            const value = process.env[ref.slice(4)];
+            if (value) values.push(value);
+          }
+        if (g.repositories.length > 128) return undefined;
+        for (const repo of g.repositories)
+          values.push(repo.path, repo.gitCommonDirectory);
+      }
       if (taskId) {
+        const requests = this.service.turnRequests(),
+          recovery = this.service.recoveryView(),
+          assignments = d.assignments(taskId);
+        if (
+          requests.length > 128 ||
+          recovery.length > 128 ||
+          assignments.length > 128 ||
+          historyBindings.length > 400
+        )
+          return undefined;
         const retained = [
-          ...this.service.turnRequests().filter((r) => r.taskId === taskId),
-          ...this.service
-            .recoveryView()
-            .flatMap((r) => (r.binding?.taskId === taskId ? [r.binding] : [])),
+          ...requests.filter((r) => r.taskId === taskId),
+          ...recovery.flatMap((r) =>
+            r.binding?.taskId === taskId ? [r.binding] : [],
+          ),
           ...historyBindings,
         ];
-        for (const a of d.assignments(taskId)) {
+        const assignmentIds = new Set(assignments.map((a) => String(a.id)));
+        if (
+          retained.some(
+            (r) =>
+              r.assignmentId === null || !assignmentIds.has(r.assignmentId),
+          )
+        )
+          return undefined;
+        for (const a of assignments) {
           for (const snapshot of [
             a,
             ...retained.filter((r) => r.assignmentId === a.id),
           ]) {
+            // Missing or inconsistent captured revisions cannot be ignored.
             if (
-              snapshot.instructionsRevision !== null &&
-              snapshot.profileRevision !== null
+              !covered.has(
+                `project:${projectId}:${snapshot.instructionsRevision}`,
+              ) ||
+              !covered.has(`profile:${a.profileId}:${snapshot.profileRevision}`)
             )
-              values.push(
-                d.instructionRevision(
-                  projectId,
-                  Number(snapshot.instructionsRevision),
-                ),
-                String(
-                  d.profileRevision(
-                    String(a.profileId),
-                    Number(snapshot.profileRevision),
-                  ).instructions,
-                ),
-              );
+              return undefined;
           }
         }
         const workspace = await this.service.taskWorkspace(taskId);
@@ -168,10 +200,10 @@ export class OperatorApi {
       ? (sanitizeConversationText(prose, excluded) ?? null)
       : null;
   }
-  private async project(row: Row) {
+  private project(row: Row, excluded: readonly string[] | undefined) {
     return {
       id: String(row.id),
-      name: this.safe(row.name, await this.exclusions(String(row.id))),
+      name: this.safe(row.name, excluded),
       version: Number(row.version),
       paused: Boolean(row.paused),
       leadProfileId:
@@ -189,21 +221,12 @@ export class OperatorApi {
       }));
   }
   async readWorkspace() {
-    const exclusions = await Promise.all(
-      this.domain()
-        .projects()
-        .map((p) => this.exclusions(String(p.id))),
-    );
-    const excluded = exclusions.every((v) => v !== undefined)
-      ? exclusions.flatMap((v) => v ?? [])
-      : undefined;
+    const excluded = await this.exclusions();
     return workspaceSchema.parse({
       data: {
-        projects: await Promise.all(
-          this.domain()
-            .projects()
-            .map((p) => this.project(p)),
-        ),
+        projects: this.domain()
+          .projects()
+          .map((p) => this.project(p, excluded)),
         profiles: this.profiles(excluded),
       },
       observedAt: Date.now(),
@@ -326,7 +349,7 @@ export class OperatorApi {
       excluded = await this.exclusions(projectId);
     return projectSchema.parse({
       data: {
-        project: await this.project(p),
+        project: this.project(p, excluded),
         profiles: this.profiles(excluded),
         tasks: await Promise.all(
           this.domain()
