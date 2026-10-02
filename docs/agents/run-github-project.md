@@ -34,8 +34,8 @@ implementing the retired BB path. This note does not change remote Project state
 - Field ID: `PVTSSF_lAHOAAN4ns4BatgHzhVjFtY`
 - Backlog name: `Backlog`
 - Backlog option ID: `f75ad846`
-- Planning name: `Planning`
-- Planning option ID: `cc2b7773`
+- Todo name: `Todo`
+- Todo option ID: `cc2b7773`
 - Ready to implement name: `Ready to implement`
 - Ready to implement option ID: `0732c167`
 - In progress name: `In progress`
