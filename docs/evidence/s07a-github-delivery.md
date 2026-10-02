@@ -55,6 +55,14 @@ independent recovery and revision rules. Remaining turn allowance alone does not
 authorize replay, hold release or inference of success. Downstream native
 dependencies remain gated.
 
+## Historical preparation (1 October 2026)
+
+The remaining paragraphs preserve the original preparation and repair evidence.
+Their unrun journeys, pending publication/visibility authority, earlier test counts
+and pending CI describe that historical candidate. They do not describe the
+2 October live attempts or the current repair PR; the current dispositions are
+recorded above.
+
 The first policy/store cycle failed for absent new modules and then passed. The
 fresh-head settlement/completion and same-aggregate comment feedback tests failed
 at their missing seams and passed after implementation. Effective-rule merge-method
