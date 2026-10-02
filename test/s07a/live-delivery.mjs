@@ -17,6 +17,7 @@ import { z } from "zod";
 import {
   FixtureGuard,
   qualificationDisposition,
+  qualificationTaskIdle,
 } from "../../dist/test/s07a/fixture.js";
 import { StandaloneDataDirectory } from "../../dist/src/standalone/data-directory.js";
 import { DomainStore } from "../../dist/src/core/domain.js";
@@ -380,13 +381,7 @@ async function decide(taskId, decision, wrong = false) {
   assert.ok(wrong ? response.status() >= 400 : response.status() === 303);
 }
 function idle(taskId) {
-  return !service
-    .list()
-    .some(
-      (intent) =>
-        intent.taskId === taskId &&
-        ["ready", "starting", "submitting", "running"].includes(intent.state),
-    );
+  return qualificationTaskIdle(taskId, service.turnRequests(), service.list());
 }
 function projectInstructions(j, ids) {
   const target = actionTarget(j),
