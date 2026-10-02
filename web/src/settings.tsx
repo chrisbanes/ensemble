@@ -396,6 +396,9 @@ export function ProfileConfiguration(
             state={resource.state}
             retry={resource.refresh}
           />
+          <Button type="button" variant="secondary" onClick={resource.refresh}>
+            Reload profile configuration
+          </Button>
           {data && (
             <p className="body">
               Current revision {data.profile.version}.{" "}
@@ -551,6 +554,9 @@ export function ProjectConfiguration(p: SettingsProps & { projectId: string }) {
         state={resource.state}
         retry={resource.refresh}
       />
+      <Button type="button" variant="secondary" onClick={resource.refresh}>
+        Reload project configuration
+      </Button>
       {data && (
         <>
           <h2 className="section-heading">Project configuration</h2>
@@ -1418,8 +1424,9 @@ function PlacementConfiguration(
         key: key(),
         expectedVersion: String(c.version),
         chosenProjectId: "",
+        placementOriginProjectId: p.projectId,
       }),
-    [d, c.version],
+    [d, c.version, p.projectId],
   );
   return (
     <section>
@@ -1429,7 +1436,8 @@ function PlacementConfiguration(
       </p>
       <a href={`/task/${c.taskId}`}>Task source review</a>
       <form
-        onSubmit={(e) =>
+        onSubmit={(e) => {
+          d.set("placementOriginProjectId", p.projectId);
           void submitDraft(
             e,
             d,
@@ -1444,8 +1452,8 @@ function PlacementConfiguration(
               expectedVersion: Number(d.values.expectedVersion),
             },
             p.refreshConfiguration,
-          )
-        }
+          );
+        }}
       >
         <DraftField draft={d} field="chosenProjectId" label="Placement project">
           <option value="">Choose actual membership</option>
@@ -1461,6 +1469,15 @@ function PlacementConfiguration(
           session={p.session}
           label="Record placement"
         />
+        {d.phase === "conflict" && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => d.adoptVersion(c.version)}
+          >
+            Review latest placement revision
+          </Button>
+        )}
       </form>
     </section>
   );

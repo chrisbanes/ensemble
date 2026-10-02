@@ -262,7 +262,9 @@ test("configuration inline validation stale revision and revoked lead failures r
   const ids = seedSettings(f),
     web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page.getByLabel("Project name", { exact: true }).fill("");
@@ -777,7 +779,9 @@ test("actual source placement retains its original receipt after transfer remove
   const { ids, target, taskId, d } = seedPlacement(f);
   const web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page
@@ -828,7 +832,9 @@ test("unknown committed placement stays reachable after conflict disappearance a
   const { ids, target, taskId, d } = seedPlacement(f),
     web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page
@@ -934,7 +940,9 @@ test("mounted reference and placement fields have unique associated controls", a
   });
   const web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   const references = page.getByLabel("Credential reference change", {
@@ -978,7 +986,9 @@ test("readiness validation focuses the exact invalid row with a real description
   const ids = seedSettings(f),
     web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   const labels = page.getByLabel("Ready label", { exact: true });
@@ -1071,7 +1081,9 @@ test("Settings retains exact delivery authority and bound-PR detail without prov
   const caller = seedOperatorDelivery(f, ids),
     web = await f.startWeb();
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
   page.setDefaultTimeout(5000);
   const external: string[] = [],
     errors: string[] = [];
@@ -1197,4 +1209,389 @@ test("Settings retains exact delivery authority and bound-PR detail without prov
   console.log(
     `UI06 retained delivery: two guarded settlement forms, all nine grant kinds, zero provider calls; screenshots ${evidence}`,
   );
+});
+
+test("non-owner project keeps one unknown placement and its original receipt after navigation", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const { ids, target, taskId, d } = seedPlacement(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${target}/settings`);
+  await page
+    .getByLabel("Placement project", { exact: true })
+    .selectOption(target);
+  const posts: string[] = [];
+  let original:
+    | { key: string; result: { projectId: string; version: number } }
+    | undefined;
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    original = await response.json();
+    await route.abort();
+  });
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  const command = JSON.parse(posts[0] ?? "null");
+  assert.equal(
+    command.projectId,
+    ids.projectId,
+    "canonical command binds the original owner A",
+  );
+  assert.equal(command.chosenProjectId, target);
+  assert.equal(command.expectedVersion, 1);
+  assert.equal(command.taskId, taskId);
+  assert.equal(
+    command.placementOriginProjectId,
+    undefined,
+    "presentation scope never enters command bytes",
+  );
+  assert.equal(d.task(taskId).projectId, target);
+  assert.equal(d.task(taskId).version, 2);
+  assert.equal(f.service.githubSources().conflicts().length, 0);
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Paused configuration project", exact: true })
+    .click();
+  await page
+    .getByRole("heading", { name: "Project configuration", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Record placement", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .count(),
+    0,
+  );
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Actual membership target", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  await capture(page, "1366-non-owner-unknown-placement");
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Record placement", exact: true })
+      .count(),
+    0,
+  );
+  await page.unroute("**/api/operator/commands");
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "conflict", message: "Conflict" },
+      }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", {
+        name: "Review latest placement revision",
+        exact: true,
+      })
+      .count(),
+    0,
+  );
+  const read = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      response.url().endsWith(`/projects/${target}/configuration`),
+  );
+  await page
+    .getByRole("button", { name: "Reload project configuration", exact: true })
+    .click();
+  const observed = await (await read).json();
+  assert.equal(observed.data.placements.length, 0);
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(
+    posts.length,
+    2,
+    "reload is an observation, never reconciliation or rekey",
+  );
+  assert.equal(
+    await page
+      .getByText("Recorded placement outcome", { exact: false })
+      .count(),
+    0,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", {
+        name: "Review latest placement revision",
+        exact: true,
+      })
+      .count(),
+    0,
+  );
+  await page.unroute("**/api/operator/commands");
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    assert.deepEqual(await response.json(), original);
+    await route.fulfill({ response });
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  await page
+    .getByText("Recorded. Latest observations", { exact: false })
+    .waitFor();
+  assert.deepEqual(posts, Array(3).fill(posts[0]));
+  assert.equal(original?.key, command.key);
+  assert.equal(original?.result.projectId, target);
+  assert.equal(original?.result.version, 2);
+  assert.equal(d.task(taskId).version, 2);
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Actual membership target", exact: true })
+    .click();
+  await page
+    .getByText("Recorded placement outcome", { exact: false })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(
+    (
+      await page
+        .getByText("Recorded placement outcome", { exact: false })
+        .innerText()
+    ).includes(`project ${target}; version 2`),
+    true,
+  );
+  assert.equal(posts.length, 3);
+  assert.equal(f.runtime.turns, 0);
+  await capture(page, "1366-non-owner-recorded-placement");
+});
+
+test("initial placement conflict requires explicit loaded revision adoption while preserving choice", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const { ids, target, taskId, d } = seedPlacement(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${target}/settings`);
+  await page
+    .getByLabel("Placement project", { exact: true })
+    .selectOption(target);
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    taskId,
+    expectedVersion: 1,
+    state: "open",
+  });
+  assert.equal(d.task(taskId).version, 2);
+  const posts: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/operator/commands"))
+      posts.push(request.postData() ?? "");
+  });
+  const response = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  assert.equal((await response).status(), 409);
+  await page
+    .getByText("Configuration changed. Review", { exact: false })
+    .waitFor();
+  const first = JSON.parse(posts[0] ?? "null");
+  assert.equal(first.expectedVersion, 1);
+  assert.equal(first.projectId, ids.projectId);
+  assert.equal(first.chosenProjectId, target);
+  assert.equal(d.recordedCommand({ ...first, actor: "operator" }), undefined);
+  await page
+    .getByRole("button", { name: "Reload project configuration", exact: true })
+    .click();
+  await page
+    .getByText("Conflicting imported task; task version 2.", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Placement project", { exact: true }).inputValue(),
+    target,
+  );
+  assert.equal(posts.length, 1, "refresh never submits or silently adopts");
+  const stillStale = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  assert.equal((await stillStale).status(), 409);
+  assert.deepEqual(
+    posts,
+    [posts[0], posts[0]],
+    "loaded observations preserve the original dirty revision/key",
+  );
+  await page
+    .getByRole("button", {
+      name: "Review latest placement revision",
+      exact: true,
+    })
+    .waitFor();
+  await capture(page, "1366-placement-initial-conflict-loaded-revision");
+  await page
+    .getByRole("button", {
+      name: "Review latest placement revision",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByText("Latest revision explicitly adopted; input retained.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Placement project", { exact: true }).inputValue(),
+    target,
+  );
+  assert.equal(
+    posts.length,
+    2,
+    "explicit adoption prepares a new operation without submitting it",
+  );
+  const saved = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  const result = await saved;
+  assert.equal(result.status(), 200);
+  const second = JSON.parse(posts[2] ?? "null");
+  assert.notEqual(second.key, first.key);
+  assert.equal(second.expectedVersion, 2);
+  assert.equal(second.projectId, ids.projectId);
+  assert.equal(second.chosenProjectId, target);
+  const receipt = await result.json();
+  assert.equal(receipt.key, second.key);
+  assert.equal(receipt.result.projectId, target);
+  assert.equal(receipt.result.version, 3);
+  await page
+    .getByText("Recorded placement outcome", { exact: false })
+    .waitFor();
+  assert.equal(d.task(taskId).projectId, target);
+  assert.equal(d.task(taskId).version, 3);
+  assert.equal(f.service.githubSources().conflicts().length, 0);
+  assert.equal(f.runtime.turns, 0);
+  await capture(page, "1366-placement-adopted-revision-recorded");
+});
+
+test("profile configuration reload observes its current revision without replacing dirty input", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/profiles/${ids.profileId}/settings`);
+  await page
+    .getByLabel("Profile name", { exact: true })
+    .fill("Retained profile edit");
+  f.service.domain().execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    name: "Observed profile name",
+  });
+  const posts: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/operator/commands"))
+      posts.push(request.postData() ?? "");
+  });
+  await page
+    .getByRole("button", { name: "Reload profile configuration", exact: true })
+    .click();
+  await page.getByText("Current revision 2.", { exact: false }).waitFor();
+  assert.equal(
+    await page.getByLabel("Profile name", { exact: true }).inputValue(),
+    "Retained profile edit",
+  );
+  assert.equal(posts.length, 0, "configuration reload performs no command");
+  const rejected = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page.getByRole("button", { name: "Save profile", exact: true }).click();
+  assert.equal((await rejected).status(), 409);
+  await page
+    .getByText("Configuration changed. Review", { exact: false })
+    .waitFor();
+  const original = JSON.parse(posts[0] ?? "null");
+  assert.equal(
+    original.expectedVersion,
+    1,
+    "reload must not adopt the dirty captured revision",
+  );
+  assert.equal(original.name, "Retained profile edit");
+  await capture(page, "1366-profile-in-place-reload-retained-draft");
+  await page
+    .getByRole("button", {
+      name: "Review latest profile revision",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByText("Latest revision explicitly adopted; input retained.", {
+      exact: true,
+    })
+    .waitFor();
+  const saved = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page.getByRole("button", { name: "Save profile", exact: true }).click();
+  assert.equal((await saved).status(), 200);
+  const adopted = JSON.parse(posts[1] ?? "null");
+  assert.equal(adopted.expectedVersion, 2);
+  assert.notEqual(adopted.key, original.key);
+  assert.equal(adopted.name, "Retained profile edit");
+  assert.equal(f.service.domain().profile(ids.profileId).version, 3);
+  assert.equal(f.runtime.turns, 0);
 });

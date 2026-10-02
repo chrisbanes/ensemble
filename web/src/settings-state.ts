@@ -198,7 +198,8 @@ export class ConfigurationDrafts {
   unsettledPlacements(projectId: string) {
     return [...this.drafts.values()].flatMap((draft) =>
       draft.frozen?.type === "github.place" &&
-      draft.frozen.projectId === projectId &&
+      (draft.values.placementOriginProjectId ?? draft.frozen.projectId) ===
+        projectId &&
       (draft.phase === "pending" || draft.phase === "unknown")
         ? [draft.frozen]
         : [],
@@ -208,7 +209,8 @@ export class ConfigurationDrafts {
     return [...this.drafts.values()].flatMap((draft) => {
       const receipt = draft.receipt;
       return draft.frozen?.type === "github.place" &&
-        draft.frozen.projectId === projectId &&
+        (draft.values.placementOriginProjectId ?? draft.frozen.projectId) ===
+          projectId &&
         receipt?.kind === "configuration" &&
         receipt.result.commandType === "github.place"
         ? [receipt]

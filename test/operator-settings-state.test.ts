@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { OperatorClient } from "../web/src/api.js";
-import { ConfigurationDraft } from "../web/src/settings-state.js";
+import {
+  ConfigurationDraft,
+  ConfigurationDrafts,
+} from "../web/src/settings-state.js";
 test("unknown private configuration remains frozen after later rejection and deliberate reconciliation uses original bytes", async () => {
   const calls: string[] = [];
   let attempt = 0;
@@ -187,4 +190,170 @@ test("placement receipt must confirm the exact frozen chosen project", async () 
   await draft.reconcile(client, "csrf");
   assert.equal(draft.phase, "recorded");
   assert.deepEqual(sent, [original, original]);
+});
+
+test("one task placement keeps its initiating project separate from the immutable owner command", async () => {
+  const drafts = new ConfigurationDrafts(),
+    taskId = randomUUID(),
+    owner = randomUUID(),
+    origin = randomUUID();
+  const draft = drafts.get(`github.place:${taskId}`, () => {}),
+    key = randomUUID();
+  draft.initialize({
+    key,
+    expectedVersion: "1",
+    chosenProjectId: origin,
+    placementOriginProjectId: origin,
+  });
+  draft.set("chosenProjectId", origin);
+  const command = {
+    type: "github.place" as const,
+    key,
+    projectId: owner,
+    taskId,
+    chosenProjectId: origin,
+    expectedVersion: 1,
+  };
+  const sent: string[] = [];
+  let attempt = 0;
+  const client = new OperatorClient(async (_url, init) => {
+    sent.push(String(init?.body));
+    if (++attempt === 1) throw Error("lost committed response");
+    return Response.json({
+      kind: "configuration",
+      recorded: true,
+      key,
+      result: {
+        commandType: "github.place",
+        resourceId: taskId,
+        projectId: origin,
+        version: 2,
+      },
+    });
+  });
+  await draft.submit(client, command, "csrf");
+  assert.equal(draft.phase, "unknown");
+  assert.deepEqual(drafts.unsettledPlacements(origin), [command]);
+  assert.equal(drafts.unsettledPlacements(owner).length, 0);
+  assert.equal(
+    drafts.get(`github.place:${taskId}`, () => {}),
+    draft,
+  );
+  assert.equal(draft.set("placementOriginProjectId", owner), false);
+  assert.equal(draft.set("chosenProjectId", owner), false);
+  assert.equal(
+    draft.frozen?.type === "github.place" && draft.frozen.projectId,
+    owner,
+  );
+  assert.equal(
+    JSON.parse(draft.bytes ?? "null").placementOriginProjectId,
+    undefined,
+  );
+  await draft.reconcile(client, "csrf");
+  assert.deepEqual(JSON.parse(sent[0] ?? "null"), command);
+  assert.deepEqual(sent, [sent[0], sent[0]]);
+  assert.equal(drafts.placementReceipts(origin).length, 1);
+  assert.equal(drafts.placementReceipts(owner).length, 0);
+  assert.equal(
+    drafts.placementReceipts(origin)[0]?.result.commandType,
+    "github.place",
+  );
+  drafts.purge();
+  assert.deepEqual(draft.values, {});
+  assert.equal(drafts.placementReceipts(origin).length, 0);
+});
+
+test("placement adopts a loaded revision explicitly after definite conflict but never after unknown", async () => {
+  const owner = randomUUID(),
+    taskId = randomUUID(),
+    chosen = randomUUID(),
+    initialKey = randomUUID();
+  const command = {
+    type: "github.place" as const,
+    key: initialKey,
+    projectId: owner,
+    taskId,
+    chosenProjectId: chosen,
+    expectedVersion: 1,
+  };
+  const draft = new ConfigurationDraft();
+  draft.initialize({
+    key: initialKey,
+    expectedVersion: "1",
+    chosenProjectId: "",
+    placementOriginProjectId: chosen,
+  });
+  draft.set("chosenProjectId", chosen);
+  let attempt = 0;
+  const sent: string[] = [];
+  const client = new OperatorClient(async (_url, init) => {
+    sent.push(String(init?.body));
+    if (++attempt === 1)
+      return Response.json(
+        { error: { code: "conflict", message: "Conflict" } },
+        { status: 409 },
+      );
+    const c = JSON.parse(String(init?.body));
+    return Response.json({
+      kind: "configuration",
+      key: c.key,
+      recorded: true,
+      result: {
+        commandType: "github.place",
+        resourceId: taskId,
+        projectId: chosen,
+        version: 3,
+      },
+    });
+  });
+  await draft.submit(client, command, "csrf");
+  assert.equal(draft.phase, "conflict");
+  draft.initialize({
+    key: randomUUID(),
+    expectedVersion: "2",
+    chosenProjectId: "",
+  });
+  assert.equal(draft.values.expectedVersion, "1");
+  assert.equal(draft.values.key, initialKey);
+  assert.equal(draft.values.chosenProjectId, chosen);
+  draft.adoptVersion(2);
+  assert.equal(draft.phase, "editing");
+  assert.equal(draft.values.expectedVersion, "2");
+  assert.notEqual(draft.values.key, initialKey);
+  assert.equal(draft.values.chosenProjectId, chosen);
+  assert.equal(draft.values.placementOriginProjectId, chosen);
+  await draft.submit(
+    client,
+    { ...command, key: draft.values.key, expectedVersion: 2 },
+    "csrf",
+  );
+  assert.equal(draft.phase, "recorded");
+  assert.equal(JSON.parse(sent[1] ?? "null").expectedVersion, 2);
+  assert.equal(JSON.parse(sent[1] ?? "null").projectId, owner);
+  const unknown = new ConfigurationDraft();
+  unknown.initialize({
+    key: initialKey,
+    expectedVersion: "1",
+    chosenProjectId: chosen,
+    placementOriginProjectId: chosen,
+  });
+  const lost = new OperatorClient(async () => {
+    throw Error("lost");
+  });
+  await unknown.submit(lost, command, "csrf");
+  const bytes = unknown.bytes,
+    frozen = structuredClone(unknown.frozen),
+    values = structuredClone(unknown.values);
+  const conflict = new OperatorClient(async () =>
+    Response.json(
+      { error: { code: "conflict", message: "Conflict" } },
+      { status: 409 },
+    ),
+  );
+  await unknown.reconcile(conflict, "csrf");
+  unknown.adoptVersion(2);
+  assert.equal(unknown.phase, "unknown");
+  assert.equal(unknown.bytes, bytes);
+  assert.deepEqual(unknown.frozen, frozen);
+  assert.deepEqual(unknown.values, values);
 });
