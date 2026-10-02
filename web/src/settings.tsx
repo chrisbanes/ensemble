@@ -3,6 +3,7 @@ import {
   useEffect,
   useReducer,
   useState,
+  useId,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -12,6 +13,7 @@ import {
   sourceObservationSchema,
   type Workspace,
   type Session,
+  type OperatorCommand,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
 import type {
@@ -35,6 +37,7 @@ export function useDraft(drafts: ConfigurationDrafts, key: string) {
 export function DraftField({
   draft,
   field,
+  errorField = field,
   label,
   multiline = false,
   children,
@@ -42,13 +45,14 @@ export function DraftField({
 }: {
   draft: ConfigurationDraft;
   field: string;
+  errorField?: string;
   label: string;
   multiline?: boolean;
   children?: ReactNode;
   type?: string;
 }) {
-  const id = `settings-${field}`,
-    error = draft.errors[field],
+  const id = useId(),
+    error = draft.errors[errorField],
     locked =
       draft.phase === "pending" ||
       draft.phase === "unknown" ||
@@ -176,11 +180,14 @@ export async function submitDraft(
   command: unknown,
   refresh: () => void,
 ) {
+  const form = e.currentTarget;
   e.preventDefault();
   await d.submit(client, command, session.csrfToken);
   if (d.phase === "recorded") refresh();
   else if (d.phase === "rejected")
-    document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    requestAnimationFrame(() =>
+      form.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(),
+    );
 }
 const key = () => crypto.randomUUID();
 export function SettingsWorkspace(p: SettingsProps) {
@@ -861,17 +868,23 @@ export function SourceConfiguration(
       field,
       JSON.stringify([...rows(d, field), { ...row, rowKey: key() }]),
     );
+  const rowError = (field: string, index: number, name: string) => {
+    const path = field === "conditions" ? "readiness.conditions" : field;
+    return (
+      d.errors[path] ||
+      d.errors[`${path}.${index}.${name}`] ||
+      d.errors[`${path}.${name}`]
+    );
+  };
   const input = (field: string, index: number, name: string, label: string) => (
     <label className="field body" htmlFor={`source-${field}-${index}-${name}`}>
       {label}
       <input
         className="control"
         id={`source-${field}-${index}-${name}`}
-        aria-invalid={Boolean(d.errors[field] || d.errors[`${field}.${name}`])}
+        aria-invalid={Boolean(rowError(field, index, name))}
         aria-describedby={
-          d.errors[field] || d.errors[`${field}.${name}`]
-            ? `source-${field}-error`
-            : undefined
+          rowError(field, index, name) ? `source-${field}-error` : undefined
         }
         value={rows(d, field)[index]?.[name] ?? ""}
         onChange={(e) => update(field, index, name, e.target.value)}
@@ -1044,7 +1057,16 @@ export function SourceConfiguration(
             Add selection
           </Button>
         </fieldset>
-        <fieldset disabled={locked}>
+        <fieldset
+          disabled={locked}
+          tabIndex={-1}
+          aria-invalid={Boolean(d.errors["readiness.conditions"])}
+          aria-describedby={
+            d.errors["readiness.conditions"]
+              ? "source-conditions-error"
+              : undefined
+          }
+        >
           <legend className="section-heading">Readiness replacement</legend>
           {Object.keys(d.errors).some((k) => k.startsWith("readiness")) && (
             <p
@@ -1055,7 +1077,12 @@ export function SourceConfiguration(
               Check readiness mode and complete conditions.
             </p>
           )}
-          <DraftField draft={d} field="mode" label="Readiness matching">
+          <DraftField
+            draft={d}
+            field="mode"
+            errorField="readiness.mode"
+            label="Readiness matching"
+          >
             <option value="all">All conditions</option>
             <option value="any">Any condition</option>
           </DraftField>
@@ -1066,6 +1093,12 @@ export function SourceConfiguration(
                 <select
                   className="control"
                   id={`condition-kind-${i}`}
+                  aria-invalid={Boolean(rowError("conditions", i, "kind"))}
+                  aria-describedby={
+                    rowError("conditions", i, "kind")
+                      ? "source-conditions-error"
+                      : undefined
+                  }
                   value={r.kind}
                   onChange={(e) => {
                     const kind = e.target.value,
@@ -1132,7 +1165,7 @@ export function SourceConfiguration(
         <fieldset
           disabled={locked}
           aria-describedby={
-            d.errors.repositories ? "repository-group-error" : undefined
+            d.errors.repositories ? "source-repositories-error" : undefined
           }
         >
           <legend className="section-heading">
@@ -1163,7 +1196,7 @@ export function SourceConfiguration(
           </Button>
           {Object.keys(d.errors).some((k) => k.startsWith("repositories")) && (
             <p
-              id="repository-group-error"
+              id="source-repositories-error"
               className="body error-text"
               role="alert"
             >
@@ -1250,6 +1283,14 @@ export function SourceConfiguration(
       {p.data.placements.map((c) => (
         <PlacementConfiguration key={c.taskId} {...p} placement={c} />
       ))}
+      {p.drafts
+        .unsettledPlacements(p.projectId)
+        .filter(
+          (c) => !p.data.placements.some((row) => row.taskId === c.taskId),
+        )
+        .map((command) => (
+          <UnsettledPlacement key={command.taskId} {...p} command={command} />
+        ))}
       {p.drafts.placementReceipts(p.projectId).map((receipt) => (
         <p key={receipt.key} className="body" role="status">
           Recorded placement outcome: task {receipt.result.resourceId}; project{" "}
@@ -1328,6 +1369,30 @@ function SourceObservations(p: SettingsProps & { projectId: string }) {
           {notice}
         </p>
       )}
+    </section>
+  );
+}
+function UnsettledPlacement(
+  p: SettingsProps & {
+    command: Extract<OperatorCommand, { type: "github.place" }>;
+  },
+) {
+  const d = useDraft(p.drafts, `github.place:${p.command.taskId}`);
+  return (
+    <section>
+      <h3 className="section-heading">Placement submission outcome</h3>
+      <p className="body">
+        Original project {p.command.projectId}; task {p.command.taskId};
+        submitted task version {p.command.expectedVersion}; chosen project{" "}
+        {p.command.chosenProjectId}. Current conflict observations cannot
+        confirm this submission.
+      </p>
+      <DraftOutcome
+        draft={d}
+        client={p.client}
+        session={p.session}
+        label="Placement pending"
+      />
     </section>
   );
 }

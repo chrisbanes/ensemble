@@ -152,3 +152,39 @@ test("configuration cannot accept another command's otherwise valid recorded rec
     assert.equal(d.set("name", "changed"), false);
   }
 });
+test("placement receipt must confirm the exact frozen chosen project", async () => {
+  const command = {
+    type: "github.place" as const,
+    key: randomUUID(),
+    projectId: randomUUID(),
+    taskId: randomUUID(),
+    chosenProjectId: randomUUID(),
+    expectedVersion: 2,
+  };
+  let chosen = randomUUID();
+  const sent: string[] = [];
+  const client = new OperatorClient(async (_url, init) => {
+    sent.push(String(init?.body));
+    return Response.json({
+      kind: "configuration",
+      key: command.key,
+      recorded: true,
+      result: {
+        commandType: "github.place",
+        resourceId: command.taskId,
+        projectId: chosen,
+        version: 3,
+      },
+    });
+  });
+  const draft = new ConfigurationDraft();
+  await draft.submit(client, command, "csrf");
+  assert.equal(draft.phase, "unknown");
+  assert.equal(draft.receipt, null);
+  assert.equal(draft.set("chosenProjectId", randomUUID()), false);
+  const original = draft.bytes;
+  chosen = command.chosenProjectId;
+  await draft.reconcile(client, "csrf");
+  assert.equal(draft.phase, "recorded");
+  assert.deepEqual(sent, [original, original]);
+});

@@ -80,7 +80,9 @@ export class ConfigurationDraft {
       for (const issue of parsed.error.issues) {
         const path = issue.path
           .filter(
-            (p) => typeof p === "string" && /^[A-Za-z][A-Za-z0-9]*$/.test(p),
+            (p) =>
+              (typeof p === "string" && /^[A-Za-z][A-Za-z0-9]*$/.test(p)) ||
+              (typeof p === "number" && Number.isSafeInteger(p) && p >= 0),
           )
           .join(".");
         this.errors[path] = "Check this field.";
@@ -133,6 +135,12 @@ export class ConfigurationDraft {
             ? c.projectId
             : null;
     if (result.resourceId !== resource) return false;
+    if (
+      c.type === "github.place" &&
+      (result.commandType !== "github.place" ||
+        result.projectId !== c.chosenProjectId)
+    )
+      return false;
     if (c.type === "github.preview")
       return (
         result.commandType === "github.preview" &&
@@ -187,6 +195,15 @@ export class ConfigurationDraft {
 }
 export class ConfigurationDrafts {
   private drafts = new Map<string, ConfigurationDraft>();
+  unsettledPlacements(projectId: string) {
+    return [...this.drafts.values()].flatMap((draft) =>
+      draft.frozen?.type === "github.place" &&
+      draft.frozen.projectId === projectId &&
+      (draft.phase === "pending" || draft.phase === "unknown")
+        ? [draft.frozen]
+        : [],
+    );
+  }
   placementReceipts(projectId: string) {
     return [...this.drafts.values()].flatMap((draft) => {
       const receipt = draft.receipt;

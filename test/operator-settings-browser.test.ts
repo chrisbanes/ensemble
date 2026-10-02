@@ -436,6 +436,16 @@ test("source replacement verifies repositories without diagnostic echo and obser
       .isDisabled(),
     false,
   );
+  const repositoryDescription = await page
+    .getByLabel("New local repository path", { exact: true })
+    .evaluate((e) => {
+      const id = e.getAttribute("aria-describedby");
+      return id ? document.getElementById(id)?.textContent : null;
+    });
+  assert.equal(
+    repositoryDescription,
+    "Check linked repository IDs, paths and refs.",
+  );
   await capture(page, "1366-repository-error");
   await page
     .getByRole("button", {
@@ -714,10 +724,7 @@ test("Runtime Settings records lowered capacity separately from usage and retain
     .waitFor();
 });
 
-test("actual source placement retains its original receipt after transfer removes the conflict", async (t) => {
-  const f = await createOperatorFixture();
-  let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+function seedPlacement(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   const ids = seedSettings(f),
     target = randomUUID(),
     taskId = randomUUID(),
@@ -750,6 +757,13 @@ test("actual source placement retains its original receipt after transfer remove
         "INSERT INTO github_memberships VALUES (?,'selection','I_PLACEMENT','[]')",
       ).run(projectId);
   });
+  return { ids, target, taskId, d };
+}
+test("actual source placement retains its original receipt after transfer removes the conflict", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const { ids, target, taskId, d } = seedPlacement(f);
   const web = await f.startWeb();
   browser = await chromium.launch();
   const page = await browser.newPage();
@@ -794,4 +808,214 @@ test("actual source placement retains its original receipt after transfer remove
   assert.equal(replay.status(), 200);
   assert.deepEqual(await replay.json(), original);
   assert.equal(d.task(taskId).version, 3);
+});
+
+test("unknown committed placement stays reachable after conflict disappearance and navigation", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const { ids, target, taskId, d } = seedPlacement(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page
+    .getByLabel("Placement project", { exact: true })
+    .selectOption(target);
+  const posts: string[] = [];
+  let original: unknown;
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    original = await (await route.fetch()).json();
+    await route.abort();
+  });
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(d.task(taskId).projectId, target);
+  assert.equal(d.task(taskId).version, 2);
+  assert.equal(f.service.githubSources().conflicts().length, 0);
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Paused configuration project", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  await capture(page, "1366-unknown-placement-after-navigation");
+  for (const status of [400, 403, 409]) {
+    await page.unroute("**/api/operator/commands");
+    await page.route("**/api/operator/commands", async (route) => {
+      posts.push(route.request().postData() ?? "");
+      await route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code:
+              status === 409
+                ? "conflict"
+                : status === 403
+                  ? "permission-denied"
+                  : "invalid-input",
+            message: "Rejected",
+          },
+        }),
+      });
+    });
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .waitFor();
+    assert.equal(posts.length, 1 + [400, 403, 409].indexOf(status) + 1);
+  }
+  await page.unroute("**/api/operator/commands");
+  const response = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/operator/commands"))
+      posts.push(r.postData() ?? "");
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  assert.deepEqual(await (await response).json(), original);
+  await page
+    .getByText("Recorded. Latest observations", { exact: false })
+    .waitFor();
+  assert.deepEqual(posts, Array(5).fill(posts[0]));
+  assert.equal(d.task(taskId).version, 2);
+  assert.equal(f.runtime.turns, 0);
+  await capture(page, "1366-reconciled-placement-original-receipt");
+});
+test("mounted reference and placement fields have unique associated controls", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const { ids, target, d } = seedPlacement(f);
+  const second = randomUUID();
+  d.execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    taskId: second,
+    title: "Second placement",
+    outcome: "Work",
+    ready: false,
+  });
+  d.markImportedTask(second, "I_SECOND", "R_SECOND");
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "INSERT INTO github_external_issues VALUES ('github.com','I_SECOND',?,'R_SECOND','owner/repo',2,'Second','Body','open','[]')",
+    ).run(second);
+    for (const projectId of [ids.projectId, target])
+      db.prepare(
+        "INSERT INTO github_memberships VALUES (?,'selection','I_SECOND','[]')",
+      ).run(projectId);
+  });
+  const web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  const references = page.getByLabel("Credential reference change", {
+    exact: true,
+  });
+  assert.equal(await references.count(), 2);
+  for (const reference of await references.all())
+    await reference.selectOption("set");
+  const duplicated = await page
+    .locator("[id]")
+    .evaluateAll((elements) =>
+      elements.map((e) => e.id).filter((id, i, ids) => ids.indexOf(id) !== i),
+    );
+  assert.deepEqual(duplicated, []);
+  const associated = await page.locator("label[for]").evaluateAll((labels) =>
+    labels.every((label) => {
+      const html = label as HTMLLabelElement;
+      return html.control !== null && html.contains(html.control);
+    }),
+  );
+  assert.equal(associated, true);
+  const inputs = page.getByLabel("New environment reference", { exact: true });
+  assert.equal(await inputs.count(), 2);
+  await inputs.nth(0).fill("env:ROUTING_NEW");
+  await inputs.nth(1).fill("env:SOURCE_NEW");
+  assert.equal(await inputs.nth(0).inputValue(), "env:ROUTING_NEW");
+  const placements = page.getByLabel("Placement project", { exact: true });
+  assert.equal(await placements.count(), 2);
+  await placements.nth(0).selectOption(target);
+  assert.equal(await placements.nth(1).inputValue(), "");
+  await placements.nth(1).selectOption(ids.projectId);
+  assert.equal(await placements.nth(0).inputValue(), target);
+  await capture(page, "1366-unique-reference-placement-controls");
+  assert.equal(f.runtime.turns, 0);
+});
+
+test("readiness validation focuses the exact invalid row with a real description", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  const labels = page.getByLabel("Ready label", { exact: true });
+  await labels.nth(0).fill("");
+  await page
+    .getByLabel(
+      "Replace all selections, readiness and repositories, including explicit empty lists",
+      { exact: true },
+    )
+    .check();
+  let posts = 0;
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/operator/commands")) posts++;
+  });
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  const verify = async (index: number) => {
+    const input = labels.nth(index);
+    await page.waitForFunction(
+      ({ index }) => {
+        const inputs = [...document.querySelectorAll("input")].filter(
+          (e) => e.closest("label")?.textContent?.trim() === "Ready label",
+        );
+        return inputs[index] === document.activeElement;
+      },
+      { index },
+    );
+    assert.equal(await input.getAttribute("aria-invalid"), "true");
+    assert.equal(
+      await input.evaluate((e) => {
+        const id = e.getAttribute("aria-describedby");
+        return id ? document.getElementById(id)?.textContent : null;
+      }),
+      "Check readiness mode and complete conditions.",
+    );
+  };
+  await verify(0);
+  await labels.nth(0).fill("ready");
+  await page
+    .getByRole("button", { name: "Add readiness condition", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  await verify(1);
+  assert.equal(await labels.nth(0).getAttribute("aria-invalid"), "false");
+  assert.equal(posts, 0);
+  assert.equal(f.runtime.turns, 0);
+  await capture(page, "1366-readiness-later-row-error-focus");
 });
