@@ -1,0 +1,121 @@
+{
+  "phase": "service",
+  "status": "passed",
+  "sourceHead": "f0002f0a1b1dd899eb5423c8321565dafa324265",
+  "node": "v24.21.0",
+  "npm": "12.2.0",
+  "runtime": {
+    "version": "codex-cli 0.159.0",
+    "executableSHA256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+    "effectiveMode": "default",
+    "continuation": "synchronous"
+  },
+  "limits": {
+    "threads": 1,
+    "turns": 1,
+    "requests": 1,
+    "replies": 1,
+    "reports": 1,
+    "requestMs": 90000,
+    "totalMs": 240000,
+    "cleanupMs": 10000,
+    "retries": 0
+  },
+  "counts": {
+    "threads": 1,
+    "turns": 1,
+    "requests": 1,
+    "replies": 1,
+    "reports": 1
+  },
+  "observations": [
+    {
+      "sequence": 1,
+      "kind": "service-turn-started"
+    },
+    {
+      "sequence": 2,
+      "kind": "question-persisted-before-exposure"
+    },
+    {
+      "sequence": 3,
+      "kind": "project-pause-committed"
+    },
+    {
+      "sequence": 4,
+      "kind": "answer-command-returned-zero-replies"
+    },
+    {
+      "sequence": 5,
+      "kind": "independent-committed-answer-readback-zero-replies"
+    },
+    {
+      "sequence": 6,
+      "kind": "intent-committed-before-write"
+    },
+    {
+      "sequence": 7,
+      "kind": "ordinary-project-unpause"
+    },
+    {
+      "sequence": 8,
+      "kind": "runtime-sent-unconfirmed"
+    },
+    {
+      "sequence": 9,
+      "kind": "runtime-confirmed"
+    },
+    {
+      "sequence": 10,
+      "kind": "exact-answer-report"
+    },
+    {
+      "sequence": 11,
+      "kind": "report-callback-ended"
+    }
+  ],
+  "persistence": {
+    "committedBeforeEffect": true,
+    "independentReadOnlyConnection": true,
+    "deliveryState": "held",
+    "replyIntentId": null,
+    "zeroReplies": true
+  },
+  "receipt": {
+    "outcome": "confirmed",
+    "orderedReceipt": {
+      "writeInitiated": 1,
+      "stdinSucceeded": 2,
+      "matchingResolution": 3
+    }
+  },
+  "settlement": {
+    "confirmedCommitted": true,
+    "reportCallbackEnded": true,
+    "boundSuccessfulTerminal": true,
+    "noOtherHold": true
+  },
+  "experimentalConsumption": {
+    "kind": "answer-only-nonce-report",
+    "sameTurn": true
+  },
+  "cleanup": {
+    "harnessVerified": true,
+    "operations": {
+      "service-stop": "settled"
+    },
+    "rootIndependentVerified": true,
+    "method": "root-independent-same-boot-ESRCH-and-ps-absence",
+    "successfulFixtureRemoved": true
+  },
+  "privateResultSHA256": "9f123341792a3a352312adaae8cc3d74756be4cfb7764cea777f5cd370f7ee18",
+  "privateCleanupProofSHA256": "15953a99da5e8543fd46b9de3accba4acc746c1af4d4686c516e89e872af434c",
+  "limitsOfEvidence": [
+    "one version-qualified single-choice question with explicitly permitted custom text",
+    "grouped questions deterministic only",
+    "curated service seam; production UI05 forms and parent736 assembled UI remain separate",
+    "provider records may remain; no general live reattachment or callback suspension qualification",
+    "737 recovery holds and settlement remain unchanged"
+  ],
+  "noAdditionalTurnOrRetry": true
+}

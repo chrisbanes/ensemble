@@ -4,6 +4,16 @@ Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
 [plan revision 2](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5952311804),
 prepared against `e544bcb8f7b9a6dc8b716d429937f4017fa3a444`, 2 October 2026.
 
+**The bounded T1 protocol and T6 service journeys have passed.** T6 ran once at
+`f0002f0a1b1dd899eb5423c8321565dafa324265` after separate finite approval and the
+reviewed delayed-replay repair. Its [sanitised service evidence](ui01-service-2026-10-02.json)
+records durable pause/readback, one confirmed reply, ended consumption callback,
+successful bound terminal and independently verified exact-process cleanup.
+Production forms and complete frontend acceptance remain UI05/parent #736 scope.
+Earlier failures and their retained fixtures/grants below remain historical evidence.
+
+## Historical consumption-witness failure
+
 **The additional replay-repair T1 failed at the consumption witness; its grant is consumed.**
 The [additional one-turn resume](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5954021251)
 ran the reviewed exact-replay repair. It observed the direct synchronous native
@@ -723,3 +733,42 @@ Both new cancellation regressions failed before their repair. The sandbox run's
 localhost restrictions and a later unchanged scheduler test's 25 ms timing failure
 were preserved; that scheduler test passed in isolation and the unchanged final
 candidate passed the repeated full check. No live T6 turn was run during this repair.
+
+
+## Approved T6 service journey — passed
+
+Root ran the separately approved one-use service proof at
+`f0002f0a1b1dd899eb5423c8321565dafa324265` with the existing login/settings,
+codex-cli `0.159.0`, pinned Node `24.21.0` / npm `12.2.0`, and unchanged
+90-second request / 240-second total / 10-second cleanup / zero-retry limits.
+
+| Observation | Result |
+| --- | --- |
+| Threads / turns / native questions / replies / reports | 1 / 1 / 1 / 1 / 1 |
+| Native qualification | Exact Default/settings/version/hash; synchronous callback |
+| Ordinary project pause and curated answer command | Committed answer and original command receipt; zero replies |
+| Independent read-only SQLite connection | Answer held, request available, no reply intent, zero replies |
+| Ordinary unpause | One immutable intent committed before one write |
+| Operational receipt | Confirmed: write initiation 1, stdin success 2, matching resolution 3 |
+| Experimental consumption | Exact answer-only nonce report from the same turn; callback ended |
+| Settlement | Confirmation committed, successful bound terminal, no other hold |
+| Scoped cleanup | Service Stop settled; root separately verified exact child absent on the same boot |
+
+The [sanitised projection](ui01-service-2026-10-02.json) binds the actual source
+revision and hashes of the private result/cleanup evidence. No raw question,
+answer, private configuration, process/endpoint identity or instructions are
+published. The successful disposable fixture was removed after verified cleanup;
+provider records may remain. Only the matching scheduler resource was released.
+Earlier failed fixtures, their consumed grants, #737 recovery holds/settlement,
+scratch, UI06's preserved patch and unrelated work remain preserved.
+
+This qualifies the bounded adapter/service contract of #739, together with the
+reviewed deterministic SQLite/hold/restart/unsupported-shape tests. It does not
+qualify grouped live questions, standalone free text, multiple selection,
+recommendation semantics, async/timed/secret shapes, production forms, general
+live reattachment or callback suspension. UI05 and parent #736 retain frontend
+acceptance; paused X work and the failed #737 qualification remain separate.
+
+The proof ran at the reviewed source whose full check passed **619/619** and
+whose required CI passed. Final evidence changes preserve all executable source
+and tests, so those exact-code verification/review results remain applicable.

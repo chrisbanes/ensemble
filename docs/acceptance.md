@@ -77,9 +77,10 @@ do not reopen the completed bounded S01 feasibility gate.
 
 Delivery UI01 #739 owns the bounded actual protocol and integrated service runtime
 journeys in [native input evidence](evidence/ui01-runtime-input.md), plus deterministic
-SQLite/hold/restart tests. T1 protocol qualification has passed; T6 service execution
-requires a separate finite root grant. Neither deterministic fixtures nor T1 complete
-UI01/UI02 frontend acceptance; UI05 and parent #736 own the forms and assembled UI.
+SQLite/hold/restart tests. T1 protocol and the separately granted actual T6 service
+journey have passed for the bounded native adapter and curated service seam. These
+results do not complete UI01/UI02 frontend acceptance; UI05 and parent #736 own the
+forms and assembled UI.
 
 | ID | Given / when | Required observable result | Layer |
 | --- | --- | --- | --- |

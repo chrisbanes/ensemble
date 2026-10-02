@@ -43,8 +43,9 @@ paused/unready fixture.
 Delivery [UI01 #739](https://github.com/chrisbanes/ensemble/issues/739) adds the
 bounded native Codex input adapter, durable recorded-versus-delivered lifecycle,
 exact eligible callback reply, conservative restart handling and curated service
-answer seam for UI05. Its bounded protocol T1 has passed; deterministic service
-and fault fixtures do not replace the separately granted T6 actual service journey.
+answer seam for UI05. Its bounded protocol T1 and separately granted actual T6
+service journey have passed; deterministic fixtures qualify the remaining bounded
+hold, restart and unsupported-shape contracts.
 Production structured forms and complete native UI acceptance remain outstanding.
 See the [native input evidence](evidence/ui01-runtime-input.md).
 
