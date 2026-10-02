@@ -360,49 +360,100 @@ test("UI02 UI03 and UI06 screenshots stay in distinct configured evidence direct
   }
 });
 
-test("overall expiry bounds a stalled cleanup and labels its uncertain outcome", async () => {
+test("overall expiry bounds a stalled cleanup and labels its uncertain outcome", {
+  timeout: 5000,
+}, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ensemble-overall-diagnostics-"));
   let finish!: () => void;
+  let entered!: () => void;
+  const cleanupStarted = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const saved = new Map<string, string>();
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const started = performance.now();
   try {
-    let failure: unknown;
-    try {
-      await runBrowserJourney(
-        "diagnostics",
-        "synthetic stalled cleanup",
-        async (journey) => {
-          journey.cleanup(
-            () =>
-              new Promise<void>((resolve) => {
-                finish = resolve;
-              }),
+    const pending = runBrowserJourney(
+      "diagnostics",
+      "synthetic stalled cleanup",
+      async (journey) => {
+        journey.cleanup(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+              entered();
+            }),
+        );
+      },
+      {
+        executionMs: 50,
+        overallMs: 150,
+        cleanupStepMs: 1000,
+        evidenceRoot: root,
+        writeEvidence: async (filename, data) => {
+          saved.set(
+            filename,
+            typeof data === "string"
+              ? data
+              : Buffer.from(data).toString("utf8"),
           );
         },
-        {
-          executionMs: 50,
-          overallMs: 150,
-          cleanupStepMs: 1000,
-          evidenceRoot: root,
-        },
-      );
-    } catch (error) {
-      failure = error;
-    }
+      },
+    );
+    let settled = false;
+    const ended = pending.then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await cleanupStarted;
+    now = 134;
+    t.mock.timers.tick(134);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    now = 135; // The 150ms overall budget reserves its last 15ms for evidence.
+    t.mock.timers.tick(1);
+    const failure = await ended;
     assert.ok(failure instanceof Error);
     assert.match(failure.message, /overall.*timed-out.*\d+ ms/);
     assert.ok(performance.now() - started < 250);
     const directory = (failure as Error & { evidenceDirectory: string })
       .evidenceDirectory;
-    const evidence = JSON.parse(
-      await readFile(join(directory, "manifest.json"), "utf8"),
-    );
+    const snapshot = saved.get(join(directory, "manifest.json"));
+    assert.ok(snapshot);
+    const evidence = JSON.parse(snapshot);
     assert.equal(evidence.phases.execution.status, "completed");
     assert.equal(evidence.phases.overall.status, "timed-out");
+    assert.equal(evidence.limits.overallMs, 150);
+    assert.equal(evidence.phases.overall.elapsedMs, 135);
     assert.equal(evidence.cleanup.incomplete, true);
     assert.equal(evidence.cleanup.steps[0].status, "timed-out");
+    const phases = (
+      failure as Error & {
+        phases: {
+          cleanup: Array<{
+            outcome: { status: string; eventual?: { status: string } };
+          }>;
+        };
+      }
+    ).phases;
+    finish();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(phases.cleanup[0]?.outcome.status, "timed-out");
+    assert.equal(phases.cleanup[0]?.outcome.eventual?.status, "completed");
+    assert.equal(saved.get(join(directory, "manifest.json")), snapshot);
   } finally {
     finish?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.reset();
+    t.mock.restoreAll();
     await rm(root, { recursive: true, force: true });
   }
 });
