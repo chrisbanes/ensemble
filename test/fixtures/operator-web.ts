@@ -1,3 +1,18 @@
+import { createServer } from "node:net";
+import { fileURLToPath } from "node:url";
+import { OperatorAuth } from "../../src/standalone/operator-auth.js";
+import {
+  LocalOperatorHttp,
+  LocalOperatorUi,
+} from "../../src/standalone/operator.js";
+import {
+  OperatorWebBundle,
+  OperatorWebBoundary,
+} from "../../src/standalone/operator-web.js";
+import { OperatorApi } from "../../src/standalone/operator-api.js";
+import { OperatorRouteRegistry } from "../../src/standalone/operator-routes.js";
+import { runtimeOperatorRoutes } from "../../src/standalone/operator-runtime.js";
+import { coordinationOperatorRoutes } from "../../src/standalone/operator-coordination.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "../temp.js";
@@ -50,11 +65,86 @@ export async function createOperatorFixture() {
     { power: { enabled: false }, routingClient: null },
   );
   await service.start();
+  const listeners = new Set<() => Promise<void>>();
+  let initialized = false;
+  let now = Date.now();
   return {
     directory,
     runtime,
     service,
+    advanceClock(ms: number) {
+      now += ms;
+    },
+    async startWeb() {
+      const probe = createServer();
+      await new Promise<void>((resolve, reject) => {
+        probe.once("error", reject);
+        probe.listen(0, "127.0.0.1", resolve);
+      });
+      const address = probe.address();
+      if (!address || typeof address === "string")
+        throw Error("Fixture port unavailable");
+      const port = address.port;
+      await new Promise<void>((resolve, reject) =>
+        probe.close((e) => (e ? reject(e) : resolve())),
+      );
+      const origin = `http://127.0.0.1:${port}`,
+        password = "fixture operator password",
+        authFile = join(directory, "operator.auth");
+      if (!initialized) {
+        await OperatorAuth.initialize(authFile, password);
+        initialized = true;
+      }
+      const auth = await OperatorAuth.open({
+        authFile,
+        origin,
+        now: () => now,
+        idleTimeoutMs: 1000 * 60,
+        absoluteTimeoutMs: 1000 * 60 * 5,
+      });
+      const routes = new OperatorRouteRegistry();
+      routes.registerSlot("runtime", runtimeOperatorRoutes(service));
+      routes.registerSlot(
+        "coordination",
+        coordinationOperatorRoutes(
+          service.coordinationView(),
+          service.domain(),
+          (id) => service.routingAvailability(id),
+        ),
+      );
+      const bundle = await OperatorWebBundle.open(
+        fileURLToPath(new URL("../../operator", import.meta.url)),
+      );
+      const http = new LocalOperatorHttp(
+        new LocalOperatorUi(
+          service.domain(),
+          undefined,
+          service.githubSources(),
+          () => service.refreshGitHub(),
+        ),
+        auth,
+        {
+          routes,
+          web: new OperatorWebBoundary(
+            bundle,
+            new OperatorApi(service, [directory]),
+          ),
+        },
+      );
+      await http.start(port);
+      let closed = false;
+      const close = async () => {
+        if (closed) return;
+        closed = true;
+        await http.stop();
+        auth.close();
+        listeners.delete(close);
+      };
+      listeners.add(close);
+      return { origin, password, auth, http, close };
+    },
     async close() {
+      for (const close of listeners) await close();
       await service.stop();
       await rm(directory, { recursive: true, force: true });
     },

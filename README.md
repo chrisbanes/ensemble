@@ -135,3 +135,18 @@ for authentication, service management and backups.
 
 [Apache-2.0](LICENSE). Taskboard informs the UI design. Dependencies retain their
 own licences.
+
+## React operator foundation
+
+`npm run build` compiles the service and self-contained React assets into
+`dist/operator`. The production `operator` command serves `/app` and same-origin
+`/api/operator` JSON from its existing listener; no frontend server is needed.
+The shell implements sign-in/out, project navigation and truthful loading,
+stale, error and session states. Overview, Inbox, project task screens and
+settings link to the existing controls while their replacement issues are open.
+All existing form routes remain available at `/`.
+
+The [foundation contract](docs/design/ui02-foundation.md) records the strict
+projection/receipt boundary and retained-control owners. UI01 native structured
+input and UI03–UI07 screen/acceptance work remain separate. This foundation does
+not establish release or cutover readiness.

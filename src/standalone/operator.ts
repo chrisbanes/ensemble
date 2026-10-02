@@ -758,12 +758,16 @@ function writeHtml(
   response.end(body);
 }
 
-function document(body: string, session: OperatorSession): string {
+function document(
+  body: string,
+  session: OperatorSession,
+  webEnabled = false,
+): string {
   const logout = session.authenticated
     ? `<form method="post" action="/logout">${hidden("csrfToken", session.csrfToken)}<button type="submit">Log out</button></form>`
     : "";
   const navigation = session.authenticated
-    ? `<nav><a href="/">Home</a> <a href="/runtime">Runtime</a> <a href="/coordination">Coordination</a></nav>${logout}`
+    ? `<nav>${webEnabled ? '<a href="/app">New interface</a> ' : ""}<a href="/">Existing operator controls</a> <a href="/runtime">Runtime</a> <a href="/coordination">Coordination</a></nav>${logout}`
     : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ensemble</title></head><body>${navigation}${body}</body></html>`;
 }
@@ -858,9 +862,14 @@ export class LocalOperatorHttp {
             return;
           }
           session ??= this.auth.createAnonymousSession();
-          writeHtml(response, 200, document(loginContent(session), session), {
-            "set-cookie": cookieHeader(session.id, this.secureCookie),
-          });
+          writeHtml(
+            response,
+            200,
+            document(loginContent(session), session, Boolean(this.web)),
+            {
+              "set-cookie": cookieHeader(session.id, this.secureCookie),
+            },
+          );
           return;
         }
 
@@ -890,7 +899,11 @@ export class LocalOperatorHttp {
             writeHtml(
               response,
               401,
-              document(loginContent(session, "Sign in failed"), session),
+              document(
+                loginContent(session, "Sign in failed"),
+                session,
+                Boolean(this.web),
+              ),
             );
             return;
           }
@@ -988,7 +1001,11 @@ export class LocalOperatorHttp {
           else if (url.pathname === "/")
             html = this.ui.home(authorized.csrfToken);
           if (html !== undefined) {
-            writeHtml(response, 200, document(html, authorized));
+            writeHtml(
+              response,
+              200,
+              document(html, authorized, Boolean(this.web)),
+            );
             return;
           }
           const extension = this.routes.match("GET", url.pathname);
@@ -1104,7 +1121,11 @@ export class LocalOperatorHttp {
         })
         .end();
     } else if (result.kind === "html" && result.body.length <= 1_000_000) {
-      writeHtml(response, 200, document(result.body, session));
+      writeHtml(
+        response,
+        200,
+        document(result.body, session, Boolean(this.web)),
+      );
     } else {
       throw new Error();
     }
@@ -1310,9 +1331,14 @@ export class LocalOperatorHttp {
     if (session?.authenticated) return session;
     request.resume();
     const preLogin = session ?? this.auth.createAnonymousSession();
-    writeHtml(response, 200, document(loginContent(preLogin), preLogin), {
-      "set-cookie": cookieHeader(preLogin.id, this.secureCookie),
-    });
+    writeHtml(
+      response,
+      200,
+      document(loginContent(preLogin), preLogin, Boolean(this.web)),
+      {
+        "set-cookie": cookieHeader(preLogin.id, this.secureCookie),
+      },
+    );
     return undefined;
   }
 
