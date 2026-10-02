@@ -34,7 +34,7 @@ export async function loadTaskList(
   for (let page = 0; page < 100; page++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const result: TaskListPage = await client.read(
-      `/api/operator/tasks${cursor ? `?cursor=${cursor}` : ""}`,
+      `/api/operator/task-list${cursor ? `?cursor=${cursor}` : ""}`,
       taskListPageSchema,
       signal,
     );
@@ -146,7 +146,8 @@ export const reasonLabels: Record<string, string> = {
   "lead-review": "Allocation requires lead review",
 };
 export function taskReasons(task: TaskListSummary) {
-  const reasons = task.admission.reasons.map(
+  const terminal = task.state === "done" || task.state === "cancelled";
+  const reasons = (terminal ? [] : task.admission.reasons).map(
     (r) => reasonLabels[r] ?? "Admission held",
   );
   if (task.execution.holds.stop)
@@ -154,8 +155,9 @@ export function taskReasons(task: TaskListSummary) {
   if (task.execution.holds.uncertainty)
     reasons.unshift("Execution is uncertain");
   if (
-    task.capacity.globalUsage >= task.capacity.globalLimit ||
-    task.capacity.projectUsage >= task.capacity.projectLimit
+    !terminal &&
+    (task.capacity.globalUsage >= task.capacity.globalLimit ||
+      task.capacity.projectUsage >= task.capacity.projectLimit)
   )
     reasons.push("Capacity currently full; admission rechecks usage");
   return reasons;

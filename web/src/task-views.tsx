@@ -72,10 +72,15 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
   const [selected, setSelected] = useState(0);
   return (
     <div className="task-board">
-      <div className="column-navigation" aria-label="Board columns">
+      <div
+        className="column-navigation"
+        role="toolbar"
+        aria-label="Board columns"
+      >
         {columns.map((column, index) => (
           <button
             key={column}
+            type="button"
             className="control column-tab"
             aria-pressed={selected === index}
             onClick={() => {
@@ -161,9 +166,29 @@ export function TaskViews({
   const tasks = filterTasks(state.data?.tasks ?? [], filters, projectId);
   const attention = tasks.filter((t) => t.attention.count > 0),
     work = overview ? tasks.filter((t) => t.attention.count === 0) : tasks;
+  const project = workspace?.data.projects.find((p) => p.id === projectId);
   return (
     <>
+      <p className="introduction muted">
+        {projectId
+          ? "Tasks in this project. Readiness, source status and execution are separate."
+          : "Tasks across your projects. Action requests and ordinary progress remain distinct."}
+      </p>
+      {project?.paused && (
+        <p className="body">
+          <StatusBadge tone="warning">Project paused</StatusBadge> New turns are
+          held.
+        </p>
+      )}
       <div className="task-actions">
+        {projectId && (
+          <a
+            className="control button secondary"
+            href={`/project/${projectId}`}
+          >
+            Open existing project controls
+          </a>
+        )}
         <a
           className="control button primary"
           href={`/app/tasks/new${projectId ? `?project=${projectId}` : ""}`}
@@ -178,12 +203,14 @@ export function TaskViews({
           Refresh tasks
         </Button>
       </div>
-      <ResourceStatus state={state} retry={refresh} label="Tasks" />
+      {state.status !== "fresh" && (
+        <ResourceStatus state={state} retry={refresh} label="Tasks" />
+      )}
       {state.data && (
         <p className="metadata muted">
-          Observed {new Date(state.data.firstObservedAt).toLocaleTimeString()}–
-          {new Date(state.data.lastObservedAt).toLocaleTimeString()}. This is a
-          catalog observation, not a provider sync.
+          Task states read{" "}
+          {new Date(state.data.firstObservedAt).toLocaleTimeString()}–
+          {new Date(state.data.lastObservedAt).toLocaleTimeString()}.
         </p>
       )}
       {overview && (
@@ -234,6 +261,7 @@ export function TaskViews({
               Project
               <select
                 id="task-project"
+                aria-label="Project"
                 value={filters.project}
                 onChange={(e) => update({ project: e.target.value })}
               >
@@ -250,6 +278,7 @@ export function TaskViews({
             State
             <select
               id="task-state"
+              aria-label="State"
               value={filters.state}
               onChange={(e) => update({ state: e.target.value })}
             >
@@ -263,6 +292,7 @@ export function TaskViews({
             Source
             <select
               id="task-source"
+              aria-label="Source"
               value={filters.source}
               onChange={(e) => update({ source: e.target.value })}
             >
@@ -275,6 +305,7 @@ export function TaskViews({
             Readiness
             <select
               id="task-ready"
+              aria-label="Readiness"
               value={filters.ready}
               onChange={(e) => update({ ready: e.target.value })}
             >
@@ -284,7 +315,11 @@ export function TaskViews({
             </select>
           </label>
         </div>
-        <div className="view-toggle" aria-label="Task presentation">
+        <div
+          className="view-toggle"
+          role="toolbar"
+          aria-label="Task presentation"
+        >
           <Button
             variant="secondary"
             aria-pressed={filters.view === "list"}
@@ -302,8 +337,10 @@ export function TaskViews({
           <p className="metadata muted">{work.length} tasks</p>
         </div>
         {state.data && !tasks.length && (
-          <p className="introduction empty-state">
-            {state.data.tasks.length
+          <p className="body empty-state">
+            {state.data.tasks.some(
+              (t) => !projectId || t.projectId === projectId,
+            )
               ? "No tasks match these filters."
               : workspace?.data.projects.length
                 ? "Ready for your first task. Create an outcome or save a draft."

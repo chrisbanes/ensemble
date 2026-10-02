@@ -552,6 +552,7 @@ export class DomainStore {
             "Command key already used with different payload",
           );
         this.db.exec("COMMIT");
+        committed = true;
         return JSON.parse(String(receipt.result));
       }
       const result = this.apply(command, verifiedRepositories);
@@ -565,7 +566,11 @@ export class DomainStore {
       this.onChange?.();
       return result;
     } catch (error) {
-      if (!committed) this.db.exec("ROLLBACK");
+      if (committed)
+        throw new Error("Command committed but change notification failed", {
+          cause: error,
+        });
+      this.db.exec("ROLLBACK");
       throw error;
     }
   }

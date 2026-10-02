@@ -17,8 +17,8 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /project/:id | github.preview | preview selections; activation via preview receipt | UI06 #744 | no |
 | /project/:id | github.refresh | refresh observation | UI06 #744 | no |
 | /project/:id | github.place | conflicting placement | UI06 #744 | no |
-| /project/:id | task.create | draft; create and start | UI03 #741 | yes |
-| /task/:id | task.configure | local title; outcome; readiness | UI03 #741 | yes |
+| /project/:id | task.create | draft; create and start; retained alongside delivered `/app/tasks/new` composer | UI03 #741 delivered | yes |
+| /task/:id | task.configure | local title; outcome; readiness | UI04 #742 | yes |
 | /task/:id | source.review | source identity; body; status; Project fields; native blockers; review; hold resolution | UI04 #742 | no |
 | /runtime | /runtime/control/capacity | global capacity; project override; remove override | UI06 #744 | no |
 | /runtime/task/:id | /runtime/control/dependency/add | local dependency add | UI04 #742 | yes |
@@ -34,14 +34,14 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /coordination/task/:id | /coordination/control/approval/decision | retained exact material; approve; deny | UI05 #743 | yes |
 | /login | /login | password sign-in | UI02 #740 | yes |
 | all authenticated views | /logout | sign-out | UI02 #740 | yes |
-| all views | navigation | home; project; task; profile; assignment; Runtime; Coordination | UI03 #741 / UI04 #742 | shell only |
+| all views | navigation | delivered overview/project List/Board/composer; retained task/profile/assignment/Runtime/Coordination destinations | UI03 #741 delivered / UI04 #742 | curated reads |
 | `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
 
 Programmatic support (no new HTTP exposure):
 
 | Command | Replacement owner/destination | Disposition |
 | --- | --- | --- |
-| `assignment.create` | UI03 #741 task composer with UI04 #742 assignment detail | Existing programmatic support; no UI02 creation endpoint |
+| `assignment.create` | UI03 #741 task composer with UI04 #742 assignment detail | Delivered as optional initial assignment in atomic `task.create`; standalone assignment creation remains programmatic |
 | `assignment.apply` | UI04 #742 assignment detail | Durable adapter and retained `/runtime/control/instruction-apply` |
 | `dependency.add` | UI04 #742 task dependency controls | Durable adapter and retained `/runtime/control/dependency/add` |
 | `dependency.remove` | UI04 #742 task dependency controls | Durable adapter and retained `/runtime/control/dependency/remove` |
@@ -61,4 +61,4 @@ Provider timestamps are stored observations; unavailable successful sync/history
 
 ## Client and staged access
 
-Only login, session lifecycle, project navigation, overview/inbox/settings placeholders and shared controls are implemented. Child views link to their current operational destination. First load, stale refresh, invalid responses, session expiry and command outcome unknown remain distinct. Lost write responses retain the exact key and payload for deliberate reconciliation. No credential/API persistence or automatic write replay.
+UI02 supplied login, session lifecycle, project navigation and shared controls. [UI03](ui03-tasks.md) now delivers attention overview, project/cross-project List/Board and local composer. Inbox/settings retain clearly labelled links to existing controls; task cards retain `/task/:id`, including Runtime/Coordination destinations. First load, stale refresh, invalid responses, session expiry and command outcome unknown remain distinct. Lost write responses retain the exact key and payload for deliberate reconciliation. No credential/API persistence or automatic write replay.

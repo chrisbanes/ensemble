@@ -23,6 +23,7 @@ import type {
   RuntimeToolResult,
 } from "../../src/standalone/codex.js";
 import { StandaloneService } from "../../src/standalone/service.js";
+import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
   private outcomes = new Map<string, (value: "completed" | "failed") => void>();
@@ -56,14 +57,16 @@ export class OperatorFixtureRuntime implements Runtime {
     this.outcomes.get(`fixture-turn-${turn}`)?.("completed");
   }
 }
-export async function createOperatorFixture() {
+export async function createOperatorFixture(
+  routingClient: RoutingChoiceClient | null = null,
+) {
   const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
   const runtime = new OperatorFixtureRuntime();
   const service = new StandaloneService(
     join(directory, "data"),
     () => runtime,
     undefined,
-    { power: { enabled: false }, routingClient: null },
+    { power: { enabled: false }, routingClient },
   );
   await service.start();
   const listeners = new Set<() => Promise<void>>();

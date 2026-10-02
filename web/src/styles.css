@@ -392,3 +392,76 @@ textarea {
     padding: var(--space-16);
   }
 }
+.composer {
+  max-width: 800px;
+  margin-top: var(--space-24);
+}
+.composer-fields,
+.dependency-options {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.composer .field input,
+.composer .field textarea,
+.composer .field select {
+  width: 100%;
+  background: var(--color-surface);
+}
+.composer .field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.composer-policy {
+  padding: var(--space-16);
+  border-left: 3px solid var(--color-primary);
+  margin-bottom: var(--space-24);
+}
+.composer-policy p:last-child {
+  margin: 0;
+}
+.dependency-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: var(--space-4);
+  margin-bottom: var(--space-24);
+}
+.dependency-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-12) var(--space-4);
+  flex-wrap: wrap;
+}
+.composer .dependency-choice input {
+  width: 20px;
+  height: 20px;
+}
+.composer-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--color-surface-container);
+  border-top: 1px solid var(--color-outline);
+  display: flex;
+  gap: var(--space-12);
+  flex-wrap: wrap;
+  padding: var(--space-16) 0;
+  margin-top: var(--space-24);
+}
+.composer-actions p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.composer form {
+  padding-bottom: var(--space-24);
+}
+@media (max-width: 759px) {
+  .composer-actions .button {
+    flex: 1;
+    min-width: 130px;
+  }
+  .composer .outcome-input {
+    min-height: 240px;
+  }
+}

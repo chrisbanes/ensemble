@@ -74,7 +74,8 @@ export class OperatorWebBoundary {
     );
   }
   async read(path: string, query = new URLSearchParams()) {
-    if (path === "/api/operator/tasks") return this.api.readTaskListPage(query);
+    if (path === "/api/operator/task-list")
+      return this.api.readTaskListPage(query);
     if ([...query].length) throw new OperatorApiError(400, "invalid-input");
     const options = path.match(
       /^\/api\/operator\/projects\/([^/]+)\/composer-options$/,
@@ -96,7 +97,7 @@ export class OperatorWebBoundary {
         "/api/operator/login",
         "/api/operator/logout",
         "/api/operator/workspace",
-        "/api/operator/tasks",
+        "/api/operator/task-list",
         "/api/operator/commands",
       ].includes(path) ||
       /^\/api\/operator\/(?:projects|tasks)\/[^/]+$/.test(path) ||

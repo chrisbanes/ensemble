@@ -277,7 +277,9 @@ export class OperatorApi {
       .assignments(String(task.id))
       .map((a) => this.selection(a));
     const holds = {
-      stop: selections.some((s) => s.record?.holds.stop),
+      stop:
+        this.service.taskHold(String(task.id)) === "Task stopped" ||
+        selections.some((s) => s.record?.holds.stop),
       writer: selections.some((s) => s.record?.holds.writer),
       capacity: selections.some((s) => s.record?.holds.capacity),
       uncertainty: selections.some((s) => s.record?.holds.uncertainty),
@@ -491,7 +493,8 @@ export class OperatorApi {
     );
     const uncertain =
       execution.holds.uncertainty ||
-      (execution.holds.task && !execution.holds.stop) ||
+      (this.service.taskHold(taskId) !== undefined &&
+        this.service.taskHold(taskId) !== "Task stopped") ||
       assignments.some((a) => {
         const s = this.selection(a);
         const confirmed =
@@ -1015,7 +1018,19 @@ export class OperatorApi {
           )
             throw new OperatorApiError(403, "forbidden");
         }
-        const raw = await this.commands.execute({ ...c, actor: "operator" });
+        let raw: unknown;
+        try {
+          raw = await this.commands.execute({ ...c, actor: "operator" });
+        } catch (error) {
+          // DomainStore wraps post-commit callbacks; only a rolled-back apply
+          // can preserve this definite policy error from the domain command.
+          if (error instanceof DomainPolicyError)
+            throw new OperatorApiError(
+              error.code === "forbidden" ? 403 : 400,
+              error.code,
+            );
+          throw error;
+        }
         const r = raw as Row;
         const result =
           c.type === "assignment.apply"
@@ -1104,10 +1119,7 @@ export class OperatorApi {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)
         throw error;
       if (error instanceof DomainPolicyError)
-        throw new OperatorApiError(
-          error.code === "forbidden" ? 403 : 400,
-          error.code,
-        );
+        throw new OperatorApiError(503, "command-outcome-unknown");
       if (
         error instanceof DomainConflictError ||
         (error instanceof Error && conflicts.has(error.message))

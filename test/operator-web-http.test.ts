@@ -51,6 +51,11 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   const origin = `http://127.0.0.1:${port}`;
   assert.equal((await fetch(`${origin}/app`)).status, 200);
   assert.equal((await fetch(`${origin}/api/operator/workspace`)).status, 401);
+  for (const path of [
+    "/api/operator/task-list",
+    `/api/operator/projects/${randomUUID()}/composer-options`,
+  ])
+    assert.equal((await fetch(origin + path)).status, 401);
   let r = await fetch(`${origin}/api/operator/session`);
   let cookie = r.headers.get("set-cookie")?.split(";")[0] ?? "";
   let session = (await r.json()) as { csrfToken: string };
@@ -106,6 +111,49 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
     ready: false,
   };
   const receipt = await (await post("/api/operator/commands", create)).json();
+  const reads = [
+    "/api/operator/task-list",
+    `/api/operator/projects/${projectId}/composer-options`,
+  ];
+  for (const path of reads)
+    assert.equal(
+      (await fetch(origin + path, { headers: { cookie } })).status,
+      200,
+    );
+  for (const query of [
+    "limit=0",
+    "limit=101",
+    "limit=1&limit=2",
+    "authority=agent",
+    "cursor=bad",
+  ])
+    assert.equal(
+      (
+        await fetch(`${origin}/api/operator/task-list?${query}`, {
+          headers: { cookie },
+        })
+      ).status,
+      400,
+    );
+  const enriched = {
+    ...create,
+    key: randomUUID(),
+    taskId: randomUUID(),
+    blockerTaskIds: [create.taskId],
+  };
+  for (const body of [
+    { ...enriched, actor: "operator" },
+    { ...enriched, repositoryAccess: true },
+    {
+      ...enriched,
+      initialAssignment: {
+        assignmentId: randomUUID(),
+        profileId: randomUUID(),
+        resultDestination: "operator",
+      },
+    },
+  ])
+    assert.equal((await post("/api/operator/commands", body)).status, 400);
   assert.deepEqual(
     await (await post("/api/operator/commands", create)).json(),
     receipt,
@@ -129,7 +177,7 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   );
   for (const originValue of ["null", "http://foreign.test", ""])
     assert.equal(
-      (await post("/api/operator/commands", create, { origin: originValue }))
+      (await post("/api/operator/commands", enriched, { origin: originValue }))
         .status,
       403,
     );
@@ -171,6 +219,14 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   });
   assert.equal(spoof, 403);
   assert.equal(f.service.domain().tasks(projectId).length, 1);
+  assert.equal(
+    (
+      await post("/api/operator/commands", enriched, {
+        "x-csrf-token": "wrong",
+      })
+    ).status,
+    403,
+  );
 
   assert.equal(
     (await post("/api/operator/commands", {}, { origin: "null" })).status,
@@ -216,6 +272,11 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
       404,
     );
   now += 1001;
+  for (const path of reads)
+    assert.equal(
+      (await fetch(origin + path, { headers: { cookie } })).status,
+      401,
+    );
   assert.equal(
     (await fetch(`${origin}/api/operator/workspace`, { headers: { cookie } }))
       .status,

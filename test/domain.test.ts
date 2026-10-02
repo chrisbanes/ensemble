@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
   DomainCommands,
+  DomainPolicyError,
   DomainStore,
   type DomainCommand,
 } from "../src/core/domain.js";
@@ -1169,9 +1170,14 @@ test("committed rich creation replays its original receipt after wakeup failure 
       initialAssignment: { assignmentId: assignment, profileId: profile },
     };
     const d = new DomainStore(f.db, () => {
-      throw Error("Wakeup unavailable");
+      throw new DomainPolicyError("forbidden", "Wakeup unavailable");
     });
-    assert.throws(() => d.execute(command), /Wakeup unavailable/);
+    assert.throws(
+      () => d.execute(command),
+      (error) =>
+        error instanceof Error && !(error instanceof DomainPolicyError),
+      "committed callback policy class is not a definite precommit rejection",
+    );
     assert.equal(f.domain.tasks(p).length, 1);
     run(f.domain, {
       type: "profile.configure",

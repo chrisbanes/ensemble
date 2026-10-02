@@ -61,9 +61,7 @@ test("task catalog pages exclude private retained revisions and classify depende
   });
   const api = new OperatorApi(f.service, [f.directory]);
   const boundary = api as unknown as {
-    readTaskListPage?: (
-      query?: URLSearchParams,
-    ) => Promise<{
+    readTaskListPage?: (query?: URLSearchParams) => Promise<{
       data: {
         tasks: {
           id: string;
@@ -130,18 +128,16 @@ function createTask(
   ready = false,
 ) {
   const taskId = randomUUID();
-  f.service
-    .domain()
-    .execute({
-      type: "task.create",
-      key: randomUUID(),
-      actor: "operator",
-      projectId,
-      taskId,
-      title,
-      outcome: "Work",
-      ready,
-    });
+  f.service.domain().execute({
+    type: "task.create",
+    key: randomUUID(),
+    actor: "operator",
+    projectId,
+    taskId,
+    title,
+    outcome: "Work",
+    ready,
+  });
   return taskId;
 }
 test("task summary retains captured lead after project lead reconfiguration", async (t) => {
@@ -240,8 +236,8 @@ test("catalog pagination fingerprints ordered identity membership and rejects in
     "limit=0",
     "limit=2&limit=3",
     "cursor=invalid",
-    "cursor=" + randomUUID(),
-    "project=" + ids.projectId,
+    `cursor=${randomUUID()}`,
+    `project=${ids.projectId}`,
   ])
     await assert.rejects(api.readTaskListPage(new URLSearchParams(query)));
 });
@@ -363,4 +359,200 @@ test("a complete task aggregate rejects changing membership and repeated page cu
     parseTaskFilters("?project=bad&source=bad&state=bad&ready=bad&view=bad"),
     { project: "", state: "", source: "", ready: "", q: "", view: "list" },
   );
+});
+
+test("composer options expose only active permitted profiles and same-project dependencies", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f),
+    other = await projectFixture(f),
+    d = f.service.domain(),
+    worker = randomUUID(),
+    revoked = randomUUID();
+  for (const profileId of [worker, revoked])
+    d.execute({
+      type: "profile.create",
+      key: randomUUID(),
+      actor: "operator",
+      profileId,
+      name: "Worker",
+      instructions: "private worker",
+      capabilities: "execute",
+    });
+  d.execute({
+    type: "routing.configure",
+    key: randomUUID(),
+    actor: "operator",
+    projectId: ids.projectId,
+    expectedVersion: 1,
+    enabled: false,
+    guidance: "private routing",
+    candidateProfileIds: [worker, worker, revoked],
+  });
+  d.execute({
+    type: "profile.configure",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: revoked,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  const own = createTask(f, ids.projectId, "Own blocker"),
+    foreign = createTask(f, other.projectId, "Foreign blocker");
+  const api = new OperatorApi(f.service, [f.directory]),
+    options = await api.readComposerOptions(ids.projectId);
+  assert.deepEqual(
+    new Set(options.data.profiles.map((p) => p.id)),
+    new Set([ids.profileId, worker]),
+  );
+  assert.equal(options.data.profiles.length, 2);
+  assert.deepEqual(
+    options.data.dependencies.map((t) => t.id),
+    [own],
+  );
+  assert.ok(!JSON.stringify(options).includes(foreign));
+  assert.doesNotMatch(
+    JSON.stringify(options),
+    /private worker|private routing/,
+  );
+  d.execute({
+    type: "profile.configure",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: worker,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  const taskId = randomUUID();
+  await assert.rejects(
+    api.execute({
+      type: "task.create",
+      key: randomUUID(),
+      projectId: ids.projectId,
+      taskId,
+      title: "Rejected stale choice",
+      outcome: "Finish",
+      ready: true,
+      initialAssignment: { assignmentId: randomUUID(), profileId: worker },
+    }),
+  );
+  assert.ok(!d.tasks(ids.projectId).some((t) => t.id === taskId));
+});
+test("task catalog and options fail explicitly above ten thousand identities rather than truncate", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f);
+  f.seedPersistedState((db) => {
+    db.exec("BEGIN");
+    const base = db.prepare(
+        "INSERT INTO tasks(id,projectId,title) VALUES(?,?,?)",
+      ),
+      domain = db.prepare(
+        "INSERT INTO domain_tasks(id,projectId,version,outcome,ready,state,importedBlockers) VALUES(?,?,1,'Work',0,'open','clear')",
+      );
+    for (let n = 1; n <= 10001; n++) {
+      const id = `90000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      base.run(id, ids.projectId, "Bounded task");
+      domain.run(id, ids.projectId);
+    }
+    db.exec("COMMIT");
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(f.service.domain().taskCatalog().length, 10001);
+  for (const read of [
+    () => api.readTaskListPage(),
+    () => api.readComposerOptions(ids.projectId),
+  ])
+    await assert.rejects(
+      read(),
+      (e: unknown) =>
+        e instanceof Error && "code" in e && e.code === "unavailable",
+    );
+});
+test("catalog privacy fails closed when the global retained-revision lookup budget is exhausted", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f),
+    d = f.service.domain(),
+    taskId = createTask(f, ids.projectId, "Private-budget title");
+  for (let version = 1; version < 129; version++)
+    d.execute({
+      type: "profile.configure",
+      key: randomUUID(),
+      actor: "operator",
+      profileId: ids.profileId,
+      expectedVersion: version,
+      instructions: `retained secret ${version}`,
+    });
+  const api = new OperatorApi(f.service, [f.directory]),
+    task = (await api.readTaskListPage()).data.tasks.find(
+      (t) => t.id === taskId,
+    );
+  assert.ok(task);
+  assert.equal(task.title, null);
+  assert.equal(task.project.name, null);
+  assert.equal(task.lead?.name, null);
+  assert.equal(task.lead?.profileId, ids.profileId);
+  assert.equal(task.state, "open");
+  const options = await api.readComposerOptions(ids.projectId);
+  assert.equal(options.data.profiles[0]?.name, null);
+  assert.equal(options.data.dependencies[0]?.title, null);
+});
+test("a complete aggregate rejects the maximum-page breach and malformed pages and obeys resource cancellation", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f);
+  createTask(f, ids.projectId);
+  const page = await new OperatorApi(f.service, [
+    f.directory,
+  ]).readTaskListPage();
+  const template = page.data.tasks[0];
+  assert.ok(template);
+  let reads = 0;
+  const many = new OperatorClient(async () => {
+    const id = `a0000000-0000-4000-8000-${String(++reads).padStart(12, "0")}`;
+    return new Response(
+      JSON.stringify({
+        ...page,
+        data: { ...page.data, tasks: [{ ...template, id }], nextCursor: id },
+      }),
+      { status: 200 },
+    );
+  });
+  await assert.rejects(loadTaskList(many), /catalog-too-large/);
+  assert.equal(reads, 100);
+  const malformed = new OperatorClient(
+    async () =>
+      new Response(
+        JSON.stringify({
+          ...page,
+          data: {
+            ...page.data,
+            tasks: [{ ...template, rawProcess: "private" }],
+          },
+        }),
+        { status: 200 },
+      ),
+  );
+  await assert.rejects(loadTaskList(malformed), /invalid-response/);
+  const abort = new AbortController();
+  abort.abort();
+  reads = 0;
+  await assert.rejects(
+    loadTaskList(many, abort.signal),
+    (e) => e instanceof Error && e.name === "AbortError",
+  );
+  assert.equal(reads, 0);
+});
+test("Stop without an active execution remains normal Work", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f),
+    taskId = createTask(f, ids.projectId, "Stopped draft");
+  f.seedPersistedState((db) => new ExecutionState(db).stopTask(taskId));
+  const task = (
+    await new OperatorApi(f.service, [f.directory]).readTaskListPage()
+  ).data.tasks.find((t) => t.id === taskId);
+  assert.equal(task?.execution.state, "stopping");
+  assert.deepEqual(task?.attention.codes, []);
 });

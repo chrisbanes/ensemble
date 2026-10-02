@@ -21,6 +21,7 @@ import {
   MobileNavigation,
 } from "./components.js";
 import { loadTaskList } from "./tasks.js";
+import { TaskComposer } from "./task-composer.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
@@ -37,7 +38,7 @@ function RouteLink({
     <a
       className="control nav-link"
       href={href}
-      aria-current={path === href ? "page" : undefined}
+      aria-current={path.split("?")[0] === href ? "page" : undefined}
       onClick={(e) => {
         if (
           e.button === 0 &&
@@ -351,8 +352,22 @@ export function App() {
               {logoutNotice}
             </p>
           )}
-          <ResourceStatus state={workspace.state} retry={workspace.refresh} />
-          {pathname === "/app" || pathname === "/app/tasks" || projectId ? (
+          {workspace.state.status !== "fresh" && (
+            <ResourceStatus state={workspace.state} retry={workspace.refresh} />
+          )}
+          {pathname === "/app/tasks/new" ? (
+            <TaskComposer
+              key={session.csrfToken}
+              client={client}
+              session={session}
+              workspace={workspace.state.data}
+              initialProject={
+                new URLSearchParams(path.split("?")[1] ?? "").get("project") ??
+                ""
+              }
+              onRecorded={tasks.refresh}
+            />
+          ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
             <TaskViews
               state={tasks.state}
               refresh={tasks.refresh}

@@ -142,11 +142,12 @@ own licences.
 `dist/operator`. The production `operator` command serves `/app` and same-origin
 `/api/operator` JSON from its existing listener; no frontend server is needed.
 The shell implements sign-in/out, project navigation and truthful loading,
-stale, error and session states. Overview, Inbox, project task screens and
-settings link to the existing controls while their replacement issues are open.
+stale, error and session states. [UI03](docs/design/ui03-tasks.md) delivers attention
+overview, cross-project/project List/Board and a substantial local task composer.
+Cards retain existing task detail; Inbox and settings link existing controls.
 All existing form routes remain available at `/`.
 
 The [foundation contract](docs/design/ui02-foundation.md) records the strict
 projection/receipt boundary and retained-control owners. UI01 native structured
-input and UI03–UI07 screen/acceptance work remain separate. This foundation does
+input and UI04–UI07 screen/acceptance work remain separate. This foundation does
 not establish release or cutover readiness.
