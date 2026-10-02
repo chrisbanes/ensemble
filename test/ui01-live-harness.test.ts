@@ -10,6 +10,7 @@ import {
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 
 const script = resolve("test/ui01/runtime-contract.mjs");
@@ -767,11 +768,33 @@ for (const mode of ["secret", "cleanup-unproved"] as const)
 
 for (const boundary of ["startup", "service-stop", "verification"] as const)
   test(`service proof bounds awaited ${boundary} and retains unresolved evidence`, {
-    timeout: 3000,
+    timeout: boundary === "startup" ? 3000 : 5000,
   }, async (t) => {
     const { createHash } = await import("node:crypto");
     const { runService } = await probe();
-    const executable = resolve("test/ui01/native-runtime-fixture.mjs");
+    const nativeFixture = resolve("test/ui01/native-runtime-fixture.mjs");
+    let executable = nativeFixture;
+    if (boundary !== "startup") {
+      const root = mkdtempSync(join(tmpdir(), "ensemble-ui01-slow-start-"));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      executable = join(root, "delayed-native-fixture.mjs");
+      writeFileSync(
+        executable,
+        `#!/usr/bin/env node\nif (!process.argv.includes("--version")) await new Promise(resolve => setTimeout(resolve, 850));\nawait import(${JSON.stringify(pathToFileURL(nativeFixture).href)});\n`,
+        { mode: 0o700 },
+      );
+    }
+    let faultEntered = false;
+    let faultSettled = false;
+    let release!: () => void;
+    const stall = async () => {
+      faultEntered = true;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      faultSettled = true;
+    };
+    t.after(() => release?.());
     const started = Date.now();
     const evidence = await runService({
       fixture: {
@@ -780,20 +803,19 @@ for (const boundary of ["startup", "service-stop", "verification"] as const)
           .update(readFileSync(executable))
           .digest("hex"),
         ...(boundary === "startup" ? { mode: "startup-stall" } : {}),
-        ...(boundary === "service-stop"
-          ? { afterServiceStop: async () => new Promise(() => {}) }
-          : {}),
-        ...(boundary === "verification"
-          ? { verifyTermination: async () => new Promise(() => {}) }
-          : {}),
+        ...(boundary === "service-stop" ? { afterServiceStop: stall } : {}),
+        ...(boundary === "verification" ? { verifyTermination: stall } : {}),
       },
-      budgets: { requestMs: 200, totalMs: 1000, cleanupMs: 300 },
+      budgets:
+        boundary === "startup"
+          ? { requestMs: 200, totalMs: 1000, cleanupMs: 300 }
+          : { requestMs: 1000, totalMs: 3000, cleanupMs: 300 },
     });
     t.after(() => {
       rmSync(evidence.fixture.path, { recursive: true, force: true });
       rmSync(evidence.evidencePath, { force: true });
     });
-    assert.ok(Date.now() - started < 1800);
+    assert.ok(Date.now() - started < (boundary === "startup" ? 1800 : 3800));
     assert.equal(evidence.status, "failed");
     assert.equal(evidence.fixture.removed, false);
     if (boundary === "startup") {
@@ -801,7 +823,22 @@ for (const boundary of ["startup", "service-stop", "verification"] as const)
       assert.equal(evidence.counts.turns, 0);
       assert.match(evidence.failure.reason, /startup-deadline/);
     } else {
+      assert.equal(faultEntered, true);
+      assert.equal(
+        evidence.failure.stage,
+        "cleanup",
+        JSON.stringify(evidence.failure),
+      );
       assert.equal(evidence.counts.turns, 1);
+      assert.deepEqual(evidence.counts, {
+        threads: 1,
+        turns: 1,
+        requests: 1,
+        replies: 1,
+        reports: 1,
+      });
+      assert.equal(evidence.receipt.outcome, "confirmed");
+      assert.equal(evidence.settlement.reportCallbackEnded, true);
       assert.equal(evidence.cleanup.verified, false);
       assert.equal(
         evidence.cleanup.unresolvedIdentity.processId,
@@ -814,6 +851,14 @@ for (const boundary of ["startup", "service-stop", "verification"] as const)
           evidence.cleanup.verification.reason,
           /process-verification-deadline/,
         );
+      assert.equal(faultSettled, false);
+      const snapshot = readFileSync(evidence.evidencePath, "utf8");
+      release();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(faultSettled, true);
+      assert.equal(evidence.fixture.removed, false);
+      assert.equal(evidence.cleanup.verified, false);
+      assert.equal(readFileSync(evidence.evidencePath, "utf8"), snapshot);
     }
   });
 

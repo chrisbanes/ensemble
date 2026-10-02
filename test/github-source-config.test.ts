@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { createServer, type AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { browserSuite } from "./fixtures/browser-diagnostics.js";
+const browserTest = browserSuite("github-source");
 import { chromium, type Browser } from "playwright";
 import { DomainStore } from "../src/core/domain.js";
 import { DomainCommands } from "../src/core/domain.js";
@@ -322,13 +324,41 @@ test("operator pages distinguish GitHub sync, provenance and source holds while 
   }
 });
 
-test("GitHub source pages and refresh inherit authenticated origin and CSRF guards", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ensemble-github-http-"));
-  const db = new DatabaseSync(join(root, "db.sqlite"));
-  let http: LocalOperatorHttp | undefined;
-  let auth: OperatorAuth | undefined;
-  let browser: Browser | undefined;
-  try {
+browserTest(
+  "GitHub source pages and refresh inherit authenticated origin and CSRF guards",
+  async (_t, journey) => {
+    const root = mkdtempSync(join(tmpdir(), "ensemble-github-http-"));
+    const db = new DatabaseSync(join(root, "db.sqlite"));
+    let http: LocalOperatorHttp | undefined;
+    let auth: OperatorAuth | undefined;
+    let browser: Browser | undefined;
+    let portServer: ReturnType<typeof createServer> | undefined;
+    journey.ownLocal({
+      browser: async () => {
+        await browser?.close();
+      },
+      listeners: [
+        {
+          name: "http.stop",
+          close: async () => {
+            await http?.stop();
+          },
+        },
+        {
+          name: "probe.close",
+          close: async () => {
+            const held = portServer;
+            if (held?.listening)
+              await new Promise<void>((resolve, reject) =>
+                held.close((error) => (error ? reject(error) : resolve())),
+              );
+          },
+        },
+      ],
+      auth: () => auth?.close(),
+      state: async () => db.close(),
+      directory: () => rmSync(root, { recursive: true, force: true }),
+    });
     new Store(db).ensureHost("test");
     const domain = new DomainStore(db);
     domain.migrate();
@@ -453,21 +483,37 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
     const ui = new LocalOperatorUi(domain, undefined, sources, async () => {
       refreshes++;
     });
-    const portServer = createServer();
-    await new Promise<void>((resolve) =>
-      portServer.listen(0, "127.0.0.1", resolve),
+    const probe = createServer();
+    portServer = probe;
+    await journey.start(
+      "probe.listen",
+      () =>
+        new Promise<void>((resolve, reject) => {
+          probe.once("error", reject);
+          probe.listen(0, "127.0.0.1", resolve);
+        }),
     );
     const port = (portServer.address() as AddressInfo).port;
-    await new Promise<void>((resolve) => portServer.close(() => resolve()));
+    await journey.closeStep(
+      "probe.close",
+      () =>
+        new Promise<void>((resolve, reject) =>
+          probe.close((error) => (error ? reject(error) : resolve())),
+        ),
+    );
     const origin = `http://127.0.0.1:${port}`;
     const password = "test operator password";
-    await OperatorAuth.initialize(join(root, "auth.json"), password);
-    auth = await OperatorAuth.open({
-      authFile: join(root, "auth.json"),
-      origin,
-    });
+    await journey.start("auth.initialize", () =>
+      OperatorAuth.initialize(join(root, "auth.json"), password),
+    );
+    auth = await journey.start("auth.open", () =>
+      OperatorAuth.open({
+        authFile: join(root, "auth.json"),
+        origin,
+      }),
+    );
     http = new LocalOperatorHttp(ui, auth);
-    await http.start(port);
+    await journey.start("http.start", http.start.bind(http, port));
     const privatePage = await fetch(`${origin}/project/${projectId}`, {
       redirect: "manual",
     });
@@ -580,7 +626,9 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
     );
     assert.equal((await post({ origin }, placeFields)).status, 303);
     assert.equal(String(domain.task(taskId).projectId), otherProjectId);
-    browser = await chromium.launch({ headless: true });
+    browser = await journey.start("browser.launch", () =>
+      chromium.launch({ headless: true }),
+    );
     const context = await browser.newContext();
     const [cookieName, cookieValue] = cookie.split("=", 2);
     assert.ok(cookieName && cookieValue);
@@ -588,6 +636,7 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
       { name: cookieName, value: cookieValue, url: origin },
     ]);
     const page = await context.newPage();
+    journey.observe(page);
     await page.goto(`${origin}/project/${projectId}`);
     assert.match(await page.locator("main").innerText(), /repo.*complete/s);
     await page.goto(`${origin}/task/${taskId}`);
@@ -596,14 +645,8 @@ test("GitHub source pages and refresh inherit authenticated origin and CSRF guar
       /GitHub source|org\/repo/,
     );
     assert.equal(await page.locator("img").count(), 0);
-  } finally {
-    await browser?.close();
-    await http?.stop();
-    auth?.close();
-    db.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test("linked repository verification is asynchronous and stale configuration cannot commit", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-github-async-config-"));

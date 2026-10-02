@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Browser } from "playwright";
 import { DatabaseSync } from "node:sqlite";
-import { createServer } from "node:net";
+import { createServer, type Server } from "node:net";
 import { fileURLToPath } from "node:url";
 import { OperatorAuth } from "../../src/standalone/operator-auth.js";
 import {
@@ -30,6 +30,14 @@ import {
 } from "../../src/standalone/service.js";
 import { DeliveryStore } from "../../src/core/delivery.js";
 import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
+import {
+  FixtureLifecycle,
+  type FixtureLifecycleOptions,
+  type FixtureStep,
+  fixtureStepCompleted,
+  fixtureStepPending,
+  throwFixtureCleanup,
+} from "./fixture-lifecycle.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
   private outcomes = new Map<string, (value: "completed" | "failed") => void>();
@@ -64,12 +72,70 @@ export class OperatorFixtureRuntime implements Runtime {
   }
 }
 import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
+
+interface OwnedWeb {
+  id: number;
+  probe: Server;
+  probeClosed: boolean;
+  auth?: OperatorAuth;
+  http?: LocalOperatorHttp;
+  starting: boolean;
+  startSteps: FixtureStep[];
+  closeSteps: Map<string, FixtureStep>;
+}
+
 export async function createOperatorFixture(
   routingClient: RoutingChoiceClient | null = null,
   readerFactory?: GitHubReaderFactory,
   delivery?: StandaloneServiceOptions["delivery"],
+  lifecycleOptions: FixtureLifecycleOptions = {},
 ) {
-  const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
+  const lifecycle = new FixtureLifecycle(lifecycleOptions);
+  const fixtureDeadline = performance.now() + lifecycle.startupTimeoutMs;
+  const startupSteps: FixtureStep[] = [];
+  let directory = "";
+  const directoryOwner = {
+    get directory() {
+      return directory;
+    },
+    lifecycle,
+    async close(primaryFailure?: unknown) {
+      const step = startupSteps.some(fixtureStepPending)
+        ? lifecycle.skip("directory.remove")
+        : await lifecycle.attempt(
+            "directory.remove",
+            "cleanup",
+            async () => {
+              if (directory)
+                await rm(directory, { recursive: true, force: true });
+            },
+            lifecycle.cleanupTimeoutMs,
+          );
+      throwFixtureCleanup([step], primaryFailure);
+    },
+  };
+  try {
+    await lifecycle.start(
+      "directory.create",
+      async () => {
+        directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
+      },
+      fixtureDeadline,
+      startupSteps,
+    );
+  } catch (error) {
+    try {
+      await directoryOwner.close(error);
+    } catch (failure) {
+      throw Object.assign(
+        failure instanceof Error ? failure : Error(String(failure)),
+        { fixture: directoryOwner },
+      );
+    }
+    throw Object.assign(error instanceof Error ? error : Error(String(error)), {
+      fixture: directoryOwner,
+    });
+  }
   const runtime = new OperatorFixtureRuntime();
   const service = new StandaloneService(
     join(directory, "data"),
@@ -82,14 +148,74 @@ export async function createOperatorFixture(
       ...(readerFactory ? { github: { readerFactory } } : {}),
     },
   );
-  await service.start();
-  const listeners = new Set<() => Promise<void>>();
+  const listeners = new Map<number, OwnedWeb>();
+  let listenerSequence = 0;
+  let ownedBrowser: Browser | undefined;
+  let browserStep: FixtureStep | undefined;
+  let serviceStep: FixtureStep | undefined;
+  let directoryStep: FixtureStep | undefined;
   let initialized = false;
   let now = Date.now();
-  return {
+  const cleanupOperation = async (
+    name: string,
+    operation: () => Promise<void>,
+    previous?: FixtureStep,
+  ) =>
+    previous && fixtureStepCompleted(previous)
+      ? previous
+      : lifecycle.attempt(
+          name,
+          "cleanup",
+          operation,
+          lifecycle.cleanupTimeoutMs,
+        );
+  const closeWeb = async (web: OwnedWeb, clientsClosed: boolean) => {
+    const steps: FixtureStep[] = [];
+    const pending = web.starting || web.startSteps.some(fixtureStepPending);
+    const attempt = async (
+      name: string,
+      operation: () => Promise<void>,
+      safe: boolean,
+    ) => {
+      const step = safe
+        ? await cleanupOperation(name, operation, web.closeSteps.get(name))
+        : lifecycle.skip(name);
+      if (safe) web.closeSteps.set(name, step);
+      steps.push(step);
+      return fixtureStepCompleted(step);
+    };
+    if (pending) steps.push(lifecycle.skip(`web-${web.id}.cleanup`));
+    const safe = clientsClosed && !pending;
+    if (!web.probeClosed)
+      await attempt(
+        `probe-${web.id}.close`,
+        async () => {
+          if (web.probe.listening)
+            await new Promise<void>((resolve, reject) =>
+              web.probe.close((error) => (error ? reject(error) : resolve())),
+            );
+          web.probeClosed = true;
+        },
+        safe,
+      );
+    const { http, auth } = web;
+    const listenerClosed = http
+      ? await attempt(`listener-${web.id}.close`, () => http.stop(), safe)
+      : safe;
+    if (auth)
+      await attempt(
+        `auth-${web.id}.close`,
+        async () => auth.close(),
+        listenerClosed,
+      );
+    if (!pending && steps.every(fixtureStepCompleted)) listeners.delete(web.id);
+    return steps;
+  };
+  const fixture = {
     directory,
     runtime,
     service,
+    lifecycle,
     seedPersistedState(seed: (db: DatabaseSync) => void) {
       const db = new DatabaseSync(join(directory, "data", "standalone.sqlite"));
       try {
@@ -102,81 +228,191 @@ export async function createOperatorFixture(
       now += ms;
     },
     async startWeb() {
-      const probe = createServer();
-      await new Promise<void>((resolve, reject) => {
-        probe.once("error", reject);
-        probe.listen(0, "127.0.0.1", resolve);
-      });
-      const address = probe.address();
-      if (!address || typeof address === "string")
-        throw Error("Fixture port unavailable");
-      const port = address.port;
-      await new Promise<void>((resolve, reject) =>
-        probe.close((e) => (e ? reject(e) : resolve())),
-      );
-      const origin = `http://127.0.0.1:${port}`,
-        password = "fixture operator password",
-        authFile = join(directory, "operator.auth");
-      if (!initialized) {
-        await OperatorAuth.initialize(authFile, password);
-        initialized = true;
-      }
-      const auth = await OperatorAuth.open({
-        authFile,
-        origin,
-        now: () => now,
-        idleTimeoutMs: 1000 * 60,
-        absoluteTimeoutMs: 1000 * 60 * 5,
-      });
-      const routes = new OperatorRouteRegistry();
-      routes.registerSlot("runtime", runtimeOperatorRoutes(service));
-      routes.registerSlot(
-        "coordination",
-        coordinationOperatorRoutes(
-          service.coordinationView(),
-          service.domain(),
-          (id) => service.routingAvailability(id),
-        ),
-      );
-      const bundle = await OperatorWebBundle.open(
-        fileURLToPath(new URL("../../operator", import.meta.url)),
-      );
-      const http = new LocalOperatorHttp(
-        new LocalOperatorUi(
-          service.domain(),
-          undefined,
-          service.githubSources(),
-          () => service.refreshGitHub(),
-        ),
-        auth,
-        {
-          routes,
-          web: new OperatorWebBoundary(
-            bundle,
-            new OperatorApi(service, [directory], undefined, readerFactory),
-          ),
-        },
-      );
-      await http.start(port);
-      let closed = false;
-      const close = async () => {
-        if (closed) return;
-        closed = true;
-        await http.stop();
-        auth.close();
-        listeners.delete(close);
+      const id = ++listenerSequence;
+      const owned: OwnedWeb = {
+        id,
+        probe: createServer(),
+        probeClosed: false,
+        starting: true,
+        startSteps: [],
+        closeSteps: new Map(),
       };
-      listeners.add(close);
-      return { origin, password, auth, http, close };
+      listeners.set(id, owned);
+      const deadline =
+        id === 1
+          ? fixtureDeadline
+          : performance.now() + lifecycle.startupTimeoutMs;
+      const start = (name: string, operation: () => Promise<void>) =>
+        lifecycle.start(name, operation, deadline, owned.startSteps);
+      try {
+        const probe = owned.probe;
+        await start(
+          `probe-${id}.start`,
+          () =>
+            new Promise<void>((resolve, reject) => {
+              probe.once("error", reject);
+              probe.listen(0, "127.0.0.1", resolve);
+            }),
+        );
+        const address = probe.address();
+        if (!address || typeof address === "string")
+          throw Error("Fixture port unavailable");
+        const port = address.port;
+        await start(
+          `probe-${id}.close`,
+          () =>
+            new Promise<void>((resolve, reject) =>
+              probe.close((e) => (e ? reject(e) : resolve())),
+            ),
+        );
+        owned.probeClosed = true;
+        const origin = `http://127.0.0.1:${port}`,
+          password = "fixture operator password",
+          authFile = join(directory, "operator.auth");
+        if (!initialized) {
+          await start(`auth-${id}.initialize`, async () => {
+            await OperatorAuth.initialize(authFile, password);
+            initialized = true;
+          });
+        }
+        await start(`auth-${id}.open`, async () => {
+          owned.auth = await OperatorAuth.open({
+            authFile,
+            origin,
+            now: () => now,
+            idleTimeoutMs: 1000 * 60,
+            absoluteTimeoutMs: 1000 * 60 * 5,
+          });
+        });
+        const auth = owned.auth;
+        if (!auth) throw Error("Fixture authentication unavailable");
+        const routes = new OperatorRouteRegistry();
+        routes.registerSlot("runtime", runtimeOperatorRoutes(service));
+        routes.registerSlot(
+          "coordination",
+          coordinationOperatorRoutes(
+            service.coordinationView(),
+            service.domain(),
+            (id) => service.routingAvailability(id),
+          ),
+        );
+        let bundle!: OperatorWebBundle;
+        await start(`bundle-${id}.open`, async () => {
+          bundle = await OperatorWebBundle.open(
+            fileURLToPath(new URL("../../operator", import.meta.url)),
+          );
+        });
+        const http = new LocalOperatorHttp(
+          new LocalOperatorUi(
+            service.domain(),
+            undefined,
+            service.githubSources(),
+            () => service.refreshGitHub(),
+          ),
+          auth,
+          {
+            routes,
+            web: new OperatorWebBoundary(
+              bundle,
+              new OperatorApi(service, [directory], undefined, readerFactory),
+            ),
+          },
+        );
+        owned.http = http;
+        await start(`listener-${id}.start`, async () => {
+          await http.start(port);
+        });
+        const close = async () => {
+          throwFixtureCleanup(
+            await closeWeb(
+              owned,
+              !ownedBrowser || fixtureStepCompleted(browserStep),
+            ),
+          );
+        };
+        return { origin, password, auth, http, close };
+      } finally {
+        owned.starting = false;
+      }
     },
-    async close(browser?: Browser) {
+    async close(browser?: Browser, primaryFailure?: unknown) {
       // Clients must close before server.close waits for their connections.
-      await browser?.close();
-      for (const close of listeners) await close();
-      await service.stop();
-      await rm(directory, { recursive: true, force: true });
+      const steps: FixtureStep[] = [];
+      let clientsClosed = true;
+      if (browser && browser !== ownedBrowser) {
+        if (ownedBrowser && !fixtureStepCompleted(browserStep))
+          throwFixtureCleanup(
+            [lifecycle.skip("browser.replace")],
+            primaryFailure,
+          );
+        ownedBrowser = browser;
+        browserStep = undefined;
+      }
+      if (ownedBrowser) {
+        const client = ownedBrowser;
+        const step =
+          browserStep && fixtureStepCompleted(browserStep)
+            ? browserStep
+            : await lifecycle.attempt(
+                "browser.close",
+                "cleanup",
+                () => client.close(),
+                lifecycle.cleanupTimeoutMs,
+              );
+        browserStep = step;
+        steps.push(step);
+        clientsClosed = fixtureStepCompleted(step);
+      }
+      let listenersClosed = clientsClosed;
+      for (const listener of listeners.values()) {
+        const listenerSteps = await closeWeb(listener, clientsClosed);
+        steps.push(...listenerSteps);
+        if (listenerSteps.some((step) => !fixtureStepCompleted(step)))
+          listenersClosed = false;
+      }
+      const stopped =
+        listenersClosed && !startupSteps.some(fixtureStepPending)
+          ? await cleanupOperation(
+              "service.stop",
+              () => service.stop(),
+              serviceStep,
+            )
+          : lifecycle.skip("service.stop");
+      if (stopped.status !== "dependency-skipped") serviceStep = stopped;
+      steps.push(stopped);
+      const removed = fixtureStepCompleted(stopped)
+        ? await cleanupOperation(
+            "directory.remove",
+            () => rm(directory, { recursive: true, force: true }),
+            directoryStep,
+          )
+        : lifecycle.skip("directory.remove");
+      if (removed.status !== "dependency-skipped") directoryStep = removed;
+      steps.push(removed);
+      throwFixtureCleanup(steps, primaryFailure);
     },
   };
+  try {
+    await lifecycle.start(
+      "service.start",
+      () => service.start(),
+      fixtureDeadline,
+      startupSteps,
+    );
+  } catch (error) {
+    try {
+      await fixture.close(undefined, error);
+    } catch (failure) {
+      throw Object.assign(
+        failure instanceof Error ? failure : Error(String(failure)),
+        { fixture },
+      );
+    }
+    throw Object.assign(error instanceof Error ? error : Error(String(error)), {
+      fixture,
+    });
+  }
+  return fixture;
 }
 
 export function seedOperatorRecovery(
