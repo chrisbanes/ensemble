@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { globSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { constants } from "node:os";
 import {
   createTestEvidenceDirectory,
   writeTestEvidence,
@@ -55,13 +56,30 @@ export async function runTestProcess(args, options = {}) {
   for (const limit of [deadlineMs, graceMs, forceWaitMs])
     if (!Number.isFinite(limit) || limit <= 0)
       throw Error("Runner deadlines must be finite positive milliseconds");
-  const group = process.platform !== "win32";
-  const child = spawn(process.execPath, args, {
-    cwd: options.cwd,
-    env: options.env,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: group,
-  });
+  // Only tests transfer a ready child, together with its exact creation grant.
+  const group = options.ownedChild
+    ? options.ownedChild.ownsGroup
+    : process.platform !== "win32";
+  if (typeof group !== "boolean")
+    throw Error("Transferred test child requires its group ownership grant");
+  const child =
+    options.ownedChild?.child ??
+    spawn(process.execPath, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: group,
+    });
+  const pid = child.pid;
+  if (
+    options.ownedChild &&
+    (options.ownedChild.pid !== pid ||
+      child.exitCode !== null ||
+      child.signalCode !== null)
+  )
+    throw Error(
+      "Transferred test child must retain its live creation identity",
+    );
   const stdout = diagnosticStream(),
     stderr = diagnosticStream();
   child.stdout.on("data", (chunk) => {
@@ -103,13 +121,13 @@ export async function runTestProcess(args, options = {}) {
   const signalOwned = (signal) => {
     if (
       observed ||
-      !child.pid ||
+      !pid ||
       child.exitCode !== null ||
       child.signalCode !== null
     )
       return;
     try {
-      if (group) process.kill(-child.pid, signal);
+      if (group) process.kill(-pid, signal);
       else child.kill(signal);
       terminationSignals.push(signal);
     } catch {
@@ -166,7 +184,8 @@ export async function runTestProcess(args, options = {}) {
   return {
     code: observed?.code ?? null,
     signal: observed?.signal ?? null,
-    pid: child.pid ?? null,
+    pid: pid ?? null,
+    signalTarget: group ? "owned-process-group" : "owned-root-child",
     exitObserved: Boolean(observed && !observed.spawnFailed),
     spawnFailed: Boolean(observed?.spawnFailed),
     timedOut,
@@ -194,7 +213,12 @@ export function runnerStatus(result) {
         ? 130
         : 143
       : 125;
-  return result.exitObserved ? (result.code ?? 1) : 125;
+  return result.exitObserved
+    ? (result.code ??
+        (result.signal && constants.signals[result.signal]
+          ? 128 + constants.signals[result.signal]
+          : 1))
+    : 125;
 }
 
 export async function recordRunnerEvidence(result, name, evidenceRoot) {

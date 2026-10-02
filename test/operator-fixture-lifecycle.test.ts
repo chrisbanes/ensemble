@@ -62,7 +62,6 @@ test("initial service and web startup share one fixture deadline", async () => {
   let finishProbe!: () => void;
   const fixture = await createOperatorFixture(null, undefined, undefined, {
     startupTimeoutMs: 1200,
-    cleanupTimeoutMs: 25,
     operation: async (name, operation) => {
       await operation();
       if (name === "service.start")
@@ -97,7 +96,6 @@ test("a stalled service startup preserves backing state until startup settles", 
   try {
     await createOperatorFixture(null, undefined, undefined, {
       startupTimeoutMs: 150,
-      cleanupTimeoutMs: 25,
       operation: async (name, operation) => {
         await operation();
         if (name === "service.start")
@@ -141,7 +139,6 @@ test("a stalled web startup retains its resources while an independent listener 
   let finish!: () => void;
   const fixture = await createOperatorFixture(null, undefined, undefined, {
     startupTimeoutMs: 1000,
-    cleanupTimeoutMs: 25,
     operation: async (name, operation) => {
       await operation();
       if (name === "listener-2.start")
@@ -352,16 +349,20 @@ test("a rejected partial web startup still owns its listener and auth", async ()
 
 test("stalled listener close bounds both entry points and retains a late rejection", async () => {
   let reject!: (error: Error) => void;
+  let cleanupTimeoutMs = 25;
   const attempts: string[] = [];
   const fixture = await createOperatorFixture(null, undefined, undefined, {
-    cleanupTimeoutMs: 25,
+    get cleanupTimeoutMs() {
+      return cleanupTimeoutMs;
+    },
     operation: async (name, operation) => {
       attempts.push(name);
-      if (name === "listener-1.close")
+      if (name === "listener-1.close") {
+        cleanupTimeoutMs = 10000; // Only the injected stall uses the short bound.
         await new Promise<void>((_resolve, fail) => {
           reject = fail;
         });
-      else await operation();
+      } else await operation();
     },
   });
   const first = await fixture.startWeb();
@@ -399,8 +400,11 @@ test("stalled listener close bounds both entry points and retains a late rejecti
 });
 
 test("a stalled browser close remains uncertain until its eventual completion", async () => {
+  let cleanupTimeoutMs = 25;
   const fixture = await createOperatorFixture(null, undefined, undefined, {
-    cleanupTimeoutMs: 25,
+    get cleanupTimeoutMs() {
+      return cleanupTimeoutMs;
+    },
   });
   const web = await fixture.startWeb();
   let finish!: () => void;
@@ -430,6 +434,7 @@ test("a stalled browser close remains uncertain until its eventual completion", 
     );
     assert.equal(step?.status, "timed-out");
     assert.equal(step.eventual, undefined);
+    cleanupTimeoutMs = 10000; // Resumed real cleanup uses the ordinary bound.
     finish();
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(
@@ -440,6 +445,7 @@ test("a stalled browser close remains uncertain until its eventual completion", 
     await fixture.close();
     await assert.rejects(access(fixture.directory));
   } finally {
+    cleanupTimeoutMs = 10000;
     finish();
     await new Promise<void>((resolve) => setImmediate(resolve));
     await fixture.close();
