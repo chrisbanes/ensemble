@@ -110,23 +110,65 @@ for await (const line of createInterface({ input: process.stdin })) {
     });
   } else if (message.method === "thread/resume") {
     resumes++;
+    if (turns === 0) {
+      write({
+        id: message.id,
+        error: { code: -32600, message: "no rollout found before first turn" },
+      });
+      continue;
+    }
     if (
       resumes !== 1 ||
+      turns !== 1 ||
+      nativeReplies !== 0 ||
       message.params.threadId !== "thread-1" ||
-      message.params.approvalPolicy !== "never" ||
-      message.params.sandbox !== "workspace-write" ||
-      message.params.dynamicTools?.[0]?.name !== "ui01_report_answers" ||
-      [
-        "model",
-        "modelProvider",
-        "effort",
-        "collaborationMode",
-        "config",
-        "baseInstructions",
-        "developerInstructions",
-      ].some((key) => key in message.params)
+      Object.keys(message.params).length !== 1
     )
       process.exit(4);
+    if (mode === "mode-resume-failed") {
+      write({
+        id: message.id,
+        error: { code: -32600, message: "no rollout found" },
+      });
+      continue;
+    }
+    if (mode === "mode-resume-timeout") continue;
+    if (mode.startsWith("mode-pending-")) {
+      if (mode === "mode-pending-async") asyncMarker();
+      if (mode === "mode-pending-foreign-async") asyncMarker("foreign");
+      if (mode === "mode-pending-resolution")
+        write({
+          method: "serverRequest/resolved",
+          params: { threadId: "thread-1", requestId },
+        });
+      if (mode === "mode-pending-report")
+        write({
+          id: "report-rpc",
+          method: "item/tool/call",
+          params: {
+            tool: "ui01_report_answers",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: "report-1",
+            arguments: { answers: {} },
+          },
+        });
+      if (
+        ["mode-pending-terminal", "mode-pending-foreign-terminal"].includes(
+          mode,
+        )
+      )
+        write({
+          method: "turn/completed",
+          params: {
+            threadId:
+              mode === "mode-pending-foreign-terminal" ? "foreign" : "thread-1",
+            turn: { id: "turn-1", status: "completed" },
+          },
+        });
+      // Leave mode unresolved: the injected confounder must stop before any answer effect.
+      continue;
+    }
     const response = {
       thread: { id: mode === "foreign-resume-thread" ? "foreign" : "thread-1" },
       ...settings,
@@ -152,7 +194,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       response.collaborationMode.settings.model = "foreign-model";
     if (mode === "missing-instruction-settings")
       delete response.collaborationMode.settings.developer_instructions;
-    write({ id: message.id, result: response });
+    if (mode === "mode-delayed")
+      setTimeout(() => write({ id: message.id, result: response }), 40);
+    else write({ id: message.id, result: response });
   } else if (message.method === "turn/start") {
     turns++;
     if (

@@ -96,10 +96,66 @@ test("native qualification binds the exact thread's observed Default settings wi
   );
   const kinds = evidence.observations.map((x: { kind: string }) => x.kind);
   assert.ok(
-    kinds.indexOf("effective-default-observed") <
-      kinds.indexOf("native-request"),
+    kinds.indexOf("native-request") <
+      kinds.indexOf("effective-default-observed"),
   );
 });
+
+test("delayed mode readback qualifies only the held callback before persistence or reply", async (t) => {
+  const evidence = await fixture(t, "mode-delayed");
+  assert.equal(evidence.status, "passed");
+  assert.equal(
+    evidence.qualification.observedAt,
+    "held-native-callback-before-answer",
+  );
+  const kinds = evidence.observations.map((x: { kind: string }) => x.kind);
+  const order = [
+    "native-request",
+    "effective-mode-readback-started",
+    "effective-default-observed",
+    "blocked-zero-replies-checkpoint",
+    "answer-and-intent-committed",
+    "reply-write-initiated",
+  ];
+  for (let i = 1; i < order.length; i++) {
+    assert.ok(
+      kinds.indexOf(order[i - 1] as string) < kinds.indexOf(order[i] as string),
+    );
+  }
+  assert.equal(evidence.counts.turns, 1);
+  assert.equal(evidence.counts.replies, 1);
+});
+
+for (const [mode, reason] of [
+  ["mode-pending-resolution", "resolution-without-reply-write"],
+  ["mode-pending-report", "report-order-or-count-mismatch"],
+  ["mode-pending-terminal", "terminal-before-receipt-or-report"],
+  ["mode-pending-async", "unsupported-async-input"],
+  ["mode-pending-foreign-async", "async-identity-mismatch"],
+  ["mode-pending-foreign-terminal", "terminal-identity-mismatch"],
+  ["mode-resume-failed", "rpc-failed"],
+  ["mode-resume-timeout", "total-budget-exceeded"],
+] as const) {
+  test(`mode readback refuses ${mode} without answer, receipt or hold release`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.stage, "effective-mode");
+    assert.equal(evidence.failure.reason, reason);
+    assert.equal(evidence.counts.turns, 1);
+    assert.equal(evidence.counts.requests, 1);
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.persistence, undefined);
+    assert.equal(evidence.qualification, undefined);
+    assert.equal(evidence.receipt.kind, "unavailable");
+    assert.equal(evidence.fixture.removed, false);
+    assert.equal(
+      existsSync(resolve(evidence.fixture.path, "proof.sqlite")),
+      false,
+    );
+    assert.equal(evidence.cleanup.verified, true);
+    assert.equal(JSON.stringify(evidence).includes("PRIVATE_ASYNC"), false);
+  });
+}
 
 test("fixed prompt invokes native input directly without exec discovery or unsupported requests", async (t) => {
   const evidence = await fixture(t, "prompt");
@@ -138,12 +194,13 @@ for (const [mode, reason] of [
   ["conflicting-mode-settings", "effective-settings-mismatch"],
   ["missing-instruction-settings", "effective-settings-mismatch"],
 ] as const) {
-  test(`effective mode qualification refuses ${mode} before the sole turn`, async (t) => {
+  test(`effective mode qualification refuses ${mode} after one held turn and before answer effects`, async (t) => {
     const evidence = await fixture(t, mode);
     assert.equal(evidence.status, "failed");
     assert.equal(evidence.failure.reason, reason);
-    assert.equal(evidence.counts.turns, 0);
+    assert.equal(evidence.counts.turns, 1);
     assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.persistence, undefined);
     assert.equal(evidence.cleanup.verified, true);
     assert.equal(
       JSON.stringify(evidence).includes("PRIVATE_MODE_INSTRUCTIONS"),

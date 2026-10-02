@@ -4,15 +4,16 @@ Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
 [plan revision 2](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5952311804),
 prepared against `e544bcb8f7b9a6dc8b716d429937f4017fa3a444`, 2 October 2026.
 
-**The renewed live T1 is pending.** The approved
-[protocol amendment](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5951479959)
-permits one renewed root-owned proof after deterministic repair and fresh independent
-review. The original failed result and consumed grant below remain historical evidence.
-The repaired harness qualifies only the exact installed version's synchronous Default
-route, observed false/null metadata and actual held waiting; source/schema facts and
-fixture tests alone do not qualify native availability or the operational receipt.
-T2–T6, #743 and #745 remain gated. No production adapter, configuration, login or
-installed service was changed. T6 has no live grant, and the renewed T1 has no retry.
+**The renewed attempt failed before any model turn; the grant is stopped.**
+Root's reviewed revision-2 invocation failed at `effective-mode` / `rpc-failed`:
+one thread, zero turns/requests/replies/reports. Exact process cleanup was verified
+and the failed fixture retained. A separate zero-turn metadata diagnosis found no
+rollout for either resume form before the first turn. Native availability, waiting,
+receipt and consumption remain unproved. The proposed change below moves identity-only
+mode readback behind the held native callback and needs an explicit decision before
+another live attempt. One model turn remains numerically unused; that is not retry
+or dispatch authority. T2–T6, #743 and #745 remain gated, and T6 has no live grant.
+No production adapter, configuration, login or installed service was changed.
 
 ## Read-only installed evidence
 
@@ -42,7 +43,7 @@ only. There is no explicit cardinality or recommended-option field.
 
 | Capability | Current evidence / disposition |
 | --- | --- |
-| Native availability under ordinary production settings | Unproved; historical turn produced no native callback; renewed proof pending |
+| Native availability under ordinary production settings | Unproved; historical turn produced no callback; revision-2 attempt failed before any turn; proposed repair awaits decision |
 | Synchronous Default input with no auto-resolution | Fixture-qualified; exact version/mode/route plus observed `false` / `null` and actual held waiting required |
 | Single choice | Fixture-qualified; fixed delivery options Local/Remote |
 | Standalone free text / grouped questions | Excluded from the renewed fixed proof; no live support claimed |
@@ -214,6 +215,10 @@ ran no App Server or model turn.
 
 ## Approved renewal preparation — revision 2
 
+This section preserves the reviewed preparation at `9227d741250f1ea7825ae75c7417c901181eeb4b`.
+Its live attempt and the proposed mode-order repair are recorded below. The
+pre-turn readback described here failed; it is not the proposed new order.
+
 The prompt now directly invokes `functions.request_user_input` synchronously once
 and awaits it. It forbids exec/ALL_TOOLS discovery, async or nonawaited substitutes,
 plaintext fallback and unsupported question variants. The fixed request is one
@@ -283,3 +288,72 @@ Biome schema-version and Vite directive warnings remain. No real App Server/mode
 turn was included. These results qualify the harness only. The final candidate
 packet binds exact file/diff and fresh log hashes; historical 334/341-test logs
 above do not validate this new candidate. Final diff whitespace validation passed.
+
+## Revision-2 zero-turn failure and proposed mode-order repair
+
+Root invoked the reviewed candidate at
+`9227d741250f1ea7825ae75c7417c901181eeb4b`. The attempt created one disposable
+thread, but `thread/resume` failed before `turn/start`:
+
+| Observation | Result |
+| --- | --- |
+| Threads / model turns / native requests / replies / reports | 1 / 0 / 0 / 0 / 0 |
+| Failure stage / reason | `effective-mode` / `rpc-failed` |
+| Answer persistence / receipt / consumption | None / unavailable / unproved |
+| Native Default, waiting and round trip | Unproved |
+| Scoped cleanup | Exact created process exit independently verified on the same boot |
+| Failed fixture | Retained; no hold or ownership release |
+
+The private sanitized live artifact remains with root at
+`/tmp/ensemble-ui01-approved-t1-live-20261002.json`. Root's separate zero-turn
+metadata diagnosis, `/tmp/ensemble-ui01-zero-turn-mode-diagnostic.json`, received
+`-32600` (no rollout found) both with the earlier overrides and with identity-only
+resume. It dispatched zero turns and independently verified exact process cleanup.
+The generated `ThreadResumeParams` documents active-thread rejoin by thread ID;
+root's tagged-source diagnosis establishes that the first turn persists the rollout.
+Neither diagnosis nor schema evidence qualifies live input or effective Default.
+
+**Proposed, pending explicit decision:** retain source/version/login/policy checks
+before the single turn. Bind the exact `turn/start` response and native callback;
+while that callback is held unanswered, issue only
+`thread/resume {threadId}`. Supply no approval, sandbox, tools, config, model,
+effort, workspace, history, path or instruction overrides. Require exact-thread
+Default, unchanged start model/provider/effort/tier and matching mode settings,
+projecting private instructions to a digest and discarding raw history. This
+observes mode after the first turn starts; it cannot prove that first turn's mode
+before actual provider readback. Missing, conflicting or failed readback stops
+with zero answers/replies and retained evidence, even though one turn may have run.
+
+Only after valid readback may the harness validate synchronous false/null shape,
+hold for the unchanged 250 ms zero-effect checkpoint, commit/read back the answer,
+command receipt and immutable intent, reply once and prove the existing ordered
+receipt, consumption report and successful same-turn terminal. Early resolution,
+report, terminal, async or foreign identity while mode readback is pending fails
+closed before answer persistence or reply. The 90-second native request deadline,
+240-second total budget and 10-second cleanup reserve remain unchanged. No second
+turn, alternate origin/shape, policy/mode override, ownership release or T2–T6
+implementation is included. This repair's fixtures cannot prove actual active
+resume while native input is held; that remains a live boundary for root review.
+
+The schema-faithful fixture now rejects resume before the first turn and accepts
+only identity-only rejoin while the native callback remains unanswered. The
+positive regression first failed under the old ordering, then passed after the
+move. Wrong/missing mode/settings now consume one fixture turn and zero replies;
+regressions cover delayed readback, RPC failure/timeout and pending-mode confounders,
+with no SQLite answer file before qualification. Source mismatches still create
+zero threads/turns. Prior receipt, config privacy, held-checkpoint and cleanup
+safeguards remain covered. No real runtime/model turn was run by the repair owner.
+
+The existing grant stopped on the failed attempt. A numerically unused model turn
+does not authorize rerun. Root retains the architectural decision, fresh independent
+review and any final approval request. Until that explicit decision, keep UI01
+unqualified, preserve prior artifacts/holds and do not invoke the live CLI again.
+
+Mode-order repair preparation passed fresh pinned Node `24.21.0` / npm `12.2.0`
+build, **66/66** targeted harness cases and **522/522** full-check tests, with no
+failures, cancellations or skips. The sandboxed full check hit existing localhost
+`listen EPERM`; its log was preserved and the exact command passed with local
+process/network permissions. Final diff whitespace validation passed. The new
+repair packet binds fresh logs and file/diff hashes separately from the earlier
+57/513-test preparation. This validates deterministic repair only, leaves the
+existing grant stopped and does not qualify live held-callback mode readback.

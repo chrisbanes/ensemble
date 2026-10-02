@@ -620,13 +620,30 @@ export async function runProtocol(options = {}) {
     threadId = thread.thread.id;
     evidence.counts.threads++;
     evidence.threadId = threadId;
-    stage = "effective-mode";
-    const resumed = await request("thread/resume", {
+    stage = "native-request";
+    turnStarting = true;
+    evidence.counts.turns++;
+    timer(budgets.requestMs, "native-request-deadline");
+    const started = await request("turn/start", {
       threadId,
+      cwd: root,
+      input: [{ type: "text", text: prompt }],
       approvalPolicy: "never",
-      sandbox: "workspace-write",
-      dynamicTools: [reportTool],
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: [root],
+        networkAccess: false,
+        excludeSlashTmp: true,
+        excludeTmpdirEnvVar: true,
+      },
     });
+    bindTurn(started.turn?.id);
+    await until(() => native !== undefined);
+    // Request deadline has been met. Keep only the total-budget timer.
+    clearTimeout(timers.pop());
+    stage = "effective-mode";
+    observe("effective-mode-readback-started");
+    const resumed = await request("thread/resume", { threadId });
     const mode = resumed.collaborationMode;
     assert.ok(
       resumed.thread.id === threadId &&
@@ -660,29 +677,9 @@ export async function runProtocol(options = {}) {
       serviceTier: resumed.serviceTier,
       developerInstructionsDigest: mode.settings.developerInstructionsDigest,
       continuation: "version-bound-synchronous-route",
+      observedAt: "held-native-callback-before-answer",
     };
     observe("effective-default-observed");
-    stage = "native-request";
-    turnStarting = true;
-    evidence.counts.turns++;
-    timer(budgets.requestMs, "native-request-deadline");
-    const started = await request("turn/start", {
-      threadId,
-      cwd: root,
-      input: [{ type: "text", text: prompt }],
-      approvalPolicy: "never",
-      sandboxPolicy: {
-        type: "workspaceWrite",
-        writableRoots: [root],
-        networkAccess: false,
-        excludeSlashTmp: true,
-        excludeTmpdirEnvVar: true,
-      },
-    });
-    bindTurn(started.turn?.id);
-    await until(() => native !== undefined);
-    // Request deadline has been met. Keep only the total-budget timer.
-    clearTimeout(timers.pop());
     endpoint = selectAnswers(
       evidence.source,
       evidence.qualification,
@@ -922,6 +919,7 @@ function sourceEvidence() {
       "v2/ThreadStartParams.ts",
       "v2/TurnStartParams.ts",
       "v2/ThreadResumeResponse.ts",
+      "v2/ThreadResumeParams.ts",
       "CollaborationMode.ts",
       "Settings.ts",
       "v2/ThreadItem.ts",
