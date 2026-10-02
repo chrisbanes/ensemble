@@ -210,3 +210,34 @@ Chromium reran unchanged UI/client/design code and retained screenshots at
 `/private/tmp/ensemble-ui02-evidence-36593`; earlier screenshot directories are
 preserved. Fixture teardown code and the explicit teardown proof are unchanged.
 `git diff --check` passed. No actual model/runtime turn or remote write occurred.
+
+## Screenshot output portability repair
+
+PR #748's required check run `36951522443`, job `110665300034`, failed three of
+347 tests on Ubuntu: the three React layout journeys attempted to create
+`/private/tmp` and received `EACCES: permission denied, mkdir '/private'`.
+The inspected CI log is `/tmp/ensemble-ui02-pr748-ci-failed.log`. This was a
+test evidence-path portability defect, not a passed Linux browser qualification.
+
+Screenshot output now uses the existing `test/temp.ts` platform helper, as the
+service fixtures already do. Evidence remains in a sibling directory outside
+the disposable service fixture and survives its teardown. Browser/security/
+layout assertions and production code are unchanged. Local validation uses an
+explicit writable TMPDIR outside `/private` to exercise the actual browser
+journey and screenshot writes under that platform temp root. Cached Chromium
+is already installed; no additional browser or dependency version is needed.
+
+Pinned `npm ci` passed, followed by the full pinned `npm run check` with
+`TMPDIR=/Users/chris/.codex/visualizations/2026/10/01/01a0f879-283e-7e40-aa8e-29962c02b243/ui02-ci-portability-temp`.
+All **347/347** tests passed, with zero failures/cancellations/skips, strict
+types/formatting/builds and the same four baseline lint warnings. Logs are
+`/private/tmp/ensemble-ui02-ci-repair-ci.log` and
+`/private/tmp/ensemble-ui02-ci-repair-check.log`. This is local CI-equivalent
+validation; the remote Ubuntu repair check remains for the delivery owner.
+
+Actual browser journeys retained all **16 screenshots** at
+`/Users/chris/.codex/visualizations/2026/10/01/01a0f879-283e-7e40-aa8e-29962c02b243/ui02-ci-portability-temp/ensemble-ui02-evidence-50930`.
+Inspection after the full check found zero remaining UI02 service fixture
+directories under that temp root, while the evidence directory survived.
+`git diff --check` passed. No production code, model turn, remote write,
+deployment or plan-mismatch repair cycle was involved.

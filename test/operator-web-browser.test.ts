@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { chromium, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
-const evidence = join("/private/tmp", `ensemble-ui02-evidence-${process.pid}`);
+import { tmpdir } from "./temp.js";
+const evidence = join(tmpdir(), `ensemble-ui02-evidence-${process.pid}`);
 async function screenshot(page: Page, name: string) {
   await mkdir(evidence, { recursive: true });
   await page.screenshot({
