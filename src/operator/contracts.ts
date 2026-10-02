@@ -119,6 +119,129 @@ export const projectSchema = envelope(
     })
     .strict(),
 );
+export const admissionSchema = taskSchemaAdmission();
+function taskSchemaAdmission() {
+  return z
+    .object({
+      eligible: z.boolean(),
+      reasons: z.array(
+        z.enum([
+          "project-paused",
+          "project-lead-unconfigured",
+          "project-lead-revoked",
+          "task-unready",
+          "task-not-open",
+          "local-dependency",
+          "imported-blockers-unknown",
+          "imported-blockers-blocked",
+          "source-held",
+          "admission-blocked",
+        ]),
+      ),
+    })
+    .strict();
+}
+export const taskSourceSummarySchema = z
+  .object({
+    identity: sourceIdentity,
+    repositoryName: z
+      .string()
+      .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
+      .nullable(),
+    number: revision.nullable(),
+    url: z.string().url().nullable(),
+    state: z.enum(["open", "closed"]).nullable(),
+  })
+  .strict()
+  .nullable();
+export const taskListSummarySchema = z
+  .object({
+    id: uuid,
+    projectId: uuid,
+    title: safeText,
+    version: revision,
+    state: taskState,
+    ready: z.boolean(),
+    project: projectSummarySchema,
+    lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
+    execution: executionSchema,
+    admission: admissionSchema,
+    capacity: z
+      .object({
+        globalUsage: time,
+        globalLimit: revision,
+        projectUsage: time,
+        projectLimit: revision,
+      })
+      .strict(),
+    source: taskSourceSummarySchema,
+    attention: z
+      .object({
+        codes: z
+          .array(
+            z.enum([
+              "question",
+              "approval",
+              "unresolved-result",
+              "completion-rejected",
+              "execution-uncertain",
+              "lead-review",
+            ]),
+          )
+          .max(6),
+        count: time,
+      })
+      .strict(),
+  })
+  .strict();
+export const taskListQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(100),
+    cursor: uuid.optional(),
+  })
+  .strict();
+export const taskListPageSchema = envelope(
+  z
+    .object({
+      tasks: z.array(taskListSummarySchema).max(100),
+      nextCursor: uuid.nullable(),
+      catalogFingerprint: hash,
+    })
+    .strict(),
+);
+export const composerOptionsSchema = envelope(
+  z
+    .object({
+      project: projectSummarySchema,
+      lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
+      profiles: z.array(profileSummarySchema),
+      dependencies: z
+        .array(
+          z
+            .object({
+              id: uuid,
+              title: safeText,
+              state: taskState,
+              source: taskSourceSummarySchema,
+            })
+            .strict(),
+        )
+        .max(10000),
+      capacity: z
+        .object({
+          globalUsage: time,
+          globalLimit: revision,
+          projectUsage: time,
+          projectLimit: revision,
+        })
+        .strict(),
+      routingEnabled: z.boolean(),
+    })
+    .strict(),
+);
+export type TaskListPage = z.infer<typeof taskListPageSchema>;
+export type TaskListSummary = z.infer<typeof taskListSummarySchema>;
+export type ComposerOptions = z.infer<typeof composerOptionsSchema>;
 const generation = z
   .object({
     workId: z.string().min(1),
@@ -445,6 +568,15 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       title: z.string().trim().min(1).max(512),
       outcome: text,
       ready: z.boolean(),
+      blockerTaskIds: z
+        .array(uuid)
+        .max(128)
+        .refine((ids) => new Set(ids).size === ids.length)
+        .optional(),
+      initialAssignment: z
+        .object({ assignmentId: uuid, profileId: uuid })
+        .strict()
+        .optional(),
     })
     .strict(),
   z

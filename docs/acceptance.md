@@ -278,6 +278,9 @@ and [foundation evidence](evidence/ui02-foundation.md).
 
 This delivery name is distinct from the existing **UI02 native-question runtime
 acceptance scenario**. That scenario remains unproved; no native availability is
-claimed. UI01/UI03–UI07 screens, runtime-question integration and parent #736
+claimed. Delivery [UI03 #741](https://github.com/chrisbanes/ensemble/issues/741)
+adds attention overview, shared List/Board and atomic local composer, with
+[contract](design/ui03-tasks.md) and [service/browser evidence](evidence/ui03-tasks.md).
+UI01/UI04–UI07 screens, runtime-question integration and parent #736
 final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.

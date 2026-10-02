@@ -20,6 +20,9 @@ import {
   ResourceStatus,
   MobileNavigation,
 } from "./components.js";
+import { loadTaskList } from "./tasks.js";
+import { TaskComposer } from "./task-composer.js";
+import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
   path,
@@ -35,7 +38,7 @@ function RouteLink({
     <a
       className="control nav-link"
       href={href}
-      aria-current={path === href ? "page" : undefined}
+      aria-current={path.split("?")[0] === href ? "page" : undefined}
       onClick={(e) => {
         if (
           e.button === 0 &&
@@ -69,6 +72,9 @@ function ProjectNavigation({
       </RouteLink>
       <RouteLink href="/app/inbox" path={path} navigate={navigate}>
         Inbox
+      </RouteLink>
+      <RouteLink href="/app/tasks" path={path} navigate={navigate}>
+        All tasks
       </RouteLink>
       <h2 className="small-heading">Projects</h2>
       {workspace?.data.projects.length === 0 && (
@@ -154,7 +160,7 @@ export function App() {
   const [session, setSession] = useState<Session | null>(null),
     [bootstrapError, setBootstrapError] = useState(false),
     [bootstrap, setBootstrap] = useState(0),
-    [path, setPath] = useState(location.pathname),
+    [path, setPath] = useState(location.pathname + location.search),
     [drawer, setDrawer] = useState(false),
     [logoutPending, setLogoutPending] = useState(false),
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
@@ -181,7 +187,7 @@ export function App() {
     };
   }, [client, bootstrap]);
   useEffect(() => {
-    const pop = () => setPath(location.pathname);
+    const pop = () => setPath(location.pathname + location.search);
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, []);
@@ -194,6 +200,15 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     loader,
   );
+  const taskLoader = useCallback(
+    (signal: AbortSignal) => loadTaskList(client, signal),
+    [client],
+  );
+  const tasks = useOperatorResource(
+    session?.authenticated ? session.csrfToken : null,
+    taskLoader,
+  );
+  const pathname = path.split("?")[0] ?? "/app";
   const navigate = (next: string) => {
     history.pushState(null, "", next);
     setPath(next);
@@ -229,7 +244,7 @@ export function App() {
           client={client}
           session={session}
           onSignedIn={(next) => {
-            if (path === "/login") {
+            if (pathname === "/login") {
               history.replaceState(null, "", "/app");
               setPath("/app");
             }
@@ -243,30 +258,34 @@ export function App() {
         )}
       </>
     );
-  const projectId = path.match(/^\/app\/projects\/([^/]+)$/)?.[1];
+  const projectId = pathname.match(/^\/app\/projects\/([^/]+)$/)?.[1];
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
   const title =
-    path === "/app"
+    pathname === "/app"
       ? "Overview"
-      : path === "/app/inbox"
-        ? "Inbox"
-        : path === "/app/settings"
-          ? "Settings"
-          : projectId
-            ? (project?.name ?? "Project")
-            : "Page not found";
+      : pathname === "/app/tasks"
+        ? "All tasks"
+        : pathname === "/app/tasks/new"
+          ? "New task"
+          : pathname === "/app/inbox"
+            ? "Inbox"
+            : pathname === "/app/settings"
+              ? "Settings"
+              : projectId
+                ? (project?.name ?? "Project")
+                : "Page not found";
   const destination =
     projectId && project
       ? `/project/${project.id}`
-      : path === "/app/inbox"
+      : pathname === "/app/inbox"
         ? "/coordination"
         : "/";
   const description =
-    path === "/app/inbox"
+    pathname === "/app/inbox"
       ? "Questions, approvals and task coordination are available in the existing operator."
-      : path === "/app/settings"
+      : pathname === "/app/settings"
         ? "Project, profile, routing and source settings are available in the existing operator."
         : projectId
           ? "Task and project controls are available in the existing operator."
@@ -333,26 +352,49 @@ export function App() {
               {logoutNotice}
             </p>
           )}
-          <ResourceStatus state={workspace.state} retry={workspace.refresh} />
-          <p className="introduction muted">{description}</p>
-          {project?.paused && (
-            <p className="body">
-              <StatusBadge tone="warning">Project paused</StatusBadge> New turns
-              are held.
-            </p>
+          {workspace.state.status !== "fresh" && (
+            <ResourceStatus state={workspace.state} retry={workspace.refresh} />
           )}
-          <a className="control button primary action-link" href={destination}>
-            Open existing{" "}
-            {projectId
-              ? "project controls"
-              : path === "/app/inbox"
-                ? "coordination controls"
-                : "operator controls"}
-          </a>
-          <p className="metadata muted">
-            This interface currently provides sign-in and project navigation.
-            Task, inbox and settings screens are being delivered separately.
-          </p>
+          {pathname === "/app/tasks/new" ? (
+            <TaskComposer
+              key={session.csrfToken}
+              client={client}
+              session={session}
+              workspace={workspace.state.data}
+              initialProject={
+                new URLSearchParams(path.split("?")[1] ?? "").get("project") ??
+                ""
+              }
+              onRecorded={tasks.refresh}
+            />
+          ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
+            <TaskViews
+              state={tasks.state}
+              refresh={tasks.refresh}
+              workspace={workspace.state.data}
+              path={path}
+              navigate={navigate}
+              {...(projectId ? { projectId } : {})}
+              overview={pathname === "/app"}
+            />
+          ) : (
+            <>
+              <p className="introduction muted">{description}</p>
+              <a
+                className="control button primary action-link"
+                href={destination}
+              >
+                Open existing{" "}
+                {pathname === "/app/inbox"
+                  ? "coordination controls"
+                  : "operator controls"}
+              </a>
+              <p className="metadata muted">
+                Task detail, complete Inbox and settings controls remain
+                available in the existing operator.
+              </p>
+            </>
+          )}
         </main>
       </div>
     </div>

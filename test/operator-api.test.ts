@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { DomainStore } from "../src/core/domain.js";
+import { DomainStore, DomainPolicyError } from "../src/core/domain.js";
 import { CoordinationStore } from "../src/core/coordination.js";
 import { CoordinationView } from "../src/standalone/coordination-view.js";
 import { ExecutionState } from "../src/standalone/state.js";
@@ -206,6 +206,11 @@ test("scoped interactions preserve exact material, revision conflicts, and origi
   const q = read.data.questions[0],
     a = read.data.approvals[0];
   assert.ok(q && a);
+  assert.deepEqual(
+    (await api.readTaskListPage()).data.tasks.find((t) => t.id === ids.taskId)
+      ?.attention.codes,
+    ["question", "approval"],
+  );
   assert.deepEqual(a.material, { version: "next" });
   assert.equal(a.approvable, true);
   const answer = {
@@ -416,6 +421,11 @@ test("unresolved result supplies exact revision and permitted recipient; replay 
   let api = new OperatorApi(f.service, [f.directory]);
   let u = (await api.readTask(ids.taskId)).data.unresolvedResults[0];
   assert.ok(u?.permittedRecipient);
+  assert.ok(
+    (await api.readTaskListPage()).data.tasks
+      .find((t) => t.id === ids.taskId)
+      ?.attention.codes.includes("unresolved-result"),
+  );
   assert.equal(u.reasonCode, "unresolved-destination");
   const recipientId = u.permittedRecipient.assignmentId;
   f.seedPersistedState((db) =>
@@ -470,6 +480,12 @@ test("unresolved result supplies exact revision and permitted recipient; replay 
   const saved = await api.execute(command);
   assert.deepEqual(await api.execute(command), saved);
   assert.equal(
+    (await api.readTaskListPage()).data.tasks
+      .find((t) => t.id === ids.taskId)
+      ?.attention.codes.includes("unresolved-result"),
+    false,
+  );
+  assert.equal(
     (await api.readTask(ids.taskId)).data.unresolvedResults.length,
     0,
   );
@@ -503,13 +519,14 @@ test("post-commit wakeup rejection is unknown and matching key reconciles one or
   const domain = new DomainStore(db);
   const coordination = new CoordinationStore(db, domain);
   let rejectWakeup = true;
+  let wakeError: Error = Error("PRIVATE WAKEUP DIAGNOSTIC");
   const view = new CoordinationView(
     domain,
     coordination,
     new ExecutionState(db),
     new RoutingAttemptStore(db),
     async () => {
-      if (rejectWakeup) throw Error("PRIVATE WAKEUP DIAGNOSTIC");
+      if (rejectWakeup) throw wakeError;
     },
   );
   const api = new OperatorApi(f.service, [f.directory], () => view);
@@ -542,6 +559,35 @@ test("post-commit wakeup rejection is unknown and matching key reconciles one or
     1,
   );
   await assert.rejects(api.execute({ ...command, message: "Different" }));
+  for (const code of ["forbidden", "invalid-input"] as const) {
+    wakeError = new DomainPolicyError(code, "PRIVATE POSTCOMMIT POLICY ERROR");
+    rejectWakeup = true;
+    const typedCommand = {
+      ...command,
+      key: randomUUID(),
+      message: `Durable typed ${code}`,
+    };
+    await assert.rejects(
+      api.execute(typedCommand),
+      (error) =>
+        error instanceof Error && error.message === "command-outcome-unknown",
+    );
+    const events = (await api.readTask(ids.taskId)).data.messages.filter(
+      (m) => m.text === typedCommand.message,
+    );
+    assert.equal(events.length, 1);
+    rejectWakeup = false;
+    const saved = await api.execute(typedCommand);
+    assert.equal(saved.kind, "coordination");
+    if (saved.kind === "coordination")
+      assert.equal(saved.eventId, events[0]?.eventId);
+    assert.equal(
+      (await api.readTask(ids.taskId)).data.messages.filter(
+        (m) => m.text === typedCommand.message,
+      ).length,
+      1,
+    );
+  }
 });
 test("history preserves omission identities and excludes captured instructions and paths", async (t) => {
   const f = await createOperatorFixture();
@@ -1182,4 +1228,132 @@ test("core-valid material beyond public collection and depth limits remains priv
       ).length,
       1,
     );
+});
+
+test("rich creation rejects a revoked explicit assignee without recording a task", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f);
+  const d = f.service.domain();
+  d.execute({
+    type: "profile.configure",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  const taskId = randomUUID();
+  await assert.rejects(
+    api.execute({
+      type: "task.create",
+      key: randomUUID(),
+      projectId: ids.projectId,
+      taskId,
+      title: "Rejected",
+      outcome: "Ship",
+      ready: true,
+      initialAssignment: {
+        assignmentId: randomUUID(),
+        profileId: ids.profileId,
+      },
+    }),
+    (e: unknown) => e instanceof Error && "code" in e && e.code === "forbidden",
+  );
+  assert.ok(!d.tasks(ids.projectId).some((t) => t.id === taskId));
+});
+
+test("catalog attention tracks current rejected completion and lead review, excluding historical fallback", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f, true),
+    api = new OperatorApi(f.service, [f.directory]);
+  const work = f.service.list().find((w) => w.state === "running");
+  assert.ok(work?.threadId && work.turnId);
+  const call = (
+    tool: string,
+    arguments_: Record<string, unknown>,
+    callId: string,
+  ) =>
+    f.runtime.callTool({
+      threadId: work.threadId ?? "",
+      turnId: work.turnId ?? "",
+      tool,
+      arguments: arguments_,
+      callId,
+    });
+  assert.equal(
+    (await call("ensemble_ask_question", { question: "Choose" }, "attention-q"))
+      .success,
+    true,
+  );
+  assert.equal(
+    (
+      await call(
+        "ensemble_request_completion",
+        { reviewedResultIds: [] },
+        "attention-c",
+      )
+    ).success,
+    true,
+  );
+  f.runtime.complete(1);
+  await until(() =>
+    f.service
+      .coordinationView()
+      .readTask(ids.taskId)
+      .completionRequests.some((c) => c.status === "rejected"),
+  );
+  const codes = async (id: string) =>
+    (await api.readTaskListPage()).data.tasks.find((t) => t.id === id)
+      ?.attention.codes ?? [];
+  assert.ok((await codes(ids.taskId)).includes("completion-rejected"));
+  f.service.domain().execute({
+    type: "task.configure",
+    key: randomUUID(),
+    actor: "operator",
+    projectId: ids.projectId,
+    taskId: ids.taskId,
+    expectedVersion: Number(f.service.domain().task(ids.taskId).version),
+    ready: false,
+  });
+  assert.equal(
+    (await codes(ids.taskId)).includes("completion-rejected"),
+    false,
+  );
+  const other = await seed(f);
+  f.seedPersistedState((db) => {
+    const routing = new RoutingAttemptStore(db),
+      operation = routing.ensureOperation({
+        projectId: other.projectId,
+        taskId: other.taskId,
+        taskVersion: 1,
+        guidanceRevision: 1,
+        brief: "Work",
+        findings: "",
+        guidance: "",
+        candidates: [],
+      });
+    routing.completeFallback(operation.operationId, {
+      kind: "lead-review",
+      reason: "no-candidates",
+      requestedModel: "jev-1.13.0",
+    });
+  });
+  assert.ok((await codes(other.taskId)).includes("lead-review"));
+  f.service.domain().execute({
+    type: "task.configure",
+    key: randomUUID(),
+    actor: "operator",
+    projectId: other.projectId,
+    taskId: other.taskId,
+    expectedVersion: 1,
+    title: "Next version",
+  });
+  assert.deepEqual(await codes(other.taskId), []);
+  assert.equal(
+    f.service.coordinationView().readTask(other.taskId).routing.attempts.length,
+    1,
+  );
 });

@@ -1,3 +1,4 @@
+import type { Browser } from "playwright";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,7 @@ import type {
   RuntimeToolResult,
 } from "../../src/standalone/codex.js";
 import { StandaloneService } from "../../src/standalone/service.js";
+import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
   private outcomes = new Map<string, (value: "completed" | "failed") => void>();
@@ -56,14 +58,16 @@ export class OperatorFixtureRuntime implements Runtime {
     this.outcomes.get(`fixture-turn-${turn}`)?.("completed");
   }
 }
-export async function createOperatorFixture() {
+export async function createOperatorFixture(
+  routingClient: RoutingChoiceClient | null = null,
+) {
   const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
   const runtime = new OperatorFixtureRuntime();
   const service = new StandaloneService(
     join(directory, "data"),
     () => runtime,
     undefined,
-    { power: { enabled: false }, routingClient: null },
+    { power: { enabled: false }, routingClient },
   );
   await service.start();
   const listeners = new Set<() => Promise<void>>();
@@ -152,7 +156,9 @@ export async function createOperatorFixture() {
       listeners.add(close);
       return { origin, password, auth, http, close };
     },
-    async close() {
+    async close(browser?: Browser) {
+      // Clients must close before server.close waits for their connections.
+      await browser?.close();
       for (const close of listeners) await close();
       await service.stop();
       await rm(directory, { recursive: true, force: true });

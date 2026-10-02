@@ -1265,7 +1265,7 @@ export class LocalOperatorHttp {
         json(200, await web.api.execute(body));
         return true;
       }
-      const data = await web.read(path);
+      const data = await web.read(path, url.searchParams);
       if (data === undefined) deny(404, "not-found");
       else json(200, data);
     } catch (error) {
