@@ -73,6 +73,123 @@ test("qualified Default false/null request records actual waiting before one non
   assert.equal(evidence.cleanup.verified, true);
 });
 
+test("one exact native callback replay after resume response and optional update stays one request/effect", async (t) => {
+  const evidence = await fixture(t, "resume-replay");
+  assert.equal(evidence.status, "passed");
+  assert.deepEqual(evidence.counts, {
+    threads: 1,
+    turns: 1,
+    requests: 1,
+    replies: 1,
+    reports: 1,
+  });
+  assert.equal(evidence.nativeReplay.accepted, 1);
+  assert.equal(evidence.receipt.kind, "confirmed");
+  assert.equal(evidence.persistence.committedBeforeEffect, true);
+  assert.equal(evidence.consumption.kind, "answer-only-nonce-report");
+  assert.equal(
+    evidence.observations.filter(
+      (x: { kind: string }) => x.kind === "answer-and-intent-committed",
+    ).length,
+    1,
+  );
+  assert.equal(
+    evidence.observations.filter(
+      (x: { kind: string }) => x.kind === "native-resume-replay",
+    ).length,
+    1,
+  );
+  assert.equal(evidence.cleanup.verified, true);
+});
+
+test("replay compares complete parameters structurally while preserving object-key equivalence", async (t) => {
+  const evidence = await fixture(t, "replay-reordered-keys");
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.nativeReplay.accepted, 1);
+  assert.equal(evidence.counts.requests, 1);
+  assert.equal(evidence.counts.replies, 1);
+});
+
+for (const mode of [
+  "replay-changed-body",
+  "replay-unknown-field",
+  "replay-null-absence",
+  "replay-array-order",
+  "replay-new-id",
+  "replay-id-type",
+  "replay-foreign-thread",
+  "replay-foreign-turn",
+  "replay-foreign-item",
+  "replay-before-response",
+  "replay-excess",
+  "duplicate",
+]) {
+  test(`native delivery ${mode} fails closed without a second request or answer effect`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, "duplicate-native-request");
+    assert.equal(evidence.counts.requests, 1);
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.persistence, undefined);
+    assert.equal(
+      evidence.nativeReplay.accepted,
+      mode === "replay-excess" ? 1 : 0,
+    );
+    assert.match(evidence.nativeReplay.rejected.paramsDigest, /^[a-f0-9]{64}$/);
+    assert.equal(
+      evidence.nativeReplay.rejected.method,
+      "item/tool/requestUserInput",
+    );
+    assert.equal(
+      evidence.nativeReplay.rejected.runtimeGeneration,
+      evidence.runtimeGeneration,
+    );
+    assert.equal(
+      evidence.nativeReplay.rejected.processId,
+      evidence.process.processId,
+    );
+    assert.equal(JSON.stringify(evidence).includes("PRIVATE_REPLAY"), false);
+    assert.equal(evidence.cleanup.verified, true);
+    if (mode === "replay-id-type")
+      assert.equal(evidence.nativeReplay.rejected.requestIdType, "number");
+  });
+}
+
+for (const [mode, receipt] of [
+  ["replay-after-write", "uncertain"],
+  ["replay-after-confirmed", "confirmed"],
+] as const) {
+  test(`${mode} fails proof without repeating an effect or rewriting historical receipt`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, "duplicate-native-request");
+    assert.equal(evidence.counts.requests, 1);
+    assert.equal(evidence.counts.replies, 1);
+    assert.equal(evidence.nativeReplay.accepted, 0);
+    assert.equal(evidence.receipt.kind, receipt);
+    assert.match(evidence.nativeReplay.rejected.paramsDigest, /^[a-f0-9]{64}$/);
+    assert.equal(evidence.cleanup.verified, true);
+  });
+}
+
+test("same textual RPC ids in a replacement process retain separate replay/effect generations", async (t) => {
+  const held = await fixture(t, "duplicate");
+  const replacement = await fixture(t, "resume-replay");
+  assert.equal(held.status, "failed");
+  assert.equal(replacement.status, "passed");
+  assert.equal(held.identity.requestId, replacement.identity.requestId);
+  assert.notEqual(held.runtimeGeneration, replacement.runtimeGeneration);
+  assert.notEqual(held.process.processId, replacement.process.processId);
+  assert.equal(
+    replacement.receipt.identity.runtimeGeneration,
+    replacement.runtimeGeneration,
+  );
+  assert.equal(replacement.nativeReplay.accepted, 1);
+  assert.equal(replacement.counts.replies, 1);
+  assert.equal(held.counts.replies, 0);
+  assert.equal(held.receipt.kind, "unavailable");
+});
+
 test("native qualification binds the exact thread's observed Default settings without private instructions", async (t) => {
   const evidence = await fixture(t, "default");
   assert.equal(evidence.status, "passed");

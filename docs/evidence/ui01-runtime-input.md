@@ -4,15 +4,16 @@ Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
 [plan revision 2](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5952311804),
 prepared against `e544bcb8f7b9a6dc8b716d429937f4017fa3a444`, 2 October 2026.
 
-**The renewed attempt failed before any model turn; the grant is stopped.**
-Root's reviewed revision-2 invocation failed at `effective-mode` / `rpc-failed`:
-one thread, zero turns/requests/replies/reports. Exact process cleanup was verified
-and the failed fixture retained. A separate zero-turn metadata diagnosis found no
-rollout for either resume form before the first turn. Native availability, waiting,
-receipt and consumption remain unproved. The proposed change below moves identity-only
-mode readback behind the held native callback and needs an explicit decision before
-another live attempt. One model turn remains numerically unused; that is not retry
-or dispatch authority. T2–T6, #743 and #745 remain gated, and T6 has no live grant.
+**The approved mode-order attempt failed after one model turn; its grant is consumed.**
+The earlier revision-2 invocation failed before any turn. Chris then accepted the
+[mode-order proposal](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5953221322),
+recorded in the [controller resume](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5953309592).
+The new attempt observed a synchronous native callback and exact-thread Default/settings,
+but failed on a second native-request notification during the held checkpoint.
+Zero replies or consumption reports were sent; no answer was persisted. Exact process
+cleanup was verified and the failed fixture retained. Native availability was observed;
+held waiting, receipt, consumption and successful terminal remain unqualified.
+No retry is authorized. T2–T6, #743 and #745 remain gated; T6 has no live grant.
 No production adapter, configuration, login or installed service was changed.
 
 ## Read-only installed evidence
@@ -43,7 +44,7 @@ only. There is no explicit cardinality or recommended-option field.
 
 | Capability | Current evidence / disposition |
 | --- | --- |
-| Native availability under ordinary production settings | Unproved; historical turn produced no callback; revision-2 attempt failed before any turn; proposed repair awaits decision |
+| Native availability under ordinary production settings | Observed in the approved mode-order attempt; held waiting and full round trip remain unqualified |
 | Synchronous Default input with no auto-resolution | Fixture-qualified; exact version/mode/route plus observed `false` / `null` and actual held waiting required |
 | Single choice | Fixture-qualified; fixed delivery options Local/Remote |
 | Standalone free text / grouped questions | Excluded from the renewed fixed proof; no live support claimed |
@@ -357,3 +358,85 @@ process/network permissions. Final diff whitespace validation passed. The new
 repair packet binds fresh logs and file/diff hashes separately from the earlier
 57/513-test preparation. This validates deterministic repair only, leaves the
 existing grant stopped and does not qualify live held-callback mode readback.
+
+## Approved mode-order live attempt — failed, no retry
+
+At reviewed head `a84c92696b03d8daeed74b33ead51597ede7c2cb`, root ran the
+single explicitly approved attempt with existing login/model and unchanged
+90-second request / 240-second total / 10-second cleanup-reserve limits.
+
+| Observation | Result |
+| --- | --- |
+| Threads / model turns / native requests accepted / replies / reports | 1 / 1 / 1 / 0 / 0 |
+| Native callback | Synchronous `isBlocking=false`, `autoResolutionMs=null`; Local/Remote plus explicit custom text |
+| Same-thread mode readback | Default with unchanged model/provider/effort/tier and projected instruction digest |
+| Failure stage / reason | `blocked-checkpoint` / `duplicate-native-request` |
+| Answer persistence / receipt / consumption | None / unavailable / unproved |
+| Scoped cleanup | Exact created process exit independently verified on the same boot |
+| Failed fixture and previous attempts | Retained; no hold or ownership release |
+
+The harness retained the first callback identity but did not capture the second
+notification's identity/body. The result cannot distinguish an identical provider
+replay from a second model request. Source investigation may explain replay
+semantics; it cannot retrospectively prove the discarded payload. No successful
+held checkpoint, operational receipt or successful terminal is claimed. The
+one-turn grant is consumed; deterministic investigation/repairs do not grant a
+further real attempt. T2–T6 stay gated and T6 remains unauthorized.
+
+Tagged-source follow-up explains an expected replay path: warm
+[`thread/resume`](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/app-server/src/request_processors/thread_lifecycle.rs#L780)
+queues the resume response, optional updates and pending callbacks even for an
+already subscribed connection. The
+[outgoing replay path](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/app-server/src/outgoing_message.rs#L446)
+sends the stored server request with the same request ID/body; new server requests
+allocate fresh IDs. This supports replay as the likely explanation, but does not
+prove the discarded second payload was identical. A deterministic repair must
+recognize only exact same-identity/body replay during that explicit rejoin window,
+and continue rejecting new IDs, changed payloads and callbacks after reply.
+
+## Deterministic exact resume-replay repair
+
+The repaired harness accepts at most one repeated native delivery after the sole
+explicit identity-only resume response and before any reply/resolution/report or
+terminal. Every delivery still receives identity/envelope checks. The repeated
+RPC method and typed ID, thread/turn/item and complete parsed parameters must match
+the first callback structurally: array order, unknown fields and null versus absence
+are significant; object key order is equivalent. The owned child receiver and
+captured first process/generation provide provenance; callback parameters do not
+independently attest a process or generation. No provider identity fields or general
+replay framework were added.
+
+An accepted replay records a separate observation and replay count while retaining
+one unique request and the original endpoint. It creates no additional persistence,
+reply or receipt. A rejected second native delivery retains only safe identity and
+SHA-256 of its serialized complete parameters; raw duplicate body/history is not
+exported. Rejection covers changed ID/type/body, foreign identity, pre-resume or
+pre-response deliveries, excess replays and callbacks after a reply. Original
+mode/settings/source qualification, 250 ms held-zero checkpoint, durable readback,
+ordered receipt, consumption, terminal and cleanup gates remain unchanged.
+
+A fixture matching resume response → optional status update → pending callback
+first failed the old duplicate guard, then passed with one commit/reply and the
+existing receipt/consumption/terminal proof. Regressions cover complete-body changes,
+null/absence, option-array order, unknown fields, equivalent object-key order,
+new/wrong-typed IDs, foreign identities, replay outside the response window, excess
+replay, effects already begun and separate owned child generations reusing textual
+RPC IDs. These are deterministic harness results only. The discarded second live
+payload remains unknown; the likely source-level replay explanation cannot become
+a retrospective identity claim.
+
+The next proof delta, if separately authorized, is to observe at most one exact
+resume replay separately from the sole native request, then reach the unchanged
+held checkpoint and round trip. The actual one-turn grant is consumed, with zero
+remaining model turns and no new live authority. No real runtime/model turn,
+production adapter, T2–T6 work, setting change, remote mutation or ownership/hold
+release was performed by the repair owner. Actual held waiting, receipt,
+consumption and successful terminal remain unqualified.
+
+Fresh replay-repair validation used pinned Node `24.21.0` / npm `12.2.0`:
+build passed, targeted **83/83** and full `npm run check` **539/539**, with no
+failures, cancellations or skips. The existing localhost `listen EPERM` sandbox
+log was preserved; the exact command passed with local process/network permissions.
+Final diff whitespace validation passed. Fresh log/file/diff hashes are bound in
+the replay candidate packet; earlier passing logs remain historical. These checks
+include no real runtime/model turn and confer no new live authority.

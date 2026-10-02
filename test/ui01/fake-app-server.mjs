@@ -8,6 +8,7 @@ let nativeReplies = 0;
 let turns = 0;
 let threads = 0;
 let resumes = 0;
+let originalNative;
 function asyncMarker(
   threadId = "thread-1",
   turnId = "turn-1",
@@ -35,6 +36,27 @@ function asyncMarker(
           },
     },
   });
+}
+function replay() {
+  const message = structuredClone(originalNative);
+  if (mode === "replay-changed-body")
+    message.params.questions[0].question = "PRIVATE_REPLAY_BODY";
+  if (mode === "replay-unknown-field")
+    message.params.opaque = "PRIVATE_REPLAY_FIELD";
+  if (mode === "replay-null-absence") delete message.params.autoResolutionMs;
+  if (mode === "replay-array-order")
+    message.params.questions[0].options.reverse();
+  if (mode === "replay-new-id") message.id = "72";
+  if (mode === "replay-id-type") message.id = 71;
+  if (mode === "replay-foreign-thread")
+    message.params.threadId = "foreign-thread";
+  if (mode === "replay-foreign-turn") message.params.turnId = "foreign-turn";
+  if (mode === "replay-foreign-item") message.params.itemId = "foreign-item";
+  if (mode === "replay-reordered-keys")
+    message.params = Object.fromEntries(
+      Object.entries(message.params).reverse(),
+    );
+  write(message);
 }
 const settings = {
   model: "fixture-model",
@@ -194,9 +216,28 @@ for await (const line of createInterface({ input: process.stdin })) {
       response.collaborationMode.settings.model = "foreign-model";
     if (mode === "missing-instruction-settings")
       delete response.collaborationMode.settings.developer_instructions;
+    if (mode === "replay-before-response") replay();
     if (mode === "mode-delayed")
       setTimeout(() => write({ id: message.id, result: response }), 40);
-    else write({ id: message.id, result: response });
+    else {
+      write({ id: message.id, result: response });
+      if (
+        mode === "resume-replay" ||
+        (mode.startsWith("replay-") &&
+          ![
+            "replay-before-response",
+            "replay-after-write",
+            "replay-after-confirmed",
+          ].includes(mode))
+      ) {
+        write({
+          method: "thread/status/changed",
+          params: { threadId: "thread-1", status: { type: "active" } },
+        });
+        replay();
+        if (mode === "replay-excess") replay();
+      }
+    }
   } else if (message.method === "turn/start") {
     turns++;
     if (
@@ -241,7 +282,12 @@ for await (const line of createInterface({ input: process.stdin })) {
           id: "delivery",
           header: "Delivery",
           question: "Select delivery",
-          isOther: ["custom", "default"].includes(mode),
+          isOther: [
+            "custom",
+            "default",
+            "resume-replay",
+            "replay-reordered-keys",
+          ].includes(mode),
           isSecret: mode === "secret",
           options: [
             { label: "Local", description: "Local output" },
@@ -278,7 +324,12 @@ for await (const line of createInterface({ input: process.stdin })) {
         method: "item/tool/requestUserInputAsync",
         params,
       });
-    write({ id: requestId, method: "item/tool/requestUserInput", params });
+    originalNative = {
+      id: requestId,
+      method: "item/tool/requestUserInput",
+      params,
+    };
+    write(originalNative);
     if (mode === "async-held") setTimeout(() => asyncMarker(), 5);
     write({
       id: message.id,
@@ -338,6 +389,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     nativeReplies++;
     if (nativeReplies !== 1 || !message.result?.answers?.delivery)
       process.exit(4);
+    if (mode === "replay-after-write") replay();
     if (mode === "async-after-write") asyncMarker();
     if (mode !== "no-resolution")
       write({
@@ -367,6 +419,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       },
     });
   } else if (message.id === "report-rpc") {
+    if (mode === "replay-after-confirmed") replay();
     if (mode === "async-after-confirmed") asyncMarker();
     write({
       method: "serverRequest/resolved",

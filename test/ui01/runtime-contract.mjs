@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   captureProcessIdentity,
   MacProcessTerminationVerifier,
@@ -280,6 +281,9 @@ export async function runProtocol(options = {}) {
   let turnStarting = false;
   let endpoint;
   let native;
+  let resumeRequested = false;
+  let resumeResponded = false;
+  evidence.nativeReplay = { accepted: 0 };
   let terminal;
   let report;
   let reportWriteStarted = false;
@@ -320,6 +324,10 @@ export async function runProtocol(options = {}) {
     });
   }
   async function request(method, params) {
+    if (method === "thread/resume") {
+      assert.equal(resumeRequested, false, "duplicate-resume-request");
+      resumeRequested = true;
+    }
     const rpcId = ++clientId;
     const response = new Promise((resolve, reject) =>
       pending.set(rpcId, { method, resolve, reject }),
@@ -395,6 +403,10 @@ export async function runProtocol(options = {}) {
         ) {
           // Only the exact pending thread response may establish mode/settings;
           // project before any caller can retain private instructions or history.
+          if (response.method === "thread/resume") {
+            resumeResponded = true;
+            observe("explicit-resume-response");
+          }
           response.resolve(
             threadProjection(
               message.result,
@@ -429,17 +441,61 @@ export async function runProtocol(options = {}) {
         throw new Error("unsupported-async-input");
       }
       if (message.method === "item/tool/requestUserInput") {
-        assert.equal(evidence.counts.requests, 0, "duplicate-native-request");
-        assert.ok(
+        // Every delivery is checked, even when a repeated endpoint might be a replay.
+        const validIdentity =
           turnStarting &&
-            params?.threadId === threadId &&
-            text(params.turnId) &&
-            text(params.itemId) &&
-            id(message.id),
-          "native-identity-mismatch",
-        );
+          params?.threadId === threadId &&
+          text(params.turnId) &&
+          (turnId === undefined || params.turnId === turnId) &&
+          text(params.itemId) &&
+          id(message.id);
+        if (native) {
+          // Capture only safe identity and an opaque complete-body digest on rejection.
+          const second = {
+            runtimeGeneration: evidence.runtimeGeneration,
+            ...evidence.process,
+            method: message.method,
+            threadId: text(params?.threadId) ? params.threadId : null,
+            turnId: text(params?.turnId) ? params.turnId : null,
+            itemId: text(params?.itemId) ? params.itemId : null,
+            requestId: id(message.id) ? message.id : null,
+            requestIdType: typeof message.id,
+            paramsDigest: hash(JSON.stringify(params) ?? "undefined"),
+          };
+          const sameProcess =
+            native.identity.runtimeGeneration === evidence.runtimeGeneration &&
+            isDeepStrictEqual(native.process, evidence.process);
+          if (
+            validIdentity &&
+            sameProcess &&
+            resumeRequested &&
+            resumeResponded &&
+            !writeStarted &&
+            !resolved &&
+            !report &&
+            !terminal &&
+            evidence.nativeReplay.accepted === 0 &&
+            message.id === native.requestId &&
+            typeof message.id === typeof native.requestId &&
+            message.method === native.method &&
+            isDeepStrictEqual(params, native.params)
+          ) {
+            evidence.nativeReplay.accepted++;
+            observe("native-resume-replay");
+            return;
+          }
+          evidence.nativeReplay.rejected = second;
+          assert.fail("duplicate-native-request");
+        }
+        assert.ok(validIdentity, "native-identity-mismatch");
         bindTurn(params.turnId);
-        native = { requestId: message.id, params };
+        native = {
+          requestId: message.id,
+          method: message.method,
+          params,
+          identity: { runtimeGeneration: evidence.runtimeGeneration },
+          process: { ...evidence.process },
+        };
         evidence.counts.requests++;
         evidence.identity = {
           ...evidence.process,
