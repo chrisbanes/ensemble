@@ -105,3 +105,145 @@ test("disposed and replaced resources abort delayed reads without updating retai
   await next.load(async () => good);
   assert.equal(next.state.data?.observedAt, 42);
 });
+test("old command and read 401 cannot expire a replacement authentication lifetime; current 401 still expires", async () => {
+  for (const method of ["read", "command"] as const) {
+    let release!: (r: Response) => void;
+    let expired = 0;
+    const client = new OperatorClient(
+      () =>
+        new Promise<Response>((done) => {
+          release = done;
+        }),
+      () => expired++,
+    );
+    const c = {
+      type: "task.create" as const,
+      key: crypto.randomUUID(),
+      taskId: crypto.randomUUID(),
+      projectId: crypto.randomUUID(),
+      title: "Task",
+      outcome: "Finish",
+      ready: false,
+    };
+    const sending =
+      method === "command"
+        ? client.command(c, "old")
+        : client
+            .read("/api/operator/workspace", workspaceSchema)
+            .catch(() => null);
+    client.invalidateAuthentication();
+    release(
+      Response.json(
+        { error: { code: "unauthenticated", message: "Sign in" } },
+        { status: 401 },
+      ),
+    );
+    await sending;
+    assert.equal(expired, 0, method);
+    const current = client
+      .read("/api/operator/workspace", workspaceSchema)
+      .catch(() => null);
+    release(Response.json({}, { status: 401 }));
+    await current;
+    assert.equal(expired, 1, method);
+  }
+});
+test("captured session callbacks discard old success and error while current observations retain authority", async () => {
+  for (const failed of [false, true]) {
+    let release!: (r: Response) => void;
+    const client = new OperatorClient(
+      () =>
+        new Promise<Response>((done) => {
+          release = done;
+        }),
+    );
+    let session = "r".repeat(43);
+    let error = false;
+    const isCurrent = client.captureAuthenticationScope();
+    const pending = client.session().then(
+      (s) => {
+        if (isCurrent()) session = s.csrfToken;
+      },
+      () => {
+        if (isCurrent()) error = true;
+      },
+    );
+    client.invalidateAuthentication();
+    release(
+      failed
+        ? Response.json({}, { status: 503 })
+        : Response.json({ authenticated: true, csrfToken: "o".repeat(43) }),
+    );
+    await pending;
+    assert.equal(session, "r".repeat(43));
+    assert.equal(error, false);
+    const scope = client.captureAuthenticationScope();
+    const observation = client.session().then((s) => {
+      if (scope()) session = s.csrfToken;
+    });
+    release(Response.json({ authenticated: true, csrfToken: "r".repeat(43) }));
+    await observation;
+    assert.equal(scope(), true);
+    assert.equal(session, "r".repeat(43));
+  }
+});
+import { ConfigurationDrafts } from "../web/src/settings-state.js";
+import { ComposerState, storageKey } from "../web/src/composer-state.js";
+test("request authentication scope preserves replacement private draft and durable composer owner after old 401", async () => {
+  const saved = new Map<string, string>();
+  const storage = {
+    getItem: (k: string) => saved.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      saved.set(k, v);
+    },
+    removeItem: (k: string) => {
+      saved.delete(k);
+    },
+  };
+  const composer = new ComposerState(storage);
+  composer.edit({
+    projectId: crypto.randomUUID(),
+    title: "Original",
+    outcome: "Finish",
+  });
+  let release!: (r: Response) => void;
+  const drafts = new ConfigurationDrafts();
+  let session = "old",
+    expiry = 0;
+  const client = new OperatorClient(
+    () =>
+      new Promise<Response>((done) => {
+        release = done;
+      }),
+    () => {
+      expiry++;
+      session = "expired";
+      drafts.purge();
+    },
+  );
+  const sending = composer.submit(client, "old", false);
+  const bytes = storage.getItem(storageKey);
+  client.invalidateAuthentication();
+  drafts.purge();
+  composer.dispose();
+  session = "new";
+  const replacement = new ComposerState(storage);
+  const draft = drafts.get("profile", () => {});
+  draft.set("instructions", "NEW PRIVATE INPUT");
+  release(Response.json({}, { status: 401 }));
+  await sending;
+  assert.equal(expiry, 0);
+  assert.equal(session, "new");
+  assert.equal(draft.values.instructions, "NEW PRIVATE INPUT");
+  assert.equal(replacement.phase, "unknown");
+  assert.equal(storage.getItem(storageKey), bytes);
+  const current = client
+    .read("/api/operator/workspace", workspaceSchema)
+    .catch(() => null);
+  release(Response.json({}, { status: 401 }));
+  await current;
+  assert.equal(expiry, 1);
+  assert.equal(session, "expired");
+  assert.deepEqual(draft.values, {});
+  assert.equal(storage.getItem(storageKey), bytes);
+});

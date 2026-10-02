@@ -357,3 +357,226 @@ test("placement adopts a loaded revision explicitly after definite conflict but 
   assert.deepEqual(unknown.frozen, frozen);
   assert.deepEqual(unknown.values, values);
 });
+test("configuration frozen views cannot redirect placement identity or its origin projections", async () => {
+  const drafts = new ConfigurationDrafts();
+  const owner = randomUUID(),
+    origin = randomUUID(),
+    destination = randomUUID(),
+    taskId = randomUUID();
+  const command = {
+    type: "github.place" as const,
+    key: randomUUID(),
+    projectId: owner,
+    taskId: taskId,
+    chosenProjectId: destination,
+    expectedVersion: 1,
+  };
+  const draft = drafts.get(`github.place:${taskId}`, () => {});
+  draft.initialize({
+    placementOriginProjectId: origin,
+    chosenProjectId: destination,
+  });
+  await draft.submit(
+    new OperatorClient(async () => {
+      throw Error("lost");
+    }),
+    command,
+    "csrf",
+  );
+  const view = draft.frozen;
+  assert.ok(view);
+  if (view.type === "github.place") {
+    view.projectId = origin;
+    view.chosenProjectId = origin;
+  }
+  assert.deepEqual(draft.frozen, command);
+  assert.deepEqual(drafts.unsettledPlacements(origin), [command]);
+  assert.deepEqual(drafts.unsettledPlacements(owner), []);
+  assert.deepEqual(drafts.unsettledPlacements(destination), []);
+  assert.equal(
+    JSON.parse(draft.bytes ?? "null").placementOriginProjectId,
+    undefined,
+  );
+});
+test("private uncertainty survives every later definite failure while edits adoption and new operations stay blocked", async () => {
+  for (const [status, code] of [
+    [400, "invalid-input"],
+    [403, "forbidden"],
+    [409, "conflict"],
+  ] as const) {
+    const draft = new ConfigurationDraft();
+    draft.initialize({
+      instructions: "PRIVATE",
+      expectedVersion: "3",
+      key: randomUUID(),
+    });
+    const command = {
+      type: "profile.configure" as const,
+      key: randomUUID(),
+      profileId: randomUUID(),
+      expectedVersion: 3,
+      instructions: "PRIVATE",
+    };
+    const sent: string[] = [];
+    let attempt = 0;
+    const client = new OperatorClient(async (_url, init) => {
+      sent.push(String(init?.body));
+      if (++attempt === 1) throw Error("lost");
+      return Response.json(
+        { error: { code, message: "Safe failure" } },
+        { status },
+      );
+    });
+    await draft.submit(client, command, "csrf");
+    await draft.reconcile(client, "csrf");
+    assert.equal(draft.phase, "unknown");
+    assert.equal(draft.set("instructions", "changed"), false);
+    draft.adoptVersion(20);
+    draft.startOperation({ instructions: "changed" });
+    await draft.submit(client, { ...command, key: randomUUID() }, "csrf");
+    assert.equal(draft.values.instructions, "PRIVATE");
+    assert.equal(draft.frozen?.key, command.key);
+    assert.deepEqual(JSON.parse(sent[0] ?? "null"), command);
+    assert.deepEqual(sent, [sent[0], sent[0]]);
+  }
+});
+test("complete configuration receipt predicates keep schema-valid mismatches unknown until exact replay", async () => {
+  const projectId = randomUUID(),
+    profileId = randomUUID();
+  const cases = [
+    {
+      command: {
+        type: "profile.create",
+        key: randomUUID(),
+        profileId,
+        name: "New profile",
+        instructions: "Synthetic",
+        capabilities: "Coordinate",
+      },
+      result: {
+        commandType: "profile.create",
+        resourceId: profileId,
+        version: 1,
+        revoked: false,
+      },
+      changes: [{ version: 2 }, { resourceId: randomUUID() }],
+    },
+    {
+      command: {
+        type: "project.create",
+        key: randomUUID(),
+        projectId,
+        name: "New project",
+        leadProfileId: null,
+      },
+      result: {
+        commandType: "project.create",
+        resourceId: projectId,
+        version: 1,
+        paused: true,
+        leadProfileId: null,
+        instructionsRevision: 1,
+      },
+      changes: [{ version: 2 }, { resourceId: randomUUID() }],
+    },
+    {
+      command: {
+        type: "profile.configure",
+        key: randomUUID(),
+        profileId,
+        expectedVersion: 3,
+        name: "Name",
+      },
+      result: {
+        commandType: "profile.configure",
+        resourceId: profileId,
+        version: 4,
+        revoked: false,
+      },
+      changes: [
+        { resourceId: randomUUID() },
+        { version: 5 },
+        { commandType: "profile.create", version: 1 },
+      ],
+    },
+    {
+      command: {
+        type: "github.preview",
+        key: randomUUID(),
+        projectId,
+        expectedVersion: 2,
+        selectionId: "selection",
+      },
+      result: {
+        commandType: "github.preview",
+        resourceId: projectId,
+        configVersion: 2,
+        selectionId: "selection",
+        active: true,
+      },
+      changes: [
+        { selectionId: "another" },
+        { configVersion: 3 },
+        { active: false },
+        { resourceId: randomUUID() },
+      ],
+    },
+    {
+      command: {
+        type: "capacity.configure",
+        key: randomUUID(),
+        globalLimit: 4,
+        projectOverrides: { [projectId]: null, [profileId]: 2 },
+      },
+      result: {
+        commandType: "capacity.configure",
+        resourceId: "system:capacity",
+        globalLimit: 4,
+        defaultProjectLimit: 2,
+        projectOverrides: { [profileId]: 2 },
+      },
+      changes: [
+        { resourceId: "system:other" },
+        { globalLimit: 5 },
+        { projectOverrides: { [projectId]: 1, [profileId]: 2 } },
+        { projectOverrides: { [profileId]: 3 } },
+      ],
+    },
+  ];
+  for (const entry of cases) {
+    for (const change of [
+      ...entry.changes,
+      { key: randomUUID() },
+      { kind: "coordination" },
+    ]) {
+      const draft = new ConfigurationDraft();
+      let mismatch = true;
+      const client = new OperatorClient(async () => {
+        const changed = mismatch ? change : {};
+        if ("kind" in changed)
+          return Response.json({
+            kind: "coordination",
+            key: entry.command.key,
+            recorded: true,
+            eventId: randomUUID(),
+            taskId: randomUUID(),
+            recipientAssignmentId: randomUUID(),
+            eventType: "message",
+            createdAt: 1,
+          });
+        return Response.json({
+          kind: "configuration",
+          key: "key" in changed ? changed.key : entry.command.key,
+          recorded: true,
+          result: { ...entry.result, ...("key" in changed ? {} : changed) },
+        });
+      });
+      await draft.submit(client, entry.command, "csrf");
+      assert.equal(draft.phase, "unknown", JSON.stringify(change));
+      assert.equal(draft.receipt, null);
+      mismatch = false;
+      await draft.reconcile(client, "csrf");
+      assert.equal(draft.phase, "recorded", JSON.stringify(entry.command));
+    }
+  }
+});

@@ -167,6 +167,8 @@ export function Login({
 }
 export function App() {
   const drafts = useRef(new ConfigurationDrafts());
+  const acceptedIdentity = useRef<string | null>(null);
+  const clientRef = useRef<OperatorClient | null>(null);
   const [session, setSession] = useState<Session | null>(null),
     [bootstrapError, setBootstrapError] = useState(false),
     [bootstrap, setBootstrap] = useState(0),
@@ -175,28 +177,46 @@ export function App() {
     [logoutPending, setLogoutPending] = useState(false),
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
   const expired = useCallback(() => {
+    clientRef.current?.invalidateAuthentication();
+    acceptedIdentity.current = null;
+    setLogoutPending(false);
     drafts.current.purge();
     setSession(null);
     setBootstrap((v) => v + 1);
     setDrawer(false);
   }, []);
   const client = useMemo(() => new OperatorClient(fetch, expired), [expired]);
+  clientRef.current = client;
+  const acceptSession = useCallback(
+    (next: Session) => {
+      const identity = next.authenticated ? next.csrfToken : null;
+      if (identity !== acceptedIdentity.current) {
+        client.invalidateAuthentication();
+        drafts.current.purge();
+        acceptedIdentity.current = identity;
+        setLogoutPending(false);
+      }
+      setSession(next);
+    },
+    [client],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrap explicitly refreshes the server session after expiry or retry.
   useEffect(() => {
     let active = true;
     setBootstrapError(false);
+    const isCurrentScope = client.captureAuthenticationScope();
     client.session().then(
       (s) => {
-        if (active) setSession(s);
+        if (active && isCurrentScope()) acceptSession(s);
       },
       () => {
-        if (active) setBootstrapError(true);
+        if (active && isCurrentScope()) setBootstrapError(true);
       },
     );
     return () => {
       active = false;
     };
-  }, [client, bootstrap]);
+  }, [client, bootstrap, acceptSession]);
   useEffect(() => {
     const pop = () => setPath(location.pathname + location.search);
     addEventListener("popstate", pop);
@@ -283,7 +303,7 @@ export function App() {
               history.replaceState(null, "", "/app");
               setPath("/app");
             }
-            setSession(next);
+            acceptSession(next);
           }}
         />
         {logoutNotice && (
@@ -329,21 +349,30 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   async function logout() {
+    client.invalidateAuthentication();
+    acceptedIdentity.current = null;
+    const isCurrentScope = client.captureAuthenticationScope();
     drafts.current.purge();
     setLogoutPending(true);
     setLogoutNotice(null);
     try {
       await client.logout(session?.csrfToken ?? "");
     } catch (error) {
-      if (error instanceof ClientError && error.status !== 401)
+      if (
+        isCurrentScope() &&
+        error instanceof ClientError &&
+        error.status !== 401
+      )
         setLogoutNotice(
           "Sign-out outcome is unknown. Session status has been checked; review before retrying.",
         );
     } finally {
-      setSession(null);
-      setDrawer(false);
-      setLogoutPending(false);
-      setBootstrap((v) => v + 1);
+      if (isCurrentScope()) {
+        setSession(null);
+        setDrawer(false);
+        setLogoutPending(false);
+        setBootstrap((v) => v + 1);
+      }
     }
   }
   const nav = (

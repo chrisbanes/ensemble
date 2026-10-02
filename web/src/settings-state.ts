@@ -4,6 +4,52 @@ import {
   type CommandReceipt,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
+import { CommandLifecycle } from "./command-lifecycle.js";
+function matchesConfigurationReceipt(c: OperatorCommand, r: CommandReceipt) {
+  if (r.key !== c.key || r.kind !== "configuration") return false;
+  const result = r.result;
+  if (result.commandType !== c.type) return false;
+  if (c.type === "capacity.configure") {
+    if (
+      result.commandType !== "capacity.configure" ||
+      result.resourceId !== "system:capacity" ||
+      result.globalLimit !== c.globalLimit
+    )
+      return false;
+    return Object.entries(c.projectOverrides).every(([id, limit]) =>
+      limit === null
+        ? !(id in result.projectOverrides)
+        : result.projectOverrides[id] === limit,
+    );
+  }
+  const resource =
+    "profileId" in c
+      ? c.profileId
+      : "taskId" in c
+        ? c.taskId
+        : "projectId" in c
+          ? c.projectId
+          : null;
+  if (result.resourceId !== resource) return false;
+  if (
+    c.type === "github.place" &&
+    (result.commandType !== "github.place" ||
+      result.projectId !== c.chosenProjectId)
+  )
+    return false;
+  if (c.type === "github.preview")
+    return (
+      result.commandType === "github.preview" &&
+      result.configVersion === c.expectedVersion &&
+      result.selectionId === c.selectionId &&
+      result.active
+    );
+  if (!("version" in result)) return false;
+  if (c.type === "project.create" || c.type === "profile.create")
+    return result.version === 1;
+  return "expectedVersion" in c && result.version === c.expectedVersion + 1;
+}
+
 export class ConfigurationDraft {
   values: Record<string, string | boolean | string[]> = {};
   phase:
@@ -16,17 +62,27 @@ export class ConfigurationDraft {
   dirty = false;
   notice = "";
   errors: Record<string, string> = {};
-  frozen: OperatorCommand | null = null;
-  bytes: string | null = null;
-  receipt: CommandReceipt | null = null;
+  private readonly lifecycle = new CommandLifecycle<OperatorCommand>();
+  get frozen() {
+    return this.lifecycle.frozen;
+  }
+  get bytes() {
+    return this.lifecycle.bytes;
+  }
+  get receipt() {
+    return this.lifecycle.receipt;
+  }
   private generation = 0;
-  private uncertain = false;
   constructor(private changed: () => void = () => {}) {}
   bind(changed: () => void) {
     this.changed = changed;
   }
   set(field: string, value: string | boolean | string[]) {
-    if (this.phase === "pending" || this.phase === "recorded" || this.uncertain)
+    if (
+      this.phase === "pending" ||
+      this.phase === "recorded" ||
+      this.lifecycle.uncertain
+    )
       return false;
     this.values = { ...this.values, [field]: value };
     this.dirty = true;
@@ -40,11 +96,9 @@ export class ConfigurationDraft {
     }
   }
   adoptVersion(version: number) {
-    if (this.phase === "pending" || this.uncertain) return;
+    if (this.phase === "pending" || this.lifecycle.uncertain) return;
     this.generation++;
-    this.frozen = null;
-    this.bytes = null;
-    this.receipt = null;
+    this.lifecycle.reset();
     this.phase = "editing";
     this.notice = "Latest revision explicitly adopted; input retained.";
     this.values = {
@@ -55,25 +109,27 @@ export class ConfigurationDraft {
     this.changed();
   }
   startOperation(values: Record<string, string | boolean | string[]>) {
-    if (this.phase === "pending" || this.uncertain) return;
+    if (this.phase === "pending" || this.lifecycle.uncertain) return;
     this.purge();
     this.initialize(values);
   }
   purge() {
     this.generation++;
     this.values = {};
-    this.frozen = null;
-    this.bytes = null;
-    this.receipt = null;
+    this.lifecycle.reset();
     this.errors = {};
-    this.uncertain = false;
     this.phase = "editing";
     this.dirty = false;
     this.notice = "";
     this.changed();
   }
   async submit(client: OperatorClient, input: unknown, csrf: string) {
-    if (this.phase === "pending" || this.uncertain) return;
+    if (
+      this.phase === "pending" ||
+      this.phase === "recorded" ||
+      this.lifecycle.uncertain
+    )
+      return;
     const parsed = operatorCommandSchema.safeParse(input);
     if (!parsed.success) {
       this.errors = {};
@@ -99,9 +155,7 @@ export class ConfigurationDraft {
       this.changed();
       return;
     }
-    this.frozen = structuredClone(parsed.data);
-    this.bytes = bytes;
-    this.receipt = null;
+    if (!this.lifecycle.freeze(parsed.data)) return;
     this.errors = {};
     await this.send(client, csrf);
   }
@@ -109,86 +163,37 @@ export class ConfigurationDraft {
     if (this.phase !== "unknown" || !this.frozen) return;
     await this.send(client, csrf);
   }
-  private matches(c: OperatorCommand, r: CommandReceipt) {
-    if (r.key !== c.key || r.kind !== "configuration") return false;
-    const result = r.result;
-    if (result.commandType !== c.type) return false;
-    if (c.type === "capacity.configure") {
-      if (
-        result.commandType !== "capacity.configure" ||
-        result.resourceId !== "system:capacity" ||
-        result.globalLimit !== c.globalLimit
-      )
-        return false;
-      return Object.entries(c.projectOverrides).every(([id, limit]) =>
-        limit === null
-          ? !(id in result.projectOverrides)
-          : result.projectOverrides[id] === limit,
-      );
-    }
-    const resource =
-      "profileId" in c
-        ? c.profileId
-        : "taskId" in c
-          ? c.taskId
-          : "projectId" in c
-            ? c.projectId
-            : null;
-    if (result.resourceId !== resource) return false;
-    if (
-      c.type === "github.place" &&
-      (result.commandType !== "github.place" ||
-        result.projectId !== c.chosenProjectId)
-    )
-      return false;
-    if (c.type === "github.preview")
-      return (
-        result.commandType === "github.preview" &&
-        result.configVersion === c.expectedVersion &&
-        result.selectionId === c.selectionId &&
-        result.active
-      );
-    if (!("version" in result)) return false;
-    if (c.type === "project.create" || c.type === "profile.create")
-      return result.version === 1;
-    return "expectedVersion" in c && result.version === c.expectedVersion + 1;
-  }
   private async send(client: OperatorClient, csrf: string) {
-    const c = this.bytes
-      ? operatorCommandSchema.parse(JSON.parse(this.bytes))
-      : null;
+    const c = this.lifecycle.begin();
     if (!c) return;
     const generation = this.generation;
     this.phase = "pending";
     this.changed();
     const result = await client.command(c, csrf);
     if (generation !== this.generation) return;
-    if (result.state === "recorded" && this.matches(c, result.receipt)) {
+    const disposition = this.lifecycle.settle(
+      result,
+      matchesConfigurationReceipt,
+    );
+    if (disposition === "recorded") {
       this.phase = "recorded";
-      this.receipt = result.receipt;
-      this.uncertain = false;
       this.notice =
         "Recorded. Latest observations may differ from this original receipt.";
-    } else if (
-      this.uncertain ||
-      result.state === "unknown" ||
-      result.state === "recorded"
-    ) {
-      this.uncertain = true;
+    } else if (disposition === "unknown") {
       this.phase = "unknown";
       this.notice =
         "Outcome unknown. Reconcile the exact original submission before making changes.";
     } else {
-      this.phase = result.state;
+      this.phase = disposition;
       this.notice =
-        result.state === "conflict"
+        disposition === "conflict"
           ? "Configuration changed. Review the loaded revision before a new submission."
           : "Submission rejected. Your input is retained.";
       this.errors = Object.fromEntries(
-        (result.fieldPaths ?? []).map((p) => [p, "Check this field."]),
+        (result.state === "recorded" ? [] : (result.fieldPaths ?? [])).map(
+          (p) => [p, "Check this field."],
+        ),
       );
-      this.frozen = null;
-      this.bytes = null;
     }
     this.changed();
   }
