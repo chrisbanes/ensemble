@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   composerOptionsSchema,
   taskSchema,
@@ -38,6 +38,10 @@ export function TaskComposer({
       s.input = { ...s.input, projectId: initialProject };
     return s;
   });
+  useEffect(() => {
+    state.activate(() => render((n) => n + 1));
+    return () => state.dispose();
+  }, [state]);
   const [resumed, setResumed] = useState(
       !state.recovered || state.phase === "unknown",
     ),
@@ -101,7 +105,9 @@ export function TaskComposer({
         return;
       }
     }
+    const isCurrent = state.captureScope();
     await state.submit(client, session.csrfToken, ready);
+    if (!isCurrent()) return;
     const first = Object.keys(state.errors)[0];
     if (first) document.getElementById(`composer-${first}`)?.focus();
     if (state.phase === "recorded") onRecorded();

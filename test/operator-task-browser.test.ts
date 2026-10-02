@@ -415,6 +415,36 @@ test("committed lost-response creation survives reload expiry and exact reconcil
       .count(),
     0,
   );
+  await page.unroute("**/api/operator/commands");
+  for (const [status, code] of [
+    [400, "invalid-input"],
+    [403, "forbidden"],
+    [409, "conflict"],
+  ] as const) {
+    await page.route("**/api/operator/commands", async (route) => {
+      sent.push(route.request().postData() ?? "");
+      await route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code, message: "Safe failure" } }),
+      });
+    });
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).isDisabled(),
+      true,
+    );
+    await page.unroute("**/api/operator/commands");
+  }
+  await page.route("**/api/operator/commands", async (route) => {
+    sent.push(route.request().postData() ?? "");
+    await route.continue();
+  });
   f.advanceClock(70000);
   await page
     .getByRole("button", { name: "Reconcile submission", exact: true })
@@ -442,7 +472,7 @@ test("committed lost-response creation survives reload expiry and exact reconcil
     )
     .waitFor();
   await page.getByText(/original creation receipt remains confirmed/).waitFor();
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 6);
   assert.ok(sent.every((bytes) => bytes === sent[0]));
   assert.equal(d.tasks(projectId).length, 2);
   assert.equal(d.assignments(material.taskId).length, 1);
@@ -1300,4 +1330,158 @@ test("composer switches scoped options despite delayed prior response and preser
   );
   assert.equal(d.tasks(a).length, 1);
   assert.equal(f.runtime.turns, 0);
+});
+test("replacement composer owns recovery before a detached committed receipt or old-session 401 arrives", async (t) => {
+  for (const mode of ["receipt-navigation", "401-expiry"] as const) {
+    const f = await createOperatorFixture();
+    let browser: Browser | undefined;
+    t.after(() => f.close(browser));
+    const d = f.service.domain(),
+      projectId = randomUUID(),
+      profileId = randomUUID();
+    d.execute({
+      type: "profile.create",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      name: "Delayed agent",
+      instructions: "private",
+      capabilities: "coordinate",
+    });
+    d.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Delayed recovery project",
+      leadProfileId: profileId,
+    });
+    const web = await f.startWeb();
+    browser = await chromium.launch();
+    const page = await browser.newPage({
+      viewport:
+        mode === "receipt-navigation"
+          ? { width: 1366, height: 820 }
+          : { width: 390, height: 844 },
+    });
+    page.setDefaultTimeout(5000);
+    const errors: string[] = [],
+      sent: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await signIn(
+      page,
+      web.origin,
+      web.password,
+      `/app/tasks/new?project=${projectId}`,
+    );
+    await page
+      .getByLabel("Task title", { exact: true })
+      .fill("Delayed original creation");
+    await page
+      .getByLabel("Desired outcome", { exact: true })
+      .fill("Finish exactly once");
+    await page.getByLabel("Assignee", { exact: true }).selectOption(profileId);
+    let release!: () => void, committed!: () => void;
+    const held = new Promise<void>((done) => {
+      committed = done;
+    });
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    await page.route("**/api/operator/commands", async (route) => {
+      sent.push(route.request().postData() ?? "");
+      const response = await route.fetch();
+      assert.equal(response.status(), 200);
+      committed();
+      await gate;
+      if (mode === "401-expiry")
+        await route.fulfill({
+          status: 401,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { code: "unauthenticated", message: "Sign in" },
+          }),
+        });
+      else await route.fulfill({ response });
+    });
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await held;
+    const recovery = await page.evaluate(() =>
+      sessionStorage.getItem("ensemble.ui03.composer.v1"),
+    );
+    assert.ok(recovery);
+    const command = JSON.parse(sent[0] ?? "null");
+    assert.equal(d.tasks(projectId).length, 1);
+    assert.equal(d.assignments(command.taskId).length, 1);
+    if (mode === "receipt-navigation") {
+      await page
+        .getByRole("link", { name: "All tasks", exact: true })
+        .first()
+        .click();
+      await page.getByRole("link", { name: "New task", exact: true }).click();
+    } else {
+      f.advanceClock(61_000);
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await page.getByLabel("Password", { exact: true }).fill(web.password);
+      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    }
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(sent.length, 1);
+    const delivered = page.waitForResponse((r) =>
+      r.url().endsWith("/api/operator/commands"),
+    );
+    release();
+    await delivered;
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).inputValue(),
+      "Delayed original creation",
+    );
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).isDisabled(),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        sessionStorage.getItem("ensemble.ui03.composer.v1"),
+      ),
+      recovery,
+    );
+    assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
+    assert.equal(sent.length, 1);
+    await screenshot(
+      page,
+      `${mode === "receipt-navigation" ? "1366" : "390"}-${mode}-replacement-unknown`,
+    );
+    await page.unroute("**/api/operator/commands");
+    page.on("request", (r) => {
+      if (r.url().endsWith("/api/operator/commands"))
+        sent.push(r.postData() ?? "");
+    });
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .click();
+    await page
+      .getByText("Draft task saved in Ensemble.", { exact: true })
+      .waitFor();
+    assert.deepEqual(sent, [sent[0], sent[0]]);
+    assert.equal(
+      await page.evaluate(() =>
+        sessionStorage.getItem("ensemble.ui03.composer.v1"),
+      ),
+      null,
+    );
+    assert.equal(d.tasks(projectId).length, 1);
+    assert.equal(d.assignments(command.taskId).length, 1);
+    assert.equal(f.runtime.turns, 0);
+    assert.deepEqual(errors, []);
+    await screenshot(
+      page,
+      `${mode === "receipt-navigation" ? "1366" : "390"}-${mode}-reconciled`,
+    );
+  }
 });

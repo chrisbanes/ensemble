@@ -740,6 +740,7 @@ test("Runtime Settings records lowered capacity separately from usage and retain
 function seedPlacement(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   const ids = seedSettings(f),
     target = randomUUID(),
+    destination = randomUUID(),
     taskId = randomUUID(),
     d = f.service.domain();
   d.execute({
@@ -748,6 +749,14 @@ function seedPlacement(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
     key: randomUUID(),
     projectId: target,
     name: "Actual membership target",
+    leadProfileId: null,
+  });
+  d.execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: destination,
+    name: "Third membership destination",
     leadProfileId: null,
   });
   d.execute({
@@ -765,12 +774,12 @@ function seedPlacement(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
     db.prepare(
       "INSERT INTO github_external_issues VALUES ('github.com','I_PLACEMENT',?,'R_PLACEMENT','owner/repo',1,'Imported','Body','open','[]')",
     ).run(taskId);
-    for (const projectId of [ids.projectId, target])
+    for (const projectId of [ids.projectId, target, destination])
       db.prepare(
         "INSERT INTO github_memberships VALUES (?,'selection','I_PLACEMENT','[]')",
       ).run(projectId);
   });
-  return { ids, target, taskId, d };
+  return { ids, target, destination, taskId, d };
 }
 test("actual source placement retains its original receipt after transfer removes the conflict", async (t) => {
   const f = await createOperatorFixture();
@@ -1215,7 +1224,7 @@ test("non-owner project keeps one unknown placement and its original receipt aft
   const f = await createOperatorFixture();
   let browser: Browser | undefined;
   t.after(() => f.close(browser));
-  const { ids, target, taskId, d } = seedPlacement(f),
+  const { ids, target, destination, taskId, d } = seedPlacement(f),
     web = await f.startWeb();
   browser = await chromium.launch();
   const page = await browser.newPage({
@@ -1225,7 +1234,7 @@ test("non-owner project keeps one unknown placement and its original receipt aft
   await signIn(page, web, `/app/projects/${target}/settings`);
   await page
     .getByLabel("Placement project", { exact: true })
-    .selectOption(target);
+    .selectOption(destination);
   const posts: string[] = [];
   let original:
     | { key: string; result: { projectId: string; version: number } }
@@ -1249,7 +1258,7 @@ test("non-owner project keeps one unknown placement and its original receipt aft
     ids.projectId,
     "canonical command binds the original owner A",
   );
-  assert.equal(command.chosenProjectId, target);
+  assert.equal(command.chosenProjectId, destination);
   assert.equal(command.expectedVersion, 1);
   assert.equal(command.taskId, taskId);
   assert.equal(
@@ -1257,7 +1266,7 @@ test("non-owner project keeps one unknown placement and its original receipt aft
     undefined,
     "presentation scope never enters command bytes",
   );
-  assert.equal(d.task(taskId).projectId, target);
+  assert.equal(d.task(taskId).projectId, destination);
   assert.equal(d.task(taskId).version, 2);
   assert.equal(f.service.githubSources().conflicts().length, 0);
   await page.getByRole("link", { name: "Settings home", exact: true }).click();
@@ -1294,22 +1303,27 @@ test("non-owner project keeps one unknown placement and its original receipt aft
     0,
   );
   await page.unroute("**/api/operator/commands");
-  await page.route("**/api/operator/commands", async (route) => {
-    posts.push(route.request().postData() ?? "");
-    await route.fulfill({
-      status: 409,
-      contentType: "application/json",
-      body: JSON.stringify({
-        error: { code: "conflict", message: "Conflict" },
-      }),
+  for (const [status, code] of [
+    [400, "invalid-input"],
+    [403, "forbidden"],
+    [409, "conflict"],
+  ] as const) {
+    await page.route("**/api/operator/commands", async (route) => {
+      posts.push(route.request().postData() ?? "");
+      await route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code, message: "Safe failure" } }),
+      });
     });
-  });
-  await page
-    .getByRole("button", { name: "Reconcile exact submission", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Reconcile exact submission", exact: true })
-    .waitFor();
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Reconcile exact submission", exact: true })
+      .waitFor();
+    await page.unroute("**/api/operator/commands");
+  }
   assert.equal(
     await page
       .getByRole("button", {
@@ -1334,7 +1348,7 @@ test("non-owner project keeps one unknown placement and its original receipt aft
     .waitFor();
   assert.equal(
     posts.length,
-    2,
+    4,
     "reload is an observation, never reconciliation or rekey",
   );
   assert.equal(
@@ -1355,6 +1369,35 @@ test("non-owner project keeps one unknown placement and its original receipt aft
   await page.unroute("**/api/operator/commands");
   await page.route("**/api/operator/commands", async (route) => {
     posts.push(route.request().postData() ?? "");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...original,
+        result: {
+          ...original?.result,
+          commandType: "github.place",
+          resourceId: taskId,
+          projectId: target,
+        },
+      }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByText("Recorded. Latest observations", { exact: false })
+      .count(),
+    0,
+  );
+  await page.unroute("**/api/operator/commands");
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
     const response = await route.fetch();
     assert.equal(response.status(), 200);
     assert.deepEqual(await response.json(), original);
@@ -1366,9 +1409,9 @@ test("non-owner project keeps one unknown placement and its original receipt aft
   await page
     .getByText("Recorded. Latest observations", { exact: false })
     .waitFor();
-  assert.deepEqual(posts, Array(3).fill(posts[0]));
+  assert.deepEqual(posts, Array(6).fill(posts[0]));
   assert.equal(original?.key, command.key);
-  assert.equal(original?.result.projectId, target);
+  assert.equal(original?.result.projectId, destination);
   assert.equal(original?.result.version, 2);
   assert.equal(d.task(taskId).version, 2);
   await page.getByRole("link", { name: "Settings home", exact: true }).click();
@@ -1389,10 +1432,10 @@ test("non-owner project keeps one unknown placement and its original receipt aft
       await page
         .getByText("Recorded placement outcome", { exact: false })
         .innerText()
-    ).includes(`project ${target}; version 2`),
+    ).includes(`project ${destination}; version 2`),
     true,
   );
-  assert.equal(posts.length, 3);
+  assert.equal(posts.length, 6);
   assert.equal(f.runtime.turns, 0);
   await capture(page, "1366-non-owner-recorded-placement");
 });
@@ -1594,4 +1637,251 @@ test("profile configuration reload observes its current revision without replaci
   assert.equal(adopted.name, "Retained profile edit");
   assert.equal(f.service.domain().profile(ids.profileId).version, 3);
   assert.equal(f.runtime.turns, 0);
+});
+test("new private input survives a detached receipt and old-session 401 after same-document reauthentication", async (t) => {
+  for (const mode of ["receipt-expiry", "401-logout"] as const) {
+    const f = await createOperatorFixture();
+    let browser: Browser | undefined;
+    t.after(() => f.close(browser));
+    const ids = seedSettings(f),
+      web = await f.startWeb();
+    browser = await chromium.launch();
+    const page = await browser.newPage({
+      viewport:
+        mode === "receipt-expiry"
+          ? { width: 1366, height: 820 }
+          : { width: 390, height: 844 },
+    });
+    page.setDefaultTimeout(5000);
+    const posts: string[] = [],
+      publicBodies: string[] = [],
+      errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    page.on("response", async (r) => {
+      if (r.url().includes("/api/operator/") && r.request().method() === "GET")
+        publicBodies.push(await r.text().catch(() => ""));
+    });
+    await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+    await page.getByLabel("Replace instructions", { exact: true }).check();
+    await page
+      .getByLabel("New instructions", { exact: true })
+      .fill("PRIVATE OLD DELAYED INPUT");
+    let release!: () => void, committed!: () => void;
+    const held = new Promise<void>((done) => {
+      committed = done;
+    });
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    await page.route("**/api/operator/commands", async (route) => {
+      posts.push(route.request().postData() ?? "");
+      const response = await route.fetch();
+      assert.equal(response.status(), 200);
+      publicBodies.push(await response.text());
+      committed();
+      await gate;
+      if (mode === "401-logout")
+        await route.fulfill({
+          status: 401,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { code: "unauthenticated", message: "Sign in" },
+          }),
+        });
+      else await route.fulfill({ response });
+    });
+    await page
+      .getByRole("button", { name: "Save project", exact: true })
+      .click();
+    await held;
+    assert.equal(f.service.domain().project(ids.projectId).version, 3);
+    if (mode === "receipt-expiry") {
+      f.advanceClock(61_000);
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    } else
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await page.getByLabel("Password", { exact: true }).waitFor();
+    await capture(
+      page,
+      `${mode === "receipt-expiry" ? "1366" : "390"}-${mode}-privacy-purged`,
+    );
+    await page.getByLabel("Password", { exact: true }).fill(web.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page
+      .getByRole("heading", { name: "Project configuration", exact: true })
+      .waitFor();
+    assert.equal(
+      await page
+        .getByLabel("Replace instructions", { exact: true })
+        .isChecked(),
+      false,
+    );
+    await page.getByLabel("Replace instructions", { exact: true }).check();
+    await page
+      .getByLabel("New instructions", { exact: true })
+      .fill("PRIVATE NEW SESSION INPUT");
+    assert.equal(posts.length, 1);
+    const delivered = page.waitForResponse((r) =>
+      r.url().endsWith("/api/operator/commands"),
+    );
+    release();
+    await delivered;
+    await page
+      .getByRole("button", { name: "Save project", exact: true })
+      .waitFor();
+    assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Sign out", exact: true })
+        .isEnabled(),
+      true,
+    );
+    assert.equal(
+      await page.getByLabel("New instructions", { exact: true }).inputValue(),
+      "PRIVATE NEW SESSION INPUT",
+    );
+    assert.equal(
+      await page.getByLabel("New instructions", { exact: true }).isDisabled(),
+      false,
+    );
+    assert.equal(
+      await page
+        .getByRole("button", {
+          name: "Reconcile exact submission",
+          exact: true,
+        })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .getByText("Recorded. Latest observations", { exact: false })
+        .count(),
+      0,
+    );
+    assert.equal(posts.length, 1);
+    assert.equal(page.url().includes("PRIVATE"), false);
+    assert.ok(publicBodies.every((body) => !body.includes("PRIVATE")));
+    assert.deepEqual(
+      await page.evaluate(() => ({
+        local: Object.keys(localStorage),
+        session: Object.keys(sessionStorage),
+      })),
+      { local: [], session: [] },
+    );
+    await capture(
+      page,
+      `${mode === "receipt-expiry" ? "1366" : "390"}-${mode}-new-private-owner`,
+    );
+    await page.unroute("**/api/operator/commands");
+    // A current-session 401 still purges this new private input.
+    f.advanceClock(61_000);
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByLabel("Password", { exact: true }).fill(web.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page
+      .getByRole("heading", { name: "Project configuration", exact: true })
+      .waitFor();
+    assert.equal(
+      await page
+        .getByLabel("Replace instructions", { exact: true })
+        .isChecked(),
+      false,
+    );
+    assert.equal(posts.length, 1);
+    assert.equal(f.runtime.turns, 0);
+    assert.deepEqual(errors, []);
+  }
+});
+test("aborted old configuration read preserves new input and a current logout 401 releases its pending control", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  const errors: string[] = [];
+  let posts = 0;
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/operator/commands")) posts++;
+  });
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  let release!: () => void, arrived!: () => void, completed!: () => void;
+  const handled = new Promise<void>((done) => {
+    completed = done;
+  });
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const held = new Promise<void>((done) => {
+    arrived = done;
+  });
+  const configurationPath = `**/api/operator/projects/${ids.projectId}/configuration`;
+  await page.route(configurationPath, async (route) => {
+    arrived();
+    await gate;
+    try {
+      await route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "unauthenticated", message: "Sign in" },
+        }),
+      });
+    } finally {
+      completed();
+    }
+  });
+  await page
+    .getByRole("button", { name: "Reload project configuration", exact: true })
+    .click();
+  await held;
+  await page.route("**/api/operator/logout", async (route) => {
+    await route.fetch();
+    await route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "unauthenticated", message: "Sign in" },
+      }),
+    });
+  });
+  const oldReadFailure = page.waitForEvent("requestfailed", (request) =>
+    request.url().endsWith(`/projects/${ids.projectId}/configuration`),
+  );
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  // Let only subsequent reads through while retaining the original handler's gate.
+  await page.unroute(configurationPath);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Project configuration", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Sign out", exact: true })
+      .isEnabled(),
+    true,
+  );
+  await page.getByLabel("Replace instructions", { exact: true }).check();
+  await page
+    .getByLabel("New instructions", { exact: true })
+    .fill("PRIVATE NEW READ OWNER");
+  assert.match((await oldReadFailure).failure()?.errorText ?? "", /ABORTED/i);
+  release();
+  await handled;
+  assert.equal(
+    await page.getByLabel("New instructions", { exact: true }).inputValue(),
+    "PRIVATE NEW READ OWNER",
+  );
+  assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
+  assert.equal(posts, 0);
+  assert.equal(f.runtime.turns, 0);
+  assert.deepEqual(errors, []);
+  await capture(page, "1366-aborted-old-read-new-private-owner");
 });

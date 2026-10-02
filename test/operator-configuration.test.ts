@@ -593,3 +593,72 @@ test("unavailable delivery exclusions fail closed without replacing safe labels 
   }
   assert.equal(f.runtime.turns, 0);
 });
+import { OperatorClient } from "../web/src/api.js";
+import { ConfigurationDraft } from "../web/src/settings-state.js";
+import { OperatorApiError } from "../src/standalone/operator-api.js";
+test("typed post-commit failure remains unknown through private configuration consumer and original API replay applies once", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const domain = f.service.domain(),
+    profileId = randomUUID();
+  domain.execute({
+    type: "profile.create",
+    actor: "operator",
+    key: randomUUID(),
+    profileId,
+    name: "Profile",
+    instructions: "Original",
+    capabilities: "Coordinate",
+  });
+  const db = new DatabaseSync(join(f.directory, "data", "standalone.sqlite"));
+  t.after(() => db.close());
+  let failing = true;
+  const injected = new DomainStore(db, () => {
+    if (failing)
+      throw new DomainPolicyError("invalid-input", "SYNTHETIC CALLBACK ERROR");
+  });
+  const originalExecute = domain.execute;
+  domain.execute = (command) => injected.execute(command);
+  t.after(() => {
+    domain.execute = originalExecute;
+  });
+  const api = new OperatorApi(f.service, [f.directory]),
+    bodies: string[] = [];
+  const client = new OperatorClient(async (_path, init) => {
+    bodies.push(String(init?.body));
+    try {
+      return Response.json(await api.execute(JSON.parse(String(init?.body))));
+    } catch (error) {
+      assert.ok(error instanceof OperatorApiError);
+      assert.equal(error.code, "command-outcome-unknown");
+      return Response.json(
+        { error: { code: error.code, message: "Outcome unknown" } },
+        { status: error.status },
+      );
+    }
+  });
+  const command = {
+    type: "profile.configure" as const,
+    key: randomUUID(),
+    profileId,
+    expectedVersion: 1,
+    instructions: "PRIVATE NEW INPUT",
+  };
+  const draft = new ConfigurationDraft();
+  draft.set("instructions", command.instructions);
+  await draft.submit(client, command, "csrf");
+  assert.equal(draft.phase, "unknown");
+  assert.equal(domain.profile(profileId).version, 2);
+  assert.ok(injected.recordedCommand({ ...command, actor: "operator" }));
+  failing = false;
+  await draft.reconcile(client, "csrf");
+  assert.equal(draft.phase, "recorded");
+  assert.deepEqual(bodies, [bodies[0], bodies[0]]);
+  assert.equal(domain.profile(profileId).version, 2);
+  assert.equal(JSON.stringify(draft.receipt).includes("PRIVATE"), false);
+  await assert.rejects(
+    api.execute({ ...command, instructions: "Changed payload" }),
+    (error) => error instanceof OperatorApiError && error.status === 409,
+  );
+  assert.equal(f.runtime.turns, 0);
+});

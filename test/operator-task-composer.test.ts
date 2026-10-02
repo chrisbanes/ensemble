@@ -427,3 +427,224 @@ test("valid multibyte selected input fits recovery and exact HTTP byte boundary 
   assert.equal(over.phase, "editable");
   assert.match(over.errors.outcome ?? "", /64 KiB/);
 });
+test("detached creation cannot clear the recovery owned by a replacement composer or publish its receipt", async () => {
+  const storage = memoryStorage();
+  let notifications = 0;
+  const old = new ComposerState(storage, () => notifications++);
+  old.edit({ projectId: randomUUID(), title: "Original", outcome: "Finish" });
+  let release!: (r: Response) => void;
+  const client = new OperatorClient(
+    () =>
+      new Promise<Response>((done) => {
+        release = done;
+      }),
+  );
+  const pending = old.submit(client, "old", false);
+  const command = old.frozen;
+  assert.ok(command);
+  const saved = storage.getItem(storageKey);
+  old.dispose();
+  const replacement = new ComposerState(storage);
+  const count = notifications;
+  release(
+    Response.json({
+      kind: "domain",
+      key: command.key,
+      recorded: true,
+      result: {
+        id: command.taskId,
+        projectId: command.projectId,
+        state: "open",
+        ready: false,
+        version: 1,
+      },
+    }),
+  );
+  await pending;
+  assert.equal(notifications, count);
+  assert.equal(old.receipt, null);
+  assert.equal(storage.getItem(storageKey), saved);
+  assert.equal(replacement.phase, "unknown");
+  assert.deepEqual(replacement.frozen, command);
+  const exposed = replacement.frozen;
+  assert.ok(exposed);
+  exposed.title = "Redirect attempt";
+  const replay = new OperatorClient(async (_url, init) => {
+    assert.equal(String(init?.body), JSON.stringify(command));
+    return Response.json({
+      kind: "domain",
+      key: command.key,
+      recorded: true,
+      result: {
+        id: command.taskId,
+        projectId: command.projectId,
+        state: "open",
+        ready: false,
+        version: 1,
+      },
+    });
+  });
+  await replacement.submit(replay, "new", true);
+  assert.equal(replacement.phase, "recorded");
+  assert.equal(storage.getItem(storageKey), null);
+});
+test("initial definite 400 403 and 409 permit correction without an automatic retry", async () => {
+  for (const [status, code] of [
+    [400, "invalid-input"],
+    [403, "forbidden"],
+    [409, "conflict"],
+  ] as const) {
+    const state = new ComposerState(memoryStorage());
+    state.edit({
+      projectId: randomUUID(),
+      title: "Original",
+      outcome: "Finish",
+    });
+    let posts = 0;
+    await state.submit(
+      new OperatorClient(async () => {
+        posts++;
+        return Response.json(
+          { error: { code, message: "Safe failure" } },
+          { status },
+        );
+      }),
+      "csrf",
+      false,
+    );
+    assert.equal(posts, 1);
+    assert.equal(state.phase, "editable");
+    assert.equal(state.frozen, null);
+    state.edit({ title: "Correction" });
+    assert.equal(state.input.title, "Correction");
+  }
+});
+test("an assignment-shaped domain receipt cannot confirm task creation", async () => {
+  const state = new ComposerState(memoryStorage());
+  state.edit({ projectId: randomUUID(), title: "Task", outcome: "Finish" });
+  await state.submit(
+    new OperatorClient(async (_url, init) => {
+      const c = JSON.parse(String(init?.body));
+      return Response.json({
+        kind: "domain",
+        recorded: true,
+        key: c.key,
+        result: {
+          id: c.taskId,
+          taskId: c.taskId,
+          projectId: c.projectId,
+          version: 1,
+          profileRevision: 1,
+          instructionsRevision: 1,
+        },
+      });
+    }),
+    "csrf",
+    false,
+  );
+  assert.equal(state.phase, "unknown");
+  assert.equal(state.receipt, null);
+});
+test("effect reactivation never restores authority to a detached response", async () => {
+  const storage = memoryStorage(),
+    state = new ComposerState(storage);
+  state.edit({ projectId: randomUUID(), title: "Task", outcome: "Finish" });
+  let release!: (r: Response) => void;
+  const sending = state.submit(
+    new OperatorClient(
+      () =>
+        new Promise<Response>((done) => {
+          release = done;
+        }),
+    ),
+    "csrf",
+    false,
+  );
+  const command = state.frozen;
+  assert.ok(command);
+  state.dispose();
+  let notifications = 0;
+  state.activate(() => notifications++);
+  release(
+    Response.json({
+      kind: "domain",
+      recorded: true,
+      key: command.key,
+      result: {
+        id: command.taskId,
+        projectId: command.projectId,
+        state: "open",
+        ready: false,
+        version: 1,
+      },
+    }),
+  );
+  await sending;
+  assert.equal(notifications, 0);
+  assert.equal(state.phase, "unknown");
+  assert.ok(storage.getItem(storageKey));
+});
+import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+import { DomainStore, DomainPolicyError } from "../src/core/domain.js";
+import { OperatorApiError } from "../src/standalone/operator-api.js";
+test("typed post-commit notification failure remains unknown through creation consumer and exact API replay records once", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const domain = f.service.domain(),
+    projectId = randomUUID();
+  domain.execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Postcommit project",
+    leadProfileId: null,
+  });
+  const db = new DatabaseSync(join(f.directory, "data", "standalone.sqlite"));
+  t.after(() => db.close());
+  let failing = true;
+  const injected = new DomainStore(db, () => {
+    if (failing)
+      throw new DomainPolicyError("forbidden", "SYNTHETIC CALLBACK ERROR");
+  });
+  const originalExecute = domain.execute;
+  domain.execute = (command) => injected.execute(command);
+  t.after(() => {
+    domain.execute = originalExecute;
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  const bodies: string[] = [];
+  const client = new OperatorClient(async (_path, init) => {
+    bodies.push(String(init?.body));
+    try {
+      return Response.json(await api.execute(JSON.parse(String(init?.body))));
+    } catch (error) {
+      assert.ok(error instanceof OperatorApiError);
+      assert.equal(error.code, "command-outcome-unknown");
+      return Response.json(
+        { error: { code: error.code, message: "Outcome unknown" } },
+        { status: error.status },
+      );
+    }
+  });
+  const state = new ComposerState(memoryStorage());
+  state.edit({ projectId, title: "One postcommit task", outcome: "Finish" });
+  await state.submit(client, "csrf", false);
+  assert.equal(state.phase, "unknown");
+  assert.equal(domain.tasks(projectId).length, 1);
+  const command = state.frozen;
+  assert.ok(command);
+  assert.ok(injected.recordedCommand({ ...command, actor: "operator" }));
+  failing = false;
+  await state.submit(client, "csrf", true);
+  assert.equal(state.phase, "recorded");
+  assert.deepEqual(bodies, [bodies[0], bodies[0]]);
+  assert.equal(domain.tasks(projectId).length, 1);
+  assert.equal(domain.task(command.taskId).version, 1);
+  await assert.rejects(
+    api.execute({ ...command, title: "Different payload" }),
+    (error) => error instanceof OperatorApiError && error.status === 409,
+  );
+  assert.equal(f.runtime.turns, 0);
+});

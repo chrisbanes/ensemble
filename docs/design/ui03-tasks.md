@@ -35,3 +35,7 @@ Every first or deliberate reconciliation POST requires successful frozen-record 
 Pending/unknown input cannot edit, rekey, change project or start another creation. Unknown survives subsequent authentication, permission, availability, validation and conflict failures. Only an exact original receipt matching kind/key/task/project/open/ready/final-version confirms it. No automatic replay occurs. Restoration happens after authentication; expiry/sign-out unmount private UI. This is same-tab on-device recovery, not durable Ensemble work or cross-device storage. No credential, session/CSRF token or fetched API cache is stored.
 
 The existing guarded listener owns Host, exact Origin, sessions, CSRF, strict JSON/byte bounds and same-origin assets/APIs. This delivery adds no deployment, credentials, actual model call, native structured-input availability or release/cutover claim. Qualification is recorded in [UI03 evidence](../evidence/ui03-tasks.md).
+
+## Shared command implementation
+
+The composer and private configuration now share immutable submission ownership, send admission and outcome settlement. Task receipt identity and verified same-tab recovery remain composer policy. Unmounting invalidates completion effects while leaving the frozen unknown record available to the next authenticated mount; reconciliation remains deliberate. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.

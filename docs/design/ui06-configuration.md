@@ -118,3 +118,7 @@ Every semicolon-separated foundation inventory control appears individually belo
 Programmatic dispositions: `assignment.create` remains programmatic as a standalone operation; delivered `/app/tasks/new` supports optional initial assignment atomically with task creation. `assignment.apply`, `dependency.add` and `dependency.remove` retain their exact runtime controls and existing JSON adapters. `imported-blockers.set` has no HTTP/JSON exposure. Arbitrary `github.activate`, recovery-resolution/proof submission and force unlock remain unsupported. No routing/plugin/development-stage framework is added.
 
 Project and existing-profile configuration expose an in-place read-only reload. Reload updates observations while retaining dirty replacement inputs, their captured revision/key and any frozen unknown submission. It never confirms a receipt or adopts a revision; deliberate revision review is still required after a definite initial conflict.
+
+## Shared command implementation
+
+Configuration and the task composer share immutable submission ownership, send admission and outcome settlement. Configuration receipt predicates, explicit revision adoption and session-memory privacy remain local. Placement origin, command owner and chosen destination remain distinct. Request-time authentication scope prevents old-session 401 responses from purging newer input while current-session expiry still purges it. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.

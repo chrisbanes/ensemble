@@ -26,6 +26,14 @@ export type CommandState =
       fieldPaths?: readonly string[];
     };
 export class OperatorClient {
+  private authenticationGeneration = 0;
+  invalidateAuthentication() {
+    this.authenticationGeneration++;
+  }
+  captureAuthenticationScope() {
+    const generation = this.authenticationGeneration;
+    return () => generation === this.authenticationGeneration;
+  }
   constructor(
     private readonly fetcher: typeof fetch = fetch,
     private readonly expired: () => void = () => {},
@@ -37,6 +45,7 @@ export class OperatorClient {
   ): Promise<T> {
     if (!path.startsWith("/api/operator/") || path.includes("://"))
       throw new ClientError("invalid-input", 400);
+    const isCurrentAuthentication = this.captureAuthenticationScope();
     let response: Response;
     try {
       const fetcher = this.fetcher;
@@ -52,7 +61,8 @@ export class OperatorClient {
       );
     }
     if (response.status === 401) {
-      if (path !== "/api/operator/login") this.expired();
+      if (path !== "/api/operator/login" && isCurrentAuthentication())
+        this.expired();
       throw new ClientError("unauthenticated", 401);
     }
     let body: unknown;
