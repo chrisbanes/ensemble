@@ -392,7 +392,12 @@ export class CodexRuntime implements Runtime {
   private conversationOverflowIdentityCapExceeded = false;
   private failure: Error | undefined;
 
-  constructor(private readonly executable = "codex") {}
+  constructor(
+    private readonly executable = "codex",
+    private readonly options: {
+      spawnEnvironment?: () => NodeJS.ProcessEnv;
+    } = {},
+  ) {}
 
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
     this.unexpected = listener;
@@ -434,7 +439,12 @@ export class CodexRuntime implements Runtime {
         "-c",
         "sandbox_mode=workspace-write",
       ],
-      { stdio: "pipe" },
+      {
+        stdio: "pipe",
+        ...(this.options.spawnEnvironment
+          ? { env: this.options.spawnEnvironment() }
+          : {}),
+      },
     );
     this.child = child;
     this.processIdentityValue = null;

@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { externalActionArgumentsSchema } from "../core/delivery.js";
 import type {
   CoordinationStore,
   CoordinationCall,
@@ -15,6 +17,28 @@ const object = (properties: Record<string, unknown>, required: string[]) => ({
 });
 
 export const coordinationTools: readonly RuntimeToolDefinition[] = [
+  {
+    type: "function",
+    name: "ensemble_external_action",
+    description:
+      "Request an exact policy-authorized GitHub action. Intent precedes effect; uncertain actions hold this task.",
+    inputSchema: z.toJSONSchema(externalActionArgumentsSchema),
+  },
+  {
+    type: "function",
+    name: "ensemble_register_pr",
+    description:
+      "Bind an existing identity-verified PR to this task and retain its lead for delivery feedback.",
+    inputSchema: object(
+      {
+        repositoryId: text,
+        prNumber: { type: "integer", minimum: 1 },
+        expectedPrNodeId: text,
+        expectedHeadSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+      },
+      ["repositoryId", "prNumber", "expectedPrNodeId", "expectedHeadSha"],
+    ),
+  },
   {
     type: "function",
     name: "ensemble_delegate",

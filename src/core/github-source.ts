@@ -246,6 +246,7 @@ export class GitHubSourceStore {
       observedDigest TEXT NOT NULL, acceptedDigest TEXT NOT NULL,
       decision TEXT, decidedAt TEXT
     );
+    CREATE TABLE IF NOT EXISTS github_delivery_closures (nodeId TEXT PRIMARY KEY, operationId TEXT NOT NULL, closerPrNodeId TEXT, snapshotJson TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS github_source_holds (
       nodeId TEXT PRIMARY KEY REFERENCES github_external_issues(nodeId),
       active INTEGER NOT NULL CHECK(active IN (0,1)), reason TEXT NOT NULL,
@@ -740,6 +741,125 @@ export class GitHubSourceStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  recordDeliveryClosure(
+    projectId: string,
+    configVersion: number,
+    input: IssueSnapshot,
+    operationId: string,
+    closerPrNodeId: string | null,
+  ): boolean {
+    const snapshot = z
+      .object({
+        providerInstance: z.literal("github.com"),
+        nodeId: nonempty,
+        repositoryId: nonempty,
+        repositoryName: nonempty,
+        number: z.number().int().positive(),
+        title: z.string(),
+        body: z.string(),
+        state: z.literal("closed"),
+        labels: z.array(nonempty),
+        projectFields: projectFieldsSchema,
+      })
+      .strict()
+      .parse(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const issue = this.issue(snapshot.nodeId),
+        config = this.db
+          .prepare(
+            "SELECT version,readiness,selections FROM project_github_sources WHERE projectId=?",
+          )
+          .get(projectId) as Row | undefined;
+      if (
+        !issue ||
+        !config ||
+        config.version !== configVersion ||
+        issue.repositoryId !== snapshot.repositoryId ||
+        issue.repositoryName !== snapshot.repositoryName ||
+        Number(issue.issueNumber) !== snapshot.number ||
+        !this.db
+          .prepare("SELECT 1 FROM domain_tasks WHERE id=? AND projectId=?")
+          .get(String(issue.taskId), projectId)
+      ) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const digest = sourceTextDigest(snapshot.title, snapshot.body),
+        review = this.review(snapshot.nodeId);
+      if (review?.observedDigest !== digest) {
+        this.db
+          .prepare(
+            "UPDATE github_source_reviews SET observedDigest=? WHERE nodeId=?",
+          )
+          .run(digest, snapshot.nodeId);
+        this.db
+          .prepare("UPDATE domain_tasks SET version=version+1 WHERE id=?")
+          .run(String(issue.taskId));
+        this.setSourceHold(snapshot.nodeId, "changed-text");
+      }
+      this.db
+        .prepare(
+          "UPDATE github_external_issues SET observedState='closed',observedTitle=?,observedBody=?,labels=? WHERE nodeId=?",
+        )
+        .run(
+          snapshot.title,
+          snapshot.body,
+          JSON.stringify(snapshot.labels),
+          snapshot.nodeId,
+        );
+      const priorHold = this.db
+        .prepare("SELECT active,reason FROM github_source_holds WHERE nodeId=?")
+        .get(snapshot.nodeId) as Row | undefined;
+      this.updateReadiness(String(issue.taskId));
+      const rule = readinessSchema.parse(JSON.parse(String(config.readiness)));
+      const labelProof =
+        rule.conditions.every((c) => c.kind === "label") &&
+        (rule.mode === "all"
+          ? rule.conditions.every(
+              (c) => c.kind === "label" && snapshot.labels.includes(c.name),
+            )
+          : rule.conditions.some(
+              (c) => c.kind === "label" && snapshot.labels.includes(c.name),
+            ));
+      const hold = priorHold;
+      if (
+        labelProof &&
+        (!hold?.active ||
+          ["closed", "withdrawn", "closure-read-unavailable"].includes(
+            String(hold.reason),
+          ))
+      )
+        this.setSourceHold(snapshot.nodeId, "closed");
+      else if (!labelProof && (!hold?.active || hold.reason === "closed"))
+        this.setSourceHold(snapshot.nodeId, "readiness-lost");
+      else if (hold?.active)
+        this.setSourceHold(snapshot.nodeId, String(hold.reason));
+      this.db
+        .prepare(
+          "INSERT INTO github_delivery_closures VALUES (?,?,?,?) ON CONFLICT(nodeId) DO UPDATE SET operationId=excluded.operationId,closerPrNodeId=excluded.closerPrNodeId,snapshotJson=excluded.snapshotJson",
+        )
+        .run(
+          snapshot.nodeId,
+          operationId,
+          closerPrNodeId,
+          JSON.stringify(snapshot),
+        );
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  recordDeliveryClosureUnavailable(nodeId: string): void {
+    const hold = this.db
+      .prepare("SELECT active,reason FROM github_source_holds WHERE nodeId=?")
+      .get(nodeId) as Row | undefined;
+    if (!hold?.active || hold.reason === "closed")
+      this.setSourceHold(nodeId, "closure-read-unavailable");
   }
 
   updateReadiness(taskId: string): void {

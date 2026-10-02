@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./store.js";
+import { DeliveryStore, deliveryPolicySchema } from "./delivery.js";
 import {
   GitHubSourceStore,
   githubConfigurationSchema,
@@ -19,6 +20,15 @@ const defaultProjectLimit = 2 as const;
 const commandBase = { key: id, actor };
 
 const commandSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      ...commandBase,
+      type: z.literal("delivery.configure"),
+      projectId: id,
+      expectedVersion: z.number().int().positive(),
+      ...deliveryPolicySchema.shape,
+    })
+    .strict(),
   z
     .object({
       ...commandBase,
@@ -278,6 +288,7 @@ export class DomainStore {
   ) {}
 
   migrate(): void {
+    new DeliveryStore(this.db).migrate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.exec(`CREATE TABLE IF NOT EXISTS domain_schema (version INTEGER NOT NULL);
@@ -582,6 +593,14 @@ export class DomainStore {
     );
   }
 
+  deliveryConfiguration(projectId: string) {
+    this.project(projectId);
+    return new DeliveryStore(this.db).publicConfiguration(projectId);
+  }
+  deliveryCredentialReference(projectId: string): string | null {
+    this.project(projectId);
+    return new DeliveryStore(this.db).configuration(projectId).credentialRef;
+  }
   githubConfiguration(projectId: string): {
     version: number;
     credentialRef: string | null;
@@ -869,7 +888,10 @@ export class DomainStore {
     reasons: string[];
   } {
     const assignment = this.assignment(assignmentId);
-    const admission = this.admission(String(assignment.taskId));
+    const isLead = this.leadBindings().some(
+      (b) => b.taskId === assignment.taskId && b.assignmentId === assignment.id,
+    );
+    const admission = this.admission(String(assignment.taskId), isLead);
     const reasons = [...admission.reasons];
     const profile = this.profile(String(assignment.profileId));
     const project = this.project(String(assignment.projectId));
@@ -975,10 +997,38 @@ export class DomainStore {
       .map((row) => String((row as Row).blockerTaskId));
   }
 
-  admission(taskId: string): { eligible: boolean; reasons: string[] } {
+  hasOwnDeliveryClosure(taskId: string): boolean {
+    if (
+      !this.one(
+        "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='github_external_issues'",
+      )
+    )
+      return false;
+    const external = this.one(
+      "SELECT nodeId,observedState FROM github_external_issues WHERE taskId=?",
+      taskId,
+    );
+    return (
+      external?.observedState === "closed" &&
+      !!this.one(
+        "SELECT 1 AS present FROM github_delivery_closures WHERE nodeId=?",
+        String(external.nodeId),
+      ) &&
+      new DeliveryStore(this.db).ownsConfirmedClosure(
+        taskId,
+        String(external.nodeId),
+      )
+    );
+  }
+  admission(
+    taskId: string,
+    deliveryContinuation = false,
+  ): { eligible: boolean; reasons: string[] } {
     const task = this.task(taskId);
     const project = this.project(String(task.projectId));
-    const reasons: string[] = [];
+    const reasons: string[] = [
+      ...new DeliveryStore(this.db).actionBlockers(taskId),
+    ];
     if (project.paused) reasons.push("project-paused");
     const lead = project.leadProfileId
       ? this.one(
@@ -988,7 +1038,9 @@ export class DomainStore {
       : undefined;
     if (!lead) reasons.push("project-lead-unconfigured");
     else if (lead.revoked) reasons.push("project-lead-revoked");
-    if (!task.ready) reasons.push("task-unready");
+    const ownClosure =
+      deliveryContinuation && this.hasOwnDeliveryClosure(taskId);
+    if (!task.ready && !ownClosure) reasons.push("task-unready");
     if (task.state !== "open") reasons.push("task-not-open");
     if (task.importedBlockers !== "clear")
       reasons.push(`imported-blockers-${task.importedBlockers}`);
@@ -1013,8 +1065,9 @@ export class DomainStore {
             reasons.push("source-review-required");
           if (
             this.one(
-              "SELECT 1 AS active FROM github_source_holds WHERE nodeId = ? AND active = 1",
+              "SELECT 1 AS active FROM github_source_holds WHERE nodeId = ? AND active = 1 AND (?=0 OR reason<>'closed')",
               String(external.nodeId),
+              Number(ownClosure),
             )
           )
             reasons.push("source-hold");
@@ -1025,8 +1078,31 @@ export class DomainStore {
             JOIN project_github_sources c ON c.projectId = m.projectId
             WHERE m.nodeId = ? AND m.projectId = ?`)
             .all(String(external.nodeId), String(task.projectId)) as Row[];
-          if (memberships.length === 0) reasons.push("source-withdrawn");
-          else if (memberships.some((membership) => membership.complete !== 1))
+          if (memberships.length === 0) {
+            const closureOnlyHold =
+              ownClosure &&
+              this.one(
+                "SELECT 1 AS present FROM github_source_holds WHERE nodeId=? AND active=1 AND reason='closed'",
+                String(external.nodeId),
+              );
+            const config = this.githubConfiguration(String(task.projectId));
+            const closureSelection =
+              closureOnlyHold &&
+              config.selections.some(
+                (selection) =>
+                  selection.kind === "repository" &&
+                  selection.repositoryId === imported.repositoryId &&
+                  this.one(
+                    "SELECT 1 AS present FROM project_github_active a JOIN github_sync_state s ON s.projectId=a.projectId AND s.selectionId=a.selectionId WHERE a.projectId=? AND a.selectionId=? AND a.configVersion=? AND s.complete=1",
+                    String(task.projectId),
+                    selection.id,
+                    config.version,
+                  ),
+              );
+            if (!closureSelection) reasons.push("source-withdrawn");
+          } else if (
+            memberships.some((membership) => membership.complete !== 1)
+          )
             reasons.push("source-unknown");
           const projects = this.db
             .prepare(
@@ -1421,6 +1497,23 @@ export class DomainStore {
             command.projectId,
           );
         return this.routing(command.projectId);
+      }
+      case "delivery.configure": {
+        this.operator(command);
+        this.project(command.projectId);
+        const {
+          key: _key,
+          actor: _actor,
+          type: _type,
+          projectId,
+          expectedVersion,
+          ...policy
+        } = command;
+        return new DeliveryStore(this.db).configureWithinTransaction(
+          projectId,
+          expectedVersion,
+          policy,
+        );
       }
       case "github.configure": {
         this.operator(command);

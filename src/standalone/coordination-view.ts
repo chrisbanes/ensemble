@@ -1,3 +1,8 @@
+import {
+  handbackSettlementSchema,
+  type HandbackSettlement,
+  type TaskDeliveryView,
+} from "../core/delivery.js";
 import { z } from "zod";
 import type {
   AssignmentResult,
@@ -145,6 +150,7 @@ export interface CoordinationRoutingFallbackAttention {
 }
 
 export interface CoordinationTaskView {
+  delivery?: TaskDeliveryView;
   task: CoordinationTaskIdentity;
   assignments: CoordinationAssignmentSummary[];
   history: CoordinationWorkHistoryEntry[];
@@ -269,6 +275,11 @@ export class CoordinationView {
       taskId: string,
       assignmentId: string,
     ) => ConversationHistoryAssignmentRead,
+    private readonly deliveryApi?: {
+      readTask: (taskId: string) => TaskDeliveryView;
+      settleHandback: (command: HandbackSettlement) => Promise<unknown>;
+      refresh: () => Promise<void>;
+    },
   ) {}
 
   /** Assignment identity determines its task; history never authorizes execution. */
@@ -421,6 +432,7 @@ export class CoordinationView {
         state: String(task.state),
         ready: Number(task.ready) === 1,
       },
+      ...(this.deliveryApi ? { delivery: this.deliveryApi.readTask(id) } : {}),
       assignments: assignmentSummaries,
       history,
       requests: this.state.taskTurnRequests(id),
@@ -450,6 +462,19 @@ export class CoordinationView {
     };
   }
 
+  async settleHandback(
+    input: Omit<HandbackSettlement, "actor">,
+  ): Promise<void> {
+    if (!this.deliveryApi) throw new Error("Delivery is unavailable");
+    await this.deliveryApi.settleHandback(
+      handbackSettlementSchema.parse({ ...input, actor: "operator" }),
+    );
+  }
+  async refreshDelivery(taskId: string): Promise<void> {
+    this.domain.task(uuid.parse(taskId));
+    if (!this.deliveryApi) throw new Error("Delivery is unavailable");
+    await this.deliveryApi.refresh();
+  }
   async postOperatorMessage(
     input: OperatorMessageCommand,
   ): Promise<CoordinationCommandReceipt> {
@@ -576,6 +601,14 @@ export class CoordinationView {
       createdAt: event.createdAt,
     };
     switch (event.eventType) {
+      case "pr-delivery":
+        return {
+          ...base,
+          text: z
+            .object({ reason: z.string(), identity: z.string() })
+            .strict()
+            .parse(JSON.parse(event.payload)).reason,
+        };
       case "operator-message":
         return {
           ...base,
