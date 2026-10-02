@@ -2,11 +2,27 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { createOperatorFixture } from "./fixtures/operator-web.js";
+import {
+  createOperatorFixture,
+  seedOperatorDelivery,
+} from "./fixtures/operator-web.js";
+import { actionKinds } from "../src/core/delivery.js";
 import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
 import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
 test("retained rendered form actions, fields and mounted route controls match documented owners", async (t) => {
-  const f = await createOperatorFixture();
+  let providerCalls = 0;
+  const unexpectedProviderCall = async () => {
+    providerCalls++;
+    throw Error("Unexpected fixture provider call");
+  };
+  const f = await createOperatorFixture(null, undefined, {
+    providerFactory: () => ({
+      inspectAction: unexpectedProviderCall,
+      preflight: unexpectedProviderCall,
+      performAction: unexpectedProviderCall,
+      inspectPr: unexpectedProviderCall,
+    }),
+  });
   t.after(() => f.close());
   const d = f.service.domain();
   const projectId = randomUUID(),
@@ -145,6 +161,27 @@ test("retained rendered form actions, fields and mounted route controls match do
       "INSERT INTO coordination_unresolved_result_destinations(resultId,taskId,assignmentId,originalDestination,reason,revision,status) VALUES (?,?,?,'lead','Unresolved',1,'unresolved')",
     ).run(resultId, taskId, assignmentId);
   });
+  command({
+    type: "delivery.configure",
+    projectId,
+    expectedVersion: 1,
+    mode: "reviewable-pr",
+    credentialRef: null,
+    grants: actionKinds.map((action) => ({
+      action,
+      repositoryId: "R1",
+      mode: "approval",
+      ...(action === "project.field"
+        ? { projectNodeId: "P1", fieldNodeId: "F1", optionNodeIds: ["O1"] }
+        : {}),
+    })),
+    requiredChecks: [{ name: "check", appId: 42 }],
+  });
+  const deliveryCaller = seedOperatorDelivery(f, {
+    projectId,
+    taskId,
+    assignmentId,
+  });
   const web = await f.startWeb();
   let response = await fetch(`${web.origin}/api/operator/session`);
   let cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "";
@@ -168,6 +205,67 @@ test("retained rendered form actions, fields and mounted route controls match do
   const inventory = await readFile(
     new URL("../../docs/design/ui02-foundation.md", import.meta.url),
     "utf8",
+  );
+  const dispositions = await readFile(
+    new URL("../../docs/design/ui06-configuration.md", import.meta.url),
+    "utf8",
+  );
+  const dispositionRows = dispositions
+    .split("\n")
+    .filter((line) => line.startsWith("| "))
+    .map((line) =>
+      line
+        .split("|")
+        .slice(1, -1)
+        .map((c) => c.trim()),
+    );
+  let individual = 0;
+  const resolve = (path: string) =>
+    path.replace(
+      ":id",
+      path.includes("profiles") || path.startsWith("/profile/")
+        ? profileId
+        : path.includes("assignments") || path.includes("assignment/")
+          ? assignmentId
+          : path.includes("tasks") || path.includes("task/")
+            ? taskId
+            : projectId,
+    );
+  const reached = new Set<string>();
+  for (const line of inventory.split("\n")) {
+    if (!line.startsWith("| ")) continue;
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (
+      cells.length !== 5 ||
+      cells[0] === "Existing destination" ||
+      cells[0] === "---"
+    )
+      continue;
+    for (const control of (cells[2] ?? "").split(";")) {
+      const row = dispositionRows.find(
+        (r) => r[0] === cells[1] && r[1] === control.trim(),
+      );
+      assert.ok(
+        row,
+        `${cells[1]} ${control.trim()} has an individual disposition`,
+      );
+      assert.ok((row[4]?.length ?? 0) > 30, "concrete scope disposition");
+      const destination = resolve(row[3] ?? "");
+      if (!reached.has(destination)) {
+        const response = await fetch(`${web.origin}${destination}`, {
+          headers: { cookie },
+        });
+        assert.equal(response.status, 200, destination);
+        reached.add(destination);
+      }
+      individual++;
+    }
+  }
+  console.log(
+    `UI06 inventory: ${individual} individual controls; ${reached.size} concrete reachable destinations`,
   );
   for (const route of routes)
     assert.ok(
@@ -217,6 +315,7 @@ test("retained rendered form actions, fields and mounted route controls match do
     "profile.create",
     "task.create",
     "project.configure",
+    "delivery.configure",
     "routing.configure",
     "github.configure",
     "github.preview",
@@ -243,6 +342,13 @@ test("retained rendered form actions, fields and mounted route controls match do
     "candidateProfileIds",
     "credentialRef",
     "clearCredentialRef",
+    "mode",
+    "grants",
+    "requiredChecks",
+    "expectedDeliveryRevision",
+    "expectedPolicyVersion",
+    "expectedPrNodeId",
+    "expectedHeadSha",
     "selections",
     "readiness",
     "repositories",
@@ -268,6 +374,8 @@ test("retained rendered form actions, fields and mounted route controls match do
   ])
     assert.ok(destinations.has(path), `${path} cross-navigation retained`);
   for (const action of [
+    "/coordination/control/delivery/settle",
+    "/coordination/control/delivery/refresh",
     "/coordination/control/question/answer",
     "/coordination/control/approval/decision",
     "/coordination/control/result/recipient",
@@ -275,6 +383,52 @@ test("retained rendered form actions, fields and mounted route controls match do
     assert.ok(actions.has(action), `${action} conditional form retained`);
   assert.ok(fields.has("materialJson"));
   assert.ok(forms >= 20);
+  const deliveryHtml = await (
+    await fetch(`${web.origin}/coordination/task/${taskId}`, {
+      headers: { cookie },
+    })
+  ).text();
+  const settlements = [
+    ...deliveryHtml.matchAll(
+      /<form\b[^>]*action="\/coordination\/control\/delivery\/settle"[^>]*>([\s\S]*?)<\/form>/g,
+    ),
+  ];
+  assert.equal(
+    settlements.length,
+    2,
+    "both bound-PR settlement decisions are present",
+  );
+  for (const [index, decision] of ["accepted", "closed"].entries()) {
+    const material = Object.fromEntries(
+      [
+        ...String(settlements[index]?.[1]).matchAll(
+          /<input\b[^>]*name="([^"]+)"[^>]*value="([^"]*)"/g,
+        ),
+      ].map((m) => [m[1], m[2]]),
+    );
+    assert.equal(material.taskId, taskId);
+    assert.equal(
+      material.expectedTaskVersion,
+      String(deliveryCaller.taskVersion),
+    );
+    assert.equal(material.expectedDeliveryRevision, "1");
+    assert.equal(material.expectedPolicyVersion, "2");
+    assert.equal(material.repositoryId, "R1");
+    assert.equal(material.prNumber, "7");
+    assert.equal(material.expectedPrNodeId, "P7");
+    assert.equal(material.expectedHeadSha, "1".repeat(40));
+    assert.equal(material.decision, decision);
+  }
+  assert.equal(
+    f.service.delivery().delivery(taskId)?.registeredWorkId,
+    deliveryCaller.workId,
+  );
+  assert.equal(
+    f.service.domain().task(taskId).version,
+    deliveryCaller.taskVersion,
+  );
+  assert.equal(f.runtime.turns, 0);
+  assert.equal(providerCalls, 0);
   console.log(
     `UI02 retained inventory: ${forms} rendered forms; ${commands.size} command discriminants; ${actions.size} form actions; ${routes.length} extension routes`,
   );

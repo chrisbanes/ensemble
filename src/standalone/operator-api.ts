@@ -11,6 +11,12 @@ import type {
   TaskCompletionRequest,
 } from "../core/coordination.js";
 import {
+  runtimeSettingsSchema,
+  assignmentRecoverySchema,
+  recoveryObservationSchema,
+  sourceObservationSchema,
+  projectConfigurationSchema,
+  profileConfigurationSchema,
   taskListPageSchema,
   taskListQuerySchema,
   composerOptionsSchema,
@@ -25,6 +31,10 @@ import {
   workspaceSchema,
   type Execution,
 } from "../operator/contracts.js";
+import {
+  GitHubHttpSourceReader,
+  type GitHubSourceReader,
+} from "./github-source.js";
 import type { StandaloneService } from "./service.js";
 import {
   sanitizeConversationText,
@@ -44,6 +54,7 @@ export class OperatorApiError extends Error {
       | "conflict"
       | "unavailable"
       | "command-outcome-unknown",
+    readonly fieldPaths?: readonly string[],
   ) {
     super(code);
   }
@@ -66,6 +77,10 @@ export class OperatorApi {
     private readonly controlPaths: readonly string[] = [],
     private readonly coordination: () => CoordinationView = () =>
       service.coordinationView(),
+    private readonly previewReader: (
+      credentialRef: string,
+    ) => Pick<GitHubSourceReader, "readSelection"> = (ref) =>
+      new GitHubHttpSourceReader(process.env[ref.slice(4)]),
   ) {
     this.commands = new DomainCommands(service.domain());
   }
@@ -132,10 +147,15 @@ export class OperatorApi {
           covered.add(`project:${id}:${revision}`);
         }
         const g = d.githubConfiguration(id);
-        for (const ref of [d.routingCredentialReference(id), g.credentialRef])
+        for (const ref of [
+          d.routingCredentialReference(id),
+          g.credentialRef,
+          d.deliveryCredentialReference(id),
+        ])
           if (ref) {
-            values.push(ref);
-            const value = process.env[ref.slice(4)];
+            const envKey = ref.slice(4);
+            values.push(ref, envKey);
+            const value = process.env[envKey];
             if (value) values.push(value);
           }
         if (g.repositories.length > 128) return undefined;
@@ -209,6 +229,10 @@ export class OperatorApi {
     return excluded
       ? (sanitizeConversationText(prose, excluded) ?? null)
       : null;
+  }
+  private exact(value: unknown, excluded: readonly string[] | undefined) {
+    const safe = this.safe(value, excluded);
+    return safe === String(value) ? safe : null;
   }
   private project(row: Row, excluded: readonly string[] | undefined) {
     return {
@@ -999,9 +1023,468 @@ export class OperatorApi {
         }
     throw new OperatorApiError(404, "not-found");
   }
+  async readProfileConfiguration(profileId: string) {
+    uuid.parse(profileId);
+    const row = this.domain()
+      .profiles()
+      .find((p) => p.id === profileId);
+    if (!row) throw new OperatorApiError(404, "not-found");
+    const excluded = await this.exclusions();
+    return profileConfigurationSchema.parse({
+      data: {
+        profile: {
+          ...this.profiles(excluded).find((p) => p.id === profileId),
+          name: this.exact(row.name, excluded),
+        },
+        instructionPresent: Boolean(row.instructions),
+        instructionRevision: Number(row.version),
+        capabilities: this.safe(row.capabilities, excluded),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readProjectConfiguration(projectId: string) {
+    const p = this.requireProject(projectId),
+      d = this.domain(),
+      excluded = await this.exclusions(projectId),
+      g = d.githubConfiguration(projectId),
+      r = d.routing(projectId),
+      active = d.githubActiveSelectionIds(projectId);
+    return projectConfigurationSchema.parse({
+      data: {
+        project: {
+          ...this.project(p, excluded),
+          name: this.exact(p.name, excluded),
+        },
+        profiles: this.profiles(excluded),
+        instructionsRevision: Number(p.instructionsRevision),
+        instructionPresent: Boolean(p.instructions),
+        placements: this.service
+          .githubSources()
+          .conflicts()
+          .filter((c) => c.projectIds.includes(projectId))
+          .map((c) => {
+            const task = d.task(c.taskId);
+            return {
+              taskId: c.taskId,
+              projectId: String(task.projectId),
+              version: Number(task.version),
+              title: this.safe(task.title, excluded),
+              choices: c.projectIds.map((id) =>
+                this.project(d.project(id), excluded),
+              ),
+            };
+          }),
+        routing: {
+          version: Number(r.version),
+          enabled: Boolean(r.enabled),
+          candidateProfileIds: JSON.parse(String(r.candidateProfileIds)),
+          credentialConfigured:
+            d.routingCredentialReference(projectId) !== null,
+          availability:
+            this.service.routingAvailability(projectId).reason ?? "available",
+        },
+        source: {
+          version: g.version,
+          credentialConfigured: g.credentialRef !== null,
+          selections: g.selections.map((s) => ({
+            id: this.exact(s.id, excluded),
+            kind: s.kind,
+            descriptor: this.safe(
+              s.kind === "repository"
+                ? `${s.owner}/${s.name}`
+                : s.kind === "project"
+                  ? s.projectNodeId
+                  : null,
+              excluded,
+            ),
+            active: active.includes(s.id),
+          })),
+          readiness:
+            this.exact(JSON.stringify(g.readiness), excluded) === null
+              ? null
+              : g.readiness,
+          repositories: g.repositories.map((r) => ({
+            repositoryId: this.safe(r.repositoryId, excluded),
+            ref: this.safe(r.ref, excluded),
+          })),
+        },
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readRuntimeSettings() {
+    const d = this.domain(),
+      projects = d.projects(),
+      excluded = await this.exclusions(),
+      limits = this.service.capacityLimits(projects.map((p) => String(p.id)));
+    return runtimeSettingsSchema.parse({
+      data: {
+        globalLimit: limits.globalLimit,
+        defaultProjectLimit: limits.defaultProjectLimit,
+        globalUsage: limits.currentUsage.global,
+        projects: await Promise.all(
+          projects.map(async (p) => {
+            const id = String(p.id);
+            return {
+              project: this.project(p, excluded),
+              limit: limits.effectiveProjectLimits[id],
+              usage: limits.currentUsage.projects[id] ?? 0,
+              override: limits.projectOverrides[id] ?? null,
+              tasks: await Promise.all(
+                d.tasks(id).map(async (t) => {
+                  const taskId = String(t.id),
+                    assignments = d.assignments(taskId),
+                    known = new Set(assignments.map((a) => String(a.id))),
+                    taskExcluded = await this.exclusions(id, taskId);
+                  const records = this.service
+                    .recoveryView()
+                    .filter(
+                      (r) =>
+                        r.binding?.taskId === taskId &&
+                        known.has(r.binding.assignmentId),
+                    );
+                  return {
+                    taskId,
+                    title: this.safe(t.title, taskExcluded),
+                    paused: Boolean(p.paused),
+                    held:
+                      this.service.taskHold(taskId) !== undefined ||
+                      records.some(
+                        (r) =>
+                          r.holds.stop ||
+                          r.holds.writer ||
+                          r.holds.capacity ||
+                          r.holds.uncertainty ||
+                          r.holds.task !== null,
+                      ),
+                    assignments: assignments.map((a) => ({
+                      assignmentId: String(a.id),
+                      name: this.safe(
+                        d.profile(String(a.profileId)).name,
+                        taskExcluded,
+                      ),
+                    })),
+                  };
+                }),
+              ),
+            };
+          }),
+        ),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readAssignmentRecovery(assignmentId: string) {
+    uuid.parse(assignmentId);
+    const d = this.domain(),
+      entry = d
+        .taskCatalog()
+        .find((t) => d.assignments(t.id).some((a) => a.id === assignmentId));
+    if (!entry) throw new OperatorApiError(404, "not-found");
+    const taskId = entry.id,
+      projectId = entry.projectId,
+      task = await this.readTask(taskId),
+      assignment = task.data.assignments.find(
+        (a) => a.assignmentId === assignmentId,
+      );
+    if (!assignment) throw new OperatorApiError(404, "not-found");
+    const selected = this.selection(d.assignment(assignmentId)).request,
+      known = new Set(d.assignments(taskId).map((a) => String(a.id))),
+      excluded = await this.exclusions(projectId, taskId);
+    const records = this.service
+      .recoveryView()
+      .filter((r) =>
+        r.binding
+          ? r.binding.taskId === taskId &&
+            known.has(r.binding.assignmentId) &&
+            uuid.safeParse(r.binding.assignmentId).success
+          : selected?.workId === r.workId &&
+            selected.assignmentId === assignmentId &&
+            selected.taskId === taskId &&
+            r.request?.assignmentId === assignmentId,
+      );
+    const taskHold = this.service.taskHold(taskId);
+    const holds = {
+      stop: taskHold === "Task stopped" || records.some((r) => r.holds.stop),
+      writer: records.some((r) => r.holds.writer),
+      capacity: records.some((r) => r.holds.capacity),
+      uncertainty: records.some((r) => r.holds.uncertainty),
+      task:
+        taskHold !== undefined || records.some((r) => r.holds.task !== null),
+    };
+    const visible = records.slice(-20);
+    const intentStates = new Set([
+        "ready",
+        "capacity-waiting",
+        "held",
+        "submitting",
+        "running",
+        "completed",
+        "reconciled",
+        "resolved-failed",
+      ]),
+      requestStates = new Set(["queued", "active", "completed", "held"]);
+    return assignmentRecoverySchema.parse({
+      data: {
+        assignment,
+        taskId,
+        project:
+          task.data.task.projectId === projectId
+            ? this.project(d.project(projectId), excluded)
+            : null,
+        held: Object.values(holds).some(Boolean),
+        holds,
+        evidenceAvailable: records.length > 0,
+        omittedCount: records.length - visible.length,
+        records: visible.map((r) => ({
+          workId: this.safe(r.workId, excluded),
+          generation: r.generation,
+          binding: r.binding
+            ? {
+                assignmentId: r.binding.assignmentId,
+                assignmentVersion: r.binding.assignmentVersion,
+                instructionsRevision: r.binding.instructionsRevision,
+                profileRevision: r.binding.profileRevision,
+              }
+            : null,
+          intentState: intentStates.has(r.intent.state)
+            ? r.intent.state
+            : "unknown",
+          requestState: r.request
+            ? requestStates.has(r.request.state)
+              ? r.request.state
+              : "unknown"
+            : null,
+          holds: {
+            stop: r.holds.stop,
+            writer: r.holds.writer,
+            capacity: r.holds.capacity,
+            uncertainty: r.holds.uncertainty,
+            task: r.holds.task !== null,
+          },
+          observations: [
+            ...new Set(
+              r.observations.map((o) => {
+                const parsed = recoveryObservationSchema.safeParse(o.kind);
+                return parsed.success ? parsed.data : "unknown";
+              }),
+            ),
+          ],
+          pendingEffectCount: r.pendingEffects.length,
+          receiptRecorded: r.receipt !== null,
+          workspace:
+            r.receipt?.workspaceDisposition === "preserved"
+              ? "preserved"
+              : r.receipt?.workspaceDisposition === "reconciled"
+                ? "reconciled"
+                : "unknown",
+        })),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readSourceObservations() {
+    const excluded = await this.exclusions(),
+      d = this.domain();
+    return sourceObservationSchema.parse({
+      data: {
+        projects: d.projects().map((p) => {
+          const projectId = String(p.id);
+          return {
+            projectId,
+            selections: d.githubConfiguration(projectId).selections.map((s) => {
+              const sync = this.service
+                .githubSources()
+                .syncState(projectId, s.id);
+              const at =
+                sync?.refreshedAt === undefined
+                  ? null
+                  : String(sync.refreshedAt);
+              return {
+                selectionId: this.safe(s.id, excluded),
+                state:
+                  excluded === undefined
+                    ? "unavailable"
+                    : sync
+                      ? sync.complete
+                        ? "complete"
+                        : "partial"
+                      : "never",
+                lastAttemptAt: at,
+                lastSuccessfulAt: sync && sync.complete ? at : null,
+              };
+            }),
+          };
+        }),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async refreshSources() {
+    await this.service.refreshGitHub();
+    return this.readSourceObservations();
+  }
+  private async previewGitHubSelection(
+    c: Extract<
+      z.infer<typeof operatorCommandSchema>,
+      { type: "github.preview" }
+    >,
+  ) {
+    const command = {
+      ...c,
+      type: "github.activate" as const,
+      actor: "operator" as const,
+    };
+    let raw = this.domain().recordedCommand(command);
+    if (raw === undefined) {
+      const config = this.domain().githubConfiguration(c.projectId);
+      if (config.version !== c.expectedVersion || !config.credentialRef)
+        throw new DomainConflictError("Preview configuration conflict");
+      const selection = config.selections.find((s) => s.id === c.selectionId);
+      if (!selection) throw new DomainConflictError("Unknown GitHub selection");
+      const preview = await this.previewReader(
+        config.credentialRef,
+      ).readSelection(selection);
+      if (!preview.complete)
+        throw new DomainConflictError("Preview incomplete");
+      raw = await this.executeDomain(command);
+    }
+    const r = raw as {
+      projectId: string;
+      selectionId: string;
+      configVersion: number;
+      active: true;
+    };
+    const excluded = await this.exclusions(c.projectId);
+    if (this.safe(r.selectionId, excluded) !== r.selectionId)
+      throw new Error("Receipt unavailable");
+    return commandReceiptSchema.parse({
+      kind: "configuration",
+      key: c.key,
+      recorded: true,
+      result: {
+        commandType: "github.preview",
+        resourceId: r.projectId,
+        selectionId: r.selectionId,
+        configVersion: r.configVersion,
+        active: r.active,
+      },
+    });
+  }
+  private async executeDomain(c: Parameters<typeof this.commands.execute>[0]) {
+    try {
+      return await this.commands.execute(c);
+    } catch (error) {
+      if (error instanceof DomainPolicyError)
+        throw new OperatorApiError(
+          error.code === "forbidden" ? 403 : 400,
+          error.code,
+          c.type === "github.configure" &&
+            error.code === "invalid-input" &&
+            error.message === "Repository verification failed"
+            ? ["repositories"]
+            : undefined,
+        );
+      throw error;
+    }
+  }
   async execute(input: unknown) {
     const c = operatorCommandSchema.parse(input);
     try {
+      if (c.type === "capacity.configure") {
+        const command = { ...c, actor: "operator" as const };
+        let raw = this.domain().recordedCommand(command);
+        if (raw === undefined) {
+          for (const id of Object.keys(c.projectOverrides))
+            this.requireProject(id);
+          raw = await this.service.configureCapacity({
+            key: c.key,
+            globalLimit: c.globalLimit,
+            projectOverrides: c.projectOverrides,
+          });
+        }
+        const r = raw as {
+          globalLimit: number;
+          defaultProjectLimit: 2;
+          projectOverrides: Record<string, number>;
+        };
+        return commandReceiptSchema.parse({
+          kind: "configuration",
+          key: c.key,
+          recorded: true,
+          result: {
+            commandType: c.type,
+            resourceId: "system:capacity",
+            globalLimit: r.globalLimit,
+            defaultProjectLimit: r.defaultProjectLimit,
+            projectOverrides: r.projectOverrides,
+          },
+        });
+      }
+      if (c.type === "github.preview")
+        return await this.previewGitHubSelection(c);
+      if (
+        c.type === "project.create" ||
+        c.type === "project.configure" ||
+        c.type === "profile.create" ||
+        c.type === "profile.configure" ||
+        c.type === "routing.configure" ||
+        c.type === "github.configure" ||
+        c.type === "github.place"
+      ) {
+        const raw = await this.executeDomain({ ...c, actor: "operator" });
+        const r = raw as Row;
+        const result =
+          c.type === "project.create" || c.type === "project.configure"
+            ? {
+                commandType: c.type,
+                resourceId: String(r.id),
+                version: Number(r.version),
+                paused: Boolean(r.paused),
+                leadProfileId:
+                  r.leadProfileId === null ? null : String(r.leadProfileId),
+                instructionsRevision: Number(r.instructionsRevision),
+              }
+            : c.type === "profile.create" || c.type === "profile.configure"
+              ? {
+                  commandType: c.type,
+                  resourceId: String(r.id),
+                  version: Number(r.version),
+                  revoked: Boolean(r.revoked),
+                }
+              : c.type === "routing.configure"
+                ? {
+                    commandType: c.type,
+                    resourceId: c.projectId,
+                    version: Number(r.version),
+                    enabled: Boolean(r.enabled),
+                    credentialConfigured: Boolean(r.credentialAvailable),
+                  }
+                : c.type === "github.configure"
+                  ? {
+                      commandType: c.type,
+                      resourceId: c.projectId,
+                      version: Number(r.version),
+                      credentialConfigured: r.credentialRef !== null,
+                      selectionCount: (raw as { selections: unknown[] })
+                        .selections.length,
+                      repositoryCount: (raw as { repositories: unknown[] })
+                        .repositories.length,
+                    }
+                  : {
+                      commandType: c.type,
+                      resourceId: String(r.id),
+                      projectId: String(r.projectId),
+                      version: Number(r.version),
+                    };
+        return commandReceiptSchema.parse({
+          kind: "configuration",
+          key: c.key,
+          recorded: true,
+          result,
+        });
+      }
       if ("projectId" in c) {
         this.requireProject(c.projectId);
         if (c.type !== "task.create") {

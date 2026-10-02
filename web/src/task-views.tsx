@@ -183,6 +183,14 @@ export function TaskViews({
         {projectId && (
           <a
             className="control button secondary"
+            href={`/app/projects/${projectId}/settings`}
+          >
+            Project settings
+          </a>
+        )}
+        {projectId && (
+          <a
+            className="control button secondary"
             href={`/project/${projectId}`}
           >
             Open existing project controls

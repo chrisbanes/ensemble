@@ -60,6 +60,9 @@ export class OperatorWebBoundary {
       path === "/app/tasks/new" ||
       path === "/app/inbox" ||
       path === "/app/settings" ||
+      /^\/app\/assignments\/[a-f0-9-]{36}\/recovery$/.test(path) ||
+      /^\/app\/settings\/(?:projects\/new|profiles\/new|runtime)$/.test(path) ||
+      /^\/app\/(?:projects|profiles)\/[a-f0-9-]{36}\/settings$/.test(path) ||
       path === "/login" ||
       /^\/app\/projects\/[a-f0-9-]{36}$/.test(path)
     );
@@ -77,10 +80,23 @@ export class OperatorWebBoundary {
     if (path === "/api/operator/task-list")
       return this.api.readTaskListPage(query);
     if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+    if (path === "/api/operator/runtime") return this.api.readRuntimeSettings();
+    const recovery = path.match(
+      /^\/api\/operator\/assignments\/([^/]+)\/recovery$/,
+    );
+    if (recovery) return this.api.readAssignmentRecovery(recovery[1] ?? "");
+    let config = path.match(
+      /^\/api\/operator\/projects\/([^/]+)\/configuration$/,
+    );
+    if (config) return this.api.readProjectConfiguration(config[1] ?? "");
+    config = path.match(/^\/api\/operator\/profiles\/([^/]+)\/configuration$/);
+    if (config) return this.api.readProfileConfiguration(config[1] ?? "");
     const options = path.match(
       /^\/api\/operator\/projects\/([^/]+)\/composer-options$/,
     );
     if (options) return this.api.readComposerOptions(options[1] ?? "");
+    if (path === "/api/operator/source-observations")
+      return this.api.readSourceObservations();
     if (path === "/api/operator/workspace") return this.api.readWorkspace();
     let match = path.match(/^\/api\/operator\/projects\/([^/]+)$/);
     if (match) return this.api.readProject(match[1] ?? "");
@@ -94,15 +110,21 @@ export class OperatorWebBoundary {
     return (
       [
         "/api/operator/session",
+        "/api/operator/runtime",
         "/api/operator/login",
         "/api/operator/logout",
         "/api/operator/workspace",
         "/api/operator/task-list",
         "/api/operator/commands",
+        "/api/operator/source-refresh",
+        "/api/operator/source-observations",
       ].includes(path) ||
+      /^\/api\/operator\/(?:projects|profiles)\/[^/]+\/configuration$/.test(
+        path,
+      ) ||
       /^\/api\/operator\/(?:projects|tasks)\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
-      /^\/api\/operator\/assignments\/[^/]+\/history$/.test(path)
+      /^\/api\/operator\/assignments\/[^/]+\/(?:history|recovery)$/.test(path)
     );
   }
 }

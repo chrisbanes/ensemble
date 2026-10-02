@@ -284,3 +284,5 @@ adds attention overview, shared List/Board and atomic local composer, with
 UI01/UI04–UI07 screens, runtime-question integration and parent #736
 final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
+
+UI06 presentation evidence is recorded in [configuration and recovery evidence](evidence/ui06-configuration.md). Fixture browser/API evidence qualifies the changed same-origin presentation; real-runtime/provider, final visual/usability UI07 and release/cutover gates remain separate.

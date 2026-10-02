@@ -61,15 +61,17 @@ export function ResourceStatus<T>({
       role={state.error ? "alert" : "status"}
     >
       <p className="body">
-        {state.status === "loading"
-          ? `Loading ${label.toLowerCase()}…`
-          : state.status === "stale"
-            ? state.error
-              ? "Refresh failed. Showing the last fetched data."
-              : "Refreshing. Showing the last fetched data."
-            : state.status === "error"
-              ? `${label} are unavailable. Try again.`
-              : "No data loaded."}
+        {state.error === "not-found"
+          ? `${label} not found.`
+          : state.status === "loading"
+            ? `Loading ${label.toLowerCase()}…`
+            : state.status === "stale"
+              ? state.error
+                ? "Refresh failed. Showing the last fetched data."
+                : "Refreshing. Showing the last fetched data."
+              : state.status === "error"
+                ? `${label} are unavailable. Try again.`
+                : "No data loaded."}
       </p>
       {state.fetchedAt && (
         <p className="metadata">

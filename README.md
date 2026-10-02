@@ -155,3 +155,5 @@ The [foundation contract](docs/design/ui02-foundation.md) records the strict
 projection/receipt boundary and retained-control owners. UI01 native structured
 input and UI04–UI07 screen/acceptance work remain separate. This foundation does
 not establish release or cutover readiness.
+
+[UI06 configuration and recovery](docs/design/ui06-configuration.md) adds Settings, paused project/profile setup, explicit private replacements, source observations, capacity and curated recovery. Exact private editors and operational controls remain reachable; UI07 visual/usability and release qualification remain outstanding.

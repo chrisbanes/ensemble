@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  sourceObservationSchema,
   apiErrorSchema,
   commandReceiptSchema,
   operatorCommandSchema,
@@ -11,6 +12,7 @@ export class ClientError extends Error {
   constructor(
     readonly code: string,
     readonly status: number,
+    readonly fieldPaths: readonly string[] = [],
   ) {
     super(code);
   }
@@ -21,6 +23,7 @@ export type CommandState =
       state: "conflict" | "rejected" | "unknown";
       command: OperatorCommand;
       code: string;
+      fieldPaths?: readonly string[];
     };
 export class OperatorClient {
   constructor(
@@ -70,6 +73,7 @@ export class OperatorClient {
             ? "command-outcome-unknown"
             : "unavailable",
         response.status,
+        error.success ? (error.data.error.fieldPaths ?? []) : [],
       );
     }
     const value = schema.safeParse(body);
@@ -100,6 +104,20 @@ export class OperatorClient {
     return this.request(
       "/api/operator/logout",
       z.object({ authenticated: z.literal(false) }).strict(),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-csrf-token": csrfToken,
+        },
+        body: "{}",
+      },
+    );
+  }
+  refreshSources(csrfToken: string) {
+    return this.request(
+      "/api/operator/source-refresh",
+      sourceObservationSchema,
       {
         method: "POST",
         headers: {
@@ -145,6 +163,7 @@ export class OperatorClient {
               : "rejected",
         command,
         code: e.code,
+        fieldPaths: e.fieldPaths,
       };
     }
   }

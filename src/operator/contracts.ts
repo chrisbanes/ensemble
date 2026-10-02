@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  githubConfigurationSchema,
+  readinessSchema,
+} from "../core/github-source-contracts.js";
 export const uuid = z.string().uuid();
 const revision = z.number().int().positive().safe();
 const time = z.number().int().nonnegative().safe();
@@ -659,8 +663,378 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       recipientAssignmentId: uuid,
     })
     .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("project.create"),
+      name: z.string().trim().min(1).max(512),
+      leadProfileId: uuid.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("project.configure"),
+      expectedVersion: revision,
+      name: z.string().trim().min(1).max(512).optional(),
+      paused: z.boolean().optional(),
+      leadProfileId: uuid.nullable().optional(),
+      instructions: text.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("profile.create"),
+      profileId: uuid,
+      name: z.string().trim().min(1).max(512),
+      instructions: text,
+      capabilities: text,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("profile.configure"),
+      profileId: uuid,
+      expectedVersion: revision,
+      name: z.string().trim().min(1).max(512).optional(),
+      instructions: text.optional(),
+      capabilities: text.optional(),
+      revoked: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("routing.configure"),
+      expectedVersion: revision,
+      enabled: z.boolean(),
+      guidance: text,
+      credentialRef: z
+        .string()
+        .regex(/^env:[A-Z][A-Z0-9_]*$/)
+        .nullable()
+        .optional(),
+      candidateProfileIds: z
+        .array(uuid)
+        .max(128)
+        .refine((ids) => new Set(ids).size === ids.length),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.configure"),
+      expectedVersion: revision,
+      ...githubConfigurationSchema.shape,
+      credentialRef: githubConfigurationSchema.shape.credentialRef.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("capacity.configure"),
+      globalLimit: revision,
+      projectOverrides: z.record(uuid, revision.nullable()),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.preview"),
+      selectionId: z.string().trim().min(1).max(512),
+      expectedVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.place"),
+      taskId: uuid,
+      chosenProjectId: uuid,
+      expectedVersion: revision,
+    })
+    .strict(),
 ]);
+export const configurationReceiptSchema = z
+  .object({
+    kind: z.literal("configuration"),
+    key: uuid,
+    recorded: z.literal(true),
+    result: z.discriminatedUnion("commandType", [
+      z
+        .object({
+          commandType: z.enum(["project.create", "project.configure"]),
+          resourceId: uuid,
+          version: revision,
+          paused: z.boolean(),
+          leadProfileId: uuid.nullable(),
+          instructionsRevision: revision,
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.enum(["profile.create", "profile.configure"]),
+          resourceId: uuid,
+          version: revision,
+          revoked: z.boolean(),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("routing.configure"),
+          resourceId: uuid,
+          version: revision,
+          enabled: z.boolean(),
+          credentialConfigured: z.boolean(),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.configure"),
+          resourceId: uuid,
+          version: revision,
+          credentialConfigured: z.boolean(),
+          selectionCount: time,
+          repositoryCount: time,
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("capacity.configure"),
+          resourceId: z.literal("system:capacity"),
+          globalLimit: revision,
+          defaultProjectLimit: z.literal(2),
+          projectOverrides: z.record(uuid, revision),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.preview"),
+          resourceId: uuid,
+          selectionId: z.string().min(1).max(512),
+          configVersion: revision,
+          active: z.literal(true),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.place"),
+          resourceId: uuid,
+          projectId: uuid,
+          version: revision,
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+export const runtimeSettingsSchema = envelope(
+  z
+    .object({
+      globalLimit: revision,
+      defaultProjectLimit: z.literal(2),
+      globalUsage: time,
+      projects: z.array(
+        z
+          .object({
+            project: projectSummarySchema,
+            limit: revision,
+            usage: time,
+            override: revision.nullable(),
+            tasks: z.array(
+              z
+                .object({
+                  taskId: uuid,
+                  title: safeText,
+                  paused: z.boolean(),
+                  held: z.boolean(),
+                  assignments: z.array(
+                    z.object({ assignmentId: uuid, name: safeText }).strict(),
+                  ),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
+export const recoveryObservationSchema = z.enum([
+  "exact-live",
+  "exact-terminal-completed",
+  "exact-terminal-failed",
+  "historical-only",
+  "conflicting",
+  "no-proof",
+  "unknown",
+  "termination-verified",
+  "termination-conflict",
+  "termination-unknown",
+  "receipt-accepted",
+  "retry-enqueued",
+]);
+const recoveryHolds = z
+  .object({
+    stop: z.boolean(),
+    writer: z.boolean(),
+    capacity: z.boolean(),
+    uncertainty: z.boolean(),
+    task: z.boolean(),
+  })
+  .strict();
+export const assignmentRecoverySchema = envelope(
+  z
+    .object({
+      assignment: assignmentSchema,
+      taskId: uuid,
+      project: projectSummarySchema,
+      held: z.boolean(),
+      holds: recoveryHolds,
+      evidenceAvailable: z.boolean(),
+      omittedCount: time,
+      records: z
+        .array(
+          z
+            .object({
+              workId: safeText,
+              generation: z
+                .object({
+                  workRevision: revision.nullable(),
+                  requestSequence: revision,
+                })
+                .strict(),
+              binding: z
+                .object({
+                  assignmentId: uuid,
+                  assignmentVersion: revision,
+                  instructionsRevision: revision,
+                  profileRevision: revision,
+                })
+                .strict()
+                .nullable(),
+              intentState: z.enum([
+                "ready",
+                "capacity-waiting",
+                "held",
+                "submitting",
+                "running",
+                "completed",
+                "reconciled",
+                "resolved-failed",
+                "unknown",
+              ]),
+              requestState: z
+                .enum(["queued", "active", "completed", "held", "unknown"])
+                .nullable(),
+              holds: recoveryHolds,
+              observations: z.array(recoveryObservationSchema).max(12),
+              pendingEffectCount: time,
+              receiptRecorded: z.boolean(),
+              workspace: z.enum(["preserved", "reconciled", "unknown"]),
+            })
+            .strict(),
+        )
+        .max(20),
+    })
+    .strict(),
+);
+export const sourceObservationSchema = envelope(
+  z
+    .object({
+      projects: z.array(
+        z
+          .object({
+            projectId: uuid,
+            selections: z.array(
+              z
+                .object({
+                  selectionId: safeText,
+                  state: z.enum([
+                    "complete",
+                    "partial",
+                    "never",
+                    "unavailable",
+                  ]),
+                  lastAttemptAt: z.string().nullable(),
+                  lastSuccessfulAt: z.string().nullable(),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
+export const profileConfigurationSchema = envelope(
+  z
+    .object({
+      profile: profileSummarySchema,
+      instructionPresent: z.boolean(),
+      instructionRevision: revision,
+      capabilities: safeText,
+    })
+    .strict(),
+);
+export const projectConfigurationSchema = envelope(
+  z
+    .object({
+      project: projectSummarySchema,
+      profiles: z.array(profileSummarySchema),
+      instructionsRevision: revision,
+      instructionPresent: z.boolean(),
+      routing: z
+        .object({
+          version: revision,
+          enabled: z.boolean(),
+          candidateProfileIds: z.array(uuid),
+          credentialConfigured: z.boolean(),
+          availability: z.enum([
+            "available",
+            "disabled",
+            "missing-client-credentials",
+            "no-eligible-candidates",
+          ]),
+        })
+        .strict(),
+      placements: z.array(
+        z
+          .object({
+            taskId: uuid,
+            projectId: uuid,
+            version: revision,
+            title: safeText,
+            choices: z.array(projectSummarySchema),
+          })
+          .strict(),
+      ),
+      source: z
+        .object({
+          version: revision,
+          credentialConfigured: z.boolean(),
+          selections: z.array(
+            z
+              .object({
+                id: safeText,
+                kind: z.enum(["repository", "search", "project"]),
+                descriptor: safeText,
+                active: z.boolean(),
+              })
+              .strict(),
+          ),
+          readiness: readinessSchema.nullable(),
+          repositories: z.array(
+            z.object({ repositoryId: safeText, ref: safeText }).strict(),
+          ),
+        })
+        .strict(),
+    })
+    .strict(),
+);
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  configurationReceiptSchema,
   z
     .object({
       kind: z.literal("domain"),

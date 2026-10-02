@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useRef,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -22,6 +23,14 @@ import {
 } from "./components.js";
 import { loadTaskList } from "./tasks.js";
 import { TaskComposer } from "./task-composer.js";
+import { RuntimeSettings, AssignmentRecovery } from "./recovery.js";
+import { ConfigurationDrafts } from "./settings-state.js";
+import {
+  SettingsWorkspace,
+  ProjectSetup,
+  ProjectConfiguration,
+  ProfileConfiguration,
+} from "./settings.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
@@ -157,6 +166,7 @@ export function Login({
   );
 }
 export function App() {
+  const drafts = useRef(new ConfigurationDrafts());
   const [session, setSession] = useState<Session | null>(null),
     [bootstrapError, setBootstrapError] = useState(false),
     [bootstrap, setBootstrap] = useState(0),
@@ -165,6 +175,7 @@ export function App() {
     [logoutPending, setLogoutPending] = useState(false),
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
   const expired = useCallback(() => {
+    drafts.current.purge();
     setSession(null);
     setBootstrap((v) => v + 1);
     setDrawer(false);
@@ -208,6 +219,30 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     taskLoader,
   );
+  useEffect(() => {
+    const click = (e: MouseEvent) => {
+      if (e.defaultPrevented) return;
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest("a"),
+        href = anchor?.getAttribute("href");
+      if (
+        href?.startsWith("/app") &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.button === 0
+      ) {
+        e.preventDefault();
+        history.pushState(null, "", href);
+        setPath(href);
+        setDrawer(false);
+      }
+    };
+    document.addEventListener("click", click);
+    return () => document.removeEventListener("click", click);
+  }, []);
   const pathname = path.split("?")[0] ?? "/app";
   const navigate = (next: string) => {
     history.pushState(null, "", next);
@@ -269,13 +304,16 @@ export function App() {
         ? "All tasks"
         : pathname === "/app/tasks/new"
           ? "New task"
-          : pathname === "/app/inbox"
-            ? "Inbox"
-            : pathname === "/app/settings"
-              ? "Settings"
-              : projectId
-                ? (project?.name ?? "Project")
-                : "Page not found";
+          : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname)
+            ? "Recovery"
+            : pathname === "/app/inbox"
+              ? "Inbox"
+              : pathname.startsWith("/app/settings") ||
+                  pathname.endsWith("/settings")
+                ? "Settings"
+                : projectId
+                  ? (project?.name ?? "Project")
+                  : "Page not found";
   const destination =
     projectId && project
       ? `/project/${project.id}`
@@ -291,6 +329,7 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   async function logout() {
+    drafts.current.purge();
     setLogoutPending(true);
     setLogoutNotice(null);
     try {
@@ -355,7 +394,63 @@ export function App() {
           {workspace.state.status !== "fresh" && (
             <ResourceStatus state={workspace.state} retry={workspace.refresh} />
           )}
-          {pathname === "/app/tasks/new" ? (
+          {pathname === "/app/settings/runtime" ? (
+            <RuntimeSettings
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname) ? (
+            <AssignmentRecovery
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              assignmentId={pathname.split("/")[3] ?? ""}
+            />
+          ) : pathname === "/app/settings" ? (
+            <SettingsWorkspace
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : pathname === "/app/settings/projects/new" ? (
+            <ProjectSetup
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : pathname === "/app/settings/profiles/new" ||
+            /^\/app\/profiles\/[^/]+\/settings$/.test(pathname) ? (
+            <ProfileConfiguration
+              key={pathname}
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              {...(pathname.includes("/profiles/") && !pathname.endsWith("/new")
+                ? { profileId: pathname.split("/")[3] }
+                : {})}
+            />
+          ) : /^\/app\/projects\/[^/]+\/settings$/.test(pathname) ? (
+            <ProjectConfiguration
+              key={pathname}
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              projectId={pathname.split("/")[3] ?? ""}
+            />
+          ) : pathname === "/app/tasks/new" ? (
             <TaskComposer
               key={session.csrfToken}
               client={client}

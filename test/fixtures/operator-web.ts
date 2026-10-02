@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Browser } from "playwright";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:net";
@@ -23,7 +24,11 @@ import type {
   RuntimeToolCall,
   RuntimeToolResult,
 } from "../../src/standalone/codex.js";
-import { StandaloneService } from "../../src/standalone/service.js";
+import {
+  StandaloneService,
+  type StandaloneServiceOptions,
+} from "../../src/standalone/service.js";
+import { DeliveryStore } from "../../src/core/delivery.js";
 import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
@@ -58,8 +63,11 @@ export class OperatorFixtureRuntime implements Runtime {
     this.outcomes.get(`fixture-turn-${turn}`)?.("completed");
   }
 }
+import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
 export async function createOperatorFixture(
   routingClient: RoutingChoiceClient | null = null,
+  readerFactory?: GitHubReaderFactory,
+  delivery?: StandaloneServiceOptions["delivery"],
 ) {
   const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
   const runtime = new OperatorFixtureRuntime();
@@ -67,7 +75,12 @@ export async function createOperatorFixture(
     join(directory, "data"),
     () => runtime,
     undefined,
-    { power: { enabled: false }, routingClient },
+    {
+      power: { enabled: false },
+      routingClient,
+      ...(delivery ? { delivery } : {}),
+      ...(readerFactory ? { github: { readerFactory } } : {}),
+    },
   );
   await service.start();
   const listeners = new Set<() => Promise<void>>();
@@ -140,7 +153,7 @@ export async function createOperatorFixture(
           routes,
           web: new OperatorWebBoundary(
             bundle,
-            new OperatorApi(service, [directory]),
+            new OperatorApi(service, [directory], undefined, readerFactory),
           ),
         },
       );
@@ -164,4 +177,114 @@ export async function createOperatorFixture(
       await rm(directory, { recursive: true, force: true });
     },
   };
+}
+
+export function seedOperatorRecovery(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  ids: { taskId: string; assignmentId: string; projectId: string },
+  count = 21,
+) {
+  f.seedPersistedState((db) => {
+    for (let i = 0; i < count; i++) {
+      const workId = `recovery-generation-${i + 1}`;
+      db.prepare(
+        "INSERT INTO execution_intents (id,workId,prompt,workspace,state,reason,threadId,turnId,accountType,sandbox,approval) VALUES (?,?,'PRIVATE RECOVERY PROMPT','/PRIVATE/RECOVERY/PATH',?,'PRIVATE RECOVERY REASON','PRIVATE THREAD','PRIVATE TURN','chatgpt','workspaceWrite','never')",
+      ).run(randomUUID(), workId, i === 0 ? "held" : "completed");
+      db.prepare(
+        "INSERT INTO execution_recovery_identities (workId,workRevision,requestSequence,processId,processStartedAt,bootId,threadId,turnId) VALUES (?,1,?,'PRIVATE PROCESS','PRIVATE START','PRIVATE BOOT','PRIVATE THREAD','PRIVATE TURN')",
+      ).run(workId, i + 1);
+      db.prepare(
+        "INSERT INTO task_execution_bindings (workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision) VALUES (?,?,?,1,1,1,1)",
+      ).run(workId, ids.taskId, ids.assignmentId);
+      db.prepare(
+        "INSERT INTO execution_recovery_observations (id,workId,kind,reason,recordedAt) VALUES (?,?,?,'PRIVATE OBSERVATION REASON',?)",
+      ).run(
+        `observation-${i}`,
+        workId,
+        i === 0 ? "unknown" : "exact-terminal-completed",
+        i,
+      );
+      if (i === 0) {
+        db.prepare(
+          "INSERT INTO task_writer_admissions (workId,workspace) VALUES (?,'/PRIVATE/RECOVERY/PATH')",
+        ).run(workId);
+        db.prepare(
+          "INSERT INTO execution_capacity_reservations (workId,projectId) VALUES (?,?)",
+        ).run(workId, ids.projectId);
+      }
+      if (i === count - 1)
+        db.prepare(
+          "INSERT INTO execution_recovery_receipts (id,workId,workRevision,requestSequence,threadId,turnId,processId,processStartedAt,bootId,terminationMethod,terminationVerifiedAt,effectsState,workspaceDisposition,createdAt) VALUES ('newer-receipt',?,1,?,'PRIVATE THREAD','PRIVATE TURN','PRIVATE PROCESS','PRIVATE START','PRIVATE BOOT','mac-pid-absent-same-boot','PRIVATE TIME','settled','preserved',1)",
+        ).run(workId, i + 1);
+    }
+    db.prepare(
+      "INSERT INTO task_writer_holds (taskId,reason) VALUES (?,'Task stopped')",
+    ).run(ids.taskId);
+  });
+}
+
+// A registered synthetic PR makes the retained settlement controls observable.
+// No runtime admission or provider call occurs in this read-only fixture.
+export function seedOperatorDelivery(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  ids: { projectId: string; taskId: string; assignmentId: string },
+) {
+  const d = f.service.domain(),
+    assignment = d.assignment(ids.assignmentId),
+    task = d.task(ids.taskId),
+    workId = "ui06-bound-delivery-work";
+  const caller = {
+    ...ids,
+    taskVersion: Number(task.version),
+    assignmentVersion: Number(assignment.version),
+    workId,
+    workRevision: 1,
+    conversationRevision: 1,
+  };
+  f.seedPersistedState((db) => {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(
+        "INSERT INTO execution_intents(id,workId,prompt,workspace,state,reason,threadId,turnId,accountType,sandbox,approval) VALUES (?,?,'fixture','fixture','completed',NULL,'fixture-thread','fixture-turn','chatgpt','workspaceWrite','never')",
+      ).run(randomUUID(), workId);
+      db.prepare(
+        "INSERT INTO task_execution_bindings(workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision) VALUES (?,?,?,?,?,?,?)",
+      ).run(
+        workId,
+        ids.taskId,
+        ids.assignmentId,
+        caller.assignmentVersion,
+        Number(assignment.instructionsRevision),
+        Number(assignment.profileRevision),
+        caller.conversationRevision,
+      );
+      const binding = new DeliveryStore(db).registerPrWithinTransaction(
+        caller,
+        {
+          repositoryId: "R1",
+          nodeId: "P7",
+          number: 7,
+          baseRef: "main",
+          headRef: "cb/change",
+          headSha: "1".repeat(40),
+          baseSha: "2".repeat(40),
+          state: "OPEN",
+          draft: false,
+          merged: false,
+          reviewDecision: null,
+          checks: [],
+          closedIssueNodeIds: [],
+          mergeBlockers: [],
+          allowedMethods: ["squash"],
+        },
+        ids.assignmentId,
+      );
+      db.exec("COMMIT");
+      return binding;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  });
+  return caller;
 }

@@ -131,6 +131,7 @@ const commandSchema = z.discriminatedUnion("type", [
       projectId: id,
       expectedVersion: z.number().int().positive(),
       ...githubConfigurationSchema.shape,
+      credentialRef: githubConfigurationSchema.shape.credentialRef.optional(),
     })
     .strict(),
   z
@@ -230,6 +231,16 @@ const commandSchema = z.discriminatedUnion("type", [
     })
     .strict(),
 ]);
+
+function parseCommand(input: unknown) {
+  const command = commandSchema.parse(input);
+  if (
+    command.type === "github.configure" &&
+    command.credentialRef === undefined
+  )
+    delete command.credentialRef;
+  return command;
+}
 
 export type DomainCommand = z.input<typeof commandSchema>;
 export class DomainConflictError extends Error {
@@ -481,7 +492,7 @@ export class DomainStore {
   }
 
   execute(input: DomainCommand): unknown {
-    const command = commandSchema.parse(input);
+    const command = parseCommand(input);
     if (
       command.type === "github.configure" &&
       command.repositories.length > 0
@@ -511,7 +522,7 @@ export class DomainStore {
   async configureGitHub(
     input: Extract<DomainCommand, { type: "github.configure" }>,
   ): Promise<unknown> {
-    const command = commandSchema.parse(input);
+    const command = parseCommand(input);
     if (command.type !== "github.configure")
       throw new Error("Expected GitHub configuration");
     const hash = createHash("sha256").update(canonical(command)).digest("hex");
@@ -532,10 +543,41 @@ export class DomainStore {
       { version: this.githubConfiguration(command.projectId).version },
       command.expectedVersion,
     );
-    const verified = await Promise.all(
-      command.repositories.map((link) => this.verifyRepository(link)),
-    );
+    let verified: LinkedRepository[];
+    try {
+      verified = await Promise.all(
+        command.repositories.map((link) => this.verifyRepository(link)),
+      );
+    } catch {
+      throw new DomainPolicyError(
+        "invalid-input",
+        "Repository verification failed",
+      );
+    }
     return this.executeParsed(command, verified);
+  }
+
+  recordedCommand(input: DomainCommand): unknown | undefined {
+    const command = parseCommand(input);
+    this.operator(command);
+    const scope =
+      "projectId" in command
+        ? command.projectId
+        : "profileId" in command
+          ? `profile:${command.profileId}`
+          : "system:capacity";
+    const hash = createHash("sha256").update(canonical(command)).digest("hex");
+    const receipt = this.one(
+      "SELECT payloadHash, result FROM command_receipts WHERE scope = ? AND key = ?",
+      scope,
+      command.key,
+    );
+    if (!receipt) return undefined;
+    if (receipt.payloadHash !== hash)
+      throw new DomainConflictError(
+        "Command key already used with different payload",
+      );
+    return JSON.parse(String(receipt.result));
   }
 
   private executeParsed(
@@ -1529,7 +1571,9 @@ export class DomainStore {
             "UPDATE project_github_sources SET version = version + 1, credentialRef = ?, selections = ?, readiness = ?, repositories = ? WHERE projectId = ?",
           )
           .run(
-            command.credentialRef,
+            command.credentialRef === undefined
+              ? current.credentialRef
+              : command.credentialRef,
             JSON.stringify(command.selections),
             JSON.stringify(command.readiness),
             JSON.stringify(repositories),
@@ -2039,7 +2083,7 @@ export class DomainCommands {
   constructor(private readonly store: DomainStore) {}
 
   execute(input: DomainCommand): Promise<unknown> {
-    const command = commandSchema.parse(input);
+    const command = parseCommand(input);
     const scope =
       "projectId" in command
         ? command.projectId
