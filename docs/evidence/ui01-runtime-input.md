@@ -635,8 +635,8 @@ its identity-only Default/settings readback before exposure. Historical endpoint
 confirmed receipts and disqualified turn identities remain preserved. Actual
 stdio fixtures cover a resumed thread's second question arriving before the
 turn/start response, late old callback/terminal replay, conflicting new request,
-async origin, non-Default readback and duplicate matching resolution. A replay
-after reply initiation cancels only its still-unconfirmed endpoint and retains
+async origin, non-Default readback and duplicate matching resolution. In that historical candidate, a replay
+after reply initiation cancelled its still-unconfirmed endpoint and retained
 uncertainty; the earlier confirmed receipt remains immutable.
 
 Native invalidation failure during Stop joins the existing cleanup error
@@ -665,3 +665,61 @@ async-origin, warm/new-turn qualification and early service prebinding controls
 remain covered; the affected matrix passed **21/21**. No model turn, authority,
 settings change or new runtime guarantee is introduced by these deterministic
 fixtures.
+
+
+## T6 failure and approved delayed-replay repair
+
+The separately approved T6 ran once at `af440a94079310616842691e0401ab02dc8629ff`.
+Its [durable failure record](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5958685532)
+records one thread, turn, request, reply and report. Default/settings qualification,
+pause, durable answer and independent SQLite readback with zero replies passed.
+After ordinary unpause, delivery became uncertain with conflicting or late native
+replay. The execution retained its unfinished-callback hold until the deadline.
+The rejected payload was not captured, so this result cannot establish whether
+that live replay was identical or changed, or whether a later resolution arrived.
+Root independently verified the exact child absent on its recorded boot before
+releasing only its matching scheduler resource. The failed fixture, consumed
+one-use ledger and recovery holds remain preserved; no retry was made.
+
+Chris approved a narrow deterministic repair after reviewing this failure. One
+exact warm-resume retransmission may arrive before exposure, during write, while
+resolution is pending, or after confirmation while the requesting turn remains
+active. It must match the current attached process, typed RPC ID and complete
+request payload, follow that request's resume response, and consume its sole replay
+allowance. It exposes no new question and causes no second answer, intent or reply.
+Changed/excess deliveries, invalidated or terminal turns, lost/replaced processes
+and unavailable/uncertain endpoints retain rejection and recovery behaviour.
+Cancellation and interruption retire replay eligibility independently of the
+immutable confirmed receipt.
+A replay alone never confirms delivery: successful stdin and matching resolution
+remain required, followed by committed confirmation, ended callbacks and a bound
+successful terminal without other holds.
+
+The actual stdio fixture now exercises retransmission after reply initiation,
+including while the stdin callback is outstanding and after confirmation, plus
+changed payload, typed-ID mismatch and excess replay rejection. A no-resolution
+case remains sent-unconfirmed. The service fixture reproduces the original
+uncertain-delivery/unfinished-callback failure before the repair, then exercises
+pause, independent durable readback, one reply and settled completion afterwards.
+Rejected-replay evidence includes safe endpoint identity, original/received payload
+digests, endpoint state, replay count and equality; raw questions and configuration
+are excluded. This repair covers the adapter shared by the curated service seam;
+no new frontend, context-menu, deep-link or notification entry point is added.
+
+These are deterministic repairs, not a live T6 pass. The original grant remains
+consumed, PR #755 stays draft, #739 stays incomplete and dependent completion gates
+remain. A reviewed new candidate and fresh finite authority are required before
+another live invocation. #737 holds/settlement/fixtures and paused X scope are
+unchanged.
+
+
+Pinned Node `24.21.0` / npm `12.2.0` validation passed `npm ci --offline`,
+type checking, lint, formatting, build and **619/619** full-check tests, with no
+failures, cancellations or skips. The affected runtime/service/harness suite passed
+**161/161**. Fresh independent review cleared correctness/standards,
+reuse/clarity/efficiency and over-engineering after fixing cancellation eligibility
+and adding an explicit replay-processing barrier to the outstanding-write test.
+Both new cancellation regressions failed before their repair. The sandbox run's
+localhost restrictions and a later unchanged scheduler test's 25 ms timing failure
+were preserved; that scheduler test passed in isolation and the unchanged final
+candidate passed the repeated full check. No live T6 turn was run during this repair.

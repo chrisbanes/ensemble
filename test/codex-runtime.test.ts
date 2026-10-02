@@ -1631,7 +1631,12 @@ async function nativeTransport(mode: string) {
     resolve();
   });
   runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
-  runtime.onUnexpectedRequest((request) => anomalies.push(request.method));
+  const unexpected: import("../src/standalone/codex.js").UnexpectedRequest[] =
+    [];
+  runtime.onUnexpectedRequest((request) => {
+    anomalies.push(request.method);
+    unexpected.push(request);
+  });
   await runtime.start();
   const threadId = await runtime.startThread(process.cwd());
   await runtime.startTurn(threadId, process.cwd(), "fixture");
@@ -1641,6 +1646,7 @@ async function nativeTransport(mode: string) {
     call,
     outcomes,
     anomalies,
+    unexpected,
     reply: () =>
       runtime.replyUserInput(
         call.identity,
@@ -1778,6 +1784,164 @@ for (const mode of [
       await f.runtime.stop();
     }
   });
+for (const mode of [
+  "reply-replay",
+  "reply-replay-confirmed",
+  "reply-replay-changed",
+  "reply-replay-excess",
+  "reply-replay-type",
+] as const)
+  test(`native ${mode} preserves one reply and distinguishes retransmission from conflict`, async () => {
+    const f = await nativeTransport(mode);
+    try {
+      await f.reply();
+      const rejected =
+        mode === "reply-replay-changed" ||
+        mode === "reply-replay-excess" ||
+        mode === "reply-replay-type";
+      await nativeUntil(() =>
+        f.outcomes.some(
+          (o) => o.outcome === (rejected ? "uncertain" : "confirmed"),
+        ),
+      );
+      assert.equal(
+        f.outcomes.filter((o) => o.outcome === "confirmed").length,
+        rejected ? 0 : 1,
+      );
+      if (mode === "reply-replay-confirmed")
+        assert.equal(
+          await f.runtime.waitForTurn(
+            f.call.identity.threadId,
+            f.call.identity.turnId,
+          ),
+          "completed",
+        );
+      assert.equal(f.anomalies.length > 0, rejected);
+      if (rejected) {
+        const diagnostic = f.unexpected[0]?.nativeReplay;
+        assert.ok(diagnostic);
+        assert.equal(
+          diagnostic.runtimeGeneration,
+          f.call.identity.runtimeGeneration,
+        );
+        assert.match(diagnostic.paramsDigest, /^[0-9a-f]{64}$/);
+        assert.equal(diagnostic.identical, mode === "reply-replay-excess");
+        assert.equal(
+          diagnostic.acceptedReplays,
+          mode === "reply-replay-excess" ? 1 : 0,
+        );
+        assert.equal(JSON.stringify(diagnostic).includes("Changed"), false);
+      }
+      let gates = 0;
+      await assert.rejects(
+        f.runtime.replyUserInput(
+          f.call.identity,
+          { answers: { q: { answers: ["Local"] } } },
+          () => {
+            gates++;
+            return {
+              replyIntentId: "duplicate",
+              answerDigest: structuredAnswerDigest({
+                q: { answers: ["Local"] },
+              }),
+            };
+          },
+        ),
+      );
+      assert.equal(gates, 0);
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+for (const control of ["cancel", "interrupt"] as const)
+  test(`native ${control} after confirmation retires replay eligibility without rewriting receipt`, async () => {
+    const f = await nativeTransport("replay-after-stop");
+    try {
+      await f.reply();
+      await nativeUntil(() =>
+        f.outcomes.some((o) => o.outcome === "confirmed"),
+      );
+      const receipt = structuredClone(f.outcomes);
+      if (control === "interrupt")
+        await f.runtime.interruptTurn(
+          f.call.identity.threadId,
+          f.call.identity.turnId,
+        );
+      else {
+        f.runtime.cancelUserInput(f.call.identity, "Stop after confirmation");
+        const child = (
+          f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
+        ).child;
+        child.stdin.write(JSON.stringify({ method: "fixture/replay" }) + "\n");
+      }
+      await f.runtime.waitForTurn(
+        f.call.identity.threadId,
+        f.call.identity.turnId,
+      );
+      assert.ok(f.anomalies.includes("stale-native-input"));
+      assert.deepEqual(f.outcomes, receipt);
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+test("native exact replay without resolution never confirms delivery", async () => {
+  const f = await nativeTransport("reply-replay-no-resolution");
+  try {
+    await f.reply();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(
+      f.outcomes.map((o) => o.outcome),
+      ["sent-unconfirmed"],
+    );
+    assert.deepEqual(f.anomalies, []);
+    f.runtime.cancelUserInput(f.call.identity, "Stop");
+    assert.equal(f.outcomes.at(-1)?.outcome, "uncertain");
+  } finally {
+    await f.runtime.stop();
+  }
+});
+test("native exact replay during an outstanding stdin callback still requires successful write and resolution", async () => {
+  const f = await nativeTransport("reply-replay");
+  const child = (
+    f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
+  ).child;
+  const original = child.stdin.write.bind(child.stdin);
+  const receiver = f.runtime as unknown as {
+    receiveNativeRequest(
+      child: ChildProcessWithoutNullStreams,
+      id: string | number,
+      input: unknown,
+    ): boolean;
+  };
+  const receive = receiver.receiveNativeRequest.bind(f.runtime);
+  let replayProcessed = false;
+  receiver.receiveNativeRequest = (attached, id, input) => {
+    const result = receive(attached, id, input);
+    replayProcessed = true;
+    return result;
+  };
+  let callback: ((error: Error | null) => void) | undefined;
+  try {
+    child.stdin.write = ((line: string, done: (error: Error | null) => void) =>
+      original(line, () => {
+        callback = done;
+      })) as typeof child.stdin.write;
+    const sent = f.reply();
+    sent.catch(() => {});
+    await nativeUntil(() => Boolean(callback));
+    await nativeUntil(() => replayProcessed);
+    assert.equal(f.outcomes.length, 0);
+    assert.ok(callback);
+    callback(null);
+    await sent;
+    await nativeUntil(() => f.outcomes.some((o) => o.outcome === "confirmed"));
+    assert.deepEqual(f.anomalies, []);
+  } finally {
+    receiver.receiveNativeRequest = receive;
+    child.stdin.write = original;
+    await f.runtime.stop();
+  }
+});
 test("replacement process reusing a typed RPC ID cannot receive an old answer", async () => {
   const f = await nativeTransport("no-resolution");
   try {
@@ -1992,12 +2156,9 @@ for (const mode of [
         );
         assert.equal(
           outcomes.filter((o) => o.outcome === "confirmed").length,
-          mode === "two-turn-early-late-replay" ? 1 : 2,
+          2,
         );
-        if (mode === "two-turn-early-late-replay") {
-          assert.equal(outcomes.at(-1)?.outcome, "uncertain");
-          assert.ok(anomalies.includes("stale-native-input"));
-        } else if (mode === "two-turn-early-old-replay")
+        if (mode === "two-turn-early-old-replay")
           assert.ok(anomalies.includes("stale-native-input"));
         else assert.deepEqual(anomalies, []);
       }

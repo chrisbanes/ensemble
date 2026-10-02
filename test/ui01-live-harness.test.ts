@@ -689,41 +689,43 @@ for (const mode of [
   });
 }
 
-test("service phase records the answer while paused then uses one ordinary requesting continuation", async (t) => {
-  const { createHash } = await import("node:crypto");
-  const { runService } = await import(
-    new URL("test/ui01/service-contract.mjs", `file://${process.cwd()}/`).href
-  );
-  const executable = resolve("test/ui01/native-runtime-fixture.mjs");
-  const evidence = await runService({
-    fixture: {
-      executable,
-      executableHash: createHash("sha256")
-        .update(readFileSync(executable))
-        .digest("hex"),
-    },
-    budgets: { requestMs: 1000, totalMs: 3000, cleanupMs: 500 },
+for (const mode of ["proof", "reply-replay"] as const)
+  test(`service phase ${mode} records the paused answer then settles one ordinary requesting continuation`, async (t) => {
+    const { createHash } = await import("node:crypto");
+    const { runService } = await import(
+      new URL("test/ui01/service-contract.mjs", `file://${process.cwd()}/`).href
+    );
+    const executable = resolve("test/ui01/native-runtime-fixture.mjs");
+    const evidence = await runService({
+      fixture: {
+        executable,
+        mode,
+        executableHash: createHash("sha256")
+          .update(readFileSync(executable))
+          .digest("hex"),
+      },
+      budgets: { requestMs: 1000, totalMs: 3000, cleanupMs: 500 },
+    });
+    t.after(() => {
+      rmSync(evidence.fixture.path, { recursive: true, force: true });
+      rmSync(evidence.evidencePath, { force: true });
+    });
+    assert.equal(evidence.status, "passed", JSON.stringify(evidence.failure));
+    assert.deepEqual(evidence.counts, {
+      threads: 1,
+      turns: 1,
+      requests: 1,
+      replies: 1,
+      reports: 1,
+    });
+    assert.equal(evidence.persistence.independentReadOnlyConnection, true);
+    assert.equal(evidence.persistence.zeroReplies, true);
+    assert.equal(evidence.persistence.replyIntentId, null);
+    assert.equal(evidence.receipt.outcome, "confirmed");
+    assert.equal(evidence.settlement.reportCallbackEnded, true);
+    assert.equal(evidence.cleanup.verified, true);
+    assert.equal(evidence.fixture.removed, true);
   });
-  t.after(() => {
-    rmSync(evidence.fixture.path, { recursive: true, force: true });
-    rmSync(evidence.evidencePath, { force: true });
-  });
-  assert.equal(evidence.status, "passed", JSON.stringify(evidence.failure));
-  assert.deepEqual(evidence.counts, {
-    threads: 1,
-    turns: 1,
-    requests: 1,
-    replies: 1,
-    reports: 1,
-  });
-  assert.equal(evidence.persistence.independentReadOnlyConnection, true);
-  assert.equal(evidence.persistence.zeroReplies, true);
-  assert.equal(evidence.persistence.replyIntentId, null);
-  assert.equal(evidence.receipt.outcome, "confirmed");
-  assert.equal(evidence.settlement.reportCallbackEnded, true);
-  assert.equal(evidence.cleanup.verified, true);
-  assert.equal(evidence.fixture.removed, true);
-});
 for (const mode of ["secret", "cleanup-unproved"] as const)
   test(`service preparation ${mode} retains failure with no second turn`, async (t) => {
     const { createHash } = await import("node:crypto");

@@ -299,6 +299,16 @@ export function deniedServerRequest(id: string | number, method: string) {
 }
 
 export interface UnexpectedRequest {
+  nativeReplay?: {
+    runtimeGeneration: string;
+    requestId: string | number;
+    itemId: string;
+    paramsDigest: string;
+    originalParamsDigest: string | null;
+    endpointState: string | null;
+    acceptedReplays: number;
+    identical: boolean;
+  };
   method: string;
   threadId?: string;
   turnId?: string;
@@ -475,12 +485,21 @@ export class CodexRuntime implements Runtime {
   }
   cancelUserInput(identity: NativeInputEndpointIdentity, reason: string): void {
     const endpoint = this.nativeEndpoints.get(nativeEndpointKey(identity));
-    if (endpoint)
+    if (endpoint) {
+      const waiting = this.nativeReadbacks.get(identity.threadId);
+      if (
+        waiting &&
+        waiting.child === this.child &&
+        waiting.id === identity.requestId &&
+        nativeInputRequestSchema.parse(waiting.input).turnId === identity.turnId
+      )
+        waiting.invalid = true;
       this.emitNative(
         endpoint,
         endpoint.intent ? "uncertain" : "unavailable",
         reason,
       );
+    }
   }
   private cancelNativeTurn(
     threadId: string,
@@ -683,6 +702,42 @@ export class CodexRuntime implements Runtime {
           endpoint.call.identity.threadId === threadId &&
           endpoint.call.identity.requestId === id,
       );
+      const prior = this.nativeReadbacks.get(threadId);
+      // Resume retransmission can arrive after the operator has already answered.
+      // It is the same request, never permission to expose or reply a second time.
+      if (
+        prior &&
+        !prior.invalid &&
+        prior.child === child &&
+        child === this.child &&
+        prior.id === id &&
+        isDeepStrictEqual(prior.input, input) &&
+        prior.requested &&
+        prior.responded &&
+        prior.replays === 0 &&
+        this.nativeTurns.get(threadId) === request.turnId &&
+        !this.invalidNativeTurns.has(`${threadId}:${request.turnId}`) &&
+        !this.terminalHistory.has(`${threadId}:${request.turnId}`) &&
+        (!knownRequest ||
+          ["pending", "writing", "sent-unconfirmed", "confirmed"].includes(
+            knownRequest.state,
+          ))
+      ) {
+        prior.replays++;
+        return true;
+      }
+      const nativeReplay = {
+        runtimeGeneration: this.nativeGeneration,
+        requestId: id,
+        itemId: request.itemId,
+        paramsDigest: digest,
+        originalParamsDigest: prior?.digest ?? knownRequest?.digest ?? null,
+        endpointState: knownRequest?.state ?? null,
+        acceptedReplays: prior?.replays ?? 0,
+        identical: Boolean(
+          prior && prior.id === id && isDeepStrictEqual(prior.input, input),
+        ),
+      };
       if (
         this.terminalHistory.has(`${threadId}:${request.turnId}`) ||
         (knownRequest &&
@@ -710,31 +765,18 @@ export class CodexRuntime implements Runtime {
         }
         this.unexpected?.({
           method: "stale-native-input",
+          nativeReplay,
           threadId,
           turnId: request.turnId,
         });
         return true;
       }
-      const priorRequest = this.nativeReadbacks.get(threadId);
-      if (priorRequest) {
-        const prior = priorRequest;
+      if (prior) {
         const endpoint = [...this.nativeEndpoints.values()].find(
           (e) =>
             e.call.identity.threadId === threadId &&
             e.call.identity.turnId === request.turnId,
         );
-        if (
-          !prior.invalid &&
-          prior.id === id &&
-          isDeepStrictEqual(prior.input, input) &&
-          prior.requested &&
-          prior.responded &&
-          prior.replays === 0 &&
-          (!endpoint || endpoint.state === "pending")
-        ) {
-          prior.replays++;
-          return true;
-        }
         prior.invalid = true;
         if (endpoint)
           this.cancelUserInput(
@@ -744,6 +786,7 @@ export class CodexRuntime implements Runtime {
         this.nativeQualifications.delete(threadId);
         this.unexpected?.({
           method: "conflicting-native-input",
+          nativeReplay,
           threadId,
           turnId: request.turnId,
         });

@@ -36,6 +36,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line);
   if (m.method === "initialize" && proof !== "startup-stall")
     send({ id: m.id, result: {} });
+  if (
+    (m.method === "fixture/replay" || m.method === "turn/interrupt") &&
+    transport === "replay-after-stop"
+  ) {
+    if (m.method === "turn/interrupt") send({ id: m.id, result: {} });
+    send(lastNative);
+    terminal();
+  }
   if (m.method === "account/read")
     send({ id: m.id, result: { account: { type: "chatgpt" } } });
   if (m.method === "config/read")
@@ -161,7 +169,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           item: { type: "toolCall", name: "request_user_input_async" },
         },
       });
-    send({
+    lastNative = {
       id: "native-id",
       method: "item/tool/requestUserInput",
       params: {
@@ -193,10 +201,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
               },
         ],
       },
-    });
+    };
+    send(lastNative);
   }
   if (m.id === "native-id" && m.result) {
-    if (transport !== "no-resolution")
+    if (transport?.startsWith("reply-replay") || proof === "reply-replay") {
+      const replay = structuredClone(lastNative);
+      if (transport === "reply-replay-changed")
+        replay.params.questions[0].question = "Changed";
+      if (transport === "reply-replay-type") replay.id = 0;
+      if (transport !== "reply-replay-confirmed") send(replay);
+      if (transport === "reply-replay-excess") send(replay);
+    }
+    if (
+      transport !== "no-resolution" &&
+      transport !== "reply-replay-no-resolution"
+    )
       send({
         method: "serverRequest/resolved",
         params: {
@@ -204,6 +224,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           requestId: transport === "wrong-type" ? 1 : "native-id",
         },
       });
+    if (transport === "reply-replay-confirmed") {
+      send(lastNative);
+      terminal();
+    }
     if (transport) return;
     if (proof)
       send({
