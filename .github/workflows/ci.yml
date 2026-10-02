@@ -9,12 +9,16 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      TMPDIR: ${{ runner.temp }}/ensemble-fixture-tmp
-      ENSEMBLE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/ensemble-test-evidence
     steps:
       - name: Prepare writable test directories
-        run: mkdir -p "$TMPDIR" "$ENSEMBLE_TEST_EVIDENCE_DIR" && test -w "$TMPDIR" && test -w "$ENSEMBLE_TEST_EVIDENCE_DIR"
+        env:
+          TMPDIR: ${{ runner.temp }}/ensemble-fixture-tmp
+          ENSEMBLE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/ensemble-test-evidence
+        run: |
+          mkdir -p "$TMPDIR" "$ENSEMBLE_TEST_EVIDENCE_DIR"
+          test -w "$TMPDIR"
+          test -w "$ENSEMBLE_TEST_EVIDENCE_DIR"
+          printf 'TMPDIR=%s\nENSEMBLE_TEST_EVIDENCE_DIR=%s\n' "$TMPDIR" "$ENSEMBLE_TEST_EVIDENCE_DIR" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
@@ -30,6 +34,6 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ensemble-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ENSEMBLE_TEST_EVIDENCE_DIR }}
+          path: ${{ runner.temp }}/ensemble-test-evidence
           retention-days: 3
           if-no-files-found: error
