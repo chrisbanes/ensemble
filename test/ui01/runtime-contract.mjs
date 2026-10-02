@@ -104,8 +104,8 @@ const reportTool = {
 const prompt = [
   "This is a disposable native input capability probe. Use no shell, filesystem, browser, network, delegation or additional external tools.",
   "Directly and synchronously call functions.request_user_input exactly once and await its answer. Ask one question: id delivery, header Delivery, question Select delivery, options Local (Local output) and Remote (Remote output). Custom text is permitted only when the native request explicitly exposes isOther support.",
-  "Do not use functions.exec, ALL_TOOLS, tool search/discovery, async input or nonawaited calls. Do not request standalone free text, multiple selection or explicit recommendation. Do not substitute plaintext chat if native input is unavailable.",
-  "After receiving the native answer, call ui01_report_answers exactly once with the exact answers received in native response shape {answers: {questionId: {answers: [strings]}}}, then end. Do not guess the answer, ask again or request approval.",
+  "Before receiving the native answer, do not use functions.exec, ALL_TOOLS, tool search/discovery, async input or nonawaited calls. Do not request standalone free text, multiple selection or explicit recommendation. Do not substitute plaintext chat if native input is unavailable.",
+  "After receiving the native answer, use functions.exec exactly once to run only this awaited known call: await tools.ui01_report_answers({answers: <exact received answers map>}). Preserve the exact received map {questionId: {answers: [strings]}}. No discovery or other calls; await the report result, then end. Do not guess the answer, ask again or request approval.",
 ].join("\n");
 
 function qualifiedSource(source) {

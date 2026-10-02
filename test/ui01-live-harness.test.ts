@@ -274,11 +274,38 @@ for (const [mode, reason] of [
   });
 }
 
-test("fixed prompt invokes native input directly without exec discovery or unsupported requests", async (t) => {
+test("prompt keeps input direct-only and permits only awaited known reporting through exec after the answer", async (t) => {
   const evidence = await fixture(t, "prompt");
   assert.equal(evidence.status, "passed");
   assert.equal(evidence.counts.requests, 1);
   assert.equal(evidence.counts.turns, 1);
+  assert.equal(evidence.counts.reports, 1);
+  assert.equal(evidence.receipt.kind, "confirmed");
+  assert.equal(evidence.consumption.kind, "selected-answer-report");
+});
+
+test("input discovery callback cannot masquerade as the known proof report", async (t) => {
+  const evidence = await fixture(t, "input-discovery");
+  assert.equal(evidence.status, "failed");
+  assert.equal(evidence.failure.reason, "report-identity-mismatch");
+  assert.equal(evidence.counts.requests, 0);
+  assert.equal(evidence.counts.replies, 0);
+  assert.equal(evidence.counts.reports, 0);
+  assert.equal(evidence.persistence, undefined);
+  assert.equal(evidence.cleanup.verified, true);
+});
+
+test("missing report still fails consumption without rewriting a confirmed receipt", async (t) => {
+  const evidence = await fixture(t, "no-report");
+  assert.equal(evidence.status, "failed");
+  assert.equal(evidence.failure.reason, "terminal-before-receipt-or-report");
+  assert.equal(evidence.counts.replies, 1);
+  assert.equal(evidence.counts.reports, 0);
+  assert.equal(evidence.persistence.committedBeforeEffect, true);
+  assert.equal(evidence.receipt.kind, "confirmed");
+  assert.equal(evidence.consumption.kind, "unproved");
+  assert.equal(evidence.fixture.removed, false);
+  assert.equal(evidence.cleanup.verified, true);
 });
 
 test("explicit async origin during a held false/null callback prevents any answer effect", async (t) => {

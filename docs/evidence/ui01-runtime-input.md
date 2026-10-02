@@ -4,17 +4,17 @@ Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
 [plan revision 2](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5952311804),
 prepared against `e544bcb8f7b9a6dc8b716d429937f4017fa3a444`, 2 October 2026.
 
-**The approved mode-order attempt failed after one model turn; its grant is consumed.**
-The earlier revision-2 invocation failed before any turn. Chris then accepted the
-[mode-order proposal](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5953221322),
-recorded in the [controller resume](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5953309592).
-The new attempt observed a synchronous native callback and exact-thread Default/settings,
-but failed on a second native-request notification during the held checkpoint.
-Zero replies or consumption reports were sent; no answer was persisted. Exact process
-cleanup was verified and the failed fixture retained. Native availability was observed;
-held waiting, receipt, consumption and successful terminal remain unqualified.
-No retry is authorized. T2–T6, #743 and #745 remain gated; T6 has no live grant.
-No production adapter, configuration, login or installed service was changed.
+**The additional replay-repair T1 failed at the consumption witness; its grant is consumed.**
+The [additional one-turn resume](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5954021251)
+ran the reviewed exact-replay repair. It observed the direct synchronous native
+callback, Default/settings, one exact resume replay, held-zero checkpoint, durable
+answer readback, one exact reply and confirmed ordered receipt. The turn ended
+without the required answer-consumption report. No complete T1 pass is claimed.
+Exact process cleanup was verified; failed fixtures and the committed answer/receipt
+remain preserved. The earlier zero-turn and duplicate-notification failures below
+remain historical evidence. No retry is authorized. T2–T6, #743 and #745 remain
+gated; T6 has no live grant. No production adapter, login, global configuration
+or installed service was changed.
 
 ## Read-only installed evidence
 
@@ -440,3 +440,83 @@ log was preserved; the exact command passed with local process/network permissio
 Final diff whitespace validation passed. Fresh log/file/diff hashes are bound in
 the replay candidate packet; earlier passing logs remain historical. These checks
 include no real runtime/model turn and confer no new live authority.
+
+## Additional replay-repair live attempt — failed consumption witness
+
+At reviewed head `341a21ef55be7ec0945c1bf2400f0d086732d49e`, root executed
+exactly one newly approved bounded T1 turn under the unchanged deadlines and
+receipt/consumption criteria.
+
+| Observation | Result |
+| --- | --- |
+| Threads / model turns / unique native requests / replies / reports | 1 / 1 / 1 / 1 / 0 |
+| Exact resume replay | One accepted; original callback/endpoint retained |
+| Default/settings and synchronous native callback | Observed |
+| Held-zero checkpoint and durable answer/intent readback before effect | Observed |
+| Ordered stdin/native resolution receipt | Confirmed; retained despite later proof failure |
+| Failure stage / reason | `receipt-and-consumption` / `terminal-before-receipt-or-report` |
+| Required consumption witness and complete qualification | Unproved / failed |
+| Scoped cleanup | Exact created process exit independently verified on the same boot |
+| Failed fixture, committed answer/intent/receipt | Retained; no replay or ownership release |
+
+The existing CLI configuration and provider readback reported `gpt-6-astra` with
+`medium` reasoning; the earlier mode-order attempt used `gpt-6.1-sol` / `high`.
+Root did not override the model or change its global configuration. This attempt
+qualified observed start/resume consistency, not identical settings across attempts.
+
+Sanitized retained history contains one direct input call and no report call. The
+visible final response says the reporting tool was accessible only through
+`functions.exec`, which the prompt prohibited. This supports a prompt/access
+conflict rather than proving failed native answer delivery. The original answer
+and confirmed receipt remain facts; history does not replace the required report
+or qualify a complete successful handoff. A proposed narrow correction would keep
+input direct-only and forbid discovery/other calls, while permitting only the
+known reporting tool after the native answer. Independent contract review is
+pending. The consumed grant gives no further live-turn authority; T2–T6 remain gated.
+
+## Deterministic reporting-tool access repair
+
+The prompt now separates the input and reporting phases. Native input remains one
+synchronous direct `functions.request_user_input` call. Before its answer, exec,
+ALL_TOOLS/search/discovery, async/nonawaited calls and plaintext input fallback
+remain prohibited. Only after the native answer may the model invoke
+`functions.exec` once, containing solely the awaited known call
+`await tools.ui01_report_answers({answers: <exact received answers map>})`, await
+its result and end. Discovery and other calls remain prohibited. The prompt contains
+no synthetic nonce or answer; the report must copy the actual received answer map.
+
+Tagged [native registration](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/tools/spec_plan.rs#L1169)
+marks the input tool direct-only. The ordinary
+[dynamic tool handler](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/tools/handlers/dynamic.rs#L38)
+awaits its RPC response; [plain-name mapping](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/tools/src/code_mode.rs#L230)
+and [code-mode description](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/code-mode-protocol/src/description.rs#L20)
+explain the known reporting call through code mode. This narrow access correction
+is source/fixture evidence, not a successful live consumption witness.
+
+The fake provider checks separate direct-input, pre-answer prohibitions and
+post-answer known-report clauses, rather than accepting isolated keyword presence.
+The new prompt regression failed the original blanket ban, then passed the phase
+exception and original public-seam round trip. A missing-report fixture preserves
+a confirmed native receipt while proof fails at the unchanged consumption/terminal
+gate. A discovery callback cannot impersonate the known report, and the existing
+incorrect-report test still rejects an unequal answer map. Native RPC identity,
+unique counts, report equality/count, report callback ending, receipt ordering,
+held checkpoint and successful-terminal gates were not modified.
+
+This repair leaves the existing CLI model/configuration alone. The last provider
+readback was Astra/medium and the previous attempt Sol/high; only within-attempt
+start/resume consistency was observed. No identical-settings claim across attempts
+is made. The current one-turn grant is consumed: numerical remaining turns zero,
+new live authority zero. No real runtime/model turn, production adapter/T2–T6 work,
+setting change, remote action or hold/ownership release was performed. Actual
+consumption and complete successful qualification remain unproved. A separately
+authorized next proof would use only this post-answer report access route while
+retaining all existing native/mode/replay/persistence/receipt/terminal criteria.
+
+Fresh reporting-access repair validation used pinned Node `24.21.0` / npm `12.2.0`:
+build passed, targeted **85/85** and full `npm run check` **541/541**, with no
+failures, cancellations or skips. The existing localhost `listen EPERM` sandbox
+log was preserved and the exact command passed with local process/network
+permissions. Final diff whitespace validation passed. The new candidate packet
+binds fresh file/diff/log hashes separately from earlier preparation. These
+deterministic checks include no real runtime/model turn or new live authority.

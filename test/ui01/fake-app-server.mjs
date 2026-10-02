@@ -258,18 +258,41 @@ for await (const line of createInterface({ input: process.stdin })) {
       process.exit(4);
     if (mode === "prompt") {
       const prompt = message.params.input?.[0]?.text ?? "";
+      const lines = prompt.split("\n");
+      const input = lines[1] ?? "";
+      const beforeAnswer = lines[2] ?? "";
+      const afterAnswer = lines[3] ?? "";
       if (
-        (prompt.match(/\bfunctions\.request_user_input\b/g) ?? []).length !==
+        (input.match(/\bfunctions\.request_user_input\b/g) ?? []).length !==
           1 ||
-        !prompt.includes("synchronously") ||
-        !prompt.includes("functions.exec") ||
-        !prompt.includes("ALL_TOOLS") ||
-        !prompt.includes("async") ||
-        !prompt.includes("plaintext") ||
-        prompt.includes("free-text goal")
+        !/^Directly and synchronously call functions\.request_user_input exactly once and await its answer\./.test(
+          input,
+        ) ||
+        !/^Before receiving the native answer, do not use functions\.exec, ALL_TOOLS, tool search\/discovery, async input or nonawaited calls\./.test(
+          beforeAnswer,
+        ) ||
+        !beforeAnswer.includes("Do not substitute plaintext chat") ||
+        !/^After receiving the native answer, use functions\.exec exactly once to run only this awaited known call: await tools\.ui01_report_answers\(\{answers: <exact received answers map>\}\)\./.test(
+          afterAnswer,
+        ) ||
+        !afterAnswer.includes("No discovery or other calls") ||
+        !afterAnswer.includes("then end") ||
+        /UI01 custom|UI01 goal/.test(prompt)
       )
         process.exit(4);
     }
+    if (mode === "input-discovery")
+      write({
+        id: "discovery-rpc",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          tool: "discover_native_input",
+          callId: "discovery-1",
+          arguments: {},
+        },
+      });
     if (mode === "timeout") continue;
     const params = {
       threadId: mode === "wrong-thread" ? "foreign" : "thread-1",
@@ -399,6 +422,20 @@ for await (const line of createInterface({ input: process.stdin })) {
           requestId: mode === "wrong-id-type" ? 71 : requestId,
         },
       });
+    if (mode === "no-report") {
+      setTimeout(
+        () =>
+          write({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed" },
+            },
+          }),
+        20,
+      );
+      continue;
+    }
     write({
       id: "report-rpc",
       method: "item/tool/call",
