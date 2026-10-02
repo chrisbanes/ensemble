@@ -1412,6 +1412,7 @@ function UnsettledPlacement(
 }
 function PlacementConfiguration(
   p: SettingsProps & {
+    projectId: string;
     placement: ProjectConfigurationData["placements"][number];
     refreshConfiguration: () => void;
   },
