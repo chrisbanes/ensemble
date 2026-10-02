@@ -53,6 +53,8 @@ test("coordination adapter owns task-scoped read and mutation routes", async (t)
   assert.deepEqual(
     routes.map(({ method, path }) => `${method} ${path}`),
     [
+      "POST /coordination/control/delivery/settle",
+      "POST /coordination/control/delivery/refresh",
       "GET /coordination",
       "GET /coordination/task/:taskId",
       "GET /coordination/assignment/:assignmentId",

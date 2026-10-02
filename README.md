@@ -81,7 +81,11 @@ Missing history does not change admission or completion gates.
 The service now includes local GitHub discovery for selected repository issues,
 searches and Projects, with provider-owned readiness and dependency holds.
 Operators can inspect source state and refresh it in the authenticated UI.
-External GitHub delivery and release cutover remain ahead.
+Scoped GitHub delivery now has durable intents, confirmed readback, retained PR
+feedback and operator settlement controls. Its deterministic tests pass; the
+required live handback and through-merge journeys remain unrun.
+[S07a evidence](docs/evidence/s07a-github-delivery.md) records that qualification
+gate. Release and cutover remain ahead.
 In particular, physical sleep/wake behaviour and
 access from an independent device still need qualification. Follow the
 [delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.
@@ -108,7 +112,7 @@ Their requirements and unproved feasibility evidence are retained. See
 
 ## Development
 
-Use Node **24.21.0** and npm **12.1.0**, pinned in
+Use Node **24.21.0** and npm **12.2.0**, pinned in
 [`.node-version`](.node-version) and [`package.json`](package.json):
 
 ```sh

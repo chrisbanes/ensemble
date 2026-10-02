@@ -1481,3 +1481,48 @@ test("handler rejection is bounded and response-pipe failure fails the runtime",
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(kills, 1);
 });
+
+import { deliveryRuntimeEnvironment } from "../src/standalone/delivery.js";
+test("delivery spawn snapshot excludes configured key and exact-value aliases while retaining login environment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-delivery-spawn-")),
+    executable = join(root, "codex.mjs"),
+    report = join(root, "report.json");
+  writeFileSync(
+    executable,
+    `#!${process.execPath}\nimport{createInterface}from'node:readline';import{writeFileSync}from'node:fs';writeFileSync(${JSON.stringify(report)},JSON.stringify({keyAbsent:process.env.ENSEMBLE_S07A_DELIVERY_SENTINEL===undefined,aliasAbsent:process.env.S07A_ALIAS===undefined,pathPresent:Boolean(process.env.PATH),homePresent:Boolean(process.env.HOME)}));for await(const line of createInterface({input:process.stdin})){const m=JSON.parse(line);if(m.id!==undefined){let result={};if(m.method==='account/read')result={account:{type:'chatgpt'}};if(m.method==='config/read')result={config:{approval_policy:'never',sandbox_mode:'workspace-write'}};process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');}}`,
+  );
+  chmodSync(executable, 0o700);
+  const environment = {
+    ...process.env,
+    ENSEMBLE_S07A_DELIVERY_SENTINEL: "S07A_NON_SECRET_TEST_MARKER",
+    S07A_ALIAS: "S07A_NON_SECRET_TEST_MARKER",
+  };
+  const runtime = new CodexRuntime(executable, {
+    spawnEnvironment: () =>
+      deliveryRuntimeEnvironment(environment, [
+        {
+          version: 2,
+          mode: "reviewable-pr",
+          credentialRef: "env:ENSEMBLE_S07A_DELIVERY_SENTINEL",
+          grants: [],
+          requiredChecks: [],
+        },
+      ]),
+  });
+  try {
+    await runtime.start();
+    assert.deepEqual(JSON.parse(readFileSync(report, "utf8")), {
+      keyAbsent: true,
+      aliasAbsent: true,
+      pathPresent: true,
+      homePresent: true,
+    });
+    assert.equal(
+      environment.ENSEMBLE_S07A_DELIVERY_SENTINEL,
+      "S07A_NON_SECRET_TEST_MARKER",
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

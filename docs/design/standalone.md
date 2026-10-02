@@ -340,3 +340,52 @@ recovery receipt because #704 owns no recovery-control surface. Neither proof
 qualifies final-schema/external-effect recovery, managed workspace relocation,
 host reboot, production deployment, old-work disposition or Haze cutover;
 those remain explicit later operational gates.
+
+
+## S07a scoped GitHub delivery boundary
+
+`DeliveryStore` owns additive SQLite policy, immutable action material, attempts,
+confirmed receipts, approval consumption, PR observations and head-bound local
+settlement. It composes transaction-internal helpers with the existing coordination
+stores. `DeliveryCoordinator` serializes task/target operations and awaits provider
+reads outside transactions; use-time policy, bound caller, approval and completion
+checks commit atomically with attempting intent. Runtime tool caller identity comes
+from the bound thread/turn. Async tool outcomes also retain exact call receipts.
+
+`GitHubHttpDeliveryProvider` supports the concrete comment, incremental label,
+reviewed title/body, single-select field, PR create/edit/ready/merge and issue-close
+operations. PR creation requires existing identity-verified remote refs and SHA.
+Repository merge settings intersect effective pull-request rule methods. Effective
+update restrictions, unsupported rules, incomplete proof, merge queues, required
+checks/app identity, strict behind heads and unproved deployments hold direct merge.
+Conversation resolution is enforced where actual rules require it. The synchronous
+merge request binds `sha`; independent merged-state readback settles its effect.
+
+Provider snapshots retain check-run/status and paginated comment/review identities,
+updated evidence and bounded feedback summaries. Each changed observation revision
+has one durable lead inbox event, including a return to an earlier head or status.
+A successful waiting lead retains its assignment/history and releases execution
+capacity. A current explicit handback settlement or confirmed merge opens only a
+new completion opportunity; fresh provider observation and successful terminal
+still gate Done. Provider-only changes and post-await local revisions reject stale
+settlement or completion. GitHub is not atomically locked by a local transaction.
+
+Own closure uses fresh identity-checked issue metadata and exact merge ClosedEvent
+attribution through `GitHubSourceStore`, preserving source text review and other
+admission holds. Repository selection and current label predicates can prove
+closure-derived withdrawal. Unproved field/search cases stay held. An explicit
+close must have observed open before its write; simultaneous independent closure
+within that remote read/write interval remains an accepted attribution limit.
+
+The service passes a filtered spawn snapshot into default, CLI and injected Codex
+factories. Delivery reference keys and nonempty exact-value aliases are omitted;
+ordinary environment, login and host execution limits remain. A newly configured
+reference already inherited by the runtime cannot activate until a safe restart.
+No credential value is placed in policy, provider receipts or operator projections.
+
+The existing coordination operator slot shows separate issue/Project, PR and task
+facts and guarded policy/refresh/settlement controls. The strict S07a harness guard
+requires a frozen resource manifest and matching named grant before provider or
+runtime activity. Required live journeys are pending, as recorded in
+[the evidence inventory](../evidence/s07a-github-delivery.md); deterministic coverage
+and harness preparation do not complete S07a or qualify S07b/cutover.

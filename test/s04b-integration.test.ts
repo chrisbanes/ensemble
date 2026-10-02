@@ -1206,6 +1206,8 @@ test("task threads receive scoped tools and delivery resumes the exact lead conv
   assert.deepEqual(
     coordinationTools.map((tool) => tool.name),
     [
+      "ensemble_external_action",
+      "ensemble_register_pr",
       "ensemble_delegate",
       "ensemble_report_result",
       "ensemble_ask_question",
