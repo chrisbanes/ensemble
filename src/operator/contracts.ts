@@ -228,18 +228,69 @@ export const unresolvedResultSchema = z
 const source = z
   .object({
     identity: sourceIdentity,
+    repositoryName: z
+      .string()
+      .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
+      .nullable(),
+    number: revision.nullable(),
     url: z.string().url().nullable(),
+    title: safeText,
     body: safeText,
-    status: safeText,
-    projectFields: z.array(
-      z.object({ selectionId: z.string(), fields: safeText }).strict(),
+    state: z.enum(["open", "closed"]).nullable(),
+    memberships: z.array(
+      z
+        .object({
+          selectionId: z.string().max(512),
+          projectFields: z.array(
+            z
+              .object({
+                projectNodeId: z.string().max(512),
+                fieldNodeId: z.string().max(512),
+                optionNodeId: z.string().max(512),
+              })
+              .strict(),
+          ),
+          sync: z
+            .object({
+              lastAttemptAt: z.string().nullable(),
+              lastSuccessfulAt: z.string().nullable(),
+              complete: z.boolean().nullable(),
+              reasonCode: z
+                .enum(["partial-sync", "sync-unavailable"])
+                .nullable(),
+            })
+            .strict(),
+        })
+        .strict(),
     ),
     nativeBlockers: z.array(
-      z.object({ nodeId: z.string(), state: safeText }).strict(),
+      z
+        .object({
+          nodeId: z.string().max(512),
+          repositoryId: z.string().max(512),
+          repositoryName: z.string().max(512),
+          number: revision,
+          state: z.enum(["open", "closed"]),
+        })
+        .strict(),
     ),
-    observation: z.literal("stored-observation"),
-    lastSuccessfulSync: z.null(),
-    historyAvailable: z.literal(false),
+    review: z
+      .object({
+        observedDigest: hash,
+        acceptedDigest: hash,
+        decision: safeText,
+        decidedAt: z.string().nullable(),
+      })
+      .strict()
+      .nullable(),
+    hold: z
+      .object({
+        active: z.boolean(),
+        revision,
+        reasonCode: z.literal("source-held"),
+      })
+      .strict()
+      .nullable(),
   })
   .strict()
   .nullable();
@@ -403,7 +454,6 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       title: z.string().trim().min(1).max(512).optional(),
       outcome: text.optional(),
       ready: z.boolean().optional(),
-      state: taskState.optional(),
     })
     .strict(),
   z
@@ -435,7 +485,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
   z
     .object({
       ...base,
-      type: z.literal("message.post"),
+      type: z.literal("message"),
       taskId: uuid,
       recipientAssignmentId: uuid,
       expectedAssignmentVersion: revision,
@@ -476,54 +526,48 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
     })
     .strict(),
 ]);
-const savedTask = z
-  .object({
-    id: uuid,
-    projectId: uuid,
-    title: safeText,
-    outcome: safeText,
-    version: revision,
-    state: taskState,
-    ready: z.boolean(),
-  })
-  .strict();
-const savedAssignment = z
-  .object({
-    assignmentId: uuid,
-    taskId: uuid,
-    projectId: uuid,
-    version: revision,
-    profileRevision: revision,
-    instructionsRevision: revision,
-    state: z.enum(["pending", "running", "completed", "held", "cancelled"]),
-  })
-  .strict();
-const savedEvent = z
-  .object({
-    eventId: uuid,
-    taskId: uuid,
-    recipientAssignmentId: uuid,
-    eventType: z.string(),
-    createdAt: time,
-  })
-  .strict();
-export const commandReceiptSchema = z
-  .object({
-    key: uuid,
-    type: z.enum([
-      "task.create",
-      "task.configure",
-      "dependency.add",
-      "dependency.remove",
-      "assignment.apply",
-      "message.post",
-      "question.answer",
-      "approval.decide",
-      "result.recipient",
-    ]),
-    result: z.union([savedTask, savedAssignment, savedEvent]),
-  })
-  .strict();
+export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("domain"),
+      key: uuid,
+      recorded: z.literal(true),
+      result: z.union([
+        z
+          .object({
+            id: uuid,
+            projectId: uuid,
+            version: revision,
+            state: taskState,
+            ready: z.boolean(),
+          })
+          .strict(),
+        z
+          .object({
+            id: uuid,
+            taskId: uuid,
+            projectId: uuid,
+            version: revision,
+            profileRevision: revision,
+            instructionsRevision: revision,
+          })
+          .strict(),
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("coordination"),
+      key: uuid,
+      recorded: z.literal(true),
+      eventId: uuid,
+      taskId: uuid,
+      recipientAssignmentId: uuid,
+      eventType: z.string(),
+      createdAt: time,
+    })
+    .strict(),
+]);
 export const apiErrorSchema = z
   .object({
     error: z
@@ -540,7 +584,8 @@ export const apiErrorSchema = z
           "unavailable",
           "command-outcome-unknown",
         ]),
-        fields: z.array(z.string().max(128)).optional(),
+        message: z.string().max(256),
+        fieldPaths: z.array(z.string().max(128)).optional(),
       })
       .strict(),
   })
