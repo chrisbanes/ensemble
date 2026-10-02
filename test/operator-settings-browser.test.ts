@@ -1,0 +1,797 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "./temp.js";
+import { test } from "node:test";
+import { chromium, type Browser, type Page } from "playwright";
+import {
+  seedOperatorRecovery,
+  createOperatorFixture,
+} from "./fixtures/operator-web.js";
+test("Settings guides empty workspace through profile and paused project creation", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await page.goto(web.origin + "/app/settings");
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Create profile", exact: true })
+    .waitFor();
+  await capture(page, "1366-empty-settings");
+  await page.getByRole("link", { name: "Create profile", exact: true }).click();
+  await page.getByLabel("Profile name", { exact: true }).waitFor();
+  await capture(page, "1366-first-profile-setup");
+  await page.getByLabel("Profile name", { exact: true }).fill("Setup lead");
+  await page
+    .getByLabel("New instructions", { exact: true })
+    .fill("PRIVATE SETUP INPUT");
+  await page.getByLabel("Capabilities", { exact: true }).fill("Coordinate");
+  await page
+    .getByRole("button", { name: "Create profile", exact: true })
+    .click();
+  await page.getByText("Recorded.", { exact: false }).waitFor();
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page.getByRole("link", { name: "Create project", exact: true }).click();
+  await page.getByLabel("Project name", { exact: true }).fill("Setup project");
+  await page
+    .getByLabel("Lead profile", { exact: true })
+    .selectOption({ label: "Setup lead" });
+  await page
+    .getByRole("button", { name: "Create paused project", exact: true })
+    .click();
+  await page.getByText("Recorded.", { exact: false }).waitFor();
+  assert.equal(f.service.domain().projects().length, 1);
+  assert.equal(f.service.domain().projects()[0]?.paused, 1);
+  assert.equal(f.runtime.turns, 0);
+});
+const evidence = join(tmpdir(), `ensemble-ui06-evidence-${process.pid}`);
+async function capture(page: Page, name: string) {
+  await mkdir(evidence, { recursive: true });
+  await page.screenshot({
+    path: join(evidence, `${name}.png`),
+    fullPage: true,
+  });
+}
+async function signIn(
+  page: Page,
+  web: { origin: string; password: string },
+  path: string,
+) {
+  await page.goto(web.origin + path);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+}
+function seedSettings(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
+  const profileId = randomUUID(),
+    projectId = randomUUID(),
+    taskId = randomUUID(),
+    assignmentId = randomUUID(),
+    d = f.service.domain();
+  d.execute({
+    type: "profile.create",
+    actor: "operator",
+    key: randomUUID(),
+    profileId,
+    name: "Lead <script>window.bad=1</script>",
+    instructions: "PRIVATE CURRENT PROFILE",
+    capabilities: "Coordinate",
+  });
+  d.execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Paused configuration project",
+    leadProfileId: profileId,
+  });
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    expectedVersion: 1,
+    instructions: "PRIVATE CURRENT PROJECT",
+  });
+  d.execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    title: "Recovery task",
+    outcome: "Work",
+    ready: false,
+  });
+  d.execute({
+    type: "assignment.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    assignmentId,
+    profileId,
+    brief: "Work",
+    resultDestination: "operator",
+    requesterAssignmentId: null,
+  });
+  return { profileId, projectId, taskId, assignmentId };
+}
+test("unknown configuration survives scope navigation and exact reconciliation while auth expiry purges private drafts", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  const posts: string[] = [];
+  const readBodies: string[] = [];
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("response", async (r) => {
+    if (r.url().includes("/api/operator/") && r.request().method() === "GET")
+      readBodies.push(await r.text().catch(() => ""));
+  });
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page.getByLabel("Replace instructions", { exact: true }).check();
+  await page
+    .getByLabel("New instructions", { exact: true })
+    .fill("PRIVATE WRITE ONLY DRAFT");
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    await route.fetch();
+    await route.abort();
+  });
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Paused configuration project", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(posts.length, 1);
+  assert.equal(
+    await page.getByLabel("New instructions", { exact: true }).inputValue(),
+    "PRIVATE WRITE ONLY DRAFT",
+  );
+  assert.equal(
+    await page.getByLabel("Project name", { exact: true }).isDisabled(),
+    true,
+  );
+  await capture(page, "1366-unknown-private-draft");
+  await page.unroute("**/api/operator/commands");
+  await page.route("**/api/operator/commands", async (route) => {
+    posts.push(route.request().postData() ?? "");
+    await route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "invalid-input",
+          message: "Check input",
+          fieldPaths: ["name"],
+        },
+      }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Project name", { exact: true }).isDisabled(),
+    true,
+  );
+  await page.unroute("**/api/operator/commands");
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/operator/commands"))
+      posts.push(r.postData() ?? "");
+  });
+  await page
+    .getByRole("button", { name: "Reconcile exact submission", exact: true })
+    .click();
+  await page
+    .getByText("Recorded. Latest observations", { exact: false })
+    .waitFor();
+  assert.deepEqual(posts, [posts[0], posts[0], posts[0]]);
+  assert.equal(f.service.domain().project(ids.projectId).version, 3);
+  assert.ok(readBodies.every((s) => !s.includes("PRIVATE")));
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      local: Object.keys(localStorage),
+      session: Object.keys(sessionStorage),
+    })),
+    { local: [], session: [] },
+  );
+  assert.equal(
+    await page.evaluate(() =>
+      Boolean((window as unknown as { bad?: number }).bad),
+    ),
+    false,
+  );
+  await page
+    .getByRole("button", {
+      name: "Review latest project revision",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByLabel("New instructions", { exact: true })
+    .fill("PRIVATE EXPIRES");
+  f.advanceClock(61_000);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.getByLabel("Password", { exact: true }).waitFor();
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Project configuration", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Replace instructions", { exact: true }).isChecked(),
+    false,
+  );
+  assert.equal(posts.length, 3);
+  assert.deepEqual(errors, []);
+});
+test("configuration inline validation stale revision and revoked lead failures retain editable input", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page.getByLabel("Project name", { exact: true }).fill("");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await page.getByText("Check this field.", { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByLabel("Project name", { exact: true })
+      .evaluate((e) => e === document.activeElement),
+    true,
+  );
+  await capture(page, "1366-inline-error");
+  await page
+    .getByLabel("Project name", { exact: true })
+    .fill("Retained edited name");
+  f.service.domain().execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 2,
+    name: "External change",
+  });
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  await page
+    .getByText("Configuration changed. Review", { exact: false })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Project name", { exact: true }).inputValue(),
+    "Retained edited name",
+  );
+  assert.equal(f.service.domain().project(ids.projectId).version, 3);
+  const other = randomUUID();
+  f.service.domain().execute({
+    type: "profile.create",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: other,
+    name: "Candidate",
+    instructions: "private",
+    capabilities: "work",
+  });
+  await page.reload();
+  await page
+    .getByRole("heading", { name: "Project configuration", exact: true })
+    .waitFor();
+  await page.getByLabel("Lead profile", { exact: true }).selectOption(other);
+  await page
+    .getByLabel("Project name", { exact: true })
+    .fill("Permission denied input");
+  f.service.domain().execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: other,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  const response = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  assert.equal((await response).status(), 403);
+  await page
+    .getByText("Submission rejected. Your input is retained.", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Project name", { exact: true }).inputValue(),
+    "Permission denied input",
+  );
+  assert.equal(
+    await page.getByLabel("Project name", { exact: true }).isDisabled(),
+    false,
+  );
+  assert.equal(f.service.domain().project(ids.projectId).version, 3);
+  await capture(page, "1366-revoked-lead-rejection");
+  await page.getByRole("link", { name: "Settings home", exact: true }).click();
+  await page.getByRole("link", { name: "Candidate", exact: true }).click();
+  await page
+    .getByText("Revoked: subsequent actions are denied.", { exact: false })
+    .waitFor();
+  await capture(page, "1366-revoked-profile-settings");
+});
+test("source replacement verifies repositories without diagnostic echo and observation refresh remains partial", async (t) => {
+  let reads = 0;
+  const reader = {
+    async readSelection() {
+      reads++;
+      return {
+        complete: false as const,
+        issues: [],
+        reason: "PRIVATE PROVIDER FAILURE",
+      };
+    },
+    async readBlockers() {
+      return { complete: true, blockers: [], reason: null };
+    },
+    async readIssueStatus() {
+      return { status: "unknown" as const };
+    },
+  };
+  const f = await createOperatorFixture(null, () => reader);
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f);
+  f.service.domain().execute({
+    type: "github.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 1,
+    credentialRef: "env:FIXTURE_GITHUB",
+    selections: [
+      {
+        id: "Literal <script>bad()</script>",
+        kind: "search",
+        query: "PRIVATE SAVED QUERY",
+      },
+    ],
+    repositories: [],
+    readiness: {
+      mode: "all",
+      conditions: [{ kind: "label", name: "ready" }],
+    },
+  });
+  f.service.domain().execute({
+    type: "github.activate",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    selectionId: "Literal <script>bad()</script>",
+    expectedVersion: 2,
+  });
+  const web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page
+    .getByRole("button", { name: "Add linked repository", exact: true })
+    .click();
+  await page.getByLabel("Linked repository ID", { exact: true }).fill("repo");
+  await page
+    .getByLabel("New local repository path", { exact: true })
+    .fill("relative-private-path");
+  await page
+    .getByLabel(
+      "Replace all selections, readiness and repositories, including explicit empty lists",
+      { exact: true },
+    )
+    .check();
+  const bad = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  assert.equal((await bad).status(), 400);
+  await page
+    .getByText("Check linked repository IDs, paths and refs.", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByLabel("New local repository path", { exact: true })
+      .inputValue(),
+    "relative-private-path",
+  );
+  assert.equal(
+    await page
+      .getByLabel("New local repository path", { exact: true })
+      .isDisabled(),
+    false,
+  );
+  await capture(page, "1366-repository-error");
+  await page
+    .getByRole("button", {
+      name: "Request installation-wide source observations",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByText("Literal <script>bad()</script>: partial.", { exact: false })
+    .waitFor();
+  assert.equal(reads, 1);
+  await capture(page, "1366-source-partial");
+  assert.equal(await page.locator("script").count(), 1);
+  assert.equal(
+    (await page.locator("body").innerText()).includes(
+      "PRIVATE PROVIDER FAILURE",
+    ),
+    false,
+  );
+  const repositoryPath = join(f.directory, "verified-repository");
+  await mkdir(repositoryPath);
+  const git = promisify(execFile);
+  await git("git", ["init", repositoryPath]);
+  await writeFile(join(repositoryPath, "README.md"), "Fixture repository\n");
+  await git("git", ["-C", repositoryPath, "add", "README.md"]);
+  await git("git", [
+    "-C",
+    repositoryPath,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-m",
+    "Fixture",
+  ]);
+  await page
+    .getByLabel("New local repository path", { exact: true })
+    .fill(repositoryPath);
+  await page.getByLabel("Linked repository ref", { exact: true }).fill("HEAD");
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  await page
+    .getByText("Recorded github.configure:", { exact: false })
+    .waitFor();
+  assert.equal(
+    f.service.domain().githubConfiguration(ids.projectId).version,
+    3,
+  );
+  assert.equal(
+    f.service.domain().githubConfiguration(ids.projectId).credentialRef,
+    "env:FIXTURE_GITHUB",
+  );
+  assert.equal(
+    f.service.domain().githubConfiguration(ids.projectId).repositories.length,
+    1,
+  );
+  const configResponse = await page.request.get(
+    `${web.origin}/api/operator/projects/${ids.projectId}/configuration`,
+  );
+  assert.equal((await configResponse.text()).includes(repositoryPath), false);
+  await page
+    .getByRole("button", { name: "Review latest source revision", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Remove repository 1", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  await page
+    .getByText("Recorded github.configure:", { exact: false })
+    .waitFor();
+  assert.equal(
+    f.service.domain().githubConfiguration(ids.projectId).repositories.length,
+    0,
+  );
+  assert.equal(
+    f.service.domain().githubConfiguration(ids.projectId).version,
+    4,
+  );
+});
+for (const layout of [
+  { name: "1366", width: 1366, height: 820, scale: 1 },
+  { name: "390", width: 390, height: 844, scale: 1 },
+  { name: "683-zoom", width: 683, height: 410, scale: 2 },
+])
+  test(`settings and omitted recovery ownership remain readable at ${layout.name}`, async (t) => {
+    const f = await createOperatorFixture();
+    let browser: Browser | undefined;
+    t.after(() => f.close(browser));
+    const ids = seedSettings(f);
+    seedOperatorRecovery(f, ids);
+    await f.service.resumeTask(ids.taskId);
+    const web = await f.startWeb();
+    browser = await chromium.launch();
+    const page = await browser.newPage({
+      viewport: { width: layout.width, height: layout.height },
+      deviceScaleFactor: layout.scale,
+    });
+    page.setDefaultTimeout(5000);
+    const external: string[] = [],
+      errors: string[] = [];
+    page.on("request", (r) => {
+      if (!r.url().startsWith(web.origin)) external.push(r.url());
+    });
+    page.on("pageerror", (e) => errors.push(e.message));
+    await signIn(page, web, "/app/settings");
+    await capture(page, `${layout.name}-populated-settings`);
+    await page
+      .getByRole("link", { name: "Paused configuration project", exact: true })
+      .click();
+    await page
+      .getByRole("heading", { name: "Project configuration", exact: true })
+      .waitFor();
+    await page
+      .getByText("Readiness: All conditions: label ready", { exact: true })
+      .waitFor();
+    assert.equal(
+      (await page.locator("[data-current-readiness]").innerText()).includes(
+        "{",
+      ),
+      false,
+    );
+    await capture(page, `${layout.name}-paused-configuration`);
+    await page.getByLabel("Project name", { exact: true }).focus();
+    await page.keyboard.press("Tab");
+    assert.equal(
+      await page
+        .getByLabel("Lead profile", { exact: true })
+        .evaluate((e) => e === document.activeElement),
+      true,
+    );
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(
+      await page
+        .getByLabel("Project name", { exact: true })
+        .evaluate((e) => e === document.activeElement),
+      true,
+    );
+    if (layout.width < 768) {
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
+      await page.getByRole("dialog").waitFor();
+      for (let i = 0; i < 12; i++) {
+        await page.keyboard.press(i % 2 ? "Shift+Tab" : "Tab");
+        assert.equal(
+          await page
+            .getByRole("dialog")
+            .evaluate((e) => e.contains(document.activeElement)),
+          true,
+        );
+      }
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog").waitFor({ state: "hidden" });
+      await page.waitForFunction(
+        () => document.activeElement?.textContent === "Projects and navigation",
+      );
+      assert.equal(
+        await page
+          .getByRole("button", { name: "Projects and navigation", exact: true })
+          .evaluate((e) => e === document.activeElement),
+        true,
+      );
+    }
+    await page.goto(
+      web.origin + `/app/assignments/${ids.assignmentId}/recovery`,
+    );
+    await page
+      .getByText("1 older recovery records omitted", { exact: false })
+      .waitFor();
+    assert.ok(
+      (await page.locator("body").innerText()).includes(
+        "Writer ownership: held",
+      ),
+    );
+    assert.ok(
+      (await page.locator("body").innerText()).includes("Capacity: held"),
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: /Force|unlock|release|proof/i })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .getByRole("link", {
+          name: "Advanced recovery evidence and exact Apply",
+          exact: true,
+        })
+        .getAttribute("href"),
+      `/runtime/assignment/${ids.assignmentId}`,
+    );
+    assert.equal(
+      await page
+        .getByRole("heading", { name: "Page not found", exact: true })
+        .count(),
+      0,
+    );
+    await capture(page, `${layout.name}-omitted-recovery`);
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth > innerWidth,
+      ),
+      false,
+    );
+    assert.equal(
+      (await page.locator("body").innerText()).includes("PRIVATE"),
+      false,
+    );
+    assert.deepEqual(external, []);
+    assert.deepEqual(errors, []);
+    assert.equal(f.runtime.turns, 0);
+    console.log(
+      `UI06 screenshots ${evidence}; Chromium ${browser.version()}; ${layout.name}`,
+    );
+  });
+
+test("Runtime Settings records lowered capacity separately from usage and retains ownership evidence", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f);
+  seedOperatorRecovery(f, ids);
+  await f.service.resumeTask(ids.taskId);
+  f.seedPersistedState((db) =>
+    db
+      .prepare(
+        "INSERT INTO execution_capacity_reservations(workId,projectId) VALUES ('recovery-generation-2',?)",
+      )
+      .run(ids.projectId),
+  );
+  const web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, "/app/settings/runtime");
+  await page
+    .getByText("Global usage 2 / 4; default project limit 2.", { exact: true })
+    .waitFor();
+  await page.getByText("Execution hold recorded", { exact: true }).waitFor();
+  await page.getByLabel("Global active-turn cap", { exact: true }).fill("1");
+  await page
+    .getByRole("button", { name: "Save capacity", exact: true })
+    .click();
+  await page
+    .getByText("Recorded. Latest observations", { exact: false })
+    .waitFor();
+  await page
+    .getByText("Global usage 2 / 1; default project limit 2.", { exact: true })
+    .waitFor();
+  const recordedCapacity = page.getByText("Recorded capacity limits:", {
+    exact: false,
+  });
+  await recordedCapacity.waitFor();
+  assert.equal(
+    await recordedCapacity.innerText(),
+    "Recorded capacity limits: global 1; default project 2; project overrides none.",
+  );
+  assert.equal((await recordedCapacity.innerText()).includes("version"), false);
+  assert.equal(
+    f.service.capacityLimits([ids.projectId]).currentUsage.global,
+    2,
+  );
+  assert.equal(f.service.list().filter((r) => r.state === "held").length, 1);
+  await capture(page, "1366-capacity-below-usage");
+  await page.getByRole("link", { name: /recovery evidence$/ }).click();
+  await page.getByRole("heading", { name: "Recovery", exact: true }).waitFor();
+  await page
+    .getByText("1 older recovery records omitted", { exact: false })
+    .waitFor();
+});
+
+test("actual source placement retains its original receipt after transfer removes the conflict", async (t) => {
+  const f = await createOperatorFixture();
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    target = randomUUID(),
+    taskId = randomUUID(),
+    d = f.service.domain();
+  d.execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: target,
+    name: "Actual membership target",
+    leadProfileId: null,
+  });
+  d.execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    taskId,
+    title: "Conflicting imported task",
+    outcome: "Work",
+    ready: false,
+  });
+  d.markImportedTask(taskId, "I_PLACEMENT", "R_PLACEMENT");
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "INSERT INTO github_external_issues VALUES ('github.com','I_PLACEMENT',?,'R_PLACEMENT','owner/repo',1,'Imported','Body','open','[]')",
+    ).run(taskId);
+    for (const projectId of [ids.projectId, target])
+      db.prepare(
+        "INSERT INTO github_memberships VALUES (?,'selection','I_PLACEMENT','[]')",
+      ).run(projectId);
+  });
+  const web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page
+    .getByLabel("Placement project", { exact: true })
+    .selectOption({ label: "Actual membership target" });
+  const received = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/commands"),
+  );
+  await page
+    .getByRole("button", { name: "Record placement", exact: true })
+    .click();
+  const response = await received,
+    submitted = JSON.parse(response.request().postData() ?? "{}"),
+    original = await response.json();
+  assert.equal(response.status(), 200);
+  await page
+    .getByText("Recorded placement outcome", { exact: false })
+    .waitFor();
+  assert.equal(d.task(taskId).projectId, target);
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: target,
+    taskId,
+    expectedVersion: 2,
+    state: "done",
+  });
+  const session = await (
+    await page.request.get(`${web.origin}/api/operator/session`)
+  ).json();
+  const replay = await page.request.post(
+    `${web.origin}/api/operator/commands`,
+    {
+      headers: { origin: web.origin, "x-csrf-token": session.csrfToken },
+      data: submitted,
+    },
+  );
+  assert.equal(replay.status(), 200);
+  assert.deepEqual(await replay.json(), original);
+  assert.equal(d.task(taskId).version, 3);
+});

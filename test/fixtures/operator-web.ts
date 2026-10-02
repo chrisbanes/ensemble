@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Browser } from "playwright";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:net";
@@ -58,8 +59,10 @@ export class OperatorFixtureRuntime implements Runtime {
     this.outcomes.get(`fixture-turn-${turn}`)?.("completed");
   }
 }
+import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
 export async function createOperatorFixture(
   routingClient: RoutingChoiceClient | null = null,
+  readerFactory?: GitHubReaderFactory,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
   const runtime = new OperatorFixtureRuntime();
@@ -67,7 +70,11 @@ export async function createOperatorFixture(
     join(directory, "data"),
     () => runtime,
     undefined,
-    { power: { enabled: false }, routingClient },
+    {
+      power: { enabled: false },
+      routingClient,
+      ...(readerFactory ? { github: { readerFactory } } : {}),
+    },
   );
   await service.start();
   const listeners = new Set<() => Promise<void>>();
@@ -140,7 +147,7 @@ export async function createOperatorFixture(
           routes,
           web: new OperatorWebBoundary(
             bundle,
-            new OperatorApi(service, [directory]),
+            new OperatorApi(service, [directory], undefined, readerFactory),
           ),
         },
       );
@@ -164,4 +171,48 @@ export async function createOperatorFixture(
       await rm(directory, { recursive: true, force: true });
     },
   };
+}
+
+export function seedOperatorRecovery(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  ids: { taskId: string; assignmentId: string; projectId: string },
+  count = 21,
+) {
+  f.seedPersistedState((db) => {
+    for (let i = 0; i < count; i++) {
+      const workId = `recovery-generation-${i + 1}`;
+      db.prepare(
+        "INSERT INTO execution_intents (id,workId,prompt,workspace,state,reason,threadId,turnId,accountType,sandbox,approval) VALUES (?,?,'PRIVATE RECOVERY PROMPT','/PRIVATE/RECOVERY/PATH',?,'PRIVATE RECOVERY REASON','PRIVATE THREAD','PRIVATE TURN','chatgpt','workspaceWrite','never')",
+      ).run(randomUUID(), workId, i === 0 ? "held" : "completed");
+      db.prepare(
+        "INSERT INTO execution_recovery_identities (workId,workRevision,requestSequence,processId,processStartedAt,bootId,threadId,turnId) VALUES (?,1,?,'PRIVATE PROCESS','PRIVATE START','PRIVATE BOOT','PRIVATE THREAD','PRIVATE TURN')",
+      ).run(workId, i + 1);
+      db.prepare(
+        "INSERT INTO task_execution_bindings (workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision) VALUES (?,?,?,1,1,1,1)",
+      ).run(workId, ids.taskId, ids.assignmentId);
+      db.prepare(
+        "INSERT INTO execution_recovery_observations (id,workId,kind,reason,recordedAt) VALUES (?,?,?,'PRIVATE OBSERVATION REASON',?)",
+      ).run(
+        `observation-${i}`,
+        workId,
+        i === 0 ? "unknown" : "exact-terminal-completed",
+        i,
+      );
+      if (i === 0) {
+        db.prepare(
+          "INSERT INTO task_writer_admissions (workId,workspace) VALUES (?,'/PRIVATE/RECOVERY/PATH')",
+        ).run(workId);
+        db.prepare(
+          "INSERT INTO execution_capacity_reservations (workId,projectId) VALUES (?,?)",
+        ).run(workId, ids.projectId);
+      }
+      if (i === count - 1)
+        db.prepare(
+          "INSERT INTO execution_recovery_receipts (id,workId,workRevision,requestSequence,threadId,turnId,processId,processStartedAt,bootId,terminationMethod,terminationVerifiedAt,effectsState,workspaceDisposition,createdAt) VALUES ('newer-receipt',?,1,?,'PRIVATE THREAD','PRIVATE TURN','PRIVATE PROCESS','PRIVATE START','PRIVATE BOOT','mac-pid-absent-same-boot','PRIVATE TIME','settled','preserved',1)",
+        ).run(workId, i + 1);
+    }
+    db.prepare(
+      "INSERT INTO task_writer_holds (taskId,reason) VALUES (?,'Task stopped')",
+    ).run(ids.taskId);
+  });
 }

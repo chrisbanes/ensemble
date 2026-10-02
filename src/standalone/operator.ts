@@ -409,16 +409,16 @@ export class LocalOperatorUi {
         };
         break;
       case "github.configure": {
-        const current = this.store.githubConfiguration(required("projectId"));
         command = {
           ...common,
           type: "github.configure",
           projectId: required("projectId"),
           expectedVersion: version(),
-          credentialRef:
-            fields.clearCredentialRef === "1"
-              ? null
-              : fields.credentialRef || current.credentialRef,
+          ...(fields.clearCredentialRef === "1"
+            ? { credentialRef: null }
+            : fields.credentialRef
+              ? { credentialRef: fields.credentialRef }
+              : {}),
           selections: JSON.parse(required("selections")),
           readiness: JSON.parse(required("readiness")),
           repositories: JSON.parse(required("repositories")),
@@ -1189,6 +1189,7 @@ export class LocalOperatorHttp {
         "/api/operator/login",
         "/api/operator/logout",
         "/api/operator/commands",
+        "/api/operator/source-refresh",
       ].includes(path)
         ? "POST"
         : "GET";
@@ -1262,6 +1263,11 @@ export class LocalOperatorHttp {
           );
           return true;
         }
+        if (path === "/api/operator/source-refresh") {
+          z.object({}).strict().parse(body);
+          json(200, await web.api.refreshSources());
+          return true;
+        }
         json(200, await web.api.execute(body));
         return true;
       }
@@ -1296,6 +1302,9 @@ export class LocalOperatorHttp {
         apiErrorSchema.parse({
           error: {
             code,
+            ...(error instanceof OperatorApiError && error.fieldPaths
+              ? { fieldPaths: error.fieldPaths }
+              : {}),
             message: publicMessage(code),
             ...(error instanceof z.ZodError
               ? {

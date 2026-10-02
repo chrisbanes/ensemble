@@ -169,6 +169,67 @@ test("retained rendered form actions, fields and mounted route controls match do
     new URL("../../docs/design/ui02-foundation.md", import.meta.url),
     "utf8",
   );
+  const dispositions = await readFile(
+    new URL("../../docs/design/ui06-configuration.md", import.meta.url),
+    "utf8",
+  );
+  const dispositionRows = dispositions
+    .split("\n")
+    .filter((line) => line.startsWith("| "))
+    .map((line) =>
+      line
+        .split("|")
+        .slice(1, -1)
+        .map((c) => c.trim()),
+    );
+  let individual = 0;
+  const resolve = (path: string) =>
+    path.replace(
+      ":id",
+      path.includes("profiles") || path.startsWith("/profile/")
+        ? profileId
+        : path.includes("assignments") || path.includes("assignment/")
+          ? assignmentId
+          : path.includes("tasks") || path.includes("task/")
+            ? taskId
+            : projectId,
+    );
+  const reached = new Set<string>();
+  for (const line of inventory.split("\n")) {
+    if (!line.startsWith("| ")) continue;
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (
+      cells.length !== 5 ||
+      cells[0] === "Existing destination" ||
+      cells[0] === "---"
+    )
+      continue;
+    for (const control of (cells[2] ?? "").split(";")) {
+      const row = dispositionRows.find(
+        (r) => r[0] === cells[1] && r[1] === control.trim(),
+      );
+      assert.ok(
+        row,
+        `${cells[1]} ${control.trim()} has an individual disposition`,
+      );
+      assert.ok((row[4]?.length ?? 0) > 30, "concrete scope disposition");
+      const destination = resolve(row[3] ?? "");
+      if (!reached.has(destination)) {
+        const response = await fetch(`${web.origin}${destination}`, {
+          headers: { cookie },
+        });
+        assert.equal(response.status, 200, destination);
+        reached.add(destination);
+      }
+      individual++;
+    }
+  }
+  console.log(
+    `UI06 inventory: ${individual} individual controls; ${reached.size} concrete reachable destinations`,
+  );
   for (const route of routes)
     assert.ok(
       inventory.includes(

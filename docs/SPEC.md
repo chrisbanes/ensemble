@@ -502,3 +502,5 @@ adds attention overview, shared List/Board and atomic local composer, with
 UI01/UI04–UI07 screens, runtime-question integration and parent #736
 final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
+
+Delivery [UI06 #744](https://github.com/chrisbanes/ensemble/issues/744) implements the [configuration/recovery presentation contract](design/ui06-configuration.md), retaining exact private editors and operational destinations. Production-bundle integration is qualified with disposable SQLite and deterministic runtime/provider fixtures; this does not replace live-runtime, provider or release evidence.

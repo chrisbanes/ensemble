@@ -4,7 +4,7 @@ The React shell is staged at `/app`; `/` and all existing operator forms remain 
 
 ## Retained-control inventory
 
-Each semicolon-separated control is individually retained at the listed destination. No removal is authorized until its named child has replacement behavior, keyboard/browser evidence and UI07 #745 parity approval. JSON readiness describes this foundation, not replacement forms.
+Each semicolon-separated control is individually retained at the listed destination. No removal is authorized until its named child has replacement behavior, keyboard/browser evidence and UI07 #745 parity approval. JSON readiness describes this foundation. [UI06 configuration and recovery](ui06-configuration.md) records delivered replacements and the individual concrete retained dispositions.
 
 | Existing destination | Command/action | Controls/read destinations | Replacement owner | JSON readiness |
 | --- | --- | --- | --- | --- |

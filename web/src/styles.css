@@ -461,3 +461,44 @@ textarea {
     min-height: 240px;
   }
 }
+
+.settings-stack {
+  display: grid;
+  gap: var(--space-20);
+  max-width: 900px;
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-block: 16px;
+}
+.settings-card {
+  border: 1px solid var(--color-outline);
+  border-radius: 10px;
+  padding: 20px;
+  min-width: 0;
+}
+.settings-stack form {
+  display: grid;
+  gap: 16px;
+}
+.settings-stack .field textarea,
+.settings-stack .field select {
+  width: 100%;
+  padding: 12px;
+  max-width: 100%;
+}
+.settings-stack .field textarea {
+  resize: vertical;
+}
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.settings-stack p,
+.settings-stack a {
+  overflow-wrap: anywhere;
+}
