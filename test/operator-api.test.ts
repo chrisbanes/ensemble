@@ -59,6 +59,7 @@ test("API preserves original durable task receipts independently of current vers
 async function seed(
   f: Awaited<ReturnType<typeof createOperatorFixture>>,
   active = false,
+  snapshots?: { project: string; profile: string },
 ) {
   const profileId = randomUUID(),
     projectId = randomUUID(),
@@ -70,7 +71,7 @@ async function seed(
     key: randomUUID(),
     profileId,
     name: "Lead",
-    instructions: "PRIVATE INSTRUCTIONS",
+    instructions: snapshots?.profile ?? "PRIVATE INSTRUCTIONS",
     capabilities: "coordination",
   });
   d.execute({
@@ -81,13 +82,22 @@ async function seed(
     name: "Project",
     leadProfileId: profileId,
   });
-  if (active)
+  if (snapshots)
     d.execute({
       type: "project.configure",
       actor: "operator",
       key: randomUUID(),
       projectId,
       expectedVersion: 1,
+      instructions: snapshots.project,
+    });
+  if (active)
+    d.execute({
+      type: "project.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: Number(d.project(projectId).version),
       paused: false,
     });
   d.execute({
@@ -572,7 +582,7 @@ test("history preserves omission identities and excludes captured instructions a
     );
   });
   const api = new OperatorApi(f.service, [f.directory]);
-  const history = api.readAssignmentHistory(String(assignment.id));
+  const history = await api.readAssignmentHistory(String(assignment.id));
   assert.equal(
     history.data.items.find((i) => i.itemId === "omitted1")?.omissionReason,
     "size-limit",
@@ -763,4 +773,294 @@ test("omitted-material denial replay remains exact after privacy-context change 
     1,
   );
   assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE INSTRUCTIONS|SECRET/);
+});
+
+test("admitted and historical instruction snapshots stay private after configured revisions advance", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const old = {
+    project: "OLD PRIVATE PROJECT SNAPSHOT",
+    profile: "OLD PRIVATE PROFILE SNAPSHOT",
+  };
+  const ids = await seed(f, true, old);
+  const d = f.service.domain(),
+    api = new OperatorApi(f.service, [f.directory]);
+  const a = d.assignments(ids.taskId)[0],
+    work = f.service.list().find((w) => w.state === "running");
+  assert.ok(a && work?.threadId && work.turnId);
+  const before = (await api.readTask(ids.taskId)).data.assignments[0]
+    ?.executionGeneration;
+  assert.equal(
+    (
+      await f.runtime.callTool({
+        threadId: work.threadId,
+        turnId: work.turnId,
+        callId: "old-snapshot-approval",
+        tool: "ensemble_request_approval",
+        arguments: {
+          action: "Publish",
+          material: { project: old.project, profile: old.profile },
+        },
+      })
+    ).success,
+    true,
+  );
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: Number(d.project(ids.projectId).version),
+    instructions: "NEW PROJECT INSTRUCTIONS",
+  });
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    instructions: "NEW PROFILE INSTRUCTIONS",
+  });
+  await api.execute({
+    type: "assignment.apply",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    assignmentId: String(a.id),
+    expectedVersion: Number(a.version),
+  });
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    taskId: ids.taskId,
+    expectedVersion: Number(d.task(ids.taskId).version),
+    outcome: `${old.project} ${old.profile}`,
+  });
+  const read = await api.readTask(ids.taskId);
+  assert.deepEqual(read.data.assignments[0]?.executionGeneration, before);
+  assert.doesNotMatch(JSON.stringify(read), /OLD PRIVATE/);
+  assert.equal(read.data.approvals[0]?.materialUnavailable, true);
+  assert.equal(read.data.approvals[0]?.approvable, false);
+  await f.service.stop();
+  await f.service.start();
+  assert.doesNotMatch(
+    JSON.stringify(await api.readTask(ids.taskId)),
+    /OLD PRIVATE/,
+  );
+});
+
+test("project task summaries share task workspace and repository exclusions", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f, true),
+    api = new OperatorApi(f.service, [f.directory]);
+  const workspace = await f.service.taskWorkspace(ids.taskId);
+  assert.ok(workspace);
+  const repository = {
+    repositoryId: "synthetic-repo",
+    sourcePath: "/synthetic/source-repository",
+    workspacePath: "/synthetic/task-repository",
+    gitCommonDir: "/synthetic/git-common",
+    ref: "main",
+    commit: null,
+  };
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "UPDATE task_workspace_bindings SET repositories = ? WHERE taskId = ?",
+    ).run(JSON.stringify([repository]), ids.taskId);
+  });
+  const d = f.service.domain();
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    taskId: ids.taskId,
+    expectedVersion: Number(d.task(ids.taskId).version),
+    title: `Workspace ${workspace.path} ${repository.sourcePath} ${repository.workspacePath} ${repository.gitCommonDir}`,
+  });
+  const task = (await api.readTask(ids.taskId)).data.task.title;
+  const project = (await api.readProject(ids.projectId)).data.tasks[0]?.title;
+  assert.equal(project, task);
+  assert.ok(!String(project).includes(workspace.path));
+  assert.doesNotMatch(String(project), /synthetic/);
+});
+
+test("history supplements captured privacy with external auth and GitHub values while retaining omissions and revisions", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f, true),
+    d = f.service.domain();
+  const reference = "env:UI02_REVIEW_SYNTHETIC_GITHUB",
+    secret = "github-synthetic-value-475",
+    authPath = "/synthetic/external/operator-auth-file";
+  process.env.UI02_REVIEW_SYNTHETIC_GITHUB = secret;
+  t.after(() => {
+    delete process.env.UI02_REVIEW_SYNTHETIC_GITHUB;
+  });
+  d.execute({
+    type: "github.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 1,
+    credentialRef: reference,
+    selections: [],
+    readiness: { mode: "all", conditions: [{ kind: "label", name: "ready" }] },
+    repositories: [],
+  });
+  const a = d.assignments(ids.taskId)[0],
+    request = f.service.turnRequests().find((r) => r.assignmentId === a?.id),
+    work = f.service.list().find((w) => w.workId === request?.workId);
+  assert.ok(a && request && work?.threadId && work.turnId);
+  const binding = {
+    workId: work.workId,
+    taskId: ids.taskId,
+    assignmentId: String(a.id),
+    assignmentVersion: 1,
+    instructionsRevision: 1,
+    profileRevision: 1,
+    conversationRevision: 1,
+    workRevision: 1,
+    threadId: work.threadId,
+    turnId: work.turnId,
+  };
+  f.seedPersistedState((db) => {
+    const store = new ConversationHistoryStore(db);
+    store.record(
+      binding,
+      {
+        kind: "completed",
+        threadId: work.threadId ?? "",
+        turnId: work.turnId ?? "",
+        itemId: "private-history",
+        text: `${authPath} ${reference} ${secret} PRIVATE INSTRUCTIONS visible text`,
+      },
+      [],
+    );
+    store.omitItem(binding, "known-omission", "size-limit");
+    store.recordEarlyBufferLimit(binding);
+  });
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    instructions: "New private instructions",
+  });
+  await new OperatorApi(f.service).execute({
+    type: "assignment.apply",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    assignmentId: String(a.id),
+    expectedVersion: Number(a.version),
+  });
+  const read = await new OperatorApi(f.service, [
+    authPath,
+  ]).readAssignmentHistory(String(a.id));
+  assert.doesNotMatch(
+    JSON.stringify(read),
+    /operator-auth-file|UI02_REVIEW_SYNTHETIC_GITHUB|github-synthetic-value-475|PRIVATE INSTRUCTIONS/,
+  );
+  const item = read.data.items.find((i) => i.itemId === "private-history");
+  assert.ok(item);
+  assert.equal(item.profileRevision, 1);
+  assert.equal(item.assignmentVersion, 1);
+  assert.match(item.text ?? "", /visible text/);
+  assert.equal(
+    read.data.items.find((i) => i.itemId === "known-omission")?.omissionReason,
+    "size-limit",
+  );
+  assert.equal(read.data.turnOmissions[0]?.reason, "early-buffer-limit");
+  const unavailable = await new OperatorApi(
+    f.service,
+    Array.from({ length: 129 }, (_, i) => `synthetic-path-${i}`),
+  ).readAssignmentHistory(String(a.id));
+  assert.equal(
+    unavailable.data.items.find((i) => i.itemId === "private-history")
+      ?.omissionReason,
+    "redaction-unavailable",
+  );
+});
+
+test("core-valid material beyond public collection and depth limits remains privately denyable with exact replay", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f, true),
+    api = new OperatorApi(f.service, [f.directory]),
+    work = f.service.list().find((w) => w.state === "running");
+  assert.ok(work?.threadId && work.turnId);
+  let deep: unknown = "PRIVATE INSTRUCTIONS";
+  for (let i = 0; i < 14; i++) deep = { nested: deep };
+  const materials = [
+    Array(257).fill(0),
+    Object.fromEntries(Array.from({ length: 257 }, (_, i) => [String(i), 0])),
+    deep,
+  ];
+  const commands = [];
+  for (const [i, material] of materials.entries()) {
+    assert.equal(
+      (
+        await f.runtime.callTool({
+          threadId: work.threadId,
+          turnId: work.turnId,
+          callId: `beyond-public-${i}`,
+          tool: "ensemble_request_approval",
+          arguments: { action: "Publish", target: "artifact", material },
+        })
+      ).success,
+      true,
+    );
+    const approval = (await api.readTask(ids.taskId)).data.approvals.find(
+      (a) => a.status === "open",
+    );
+    assert.ok(approval);
+    assert.equal(approval.materialUnavailable, true);
+    assert.equal(approval.material, null);
+    assert.equal(approval.approvable, false);
+    const command = {
+      type: "approval.decide" as const,
+      key: randomUUID(),
+      taskId: ids.taskId,
+      interactionId: approval.interactionId,
+      expectedRevision: approval.revision,
+      decision: "denied" as const,
+      action: approval.action ?? "",
+      target: approval.target ?? undefined,
+    };
+    await assert.rejects(
+      api.execute({ ...command, decision: "approved", material: {} }),
+    );
+    await assert.rejects(
+      api.execute({
+        ...command,
+        expectedRevision: command.expectedRevision + 1,
+      }),
+    );
+    await assert.rejects(api.execute({ ...command, action: "Different" }));
+    await assert.rejects(api.execute({ ...command, target: "Different" }));
+    await assert.rejects(
+      api.execute({ ...command, material: { altered: true } }),
+    );
+    const receipt = await api.execute(command);
+    assert.deepEqual(await api.execute(command), receipt);
+    await assert.rejects(api.execute({ ...command, key: randomUUID() }));
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE INSTRUCTIONS|nested/);
+    commands.push({ command, receipt });
+  }
+  await f.service.stop();
+  await f.service.start();
+  for (const { command, receipt } of commands)
+    assert.deepEqual(await api.execute(command), receipt);
+  const read = await api.readTask(ids.taskId);
+  assert.doesNotMatch(JSON.stringify(read), /PRIVATE INSTRUCTIONS|nested/);
+  for (const { command } of commands)
+    assert.equal(
+      read.data.messages.filter(
+        (m) => m.interactionId === command.interactionId,
+      ).length,
+      1,
+    );
 });

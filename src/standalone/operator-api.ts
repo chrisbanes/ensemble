@@ -17,7 +17,10 @@ import {
   type Execution,
 } from "../operator/contracts.js";
 import type { StandaloneService } from "./service.js";
-import { sanitizeConversationText } from "./conversation-history.js";
+import {
+  sanitizeConversationText,
+  type ConversationHistoryBinding,
+} from "./conversation-history.js";
 type Row =
   ReturnType<StandaloneService["domain"]> extends { task(id: string): infer R }
     ? R
@@ -83,6 +86,7 @@ export class OperatorApi {
   private async exclusions(
     projectId: string,
     taskId?: string,
+    historyBindings: readonly ConversationHistoryBinding[] = [],
   ): Promise<string[] | undefined> {
     try {
       const d = this.domain(),
@@ -107,14 +111,35 @@ export class OperatorApi {
       for (const repo of g.repositories)
         values.push(repo.path, repo.gitCommonDirectory);
       if (taskId) {
+        const retained = [
+          ...this.service.turnRequests().filter((r) => r.taskId === taskId),
+          ...this.service
+            .recoveryView()
+            .flatMap((r) => (r.binding?.taskId === taskId ? [r.binding] : [])),
+          ...historyBindings,
+        ];
         for (const a of d.assignments(taskId)) {
-          values.push(
-            d.instructionRevision(projectId, Number(a.instructionsRevision)),
-            String(
-              d.profileRevision(String(a.profileId), Number(a.profileRevision))
-                .instructions,
-            ),
-          );
+          for (const snapshot of [
+            a,
+            ...retained.filter((r) => r.assignmentId === a.id),
+          ]) {
+            if (
+              snapshot.instructionsRevision !== null &&
+              snapshot.profileRevision !== null
+            )
+              values.push(
+                d.instructionRevision(
+                  projectId,
+                  Number(snapshot.instructionsRevision),
+                ),
+                String(
+                  d.profileRevision(
+                    String(a.profileId),
+                    Number(snapshot.profileRevision),
+                  ).instructions,
+                ),
+              );
+          }
         }
         const workspace = await this.service.taskWorkspace(taskId);
         if (workspace) {
@@ -127,7 +152,7 @@ export class OperatorApi {
             );
         }
       }
-      return values.filter(Boolean);
+      return [...new Set(values.filter(Boolean))];
     } catch {
       return undefined;
     }
@@ -303,18 +328,23 @@ export class OperatorApi {
       data: {
         project: await this.project(p),
         profiles: this.profiles(excluded),
-        tasks: this.domain()
-          .tasks(projectId)
-          .map((t) => ({
-            id: String(t.id),
-            projectId,
-            title: this.safe(t.title, excluded),
-            version: Number(t.version),
-            state: t.state,
-            ready: Boolean(t.ready),
-            execution: this.execution(t),
-            sourceIdentity: this.identity(String(t.id)),
-          })),
+        tasks: await Promise.all(
+          this.domain()
+            .tasks(projectId)
+            .map(async (t) => ({
+              id: String(t.id),
+              projectId,
+              title: this.safe(
+                t.title,
+                await this.exclusions(projectId, String(t.id)),
+              ),
+              version: Number(t.version),
+              state: t.state,
+              ready: Boolean(t.ready),
+              execution: this.execution(t),
+              sourceIdentity: this.identity(String(t.id)),
+            })),
+        ),
       },
       observedAt: Date.now(),
     });
@@ -667,7 +697,7 @@ export class OperatorApi {
         : null,
     };
   }
-  readAssignmentHistory(assignmentId: string) {
+  async readAssignmentHistory(assignmentId: string) {
     uuid.parse(assignmentId);
     for (const p of this.domain().projects())
       for (const task of this.domain().tasks(String(p.id)))
@@ -676,10 +706,32 @@ export class OperatorApi {
             .assignments(String(task.id))
             .some((a) => a.id === assignmentId)
         ) {
+          const history =
+            this.coordination().readAssignmentHistory(assignmentId);
+          const excluded = await this.exclusions(
+            String(p.id),
+            String(task.id),
+            [...history.items, ...history.turnOmissions],
+          );
           return assignmentHistorySchema.parse({
-            data: this.service
-              .coordinationView()
-              .readAssignmentHistory(assignmentId),
+            data: {
+              ...history,
+              items: history.items.map((item) => {
+                if (item.lifecycle !== "completed") return item;
+                const text =
+                  excluded === undefined
+                    ? undefined
+                    : sanitizeConversationText(item.text ?? "", excluded);
+                return text === undefined
+                  ? {
+                      ...item,
+                      lifecycle: "omitted",
+                      text: null,
+                      omissionReason: "redaction-unavailable",
+                    }
+                  : { ...item, text };
+              }),
+            },
             observedAt: Date.now(),
           });
         }
@@ -748,7 +800,9 @@ export class OperatorApi {
         ) {
           command = {
             ...submitted,
-            material: materialSchema.parse(JSON.parse(retained.materialJson)),
+            // Display bounds deliberately exclude some core-valid retained JSON.
+            // The existing command compares these immutable bytes canonically.
+            material: JSON.parse(retained.materialJson),
           };
         }
       }

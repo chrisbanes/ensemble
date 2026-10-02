@@ -44,7 +44,7 @@ npm run check
 git diff --check
 ```
 
-The scoped suite passed **27/27**. The final full check passed **341/341**, with
+The scoped suite passed **27/27**. The initial full check passed **341/341**, with
 zero failures, cancellations or skips, strict server/browser type checks,
 formatting, build and lint. Its log is retained at
 `/private/tmp/ensemble-ui02-final-check.log`. Four existing lint warnings remain
@@ -129,3 +129,46 @@ paused X work or cutover occurred. The previous native-question **UI02 runtime
 acceptance scenario** remains unproved. UI01/UI03–UI07 and parent #736 final
 product acceptance remain separate; this evidence qualifies only #740's
 foundation integration.
+
+## Independent audit repairs
+
+The fresh audit of `3c64283087f982d888a8a19041a9fdf52c21a7da` required four
+adapter corrections before push. Four public-seam tests reproduced all four
+defects (0 passed, 4 failed), retained at
+`/private/tmp/ensemble-ui02-review-red.log`. After correction the focused
+API/contracts/HTTP/integration and existing coordination policy/view suite
+passed **29/29**, retained at `/private/tmp/ensemble-ui02-review-green.log`.
+
+The consolidated task privacy context now includes configured snapshots plus
+all retained task requests/recovery bindings and captured history revisions.
+Old project and profile instructions stay private after apply advances both
+configured revisions, including prose and exact approval material after reopen.
+Project task-summary titles use this same task context, preserving the task
+read's workspace/repository source/worktree/common-directory exclusions.
+History supplements the existing service redaction with this consolidated
+context, including external auth-file paths and GitHub credential references
+and their synthetic test values. Identities, revisions, retention counts and
+existing omission notices survive; inability to safely redact a completed item
+uses the existing `redaction-unavailable` omission semantics.
+
+Omitted-material denial reconstruction parses only the immutable same-task
+retained JSON, independently of the public material display bounds. The
+authoritative command still checks exact canonical material, revision, action
+and target. Regression cases include 257-element arrays, 257-entry records and
+depth-14 JSON below the core byte limit, approval/stale/action/target/supplied-
+material rejection, one original event and saved-key replay after reopen, and
+no secret material in reads or receipts. Client-supplied material is never
+substituted. These are review repairs, not a second mechanical plan-mismatch
+repair cycle. Core, service, state, browser/client/design source and dependency
+bytes remain unchanged by the repair.
+
+The final repair check (`npm run check` with the same pinned PATH) passed
+**345/345**, with no failures, cancellations or skips and the same four baseline
+lint warnings. Type checks, formatting and both builds passed. Its log is
+`/private/tmp/ensemble-ui02-review-full-check.log`; `git diff --check` also
+passed. That check reran the browser cases and retained candidate screenshots
+at `/private/tmp/ensemble-ui02-evidence-24305`, using the same filenames and
+viewports described above. The previous screenshot evidence is preserved.
+The fixture/browser teardown implementation is unchanged and its explicit
+teardown probe remains applicable. No real runtime/model turn or remote write
+was performed during repair.
