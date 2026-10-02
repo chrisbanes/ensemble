@@ -445,8 +445,7 @@ export class OperatorApi {
           ),
           currentInstructionsRevision: Number(p.instructionsRevision),
           executionGeneration:
-            request &&
-            request.assignmentVersion &&
+            request?.assignmentVersion &&
             request.instructionsRevision &&
             request.profileRevision
               ? {
@@ -632,15 +631,13 @@ export class OperatorApi {
             },
           };
         }),
-      nativeBlockers: store
-        .nativeBlockers(identity.nodeId)
-        .map((b) => ({
-          nodeId: String(b.blockerNodeId),
-          repositoryId: String(b.repositoryId),
-          repositoryName: String(b.repositoryName),
-          number: Number(b.issueNumber),
-          state: b.status,
-        })),
+      nativeBlockers: store.nativeBlockers(identity.nodeId).map((b) => ({
+        nodeId: String(b.blockerNodeId),
+        repositoryId: String(b.repositoryId),
+        repositoryName: String(b.repositoryName),
+        number: Number(b.issueNumber),
+        state: b.status,
+      })),
       review: review
         ? {
             observedDigest: String(review.observedDigest),

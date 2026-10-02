@@ -38,7 +38,7 @@ export class OperatorWebBundle {
     }
     for (const match of html
       .toString("utf8")
-      .matchAll(/(?:src|href)="([^\"]+)"/g)) {
+      .matchAll(/(?:src|href)="([^"]+)"/g)) {
       if (!match[1]?.startsWith("/assets/") || !files.has(match[1]))
         throw Error("Operator build references unavailable asset");
     }
