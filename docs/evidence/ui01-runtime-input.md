@@ -520,3 +520,148 @@ log was preserved and the exact command passed with local process/network
 permissions. Final diff whitespace validation passed. The new candidate packet
 binds fresh file/diff/log hashes separately from earlier preparation. These
 deterministic checks include no real runtime/model turn or new live authority.
+
+## Renewed T1 protocol qualification — passed
+
+Root ran the separately granted proof at reviewed head
+7dbd2afd13bf7e2372d99c408704594af70c0cfa under
+[resume 5955887756](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5955887756).
+The [durable outcome](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5955928383)
+records one thread, one model turn, one unique synchronous native question, one
+reply and one exact answer-only consumption report. One identical warm-resume
+replay was observed separately. The 250 ms zero-reply checkpoint preceded answer
+and intent commit and independent SQLite readback. Initiated write, successful
+stdin callback and matching native resolution confirmed the receipt before the
+report callback ended and the same-turn successful terminal.
+
+Codex 0.159.0, effective Default and preserved settings were verified inside
+this attempt (gpt-6.1-sol, high). Earlier Astra/medium attempts remain history;
+there is no claim of identical settings across attempts. Root independently
+verified exact PID 19056 absent on the same boot and removed the successful
+fixture. Earlier failed fixtures, accepted answers and confirmed receipts remain
+preserved. Private result SHA-256:
+3dcc3dcade860fcfa9288e8dfa21b4b3c46f53f2f2dbf28ca0859e5998cbe6e6.
+The finite T1 grant is consumed. This proves the protocol only; it grants no
+further turn and does not qualify production forms or the integrated service.
+
+## Native adapter and durable service seam
+
+The adapter admits only the exact qualified executable/version and synchronous
+native RPC route. It holds the callback while the bound turn's identity-only
+warm resume verifies Default, unchanged model/provider/effort/tier and a private
+instruction digest. No mode or instruction override is sent. Non-Default,
+unknown version/hash, async markers, true/blocking metadata, timed resolution,
+secret questions, standalone free text, multiple selection and explicit native
+recommendation fields remain unsupported. Single choice and permitted custom
+text are observed in T1. Grouped sets of those shapes are validated
+**deterministically only**, with no grouped live-support claim.
+
+CoordinationStore persists the interaction, exact endpoint and attention before
+exposure; a complete answer and operator receipt commit before the answer command
+returns. Native answers create no ordinary inbox event or new turn. Immutable
+reply intent commits inside the final synchronous eligibility gate immediately
+before write. Successful stdin alone is sent-unconfirmed. Resolution before write
+makes the endpoint unavailable; resolution during write waits for successful
+stdin completion. Write errors, Stop/cancellation, lost/replaced process, wrong
+thread or typed request identity cannot confirm. Duplicate confirmation and later
+controls preserve the historical receipt. The service commits the receipt before
+settling its owned callback. A failed commit retains execution ownership and the
+callback hold. Confirmation does not complete the assignment without its bound
+successful terminal and ended callbacks, and releases no independent hold.
+
+The curated CoordinationView task projection and answerRuntimeQuestion command
+are the seam for UI05. They expose supported question text, answers and delivery
+state, excluding process identity, qualification internals and private instructions.
+Ordinary answerQuestion rejects native interactions. No React forms, browser
+native-answer route, context-menu action, extension, deep link or notification
+answer action is introduced; existing plain-text entry points retain their behavior.
+Native request cancellation/Stop and conservative restart are the recovery paths;
+no force-unlock or replacement-process answer replay is added.
+
+### Deterministic acceptance coverage
+
+| Contract | Test evidence |
+| --- | --- |
+| Source text and bounded qualified single/group schemas; invalid selections, unknown/incomplete IDs, secret/free-text/multiple/recommendation variants | native-input.test.ts |
+| Current executable hash/version, Default readback, exact typed identity and one reply; an earlier async-origin marker remains disqualifying | codex-runtime.test.ts: qualified native runtime and unsupported version/mode/hash cases |
+| Early resolution; buffered resolution before stdin success; successful write without resolution; write error; cancellation; wrong thread/type; replacement process; duplicate effect protection | codex-runtime.test.ts: native early resolution, stdin-only, ordered receipt matrix, replacement process |
+| Question/answer persistence, immutable intent/digest, matching/conflicting command replay, no inbox, pending attention and monotonic confirmation | runtime-question-store.test.ts |
+| Pause, unready, revoked profile, ownership, power, final-gate Stop, local/open/unknown imported dependencies, independent holds, exact two-task answer scope | runtime-question-service.test.ts: hold/dependency/final-gate/two-task matrix |
+| Early native prebinding, exact/conflicting response, intervening Stop or changed process generation; failed receipt commit retains callback/ownership | runtime-question-service.test.ts: prebinding and failed commit cases |
+| Restart after request, answer, reply intent, and write before confirmation; retained answers/receipts, uncertainty, zero restored turns/replies, delayed old resolution | runtime-question-store.test.ts and runtime-question-service.test.ts: four named boundaries |
+| Pause after initiated reply preserves confirmation; Stop before confirmation stays uncertain | runtime-question-service.test.ts: post-intent control matrix |
+| Existing approval rejection, ordinary coordination/inbox and operator runtime recovery | Existing runtime, coordination, standalone, S04b and operator-runtime regression suites |
+| Service-mediated paused answer command, zero-reply independent committed SQLite readback, ordinary unpause, one exact reply/receipt/report/terminal, unsupported shape and unproved cleanup | ui01-live-harness.test.ts: service phase and failure cases |
+| Awaited startup/stop/verifier deadlines retain unresolved identity; finite grant binds exact head/resource/budgets and atomic one-use consumption | ui01-live-harness.test.ts: three service deadline boundaries and synthetic grant admission (zero runtime execution) |
+
+## T6 preparation — live service journey not granted
+
+The deterministic service harness uses StandaloneService, real SQLite and its
+curated answer command. A persisted project pause prevents every flush while the
+answer command completes and a separate read-only connection verifies the
+immutable answer and operator receipt, held delivery and absent reply intent.
+Ordinary unpause releases one reply on the admitted requesting turn. Its one bound
+answer-only reporting callback records the existing coordination result; no second
+model turn or native reply is permitted. Fixture OS/process facts are identified
+as deterministic, and cannot qualify actual runtime availability or cleanup.
+
+The prepared command is npm run ui01:live, requiring a separate root-owned
+finite grant and the canonical shared resource
+existing-login:codex-app-server:qualification. The root must acquire the matching
+resource/holder 739/fresh grant ID before execution. The CLI atomically consumes
+that exact-head grant before metadata or runtime creation. Proposed limits remain
+one task/thread/turn/request/reply/report, 90-second request deadline, 240 seconds
+total with 10 seconds reserved for exact-process cleanup, no retry or settings/mode
+fallback. Awaited startup, provisioning, answer command, service Stop and exact
+process verification share those absolute deadlines. A timed-out cleanup wait
+retains the unresolved identity and fixture; it never establishes successful Stop.
+The typed runtime receipt retains endpoint-local sequence numbers for write
+initiation, successful stdin completion and matching resolution, including a
+resolution buffered before the stdin callback. Provider records may remain after scoped cleanup. Failed or unsettled
+fixtures are retained. Only root may authorize and execute this later live journey;
+no T6 actual turn has occurred during implementation. #739 remains unqualified
+for the integrated service, and #743/#745 remain gated until the required live
+result and final review. UI01–UI03 frontend acceptance and parent #736 remain separate.
+
+### Same-thread turn reuse and storage-failure cleanup
+
+The pre-repair frozen candidate passed root's pinned external full check:
+**600/600**, no failures, skips or cancellations. That result belongs to its exact
+source manifest; it does not qualify subsequent changes or replace actual T6.
+
+Each new turn retires the previous ephemeral native readback before the provider
+can emit an early callback. The new callback waits for the new turn response and
+its identity-only Default/settings readback before exposure. Historical endpoints,
+confirmed receipts and disqualified turn identities remain preserved. Actual
+stdio fixtures cover a resumed thread's second question arriving before the
+turn/start response, late old callback/terminal replay, conflicting new request,
+async origin, non-Default readback and duplicate matching resolution. A replay
+after reply initiation cancels only its still-unconfirmed endpoint and retains
+uncertainty; the earlier confirmed receipt remains immutable.
+
+Native invalidation failure during Stop joins the existing cleanup error
+collection. Exact owned runtime, power, supervisor, database and owner cleanup
+continue, and the original storage error is rethrown. A real SQLite abort trigger
+verifies this path and repeated Stop; existing closed/cleared-database crash
+cleanup retains its recovery behavior. The final focused repair matrix passed
+**8/8**; the earlier interaction matrix passed **18/18**. These fixtures use no
+actual model turn. Actual T6 remains pending a separate root-owned finite grant,
+final reviewed source and the canonical shared qualification resource.
+
+### Early resolution on a reused thread
+
+Root's unchanged repair1 candidate passed pinned external full checks **608/608**;
+that result belongs to the repair1 source manifest. Subsequent changes require
+fresh validation, with actual T6 still pending separately.
+
+A historical endpoint on the same thread cannot hide an early resolution of a
+new pending request. Before qualification, resolution matching uses the current
+attached process, exact thread and typed RPC identity. Matching resolution before
+the new turn response makes that pending request unavailable: it is never exposed
+as supported and cannot receive a later reply. The actual stdio two-turn fixture
+asserts zero second-question exposure, zero later write-gate calls and an unchanged
+first confirmed receipt. Wrong typed ID/foreign resolution, buffered receipt,
+async-origin, warm/new-turn qualification and early service prebinding controls
+remain covered; the affected matrix passed **21/21**. No model turn, authority,
+settings change or new runtime guarantee is introduced by these deterministic
+fixtures.

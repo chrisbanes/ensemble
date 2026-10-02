@@ -19,6 +19,9 @@ import {
   MacProcessTerminationVerifier,
 } from "../../dist/src/standalone/termination.js";
 
+import { runService, qualificationResource } from "./service-contract.mjs";
+export { runService } from "./service-contract.mjs";
+
 const bounds = {
   requestMs: 90_000,
   totalMs: 240_000,
@@ -53,9 +56,11 @@ export function validateArguments(args) {
     args.length !== 3 ||
     args[0] !== "--live" ||
     args[1] !== "--phase" ||
-    args[2] !== "protocol"
+    !["protocol", "service"].includes(args[2])
   ) {
-    throw new Error("Protocol probe requires exactly --live --phase protocol");
+    throw new Error(
+      "Protocol probe requires exactly --live --phase protocol or --live --phase service with a finite grant",
+    );
   }
 }
 
@@ -1013,19 +1018,72 @@ function sourceEvidence() {
   }
 }
 
+export function consumeServiceGrant(
+  path = process.env.ENSEMBLE_UI01_SERVICE_GRANT,
+) {
+  if (!path)
+    throw new Error(
+      "Service proof requires exactly --live --phase protocol or --live --phase service with a finite root-owned grant",
+    );
+  const grant = JSON.parse(readFileSync(path, "utf8"));
+  assert.ok(
+    typeof grant.grantId === "string" && /^[0-9a-f-]{36}$/.test(grant.grantId),
+    "invalid-finite-grant",
+  );
+  assert.equal(grant.resource, qualificationResource);
+  assert.equal(grant.holder, 739);
+  assert.equal(grant.phase, "service");
+  assert.equal(grant.authority, "root-approved-finite-service-turn");
+  assert.equal(
+    grant.head,
+    execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+  );
+  assert.deepEqual(grant.limits, {
+    threads: 1,
+    turns: 1,
+    requests: 1,
+    replies: 1,
+    reports: 1,
+    requestMs: 90000,
+    totalMs: 240000,
+    cleanupMs: 10000,
+    retries: 0,
+  });
+  writeFileSync(
+    `${path}.consumed`,
+    JSON.stringify({
+      grantId: grant.grantId,
+      resource: grant.resource,
+      holder: grant.holder,
+      head: grant.head,
+      consumedAt: new Date().toISOString(),
+    }) + "\n",
+    { flag: "wx", mode: 0o600 },
+  );
+  return grant;
+}
+
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
+  let serviceGrant;
   try {
     validateArguments(process.argv.slice(2));
+    if (process.argv[4] === "service") serviceGrant = consumeServiceGrant();
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 2;
   }
   if (!process.exitCode) {
     try {
-      const evidence = await runProtocol({ source: sourceEvidence() });
+      const evidence =
+        process.argv[4] === "service"
+          ? await runService({
+              source: sourceEvidence(),
+              grant: serviceGrant,
+            })
+          : await runProtocol({ source: sourceEvidence() });
       process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`);
       process.exitCode = evidence.status === "passed" ? 0 : 1;
     } catch {

@@ -78,3 +78,17 @@ export type {
   WorkspaceCleanupEvidence,
   WorkspaceCleanupResult,
 } from "./workspaces.js";
+
+export type {
+  NativeInputEndpointIdentity,
+  NativeInputRequest,
+  NativeInputReply,
+  NativeInputProtocolQualification,
+  RuntimeUserInputRequest,
+  RuntimeUserInputOutcome,
+  RuntimeReplyIntent,
+} from "./native-input.js";
+export type {
+  StructuredQuestionSet,
+  StructuredQuestionAnswers,
+} from "../core/structured-questions.js";

@@ -1,4 +1,28 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
+import {
+  boundedQuestionPayload,
+  structuredAnswerDigest,
+} from "../core/structured-questions.js";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { delimiter, isAbsolute, join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  encodeNativeInputReply,
+  nativeEndpointKey,
+  parseNativeInputRequest,
+  nativeInputRequestSchema,
+  nativeInputEndpointIdentitySchema,
+  nativeInputQualificationSchema,
+  type NativeInputEndpointIdentity,
+  type NativeInputReply,
+  type NativeInputProtocolQualification,
+  type RuntimeReplyIntent,
+  type RuntimeUserInputOutcome,
+  type RuntimeUserInputRequest,
+} from "./native-input.js";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { z } from "zod";
@@ -305,6 +329,19 @@ export function unexpectedRequest(
 }
 
 export interface Runtime {
+  onUserInputRequest?(
+    listener: (request: RuntimeUserInputRequest) => void,
+  ): void;
+  onUserInputOutcome?(
+    listener: (outcome: RuntimeUserInputOutcome) => void,
+  ): void;
+  replyUserInput?(
+    identity: NativeInputEndpointIdentity,
+    reply: NativeInputReply,
+    beforeWrite: () => RuntimeReplyIntent,
+  ): Promise<void>;
+  cancelUserInput?(identity: NativeInputEndpointIdentity, reason: string): void;
+  currentUserInputGeneration?(): string | undefined;
   start(): Promise<void>;
   stop(): Promise<void>;
   startThread(
@@ -352,9 +389,538 @@ export interface Runtime {
   ): FailureEvidence | undefined;
 }
 
+interface NativeEndpoint {
+  call: RuntimeUserInputRequest;
+  digest: string;
+  state:
+    | "pending"
+    | "writing"
+    | "sent-unconfirmed"
+    | "confirmed"
+    | "unavailable"
+    | "uncertain";
+  intent?: RuntimeReplyIntent;
+  resolved: boolean;
+  order: number;
+  orderedReceipt?: RuntimeUserInputOutcome["orderedReceipt"];
+}
+
 /** One private stdio App Server process. It never sends an approval grant. */
 export class CodexRuntime implements Runtime {
   private child: ChildProcessWithoutNullStreams | undefined;
+  private nativeGeneration: string | undefined;
+  private nativeExecutable:
+    | { codexVersion: string; executableHash: string }
+    | undefined;
+  private readonly nativeQualifications = new Map<
+    string,
+    NativeInputProtocolQualification
+  >();
+  private readonly nativeEndpoints = new Map<string, NativeEndpoint>();
+  private readonly nativeThreadSettings = new Map<
+    string,
+    Record<string, unknown>
+  >();
+  private readonly nativeTurns = new Map<string, string>();
+  private readonly invalidNativeTurns = new Set<string>();
+  private readonly nativeReadbacks = new Map<
+    string,
+    {
+      input: unknown;
+      id: string | number;
+      child: ChildProcessWithoutNullStreams;
+      digest: string;
+      requested: boolean;
+      responded: boolean;
+      replays: number;
+      invalid: boolean;
+    }
+  >();
+  private nativeRequest?: (request: RuntimeUserInputRequest) => void;
+  private nativeOutcome?: (outcome: RuntimeUserInputOutcome) => void;
+  onUserInputRequest(
+    listener: (request: RuntimeUserInputRequest) => void,
+  ): void {
+    this.nativeRequest = listener;
+  }
+  onUserInputOutcome(
+    listener: (outcome: RuntimeUserInputOutcome) => void,
+  ): void {
+    this.nativeOutcome = listener;
+  }
+  currentUserInputGeneration(): string | undefined {
+    return this.failure ? undefined : this.nativeGeneration;
+  }
+  private emitNative(
+    endpoint: NativeEndpoint,
+    outcome: RuntimeUserInputOutcome["outcome"],
+    reason: string,
+  ): void {
+    if (
+      endpoint.state === "confirmed" ||
+      endpoint.state === "uncertain" ||
+      endpoint.state === "unavailable"
+    )
+      return;
+    endpoint.state = outcome;
+    this.nativeOutcome?.({
+      ...endpoint.call.identity,
+      ...endpoint.intent,
+      outcome,
+      reason,
+      ...(endpoint.orderedReceipt
+        ? { orderedReceipt: { ...endpoint.orderedReceipt } }
+        : {}),
+    });
+  }
+  cancelUserInput(identity: NativeInputEndpointIdentity, reason: string): void {
+    const endpoint = this.nativeEndpoints.get(nativeEndpointKey(identity));
+    if (endpoint)
+      this.emitNative(
+        endpoint,
+        endpoint.intent ? "uncertain" : "unavailable",
+        reason,
+      );
+  }
+  private cancelNativeTurn(
+    threadId: string,
+    turnId: string,
+    reason: string,
+  ): void {
+    for (const endpoint of this.nativeEndpoints.values())
+      if (
+        endpoint.call.identity.threadId === threadId &&
+        endpoint.call.identity.turnId === turnId
+      )
+        this.cancelUserInput(endpoint.call.identity, reason);
+  }
+  async replyUserInput(
+    identity: NativeInputEndpointIdentity,
+    reply: NativeInputReply,
+    beforeWrite: () => RuntimeReplyIntent,
+  ): Promise<void> {
+    const endpoint = this.nativeEndpoints.get(nativeEndpointKey(identity));
+    const child = this.child;
+    if (
+      !endpoint ||
+      !child ||
+      identity.runtimeGeneration !== this.currentUserInputGeneration() ||
+      endpoint.state !== "pending"
+    )
+      throw new Error("Native endpoint unavailable");
+    const encoded = encodeNativeInputReply(
+      endpoint.call.request,
+      reply.answers,
+    );
+    const line = `${JSON.stringify({ id: identity.requestId, result: encoded })}\n`;
+    return await new Promise<void>((resolve, reject) => {
+      try {
+        const intent = beforeWrite();
+        if (
+          !intent.replyIntentId ||
+          intent.answerDigest !== structuredAnswerDigest(encoded.answers)
+        )
+          throw new Error("Invalid native reply intent");
+        if (
+          endpoint.state !== "pending" ||
+          this.child !== child ||
+          identity.runtimeGeneration !== this.currentUserInputGeneration()
+        )
+          throw new Error("Native endpoint changed before write");
+        endpoint.intent = { ...intent };
+        endpoint.state = "writing";
+        const orderedReceipt = {
+          writeInitiated: ++endpoint.order,
+        } as NonNullable<RuntimeUserInputOutcome["orderedReceipt"]>;
+        endpoint.orderedReceipt = orderedReceipt;
+        child.stdin.write(line, (error) => {
+          if (
+            error ||
+            this.child !== child ||
+            endpoint.state === "uncertain" ||
+            endpoint.state === "unavailable"
+          ) {
+            this.emitNative(
+              endpoint,
+              "uncertain",
+              "Native write failed or endpoint lost",
+            );
+            reject(error ?? new Error("Native endpoint unavailable"));
+            return;
+          }
+          orderedReceipt.stdinSucceeded = ++endpoint.order;
+          this.emitNative(
+            endpoint,
+            endpoint.resolved ? "confirmed" : "sent-unconfirmed",
+            endpoint.resolved
+              ? "Matching resolution after successful stdin write"
+              : "Successful stdin write; resolution pending",
+          );
+          resolve();
+        });
+      } catch (error) {
+        if (endpoint.intent)
+          this.emitNative(endpoint, "uncertain", "Native write failed");
+        reject(error);
+      }
+    });
+  }
+  private async qualifyExecutable(
+    environment: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    this.nativeExecutable = undefined;
+    try {
+      let executable = this.executable;
+      if (!isAbsolute(executable)) {
+        for (const directory of (environment.PATH ?? "").split(delimiter)) {
+          try {
+            await readFile(join(directory, executable));
+            executable = join(directory, executable);
+            break;
+          } catch {}
+        }
+      }
+      const { stdout } = await promisify(execFile)(executable, ["--version"], {
+        env: environment,
+        timeout: 1000,
+        killSignal: "SIGKILL",
+        maxBuffer: 4096,
+      });
+      const executableHash = createHash("sha256")
+        .update(await readFile(executable))
+        .digest("hex");
+      if (
+        stdout.trim() === "codex-cli 0.159.0" &&
+        executableHash ===
+          (this.options.qualifiedExecutableHash ??
+            "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a")
+      )
+        this.nativeExecutable = { codexVersion: stdout.trim(), executableHash };
+    } catch {
+      /* General runtime remains usable without native qualification. */
+    }
+  }
+  private captureNativeQualification(threadId: string, input: unknown): void {
+    this.nativeQualifications.delete(threadId);
+    const parsed = z
+      .object({
+        thread: z.object({ id: z.literal(threadId) }),
+        model: z.string().min(1),
+        modelProvider: z.string().min(1),
+        reasoningEffort: z.string().nullable(),
+        serviceTier: z.string().nullable(),
+        collaborationMode: z.object({
+          mode: z.literal("default"),
+          settings: z.object({
+            model: z.string(),
+            reasoning_effort: z.string().nullable(),
+            developer_instructions: z.string().nullable(),
+          }),
+        }),
+      })
+      .safeParse(input);
+    const prior = this.nativeThreadSettings.get(threadId);
+    if (
+      !parsed.success ||
+      !prior ||
+      !this.nativeExecutable ||
+      !this.nativeGeneration
+    )
+      return;
+    const data = parsed.data;
+    if (
+      ["model", "modelProvider", "reasoningEffort", "serviceTier"].some(
+        (key) => prior[key] !== data[key as keyof typeof data],
+      ) ||
+      data.collaborationMode.settings.model !== data.model ||
+      data.collaborationMode.settings.reasoning_effort !== data.reasoningEffort
+    )
+      return;
+    const qualification = nativeInputQualificationSchema.safeParse({
+      ...this.nativeExecutable,
+      threadId,
+      runtimeGeneration: this.nativeGeneration,
+      mode: "default",
+      model: data.model,
+      modelProvider: data.modelProvider,
+      reasoningEffort: data.reasoningEffort,
+      serviceTier: data.serviceTier,
+      developerInstructionsDigest: createHash("sha256")
+        .update(
+          JSON.stringify(
+            data.collaborationMode.settings.developer_instructions,
+          ),
+        )
+        .digest("hex"),
+      continuation: "synchronous",
+    });
+    if (qualification.success)
+      this.nativeQualifications.set(threadId, qualification.data);
+  }
+  private receiveNativeRequest(
+    child: ChildProcessWithoutNullStreams,
+    id: string | number,
+    input: unknown,
+  ): boolean {
+    try {
+      boundedQuestionPayload(input);
+      const request = nativeInputRequestSchema.parse(input);
+      nativeInputEndpointIdentitySchema.shape.requestId.parse(id);
+      const threadId = request.threadId;
+      if (
+        !this.nativeExecutable ||
+        !this.nativeThreadSettings.has(threadId) ||
+        !this.nativeRequest ||
+        !this.nativeGeneration
+      )
+        return false;
+      const digest = createHash("sha256")
+        .update(JSON.stringify(input))
+        .digest("hex");
+      const knownRequest = [...this.nativeEndpoints.values()].find(
+        (endpoint) =>
+          endpoint.call.identity.runtimeGeneration === this.nativeGeneration &&
+          endpoint.call.identity.threadId === threadId &&
+          endpoint.call.identity.requestId === id,
+      );
+      if (
+        this.terminalHistory.has(`${threadId}:${request.turnId}`) ||
+        (knownRequest &&
+          (knownRequest.state !== "pending" ||
+            knownRequest.call.identity.turnId !== request.turnId ||
+            knownRequest.call.identity.itemId !== request.itemId))
+      ) {
+        if (
+          knownRequest &&
+          ["pending", "writing", "sent-unconfirmed"].includes(
+            knownRequest.state,
+          )
+        ) {
+          this.cancelUserInput(
+            knownRequest.call.identity,
+            "Conflicting or late native replay",
+          );
+          const waiting = this.nativeReadbacks.get(threadId);
+          if (
+            waiting &&
+            nativeInputRequestSchema.parse(waiting.input).turnId ===
+              knownRequest.call.identity.turnId
+          )
+            waiting.invalid = true;
+        }
+        this.unexpected?.({
+          method: "stale-native-input",
+          threadId,
+          turnId: request.turnId,
+        });
+        return true;
+      }
+      const priorRequest = this.nativeReadbacks.get(threadId);
+      if (priorRequest) {
+        const prior = priorRequest;
+        const endpoint = [...this.nativeEndpoints.values()].find(
+          (e) =>
+            e.call.identity.threadId === threadId &&
+            e.call.identity.turnId === request.turnId,
+        );
+        if (
+          !prior.invalid &&
+          prior.id === id &&
+          isDeepStrictEqual(prior.input, input) &&
+          prior.requested &&
+          prior.responded &&
+          prior.replays === 0 &&
+          (!endpoint || endpoint.state === "pending")
+        ) {
+          prior.replays++;
+          return true;
+        }
+        prior.invalid = true;
+        if (endpoint)
+          this.cancelUserInput(
+            endpoint.call.identity,
+            "Conflicting or repeated native request",
+          );
+        this.nativeQualifications.delete(threadId);
+        this.unexpected?.({
+          method: "conflicting-native-input",
+          threadId,
+          turnId: request.turnId,
+        });
+        return true;
+      }
+      this.nativeReadbacks.set(threadId, {
+        input,
+        id,
+        child,
+        digest,
+        requested: false,
+        responded: false,
+        replays: 0,
+        invalid: false,
+      });
+      void this.qualifyNativeRequest(threadId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  private async qualifyNativeRequest(threadId: string): Promise<void> {
+    const pending = this.nativeReadbacks.get(threadId);
+    if (!pending || pending.requested || !this.nativeTurns.has(threadId))
+      return;
+    pending.requested = true;
+    try {
+      const rawResponse = await this.request(
+        "thread/resume",
+        { threadId },
+        () => {
+          pending.responded = true;
+        },
+      );
+      if (this.nativeReadbacks.get(threadId) !== pending)
+        throw new Error("Native readback replaced");
+      const resumed = thread.parse(rawResponse);
+      if (resumed.thread.id !== threadId)
+        throw new Error("Native resume identity mismatch");
+      this.captureNativeQualification(threadId, rawResponse);
+      const qualification = this.nativeQualifications.get(threadId);
+      if (!qualification || pending.invalid || this.child !== pending.child)
+        throw new Error("Native request unqualified");
+      const request = parseNativeInputRequest(pending.input, qualification);
+      if (
+        this.nativeTurns.get(threadId) !== request.turnId ||
+        this.terminalHistory.has(`${threadId}:${request.turnId}`) ||
+        this.invalidNativeTurns.has(`${threadId}:${request.turnId}`)
+      )
+        throw new Error("Native turn unavailable");
+      const identity = {
+        requestId: pending.id,
+        runtimeGeneration: qualification.runtimeGeneration,
+        threadId,
+        turnId: request.turnId,
+        itemId: request.itemId,
+      };
+      const call = { identity, request, qualification };
+      this.nativeEndpoints.set(nativeEndpointKey(identity), {
+        call,
+        digest: pending.digest,
+        state: "pending",
+        resolved: false,
+        order: 0,
+      });
+      this.nativeRequest?.(call);
+    } catch {
+      if (this.nativeReadbacks.get(threadId) === pending)
+        this.nativeQualifications.delete(threadId);
+      const turnId = nativeInputRequestSchema.parse(pending.input).turnId;
+      this.unexpected?.({
+        method: "unqualified-native-input",
+        threadId,
+        ...(turnId ? { turnId } : {}),
+      });
+    }
+  }
+  private receiveNativeNotification(method: string, params: unknown): void {
+    if (method === "serverRequest/resolved") {
+      const parsed = z
+        .object({
+          threadId: z.string(),
+          requestId: z.union([z.string(), z.number()]),
+        })
+        .safeParse(params);
+      if (!parsed.success) return;
+      const waiting = this.nativeReadbacks.get(parsed.data.threadId);
+      if (
+        waiting &&
+        waiting.child === this.child &&
+        waiting.id === parsed.data.requestId &&
+        ![...this.nativeEndpoints.values()].some(
+          (e) =>
+            e.call.identity.runtimeGeneration === this.nativeGeneration &&
+            e.call.identity.threadId === parsed.data.threadId &&
+            e.call.identity.requestId === parsed.data.requestId,
+        )
+      ) {
+        waiting.invalid = true;
+        this.unexpected?.({
+          method: "native-resolution-before-qualification",
+          threadId: parsed.data.threadId,
+        });
+        return;
+      }
+      for (const endpoint of this.nativeEndpoints.values()) {
+        const identity = endpoint.call.identity;
+        if (
+          identity.runtimeGeneration !== this.nativeGeneration ||
+          identity.requestId !== parsed.data.requestId ||
+          identity.threadId !== parsed.data.threadId
+        )
+          continue;
+        if (endpoint.state === "pending")
+          this.emitNative(
+            endpoint,
+            "unavailable",
+            "Resolution before native write",
+          );
+        else if (endpoint.state === "writing") {
+          if (!endpoint.resolved && endpoint.orderedReceipt)
+            endpoint.orderedReceipt.matchingResolution = ++endpoint.order;
+          endpoint.resolved = true;
+        } else if (endpoint.state === "sent-unconfirmed") {
+          if (endpoint.orderedReceipt)
+            endpoint.orderedReceipt.matchingResolution = ++endpoint.order;
+          this.emitNative(
+            endpoint,
+            "confirmed",
+            "Matching resolution after successful stdin write",
+          );
+        }
+        return;
+      }
+      this.unexpected?.({
+        method: "unmatched-native-resolution",
+        threadId: parsed.data.threadId,
+      });
+    }
+    if (method === "item/started" || method === "item/completed") {
+      const parsed = z
+        .object({
+          threadId: z.string(),
+          turnId: z.string(),
+          item: z.object({
+            type: z.string(),
+            delivery: z.unknown().optional(),
+            questions: z.unknown().optional(),
+            name: z.unknown().optional(),
+          }),
+        })
+        .safeParse(params);
+      if (parsed.success) {
+        const { item, threadId, turnId } = parsed.data;
+        if (
+          item.delivery === "async" ||
+          item.questions != null ||
+          item.name === "request_user_input_async"
+        ) {
+          this.invalidNativeTurns.add(`${threadId}:${turnId}`);
+          const waiting = this.nativeReadbacks.get(threadId);
+          if (waiting) waiting.invalid = true;
+          this.cancelNativeTurn(
+            threadId,
+            turnId,
+            "Unqualified asynchronous input origin",
+          );
+          this.nativeQualifications.delete(threadId);
+          this.unexpected?.({
+            method: "unqualified-async-input",
+            threadId,
+            turnId,
+          });
+        }
+      }
+    }
+  }
   private processIdentityValue: RuntimeProcessIdentity | null = null;
   private nextId = 1;
   private readonly pending = new Map<
@@ -396,6 +962,12 @@ export class CodexRuntime implements Runtime {
     private readonly executable = "codex",
     private readonly options: {
       spawnEnvironment?: () => NodeJS.ProcessEnv;
+      /** Test-only executable identity for deterministic stdio fixtures. */
+      qualifiedExecutableHash?: string;
+      /** Test-only OS boundary for deterministic attached child identity. */
+      captureProcessIdentity?: (
+        pid: number | undefined,
+      ) => Promise<RuntimeProcessIdentity | null>;
     } = {},
   ) {}
 
@@ -430,6 +1002,14 @@ export class CodexRuntime implements Runtime {
     this.failure = undefined;
     this.failures.clear();
     this.clearConversationCaptures();
+    const environment = this.options.spawnEnvironment?.() ?? process.env;
+    this.nativeGeneration = randomUUID();
+    this.nativeQualifications.clear();
+    this.nativeEndpoints.clear();
+    this.nativeThreadSettings.clear();
+    this.nativeTurns.clear();
+    this.invalidNativeTurns.clear();
+    this.nativeReadbacks.clear();
     const child = spawn(
       this.executable,
       [
@@ -463,7 +1043,11 @@ export class CodexRuntime implements Runtime {
       this.receive(child, line),
     );
     try {
-      this.processIdentityValue = await captureProcessIdentity(child.pid);
+      await this.qualifyExecutable(environment);
+      if (this.child !== child) throw new Error("Runtime stopped");
+      this.processIdentityValue = await (
+        this.options.captureProcessIdentity ?? captureProcessIdentity
+      )(child.pid);
       if (this.child !== child) throw new Error("Runtime stopped");
       await this.request("initialize", {
         clientInfo: { name: "ensemble", version: "0.1.0" },
@@ -482,6 +1066,10 @@ export class CodexRuntime implements Runtime {
   async stop(): Promise<void> {
     const child = this.child;
     if (!child) return;
+    for (const endpoint of this.nativeEndpoints.values())
+      this.cancelUserInput(endpoint.call.identity, "Runtime stopped");
+    this.nativeGeneration = undefined;
+    this.nativeQualifications.clear();
     this.child = undefined;
     this.processIdentityValue = null;
     this.fail(new Error("Runtime stopped"));
@@ -520,6 +1108,7 @@ export class CodexRuntime implements Runtime {
     tools: readonly RuntimeToolDefinition[] = [],
   ): Promise<string> {
     const definitions = registeredTools(tools);
+    let rawResponse: unknown;
     const response = thread.parse(
       await this.request(
         "thread/start",
@@ -531,12 +1120,23 @@ export class CodexRuntime implements Runtime {
           ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
         },
         (raw) => {
+          rawResponse = raw;
           const started = thread.parse(raw);
           this.threadTools.set(started.thread.id, definitions);
         },
       ),
     );
     this.threadTools.set(response.thread.id, definitions);
+    const settings = z
+      .object({
+        model: z.string(),
+        modelProvider: z.string(),
+        reasoningEffort: z.string().nullable(),
+        serviceTier: z.string().nullable(),
+      })
+      .safeParse(rawResponse);
+    if (settings.success && this.nativeExecutable)
+      this.nativeThreadSettings.set(response.thread.id, settings.data);
     return response.thread.id;
   }
 
@@ -547,14 +1147,16 @@ export class CodexRuntime implements Runtime {
     const definitions = registeredTools(
       tools ?? this.threadTools.get(threadId) ?? [],
     );
-    thread.parse(
-      await this.request("thread/resume", {
-        threadId,
-        approvalPolicy: "never",
-        sandbox: "workspace-write",
-        ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
-      }),
-    );
+    const rawResponse = await this.request("thread/resume", {
+      threadId,
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
+    });
+    const resumed = thread.parse(rawResponse);
+    if (resumed.thread.id !== threadId)
+      throw new Error("Resumed thread identity mismatch");
+    this.captureNativeQualification(threadId, rawResponse);
     if (tools !== undefined || !this.threadTools.has(threadId))
       this.threadTools.set(threadId, definitions);
   }
@@ -564,6 +1166,14 @@ export class CodexRuntime implements Runtime {
     workspace: string,
     prompt: string,
   ): Promise<string> {
+    // Retire only the ephemeral readback before a new turn can emit callbacks.
+    // Saved endpoints/receipts and disqualified turn identities remain historical.
+    const previousTurn = this.nativeTurns.get(threadId);
+    if (previousTurn)
+      this.cancelNativeTurn(threadId, previousTurn, "New turn requested");
+    this.nativeTurns.delete(threadId);
+    this.nativeReadbacks.delete(threadId);
+    this.nativeQualifications.delete(threadId);
     const response = turn.parse(
       await this.request("turn/start", {
         threadId,
@@ -573,10 +1183,13 @@ export class CodexRuntime implements Runtime {
         sandboxPolicy: executionPolicy(workspace),
       }),
     );
+    this.nativeTurns.set(threadId, response.turn.id);
+    void this.qualifyNativeRequest(threadId);
     return response.turn.id;
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    this.cancelNativeTurn(threadId, turnId, "Turn interrupted");
     z.object({})
       .strict()
       .parse(await this.request("turn/interrupt", { threadId, turnId }));
@@ -717,6 +1330,11 @@ export class CodexRuntime implements Runtime {
     }
     if (message.method && message.id !== undefined) {
       const method = message.method;
+      if (
+        method === "item/tool/requestUserInput" &&
+        this.receiveNativeRequest(child, message.id, message.params)
+      )
+        return;
       if (method === "item/tool/call") {
         this.receiveToolCall(child, message.id, message.params);
         return;
@@ -763,6 +1381,8 @@ export class CodexRuntime implements Runtime {
       }
       return;
     }
+    if (message.method)
+      this.receiveNativeNotification(message.method, message.params);
     if (message.method === "turn/completed") {
       const terminal = completedTurn.safeParse(message.params);
       if (!terminal.success) {
@@ -770,6 +1390,18 @@ export class CodexRuntime implements Runtime {
           reason: "Missing terminal identity or status",
         });
       } else {
+        const waiting = this.nativeReadbacks.get(terminal.data.threadId);
+        if (
+          waiting &&
+          nativeInputRequestSchema.parse(waiting.input).turnId ===
+            terminal.data.turn.id
+        )
+          waiting.invalid = true;
+        this.cancelNativeTurn(
+          terminal.data.threadId,
+          terminal.data.turn.id,
+          "Turn ended before native receipt",
+        );
         this.finishConversationTurn(
           terminal.data.threadId,
           terminal.data.turn.id,
@@ -1175,6 +1807,10 @@ export class CodexRuntime implements Runtime {
 
   private fail(error: Error): void {
     if (this.failure) return;
+    for (const endpoint of this.nativeEndpoints.values())
+      this.cancelUserInput(endpoint.call.identity, "Runtime lost");
+    this.nativeGeneration = undefined;
+    this.nativeQualifications.clear();
     this.failure = error;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);

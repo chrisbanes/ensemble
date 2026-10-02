@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import test, { type TestContext } from "node:test";
 
 const script = resolve("test/ui01/runtime-contract.mjs");
@@ -680,3 +688,174 @@ for (const mode of [
     assert.equal(JSON.stringify(evidence).includes("PRIVATE_CONFIG"), false);
   });
 }
+
+test("service phase records the answer while paused then uses one ordinary requesting continuation", async (t) => {
+  const { createHash } = await import("node:crypto");
+  const { runService } = await import(
+    new URL("test/ui01/service-contract.mjs", `file://${process.cwd()}/`).href
+  );
+  const executable = resolve("test/ui01/native-runtime-fixture.mjs");
+  const evidence = await runService({
+    fixture: {
+      executable,
+      executableHash: createHash("sha256")
+        .update(readFileSync(executable))
+        .digest("hex"),
+    },
+    budgets: { requestMs: 1000, totalMs: 3000, cleanupMs: 500 },
+  });
+  t.after(() => {
+    rmSync(evidence.fixture.path, { recursive: true, force: true });
+    rmSync(evidence.evidencePath, { force: true });
+  });
+  assert.equal(evidence.status, "passed", JSON.stringify(evidence.failure));
+  assert.deepEqual(evidence.counts, {
+    threads: 1,
+    turns: 1,
+    requests: 1,
+    replies: 1,
+    reports: 1,
+  });
+  assert.equal(evidence.persistence.independentReadOnlyConnection, true);
+  assert.equal(evidence.persistence.zeroReplies, true);
+  assert.equal(evidence.persistence.replyIntentId, null);
+  assert.equal(evidence.receipt.outcome, "confirmed");
+  assert.equal(evidence.settlement.reportCallbackEnded, true);
+  assert.equal(evidence.cleanup.verified, true);
+  assert.equal(evidence.fixture.removed, true);
+});
+for (const mode of ["secret", "cleanup-unproved"] as const)
+  test(`service preparation ${mode} retains failure with no second turn`, async (t) => {
+    const { createHash } = await import("node:crypto");
+    const { runService } = await probe();
+    const executable = resolve("test/ui01/native-runtime-fixture.mjs");
+    const evidence = await runService({
+      fixture: {
+        executable,
+        executableHash: createHash("sha256")
+          .update(readFileSync(executable))
+          .digest("hex"),
+        mode: mode === "secret" ? "secret" : "proof",
+        ...(mode === "cleanup-unproved"
+          ? {
+              verifyTermination: async () => ({
+                kind: "unknown",
+                reason: "fixture-unproved",
+              }),
+            }
+          : {}),
+      },
+      budgets: { requestMs: 200, totalMs: 1500, cleanupMs: 500 },
+    });
+    t.after(() => {
+      rmSync(evidence.fixture.path, { recursive: true, force: true });
+      rmSync(evidence.evidencePath, { force: true });
+    });
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.counts.turns, 1);
+    assert.equal(evidence.fixture.removed, false);
+    if (mode === "secret") {
+      assert.equal(evidence.counts.replies, 0);
+      assert.equal(evidence.persistence, undefined);
+    } else {
+      assert.equal(evidence.cleanup.verified, false);
+      assert.equal(evidence.receipt.outcome, "confirmed");
+    }
+  });
+
+for (const boundary of ["startup", "service-stop", "verification"] as const)
+  test(`service proof bounds awaited ${boundary} and retains unresolved evidence`, {
+    timeout: 3000,
+  }, async (t) => {
+    const { createHash } = await import("node:crypto");
+    const { runService } = await probe();
+    const executable = resolve("test/ui01/native-runtime-fixture.mjs");
+    const started = Date.now();
+    const evidence = await runService({
+      fixture: {
+        executable,
+        executableHash: createHash("sha256")
+          .update(readFileSync(executable))
+          .digest("hex"),
+        ...(boundary === "startup" ? { mode: "startup-stall" } : {}),
+        ...(boundary === "service-stop"
+          ? { afterServiceStop: async () => new Promise(() => {}) }
+          : {}),
+        ...(boundary === "verification"
+          ? { verifyTermination: async () => new Promise(() => {}) }
+          : {}),
+      },
+      budgets: { requestMs: 200, totalMs: 1000, cleanupMs: 300 },
+    });
+    t.after(() => {
+      rmSync(evidence.fixture.path, { recursive: true, force: true });
+      rmSync(evidence.evidencePath, { force: true });
+    });
+    assert.ok(Date.now() - started < 1800);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.fixture.removed, false);
+    if (boundary === "startup") {
+      assert.equal(evidence.counts.threads, 0);
+      assert.equal(evidence.counts.turns, 0);
+      assert.match(evidence.failure.reason, /startup-deadline/);
+    } else {
+      assert.equal(evidence.counts.turns, 1);
+      assert.equal(evidence.cleanup.verified, false);
+      assert.equal(
+        evidence.cleanup.unresolvedIdentity.processId,
+        evidence.process.processId,
+      );
+      if (boundary === "service-stop")
+        assert.equal(evidence.cleanup.operations["service-stop"], "unresolved");
+      else
+        assert.match(
+          evidence.cleanup.verification.reason,
+          /process-verification-deadline/,
+        );
+    }
+  });
+
+test("service finite grant is exact-head/resource/budget bound and atomically consumed once without execution", async (t) => {
+  const { consumeServiceGrant } = await probe();
+  const root = mkdtempSync(join(tmpdir(), "ensemble-ui01-grant-fixture-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const grant = {
+    grantId: randomUUID(),
+    resource: "existing-login:codex-app-server:qualification",
+    holder: 739,
+    phase: "service",
+    authority: "root-approved-finite-service-turn",
+    head: execFileSync("git", ["rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim(),
+    limits: {
+      threads: 1,
+      turns: 1,
+      requests: 1,
+      replies: 1,
+      reports: 1,
+      requestMs: 90000,
+      totalMs: 240000,
+      cleanupMs: 10000,
+      retries: 0,
+    },
+  };
+  const path = join(root, "synthetic-grant.json");
+  for (const invalid of [
+    { ...grant, resource: "different-resource" },
+    { ...grant, holder: 737 },
+    { ...grant, head: "0".repeat(40) },
+    { ...grant, authority: "not-authorized" },
+    { ...grant, limits: { ...grant.limits, retries: 1 } },
+  ]) {
+    writeFileSync(path, JSON.stringify(invalid), { mode: 0o600 });
+    assert.throws(() => consumeServiceGrant(path));
+    assert.equal(existsSync(`${path}.consumed`), false);
+  }
+  writeFileSync(path, JSON.stringify(grant), { mode: 0o600 });
+  assert.deepEqual(consumeServiceGrant(path), grant);
+  const receipt = readFileSync(`${path}.consumed`, "utf8");
+  assert.equal(JSON.parse(receipt).grantId, grant.grantId);
+  assert.throws(() => consumeServiceGrant(path), /EEXIST/);
+  assert.equal(readFileSync(`${path}.consumed`, "utf8"), receipt);
+});
