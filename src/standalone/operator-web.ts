@@ -1,6 +1,6 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { OperatorApi } from "./operator-api.js";
+import { OperatorApiError, type OperatorApi } from "./operator-api.js";
 const mime: Record<string, string> = {
   js: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8",
@@ -56,6 +56,8 @@ export class OperatorWebBoundary {
   shell(path: string) {
     return (
       path === "/app" ||
+      path === "/app/tasks" ||
+      path === "/app/tasks/new" ||
       path === "/app/inbox" ||
       path === "/app/settings" ||
       path === "/login" ||
@@ -71,7 +73,13 @@ export class OperatorWebBoundary {
       path.startsWith("/api/")
     );
   }
-  async read(path: string) {
+  async read(path: string, query = new URLSearchParams()) {
+    if (path === "/api/operator/tasks") return this.api.readTaskListPage(query);
+    if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+    const options = path.match(
+      /^\/api\/operator\/projects\/([^/]+)\/composer-options$/,
+    );
+    if (options) return this.api.readComposerOptions(options[1] ?? "");
     if (path === "/api/operator/workspace") return this.api.readWorkspace();
     let match = path.match(/^\/api\/operator\/projects\/([^/]+)$/);
     if (match) return this.api.readProject(match[1] ?? "");
@@ -88,9 +96,11 @@ export class OperatorWebBoundary {
         "/api/operator/login",
         "/api/operator/logout",
         "/api/operator/workspace",
+        "/api/operator/tasks",
         "/api/operator/commands",
       ].includes(path) ||
       /^\/api\/operator\/(?:projects|tasks)\/[^/]+$/.test(path) ||
+      /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
       /^\/api\/operator\/assignments\/[^/]+\/history$/.test(path)
     );
   }

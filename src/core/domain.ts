@@ -49,6 +49,18 @@ const commandSchema = z.discriminatedUnion("type", [
       title: label,
       outcome: prose,
       ready: z.boolean().default(false),
+      blockerTaskIds: z
+        .array(id)
+        .max(128)
+        .refine(
+          (ids) => new Set(ids).size === ids.length,
+          "Duplicate dependency",
+        )
+        .optional(),
+      initialAssignment: z
+        .object({ assignmentId: id, profileId: id })
+        .strict()
+        .optional(),
     })
     .strict(),
   z
@@ -214,6 +226,16 @@ export class DomainConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DomainConflictError";
+  }
+}
+
+export class DomainPolicyError extends Error {
+  constructor(
+    readonly code: "forbidden" | "invalid-input",
+    message: string,
+  ) {
+    super(message);
+    this.name = "DomainPolicyError";
   }
 }
 
@@ -517,6 +539,7 @@ export class DomainStore {
           : "system:capacity";
     const hash = createHash("sha256").update(canonical(command)).digest("hex");
     this.db.exec("BEGIN IMMEDIATE");
+    let committed = false;
     try {
       const receipt = this.one(
         "SELECT payloadHash, result FROM command_receipts WHERE scope = ? AND key = ?",
@@ -538,10 +561,11 @@ export class DomainStore {
         )
         .run(scope, command.key, hash, JSON.stringify(result));
       this.db.exec("COMMIT");
+      committed = true;
       this.onChange?.();
       return result;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      if (!committed) this.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -661,6 +685,15 @@ export class DomainStore {
         "SELECT p.id, p.name, p.version, p.paused, p.leadProfileId, p.instructionsRevision, i.instructions FROM domain_projects p JOIN project_instruction_revisions i ON i.projectId = p.id AND i.revision = p.instructionsRevision ORDER BY p.name",
       )
       .all() as Row[];
+  }
+
+  /** Bounded catalog membership only; policy-bearing rows are projected separately. */
+  taskCatalog(): { id: string; projectId: string }[] {
+    return this.db
+      .prepare(
+        "SELECT t.id, t.projectId FROM domain_tasks t JOIN tasks base ON base.id=t.id ORDER BY t.id LIMIT 10001",
+      )
+      .all() as { id: string; projectId: string }[];
   }
 
   tasks(projectId: string): Row[] {
@@ -1094,7 +1127,10 @@ export class DomainStore {
         throw new Error("External admission rejected routing disposition");
       const task = this.task(data.taskId);
       if (task.projectId !== data.projectId)
-        throw new Error("Task belongs to another project");
+        throw new DomainPolicyError(
+          "forbidden",
+          "Task belongs to another project",
+        );
       const routing = this.routing(data.projectId);
       if (
         task.version !== data.taskVersion ||
@@ -1263,6 +1299,30 @@ export class DomainStore {
             command.outcome,
             Number(command.ready),
           );
+        for (const blockerTaskId of command.blockerTaskIds ?? []) {
+          this.apply({
+            type: "dependency.add",
+            key: command.key,
+            actor: command.actor,
+            projectId: command.projectId,
+            taskId: command.taskId,
+            blockerTaskId,
+            expectedVersion: Number(this.task(command.taskId).version),
+          });
+        }
+        if (command.initialAssignment) {
+          this.apply({
+            type: "assignment.create",
+            key: command.key,
+            actor: command.actor,
+            projectId: command.projectId,
+            taskId: command.taskId,
+            ...command.initialAssignment,
+            brief: `Task: ${command.title}\nOutcome: ${command.outcome}`,
+            resultDestination: "lead",
+            requesterAssignmentId: null,
+          });
+        }
         return this.task(command.taskId);
       }
       case "task.configure": {
@@ -1594,6 +1654,13 @@ export class DomainStore {
         return this.task(command.taskId);
       }
       case "assignment.create": {
+        if (
+          this.one(
+            "SELECT id FROM domain_assignments WHERE id = ?",
+            command.assignmentId,
+          )
+        )
+          throw new DomainConflictError("Assignment identity already exists");
         const task = this.task(command.taskId);
         this.projectMatch(task, command.projectId);
         const profile = this.activeProfile(command.profileId);
@@ -1606,7 +1673,10 @@ export class DomainStore {
           project.leadProfileId !== command.profileId &&
           !permitted.includes(command.profileId)
         )
-          throw new Error("Profile is not permitted for this project");
+          throw new DomainPolicyError(
+            "forbidden",
+            "Profile is not permitted for this project",
+          );
         if (command.requesterAssignmentId) {
           const requester = this.assignment(command.requesterAssignmentId);
           this.projectMatch(requester, command.projectId);
@@ -1662,7 +1732,10 @@ export class DomainStore {
         this.projectMatch(blocker, command.projectId);
         this.version(task, command.expectedVersion);
         if (command.taskId === command.blockerTaskId)
-          throw new Error("Task cannot block itself");
+          throw new DomainPolicyError(
+            "invalid-input",
+            "Task cannot block itself",
+          );
         if (command.type === "dependency.add") {
           if (this.importedTask(command.taskId))
             throw new DomainConflictError(
@@ -1673,7 +1746,11 @@ export class DomainStore {
             command.blockerTaskId,
             command.taskId,
           );
-          if (cycle) throw new Error("Local dependency cycle");
+          if (cycle)
+            throw new DomainPolicyError(
+              "invalid-input",
+              "Local dependency cycle",
+            );
           this.db
             .prepare(
               "INSERT INTO local_dependencies (taskId, blockerTaskId) VALUES (?, ?)",
@@ -1813,13 +1890,14 @@ export class DomainStore {
 
   private activeProfile(profileId: string): Row {
     const profile = this.profile(profileId);
-    if (profile.revoked) throw new Error("Profile revoked");
+    if (profile.revoked)
+      throw new DomainPolicyError("forbidden", "Profile revoked");
     return profile;
   }
 
   private operator(command: { actor: "operator" | "agent" }): void {
     if (command.actor !== "operator")
-      throw new Error("Operator authority required");
+      throw new DomainPolicyError("forbidden", "Operator authority required");
   }
 
   private version(row: Row, expected: number): void {
@@ -1829,7 +1907,10 @@ export class DomainStore {
 
   private projectMatch(row: Row, projectId: string): void {
     if (row.projectId !== projectId)
-      throw new Error("Task belongs to another project");
+      throw new DomainPolicyError(
+        "forbidden",
+        "Task belongs to another project",
+      );
   }
 
   private one(

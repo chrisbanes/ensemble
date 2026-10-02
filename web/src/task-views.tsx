@@ -1,0 +1,325 @@
+import { useState } from "react";
+import type {
+  Workspace,
+  TaskListSummary,
+} from "../../src/operator/contracts.js";
+import { Button, ResourceStatus, StatusBadge } from "./components.js";
+import type { ResourceState } from "./resource.js";
+import {
+  columns,
+  filterTasks,
+  parseTaskFilters,
+  taskColumn,
+  taskDetailHref,
+  taskFiltersUrl,
+  taskReasons,
+  reasonLabels,
+  type TaskAggregate,
+  type TaskFilters,
+} from "./tasks.js";
+function TaskContents({ task }: { task: TaskListSummary }) {
+  return (
+    <>
+      <p className="metadata muted">
+        {task.project.name ?? "Project name unavailable"} ·{" "}
+        {task.source
+          ? `GitHub ${task.source.repositoryName ?? "repository unavailable"} #${task.source.number ?? "?"}`
+          : "Local task"}
+      </p>
+      <a className="small-heading task-title" href={taskDetailHref(task)}>
+        {task.title ?? "Title unavailable"}
+      </a>
+      <p className="body">
+        <StatusBadge tone={task.attention.count ? "warning" : "neutral"}>
+          {taskColumn(task)}
+        </StatusBadge>{" "}
+        <span>
+          {task.ready ? "Ready" : "Not Ready"} · {task.execution.state}
+        </span>
+      </p>
+      <p className="metadata">
+        Task lead:{" "}
+        {task.lead?.name ?? (task.lead ? "Name unavailable" : "Unconfigured")}
+      </p>
+      {task.source && (
+        <p className="metadata muted">
+          GitHub source: {task.source.state ?? "state unavailable"}
+        </p>
+      )}
+      {taskReasons(task).map((reason) => (
+        <p key={reason} className="body muted task-reason">
+          {reason}
+        </p>
+      ))}
+    </>
+  );
+}
+export function TaskRow({ task }: { task: TaskListSummary }) {
+  return (
+    <article className="task-row" data-task-id={task.id}>
+      <TaskContents task={task} />
+    </article>
+  );
+}
+export function TaskCard({ task }: { task: TaskListSummary }) {
+  return (
+    <article className="task-card" data-task-id={task.id}>
+      <TaskContents task={task} />
+    </article>
+  );
+}
+export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
+  const [selected, setSelected] = useState(0);
+  return (
+    <div className="task-board">
+      <div className="column-navigation" aria-label="Board columns">
+        {columns.map((column, index) => (
+          <button
+            key={column}
+            className="control column-tab"
+            aria-pressed={selected === index}
+            onClick={() => {
+              setSelected(index);
+              document
+                .getElementById(`column-${column}`)
+                ?.scrollIntoView({ block: "nearest", inline: "start" });
+            }}
+          >
+            {column} ({tasks.filter((t) => taskColumn(t) === column).length})
+          </button>
+        ))}
+      </div>
+      <div className="phone-column-controls">
+        <Button
+          variant="secondary"
+          onClick={() => setSelected((i) => Math.max(0, i - 1))}
+          disabled={selected === 0}
+        >
+          Previous column
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={() =>
+            setSelected((i) => Math.min(columns.length - 1, i + 1))
+          }
+          disabled={selected === columns.length - 1}
+        >
+          Next column
+        </Button>
+      </div>
+      <div className="board-columns">
+        {columns.map((column, index) => (
+          <section
+            key={column}
+            id={`column-${column}`}
+            className={`board-column ${selected === index ? "selected-column" : ""}`}
+            aria-label={`${column} tasks`}
+          >
+            <h2 className="small-heading">
+              {column}{" "}
+              <span className="muted">
+                ({tasks.filter((t) => taskColumn(t) === column).length})
+              </span>
+            </h2>
+            {tasks
+              .filter((t) => taskColumn(t) === column)
+              .map((t) => (
+                <TaskCard key={t.id} task={t} />
+              ))}
+            {!tasks.some((t) => taskColumn(t) === column) && (
+              <p className="body muted">No tasks</p>
+            )}
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+export function TaskViews({
+  state,
+  refresh,
+  workspace,
+  path,
+  navigate,
+  projectId,
+  overview = false,
+}: {
+  state: ResourceState<TaskAggregate>;
+  refresh: () => void;
+  workspace: Workspace | null;
+  path: string;
+  navigate: (path: string) => void;
+  projectId?: string;
+  overview?: boolean;
+}) {
+  const base = path.split("?")[0] ?? "/app/tasks",
+    filters = parseTaskFilters(
+      path.includes("?") ? path.slice(path.indexOf("?")) : "",
+    );
+  const update = (patch: Partial<TaskFilters>) =>
+    navigate(taskFiltersUrl(base, { ...filters, ...patch }));
+  const tasks = filterTasks(state.data?.tasks ?? [], filters, projectId);
+  const attention = tasks.filter((t) => t.attention.count > 0),
+    work = overview ? tasks.filter((t) => t.attention.count === 0) : tasks;
+  return (
+    <>
+      <div className="task-actions">
+        <a
+          className="control button primary"
+          href={`/app/tasks/new${projectId ? `?project=${projectId}` : ""}`}
+          onClick={(e) => {
+            e.preventDefault();
+            navigate(e.currentTarget.getAttribute("href") ?? "/app/tasks/new");
+          }}
+        >
+          New task
+        </a>
+        <Button variant="secondary" onClick={refresh} disabled={state.pending}>
+          Refresh tasks
+        </Button>
+      </div>
+      <ResourceStatus state={state} retry={refresh} label="Tasks" />
+      {state.data && (
+        <p className="metadata muted">
+          Observed {new Date(state.data.firstObservedAt).toLocaleTimeString()}–
+          {new Date(state.data.lastObservedAt).toLocaleTimeString()}. This is a
+          catalog observation, not a provider sync.
+        </p>
+      )}
+      {overview && (
+        <section className="attention-preview" aria-label="Needs attention">
+          <div className="section-title">
+            <h2 className="section-heading">Needs attention</h2>
+            <a
+              className="control"
+              href="/app/inbox"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate("/app/inbox");
+              }}
+            >
+              View Inbox
+            </a>
+          </div>
+          {state.data && !attention.length && (
+            <p className="body muted">
+              No action requests in this observation.
+            </p>
+          )}
+          {attention.map((t) => (
+            <div key={t.id}>
+              <TaskRow task={t} />
+              <p className="body attention-reasons">
+                {t.attention.codes.map((c) => reasonLabels[c]).join(" · ")}
+              </p>
+            </div>
+          ))}
+        </section>
+      )}
+      <section aria-label={overview ? "Work" : "Tasks"}>
+        {overview && <h2 className="section-heading">Work</h2>}
+        <div className="task-filters">
+          <label className="field body" htmlFor="task-search">
+            Search tasks
+            <input
+              id="task-search"
+              className="control"
+              value={filters.q}
+              maxLength={512}
+              onChange={(e) => update({ q: e.target.value })}
+            />
+          </label>
+          {!projectId && (
+            <label className="field body" htmlFor="task-project">
+              Project
+              <select
+                id="task-project"
+                value={filters.project}
+                onChange={(e) => update({ project: e.target.value })}
+              >
+                <option value="">All projects</option>
+                {workspace?.data.projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name ?? "Name unavailable"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="field body" htmlFor="task-state">
+            State
+            <select
+              id="task-state"
+              value={filters.state}
+              onChange={(e) => update({ state: e.target.value })}
+            >
+              <option value="">All states</option>
+              {columns.map((c) => (
+                <option key={c}>{c}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field body" htmlFor="task-source">
+            Source
+            <select
+              id="task-source"
+              value={filters.source}
+              onChange={(e) => update({ source: e.target.value })}
+            >
+              <option value="">All sources</option>
+              <option value="local">Local</option>
+              <option value="github">GitHub</option>
+            </select>
+          </label>
+          <label className="field body" htmlFor="task-ready">
+            Readiness
+            <select
+              id="task-ready"
+              value={filters.ready}
+              onChange={(e) => update({ ready: e.target.value })}
+            >
+              <option value="">Any readiness</option>
+              <option value="yes">Ready</option>
+              <option value="no">Not Ready</option>
+            </select>
+          </label>
+        </div>
+        <div className="view-toggle" aria-label="Task presentation">
+          <Button
+            variant="secondary"
+            aria-pressed={filters.view === "list"}
+            onClick={() => update({ view: "list" })}
+          >
+            List
+          </Button>
+          <Button
+            variant="secondary"
+            aria-pressed={filters.view === "board"}
+            onClick={() => update({ view: "board" })}
+          >
+            Board
+          </Button>
+          <p className="metadata muted">{work.length} tasks</p>
+        </div>
+        {state.data && !tasks.length && (
+          <p className="introduction empty-state">
+            {state.data.tasks.length
+              ? "No tasks match these filters."
+              : workspace?.data.projects.length
+                ? "Ready for your first task. Create an outcome or save a draft."
+                : "Create a project in existing operator controls to begin."}
+          </p>
+        )}
+        {filters.view === "board" ? (
+          <TaskBoard tasks={work} />
+        ) : (
+          <div className="task-list">
+            {work.map((t) => (
+              <TaskRow key={t.id} task={t} />
+            ))}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}

@@ -1183,3 +1183,37 @@ test("core-valid material beyond public collection and depth limits remains priv
       1,
     );
 });
+
+test("rich creation rejects a revoked explicit assignee without recording a task", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await seed(f);
+  const d = f.service.domain();
+  d.execute({
+    type: "profile.configure",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: ids.profileId,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  const taskId = randomUUID();
+  await assert.rejects(
+    api.execute({
+      type: "task.create",
+      key: randomUUID(),
+      projectId: ids.projectId,
+      taskId,
+      title: "Rejected",
+      outcome: "Ship",
+      ready: true,
+      initialAssignment: {
+        assignmentId: randomUUID(),
+        profileId: ids.profileId,
+      },
+    }),
+    (e: unknown) => e instanceof Error && "code" in e && e.code === "forbidden",
+  );
+  assert.ok(!d.tasks(ids.projectId).some((t) => t.id === taskId));
+});

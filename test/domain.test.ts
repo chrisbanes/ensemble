@@ -1003,3 +1003,199 @@ test("capacity limits default, configure sparsely, replay and persist", () => {
     f.close();
   }
 });
+
+test("task.create atomically records dependencies and explicit assignment before readiness wakeup", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Lead",
+      instructions: "Coordinate",
+      capabilities: "assign",
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Project",
+      leadProfileId: profile,
+    });
+    run(f.domain, {
+      type: "task.create",
+      actor: "operator",
+      projectId: p,
+      taskId: b,
+      title: "Blocker",
+      outcome: "Finish first",
+      ready: false,
+    });
+    let observed = false;
+    const d = new DomainStore(f.db, () => {
+      observed = true;
+      assert.equal(d.dependencies(a).length, 1);
+      assert.equal(d.assignments(a).length, 1);
+      assert.equal(d.task(a).version, 2);
+      assert.equal(d.admission(a).eligible, false);
+    });
+    const command = {
+      type: "task.create",
+      key: key(),
+      actor: "operator",
+      projectId: p,
+      taskId: a,
+      title: "Rich task",
+      outcome: "Ship",
+      ready: true,
+      blockerTaskIds: [b],
+      initialAssignment: { assignmentId: assignment, profileId: profile },
+    } as unknown as DomainCommand;
+    const receipt = d.execute(command);
+    assert.ok(observed);
+    assert.equal(d.assignments(a)[0]?.brief, "Task: Rich task\nOutcome: Ship");
+    assert.equal(d.assignments(a)[0]?.profileRevision, 1);
+    assert.equal(
+      d.leadBindings().find((x) => x.taskId === a)?.profileId,
+      profile,
+    );
+    assert.deepEqual(d.execute(command), receipt);
+    f.reopen();
+    assert.deepEqual(f.domain.execute(command), receipt);
+    assert.equal(f.domain.assignments(a).length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("rich task creation rolls back invalid setup and preserves legacy omitted-field receipts", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Lead",
+      instructions: "private",
+      capabilities: "assign",
+    });
+    for (const projectId of [p, q])
+      run(f.domain, {
+        type: "project.create",
+        actor: "operator",
+        projectId,
+        name: "Project",
+        leadProfileId: profile,
+      });
+    run(f.domain, {
+      type: "task.create",
+      actor: "operator",
+      projectId: q,
+      taskId: b,
+      title: "Foreign",
+      outcome: "Work",
+      ready: false,
+    });
+    const base = {
+      type: "task.create" as const,
+      actor: "operator" as const,
+      projectId: p,
+      taskId: a,
+      title: "Task",
+      outcome: "Ship",
+      ready: true,
+    };
+    for (const invalid of [
+      { blockerTaskIds: [b] },
+      { blockerTaskIds: [a] },
+      { blockerTaskIds: [b, b] },
+      { blockerTaskIds: Array(129).fill(b) },
+      {
+        initialAssignment: {
+          assignmentId: assignment,
+          profileId: randomProfile,
+        },
+      },
+      { actor: "agent" },
+    ]) {
+      assert.throws(() =>
+        f.domain.execute({ ...base, ...invalid, key: key() } as DomainCommand),
+      );
+      assert.equal(f.domain.tasks(p).length, 0);
+      assert.equal(f.domain.assignments(a).length, 0);
+      assert.equal(f.domain.leadBindings().length, 0);
+    }
+    const legacy = { ...base, key: key() };
+    const receipt = f.domain.execute(legacy);
+    f.reopen();
+    assert.deepEqual(f.domain.execute(legacy), receipt);
+    assert.throws(
+      () => f.domain.execute({ ...legacy, blockerTaskIds: [] }),
+      /different payload/,
+    );
+  } finally {
+    f.close();
+  }
+});
+const randomProfile = "20000000-0000-4000-8000-000000000099";
+
+test("committed rich creation replays its original receipt after wakeup failure and policy revocation", () => {
+  const f = fixture();
+  try {
+    run(f.domain, {
+      type: "profile.create",
+      actor: "operator",
+      profileId: profile,
+      name: "Lead",
+      instructions: "private",
+      capabilities: "assign",
+    });
+    run(f.domain, {
+      type: "project.create",
+      actor: "operator",
+      projectId: p,
+      name: "Project",
+      leadProfileId: profile,
+    });
+    const command = {
+      type: "task.create" as const,
+      actor: "operator" as const,
+      key: key(),
+      projectId: p,
+      taskId: a,
+      title: "Task",
+      outcome: "Ship",
+      ready: false,
+      initialAssignment: { assignmentId: assignment, profileId: profile },
+    };
+    const d = new DomainStore(f.db, () => {
+      throw Error("Wakeup unavailable");
+    });
+    assert.throws(() => d.execute(command), /Wakeup unavailable/);
+    assert.equal(f.domain.tasks(p).length, 1);
+    run(f.domain, {
+      type: "profile.configure",
+      actor: "operator",
+      profileId: profile,
+      expectedVersion: 1,
+      revoked: true,
+    });
+    run(f.domain, {
+      type: "task.configure",
+      actor: "operator",
+      projectId: p,
+      taskId: a,
+      expectedVersion: 1,
+      title: "Changed",
+    });
+    assert.equal((d.execute(command) as { title: string }).title, "Task");
+    f.reopen();
+    assert.equal(
+      (f.domain.execute(command) as { title: string }).title,
+      "Task",
+    );
+    assert.equal(f.domain.assignments(a).length, 1);
+  } finally {
+    f.close();
+  }
+});

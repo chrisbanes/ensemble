@@ -1,11 +1,20 @@
 import type { CoordinationView } from "./coordination-view.js";
 import { z } from "zod";
-import { DomainCommands, DomainConflictError } from "../core/domain.js";
+import { createHash } from "node:crypto";
+import {
+  DomainCommands,
+  DomainConflictError,
+  DomainPolicyError,
+} from "../core/domain.js";
 import type {
   CoordinationInteraction,
   TaskCompletionRequest,
 } from "../core/coordination.js";
 import {
+  taskListPageSchema,
+  taskListQuerySchema,
+  composerOptionsSchema,
+  admissionSchema,
   assignmentHistorySchema,
   commandReceiptSchema,
   materialSchema,
@@ -30,6 +39,7 @@ export class OperatorApiError extends Error {
     readonly status: number,
     readonly code:
       | "not-found"
+      | "invalid-input"
       | "forbidden"
       | "conflict"
       | "unavailable"
@@ -368,6 +378,232 @@ export class OperatorApi {
               sourceIdentity: this.identity(String(t.id)),
             })),
         ),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  private capacity(projectId: string) {
+    const c = this.domain().capacityLimits();
+    return {
+      globalUsage: c.currentUsage.global,
+      globalLimit: c.globalLimit,
+      projectUsage: c.currentUsage.projects[projectId] ?? 0,
+      projectLimit:
+        c.effectiveProjectLimits[projectId] ?? c.defaultProjectLimit,
+    };
+  }
+  private admission(taskId: string) {
+    const a = this.domain().admission(taskId);
+    return {
+      eligible: a.eligible,
+      reasons: a.reasons.map((r) =>
+        admissionSchema.shape.reasons.element.safeParse(r).success
+          ? r
+          : r.startsWith("source-")
+            ? "source-held"
+            : "admission-blocked",
+      ),
+    };
+  }
+  private taskLead(task: Row, excluded: readonly string[] | undefined) {
+    const d = this.domain(),
+      projectId = String(task.projectId);
+    const binding = d
+      .leadBindings()
+      .find((b) => b.taskId === task.id && b.projectId === projectId);
+    if (binding) {
+      let name: string | null = null;
+      try {
+        name = this.safe(
+          d.profileRevision(
+            String(binding.profileId),
+            Number(binding.profileRevision),
+          ).name,
+          excluded,
+        );
+      } catch {}
+      return { profileId: String(binding.profileId), name };
+    }
+    const project = d.project(projectId);
+    if (!project.leadProfileId) return null;
+    let name: string | null = null;
+    try {
+      name = this.safe(d.profile(String(project.leadProfileId)).name, excluded);
+    } catch {}
+    return { profileId: String(project.leadProfileId), name };
+  }
+  private sourceSummary(
+    taskId: string,
+    excluded: readonly string[] | undefined,
+  ) {
+    const identity = this.identity(taskId);
+    if (!identity) return null;
+    const issue = this.service.githubSources().issue(identity.nodeId);
+    const rawName = issue?.repositoryName;
+    const repositoryName =
+      rawName &&
+      /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(rawName)) &&
+      this.safe(rawName, excluded) === rawName
+        ? String(rawName)
+        : null;
+    const number =
+      issue &&
+      Number.isSafeInteger(Number(issue.issueNumber)) &&
+      Number(issue.issueNumber) > 0
+        ? Number(issue.issueNumber)
+        : null;
+    return {
+      identity,
+      repositoryName,
+      number,
+      url:
+        repositoryName && number
+          ? `https://github.com/${repositoryName}/issues/${number}`
+          : null,
+      state: issue?.observedState ?? null,
+    };
+  }
+  private async taskSummary(taskId: string) {
+    const d = this.domain(),
+      task = d.task(taskId),
+      projectId = String(task.projectId),
+      excluded = await this.exclusions(projectId, taskId),
+      view = this.coordination().readTask(taskId),
+      execution = this.execution(task),
+      assignments = d.assignments(taskId);
+    const codes: string[] = [];
+    let count = 0;
+    const add = (code: string, n: number) => {
+      if (n) {
+        codes.push(code);
+        count += n;
+      }
+    };
+    add("question", view.questions.filter((i) => i.status === "open").length);
+    add("approval", view.approvals.filter((i) => i.status === "open").length);
+    add("unresolved-result", view.unresolvedResults.length);
+    add(
+      "completion-rejected",
+      view.completionRequests.filter(
+        (c) =>
+          c.status === "rejected" && c.taskVersion === Number(task.version),
+      ).length,
+    );
+    const uncertain =
+      execution.holds.uncertainty ||
+      (execution.holds.task && !execution.holds.stop) ||
+      assignments.some((a) => {
+        const s = this.selection(a);
+        const confirmed =
+          s.request?.state === "active" &&
+          ["running", "submitting"].includes(s.intent?.state ?? "");
+        return (
+          s.request?.state === "held" ||
+          (s.request?.state === "active" && !confirmed) ||
+          Boolean(
+            (s.record?.holds.writer || s.record?.holds.capacity) && !confirmed,
+          )
+        );
+      });
+    add("execution-uncertain", uncertain ? 1 : 0);
+    add(
+      "lead-review",
+      assignments.length === 0 &&
+        view.routing.attempts.some(
+          (a) =>
+            a.taskVersion === Number(task.version) &&
+            a.status === "lead-review",
+        )
+        ? 1
+        : 0,
+    );
+    return {
+      id: taskId,
+      projectId,
+      title: this.safe(task.title, excluded),
+      version: Number(task.version),
+      state: task.state,
+      ready: Boolean(task.ready),
+      project: this.project(d.project(projectId), excluded),
+      lead: this.taskLead(task, excluded),
+      execution,
+      admission: this.admission(taskId),
+      capacity: this.capacity(projectId),
+      source: this.sourceSummary(taskId, excluded),
+      attention: { codes, count },
+    };
+  }
+  async readTaskListPage(params = new URLSearchParams()) {
+    const values: Record<string, string> = {};
+    for (const [key, value] of params) {
+      if (key in values) throw new OperatorApiError(400, "invalid-input");
+      values[key] = value;
+    }
+    const query = taskListQuerySchema.parse(values),
+      catalog = this.domain().taskCatalog();
+    if (catalog.length > 10000) throw new OperatorApiError(503, "unavailable");
+    const catalogFingerprint = createHash("sha256")
+      .update(JSON.stringify(catalog.map((t) => [t.id, t.projectId])))
+      .digest("hex");
+    const index = query.cursor
+      ? catalog.findIndex((t) => t.id === query.cursor)
+      : -1;
+    if (query.cursor && index < 0)
+      throw new OperatorApiError(400, "invalid-input");
+    const page = catalog.slice(index + 1, index + 1 + query.limit);
+    return taskListPageSchema.parse({
+      data: {
+        tasks: await Promise.all(page.map((t) => this.taskSummary(t.id))),
+        nextCursor:
+          index + 1 + page.length < catalog.length
+            ? (page.at(-1)?.id ?? null)
+            : null,
+        catalogFingerprint,
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readComposerOptions(projectId: string) {
+    const p = this.requireProject(projectId),
+      d = this.domain(),
+      catalog = d.taskCatalog();
+    if (catalog.length > 10000) throw new OperatorApiError(503, "unavailable");
+    const excluded = await this.exclusions(projectId);
+    const permitted = new Set(
+      d.routingCandidates(projectId).map((p) => String(p.profileId)),
+    );
+    if (p.leadProfileId) permitted.add(String(p.leadProfileId));
+    const profiles = this.profiles(excluded).filter(
+      (p) => !p.revoked && permitted.has(p.id),
+    );
+    const lead = p.leadProfileId
+      ? {
+          profileId: String(p.leadProfileId),
+          name: this.safe(d.profile(String(p.leadProfileId)).name, excluded),
+        }
+      : null;
+    const dependencies = await Promise.all(
+      catalog
+        .filter((t) => t.projectId === projectId)
+        .map(async (t) => {
+          const row = d.task(t.id),
+            safe = await this.exclusions(projectId, t.id);
+          return {
+            id: t.id,
+            title: this.safe(row.title, safe),
+            state: row.state,
+            source: this.sourceSummary(t.id, safe),
+          };
+        }),
+    );
+    return composerOptionsSchema.parse({
+      data: {
+        project: this.project(p, excluded),
+        lead,
+        profiles,
+        dependencies,
+        capacity: this.capacity(projectId),
+        routingEnabled: Boolean(d.routing(projectId).enabled),
       },
       observedAt: Date.now(),
     });
@@ -867,6 +1103,11 @@ export class OperatorApi {
     } catch (error) {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)
         throw error;
+      if (error instanceof DomainPolicyError)
+        throw new OperatorApiError(
+          error.code === "forbidden" ? 403 : 400,
+          error.code,
+        );
       if (
         error instanceof DomainConflictError ||
         (error instanceof Error && conflicts.has(error.message))

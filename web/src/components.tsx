@@ -42,9 +42,11 @@ export function StatusBadge({
 export function ResourceStatus<T>({
   state,
   retry,
+  label = "Projects",
 }: {
   state: ResourceState<T>;
   retry: () => void;
+  label?: string;
 }) {
   if (state.status === "fresh")
     return (
@@ -60,13 +62,13 @@ export function ResourceStatus<T>({
     >
       <p className="body">
         {state.status === "loading"
-          ? "Loading projects…"
+          ? `Loading ${label.toLowerCase()}…`
           : state.status === "stale"
             ? state.error
               ? "Refresh failed. Showing the last fetched data."
               : "Refreshing. Showing the last fetched data."
             : state.status === "error"
-              ? "Projects are unavailable. Try again."
+              ? `${label} are unavailable. Try again.`
               : "No data loaded."}
       </p>
       {state.fetchedAt && (
