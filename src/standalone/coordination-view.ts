@@ -3,6 +3,12 @@ import {
   type HandbackSettlement,
   type TaskDeliveryView,
 } from "../core/delivery.js";
+import {
+  runtimeQuestionAnswerCommandSchema,
+  type RuntimeQuestionAnswerReceipt,
+  type RuntimeQuestionRecord,
+} from "../core/coordination.js";
+import type { StructuredQuestionAnswers } from "../core/structured-questions.js";
 import { z } from "zod";
 import type {
   AssignmentResult,
@@ -159,6 +165,23 @@ export interface CoordinationTaskView {
   unresolvedResults: UnresolvedResultDestination[];
   messages: CoordinationViewMessage[];
   questions: CoordinationInteraction[];
+  runtimeQuestions?: Array<
+    Pick<
+      RuntimeQuestionRecord,
+      | "interactionId"
+      | "requestingAssignmentId"
+      | "revision"
+      | "answers"
+      | "deliveryState"
+      | "requestState"
+      | "reason"
+    > & {
+      request: Pick<
+        RuntimeQuestionRecord["request"],
+        "questions" | "isBlocking" | "autoResolutionMs"
+      >;
+    }
+  >;
   approvals: CoordinationInteraction[];
   completionRequests: TaskCompletionRequest[];
   routing: {
@@ -439,6 +462,33 @@ export class CoordinationView {
       results: this.coordination.results(id),
       unresolvedResults: this.coordination.unresolvedResultDestinations(id),
       messages,
+      runtimeQuestions: this.coordination
+        .runtimeQuestions(id)
+        .map(
+          ({
+            interactionId,
+            requestingAssignmentId,
+            revision,
+            request,
+            answers,
+            deliveryState,
+            requestState,
+            reason,
+          }) => ({
+            interactionId,
+            requestingAssignmentId,
+            revision,
+            request: {
+              questions: request.questions,
+              isBlocking: request.isBlocking,
+              autoResolutionMs: request.autoResolutionMs,
+            },
+            answers,
+            deliveryState,
+            requestState,
+            reason,
+          }),
+        ),
       questions: interactions.filter(
         (interaction) => interaction.kind === "question",
       ),
@@ -511,6 +561,23 @@ export class CoordinationView {
         recipientAssignmentId: command.recipientAssignmentId,
       }),
     );
+  }
+
+  async answerRuntimeQuestion(input: {
+    taskId: string;
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: StructuredQuestionAnswers;
+  }): Promise<RuntimeQuestionAnswerReceipt> {
+    const command = runtimeQuestionAnswerCommandSchema.parse({
+      actor: "operator",
+      ...input,
+    });
+    this.requireInteraction(command.taskId, command.interactionId, "question");
+    const receipt = this.coordination.answerRuntimeQuestion(command);
+    await this.onCommand();
+    return receipt;
   }
 
   async answerQuestion(

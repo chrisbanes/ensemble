@@ -27,7 +27,8 @@
     "format:check": "biome format .",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
     "build:service": "tsc",
-    "build:web": "vite build --config web/vite.config.ts"
+    "build:web": "vite build --config web/vite.config.ts",
+    "ui01:live": "node test/ui01/runtime-contract.mjs --live --phase service"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "5.3.0",

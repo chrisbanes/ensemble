@@ -22,12 +22,19 @@ import {
   type CoordinationCall,
   type CoordinationReceipt,
   type InboxDelivery,
+  type RuntimeQuestionRecord,
 } from "../core/coordination.js";
 import {
   dispatchCoordinationTool,
   isCoordinationTool,
   coordinationTools,
 } from "./coordination-tools.js";
+import {
+  nativeEndpointKey,
+  encodeNativeInputReply,
+  type RuntimeUserInputRequest,
+  type RuntimeUserInputOutcome,
+} from "./native-input.js";
 import { CoordinationView } from "./coordination-view.js";
 import {
   DomainStore,
@@ -179,6 +186,10 @@ export class StandaloneService {
   private lastCompletedWorkId: string | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
   private readonly activeByWorkId = new Map<string, Promise<ExecutionIntent>>();
+  private readonly nativeWaiters = new Map<
+    string,
+    { workId: string; interactionId: string; resolve: () => void }
+  >();
   private readonly callbacks = new Map<string, Set<Promise<unknown>>>();
   private readonly routingCoordinators = new Map<string, RoutingCoordinator>();
   private readonly retryNow: () => number;
@@ -284,6 +295,9 @@ export class StandaloneService {
         state.isNeverAdmittedRefusedInboxWork(workId),
       );
       coordination.migrate();
+      coordination.invalidateRuntimeQuestions(
+        "Service restarted; native endpoints cannot be reconstructed",
+      );
       this.coordination = coordination;
       const deliveryStore = new DeliveryStore(db);
       deliveryStore.migrate();
@@ -449,6 +463,12 @@ export class StandaloneService {
           this.supervisor?.noteAnomaly(item.workId);
         }
       });
+      runtime.onUserInputRequest?.((request) =>
+        this.handleUserInputRequest(request),
+      );
+      runtime.onUserInputOutcome?.((outcome) =>
+        this.handleUserInputOutcome(outcome),
+      );
       runtime.onToolCall?.((call) => this.handleToolCall(call));
       runtime.onConversationEvent?.((event) =>
         this.receiveConversationEvent(event),
@@ -597,13 +617,21 @@ export class StandaloneService {
     const supervisor = this.supervisor;
     supervisor?.cancelObservations();
     const runtime = this.runtime;
+    let failure: unknown;
+    try {
+      if (this.db?.isOpen)
+        this.coordination?.invalidateRuntimeQuestions(
+          "Service stopped; native endpoints lost",
+        );
+    } catch (error) {
+      failure = error;
+    }
     this.runtime = undefined;
     this.clearConversationCaptures();
-    let failure: unknown;
     try {
       if (runtime) await runtime.stop();
     } catch (error) {
-      failure = error;
+      if (failure === undefined) failure = error;
     }
     await Promise.allSettled(this.active);
     const power = this.power;
@@ -632,6 +660,8 @@ export class StandaloneService {
     this.workspaceBindings = undefined;
     this.conversationHistory = undefined;
     this.activeByWorkId.clear();
+    this.nativeWaiters.clear();
+    this.callbacks.clear();
     try {
       db?.close();
     } catch (error) {
@@ -992,6 +1022,12 @@ export class StandaloneService {
     this.domain().task(taskId);
     const state = this.requireState();
     const targets = state.stopTask(taskId);
+    for (const question of this.coordination?.runtimeQuestions(taskId) ?? [])
+      if (targets.some((target) => target.workId === question.requestingWorkId))
+        this.runtime?.cancelUserInput?.(
+          question.identity,
+          "Task stopped before native receipt",
+        );
     return this.requireSupervisor().observeStop(taskId, targets);
   }
 
@@ -1042,6 +1078,236 @@ export class StandaloneService {
         if (set.size === 0) this.callbacks.delete(workId);
       })
       .catch(() => {});
+  }
+
+  private handleUserInputRequest(call: RuntimeUserInputRequest): void {
+    const state = this.requireState();
+    const runtime = this.requireRuntime();
+    const coordination = this.coordination;
+    if (!coordination) return;
+    try {
+      if (
+        runtime.currentUserInputGeneration?.() !==
+        call.identity.runtimeGeneration
+      )
+        throw new Error("Native process generation mismatch");
+      let binding = state.runtimeQuestionBinding(
+        call.identity.threadId,
+        call.identity.turnId,
+      );
+      if (!binding) {
+        const snapshot = state.nativeTurnPrebinding(
+          call.identity.threadId,
+          call.identity.turnId,
+          call.identity.runtimeGeneration,
+        );
+        if (!snapshot || !state.prebindNativeTurn(snapshot))
+          throw new Error("Native callback has no exact admitted binding");
+        this.requireSupervisor().turnBound(
+          snapshot.workId,
+          call.identity.threadId,
+          call.identity.turnId,
+        );
+        binding = state.runtimeQuestionBinding(
+          call.identity.threadId,
+          call.identity.turnId,
+        );
+      }
+      if (!binding) throw new Error("Native callback binding unavailable");
+      const recovery = state.recoveryIdentity(binding.workId);
+      const currentProcess = runtime.processIdentity?.();
+      if (
+        !recovery?.processIdentity ||
+        !currentProcess ||
+        currentProcess instanceof Promise ||
+        JSON.stringify(currentProcess) !==
+          JSON.stringify(recovery.processIdentity)
+      )
+        throw new Error("Native admitted process identity mismatch");
+      const question = coordination.recordRuntimeQuestion(call);
+      const key = nativeEndpointKey(call.identity);
+      if (this.nativeWaiters.has(key)) return;
+      let resolve!: () => void;
+      const pending = new Promise<void>((done) => {
+        resolve = done;
+      });
+      this.nativeWaiters.set(key, {
+        workId: binding.workId,
+        interactionId: question.interactionId,
+        resolve,
+      });
+      this.registerExecutionCallback(binding.workId, pending);
+    } catch {
+      const execution = state
+        .list()
+        .find(
+          (intent) =>
+            intent.threadId === call.identity.threadId &&
+            (intent.turnId === call.identity.turnId || intent.turnId === null),
+        );
+      if (execution) {
+        state.hold(execution.id, "Native callback could not be durably bound");
+        this.supervisor?.noteAnomaly(execution.workId);
+      }
+      runtime.cancelUserInput?.(
+        call.identity,
+        "Native callback binding failed",
+      );
+    }
+  }
+  private handleUserInputOutcome(outcome: RuntimeUserInputOutcome): void {
+    const waiter = this.nativeWaiters.get(nativeEndpointKey(outcome));
+    const coordination = this.coordination;
+    if (!coordination) return;
+    try {
+      const record = coordination.recordRuntimeReplyOutcome(outcome);
+      if (record.deliveryState === "confirmed" && waiter) {
+        this.nativeWaiters.delete(nativeEndpointKey(outcome));
+        waiter.resolve();
+      } else if (
+        outcome.outcome === "uncertain" ||
+        outcome.outcome === "unavailable"
+      ) {
+        const execution = this.state?.byWorkId(record.requestingWorkId);
+        if (execution) {
+          this.state?.hold(
+            execution.id,
+            "Native input delivery unavailable or uncertain",
+          );
+          this.supervisor?.noteAnomaly(execution.workId);
+        }
+      }
+    } catch {
+      const record = coordination
+        .runtimeQuestions()
+        .find(
+          (q) => nativeEndpointKey(q.identity) === nativeEndpointKey(outcome),
+        );
+      const workId = waiter?.workId ?? record?.requestingWorkId;
+      const execution = workId ? this.state?.byWorkId(workId) : undefined;
+      if (execution) {
+        this.retractWriterAndSuccessors(
+          execution,
+          "Native receipt could not be durably committed",
+        );
+        this.supervisor?.noteAnomaly(execution.workId);
+      }
+    }
+  }
+  private runtimeAnswerEligibility(question: RuntimeQuestionRecord): string[] {
+    const state = this.requireState(),
+      runtime = this.requireRuntime(),
+      domain = this.domain();
+    const reasons: string[] = [
+      ...domain.admission(question.taskId, false).reasons,
+    ];
+    const binding = state.runtimeQuestionBinding(
+      question.identity.threadId,
+      question.identity.turnId,
+    );
+    const recovery = state.recoveryIdentity(question.requestingWorkId);
+    const intent = state.byWorkId(question.requestingWorkId);
+    if (
+      !binding ||
+      binding.workId !== question.requestingWorkId ||
+      binding.assignmentId !== question.requestingAssignmentId ||
+      intent?.state !== "running"
+    )
+      reasons.push("requesting-generation-not-running");
+    if (
+      runtime.currentUserInputGeneration?.() !==
+      question.identity.runtimeGeneration
+    )
+      reasons.push("native-process-generation-changed");
+    const process = runtime.processIdentity?.();
+    if (
+      !process ||
+      process instanceof Promise ||
+      JSON.stringify(process) !== JSON.stringify(recovery?.processIdentity)
+    )
+      reasons.push("native-process-identity-changed");
+    if (binding) {
+      reasons.push(...domain.assignmentAdmission(binding.assignmentId).reasons);
+      const assignment = domain.assignment(binding.assignmentId);
+      if (
+        Number(assignment.version) !== binding.assignmentVersion ||
+        Number(assignment.instructionsRevision) !==
+          binding.instructionsRevision ||
+        Number(assignment.profileRevision) !== binding.profileRevision
+      )
+        reasons.push("native-immutable-revision-changed");
+    }
+    const hold = state.taskHold(question.taskId);
+    if (hold) reasons.push(hold);
+    if (state.stopTarget(question.requestingWorkId))
+      reasons.push("task-stopped");
+    if (state.powerAdmissionState().held) reasons.push("power-held");
+    if (this.supervisor?.hasKnownRisk(question.requestingWorkId))
+      reasons.push("known-execution-risk");
+    if (
+      state
+        .list()
+        .some(
+          (other) =>
+            other.workId !== question.requestingWorkId &&
+            ["submitting", "running", "held"].includes(other.state) &&
+            state.taskBinding(other.workId)?.taskId === question.taskId,
+        )
+    )
+      reasons.push("competing-task-generation");
+    if (!this.nativeWaiters.has(nativeEndpointKey(question.identity)))
+      reasons.push("native-endpoint-unavailable");
+    return reasons;
+  }
+  private flushRuntimeAnswers(): void {
+    const coordination = this.coordination;
+    if (!coordination || !this.runtime?.replyUserInput) return;
+    for (const question of coordination.runtimeQuestions()) {
+      if (
+        !question.answers ||
+        question.replyIntentId ||
+        question.requestState !== "available"
+      )
+        continue;
+      const reasons = this.runtimeAnswerEligibility(question);
+      if (reasons.length) {
+        coordination.holdRuntimeAnswer(
+          question.interactionId,
+          reasons.join("; "),
+        );
+        continue;
+      }
+      void this.runtime
+        .replyUserInput(
+          question.identity,
+          encodeNativeInputReply(question.request, question.answers),
+          () => {
+            const reasons = this.runtimeAnswerEligibility(question);
+            if (reasons.length) {
+              coordination.holdRuntimeAnswer(
+                question.interactionId,
+                reasons.join("; "),
+              );
+              throw new Error("Native reply held");
+            }
+            return coordination.beginRuntimeReply(
+              question.interactionId,
+              question.identity,
+            );
+          },
+        )
+        .catch(() => {
+          const current = this.coordination
+            ?.runtimeQuestions(question.taskId)
+            .find((q) => q.interactionId === question.interactionId);
+          if (current?.replyIntentId) {
+            this.runtime?.cancelUserInput?.(
+              question.identity,
+              "Native reply failed",
+            );
+          }
+        });
+    }
   }
 
   private handleToolCall(call: RuntimeToolCall): Promise<RuntimeToolResult> {
@@ -1286,6 +1552,7 @@ export class StandaloneService {
       !routingAttempts
     )
       return;
+    this.flushRuntimeAnswers();
     const deliveryWorkCompleted = (delivery: InboxDelivery): boolean => {
       const intent = state.byWorkId(delivery.deliveryWorkId);
       const binding = state.taskBinding(delivery.deliveryWorkId);
@@ -2075,8 +2342,33 @@ export class StandaloneService {
         workspace,
         this.executionPrompt(request),
       );
-      const turnBound = state.bindTurn(intent.id, turnId);
-      this.requireSupervisor().turnBound(request.workId, threadId, turnId);
+      let turnBound = state.bindTurn(intent.id, turnId);
+      let nativeRejected = false;
+      if (!turnBound) {
+        const reconciliation = state.reconcileNativeTurnStartResponse({
+          intentId: intent.id,
+          workId: request.workId,
+          threadId,
+          turnId,
+          runtimeGeneration: runtime.currentUserInputGeneration?.(),
+        });
+        turnBound = reconciliation === "matched";
+        if (reconciliation === "rejected") {
+          nativeRejected = true;
+          state.hold(
+            intent.id,
+            "Native turn start response disagrees with admitted prebinding",
+          );
+          for (const question of this.coordination?.runtimeQuestions() ?? [])
+            if (question.requestingWorkId === request.workId)
+              runtime.cancelUserInput?.(
+                question.identity,
+                "Native prebinding rejected",
+              );
+        }
+      }
+      if (!nativeRejected)
+        this.requireSupervisor().turnBound(request.workId, threadId, turnId);
       if (!turnBound) {
         conversationCapture?.discard();
         if (conversationCapture)

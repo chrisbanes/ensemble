@@ -50,6 +50,16 @@ export interface CoordinationExecutionBinding extends TaskExecutionBinding {
   state: "running" | "completed";
 }
 
+export interface NativeTurnPrebinding extends TaskExecutionBinding {
+  intentId: string;
+  workRevision: number;
+  requestSequence: number;
+  threadId: string;
+  turnId: string;
+  runtimeGeneration: string;
+  processIdentity: RuntimeProcessIdentity;
+}
+
 export interface StopTarget {
   taskId: string;
   workId: string;
@@ -930,6 +940,119 @@ export class ExecutionState {
         turnId: z.string().min(1),
       })
       .parse(rows[0]);
+  }
+
+  private readonly nativePrebindings = new Map<string, NativeTurnPrebinding>();
+  runtimeQuestionBinding(
+    threadId: string,
+    turnId: string,
+  ): CoordinationExecutionBinding | undefined {
+    const binding = this.coordinationBinding(threadId, turnId);
+    return binding?.state === "running" ? binding : undefined;
+  }
+  nativeTurnPrebinding(
+    threadId: string,
+    turnId: string,
+    runtimeGeneration: string,
+  ): NativeTurnPrebinding | undefined {
+    const matches = this.list().filter(
+      (intent) =>
+        intent.threadId === threadId &&
+        intent.state === "submitting" &&
+        intent.turnId === null,
+    );
+    if (matches.length !== 1) return undefined;
+    const intent = matches[0];
+    if (!intent) return undefined;
+    const binding = this.taskBinding(intent.workId);
+    const recovery = this.recoveryIdentity(intent.workId);
+    if (
+      !binding ||
+      !recovery?.processIdentity ||
+      recovery.workRevision === null ||
+      this.taskHold(binding.taskId) ||
+      this.powerAdmissionState().held ||
+      this.stopTarget(intent.workId)
+    )
+      return undefined;
+    return {
+      ...binding,
+      intentId: intent.id,
+      workRevision: recovery.workRevision,
+      requestSequence: recovery.requestSequence,
+      threadId,
+      turnId,
+      runtimeGeneration,
+      processIdentity: recovery.processIdentity,
+    };
+  }
+  prebindNativeTurn(input: NativeTurnPrebinding): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.nativeTurnPrebinding(
+        input.threadId,
+        input.turnId,
+        input.runtimeGeneration,
+      );
+      if (!current || JSON.stringify(current) !== JSON.stringify(input)) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const bound = this.bindTurn(input.intentId, input.turnId);
+      if (bound && !this.runtimeQuestionBinding(input.threadId, input.turnId))
+        throw new Error("Native prebinding revisions changed");
+      if (bound)
+        this.nativePrebindings.set(input.workId, Object.freeze({ ...input }));
+      this.db.exec("COMMIT");
+      return bound;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  reconcileNativeTurnStartResponse(input: {
+    intentId: string;
+    workId: string;
+    threadId: string;
+    turnId: string;
+    runtimeGeneration: string | undefined;
+  }): "matched" | "absent" | "rejected" {
+    const proof = this.nativePrebindings.get(input.workId);
+    if (!proof) return "absent";
+    this.nativePrebindings.delete(input.workId);
+    const intent = this.byWorkId(input.workId);
+    const binding = this.runtimeQuestionBinding(input.threadId, input.turnId);
+    const recovery = this.recoveryIdentity(input.workId);
+    if (
+      !intent ||
+      intent.id !== input.intentId ||
+      intent.state !== "running" ||
+      !binding ||
+      !recovery ||
+      (
+        [
+          "workId",
+          "taskId",
+          "assignmentId",
+          "assignmentVersion",
+          "instructionsRevision",
+          "profileRevision",
+          "conversationRevision",
+        ] as const
+      ).some((key) => binding[key] !== proof[key]) ||
+      proof.runtimeGeneration !== input.runtimeGeneration ||
+      proof.threadId !== input.threadId ||
+      proof.turnId !== input.turnId ||
+      proof.workRevision !== recovery.workRevision ||
+      proof.requestSequence !== recovery.requestSequence ||
+      JSON.stringify(proof.processIdentity) !==
+        JSON.stringify(recovery.processIdentity) ||
+      this.taskHold(binding.taskId) ||
+      this.powerAdmissionState().held ||
+      this.stopTarget(input.workId)
+    )
+      return "rejected";
+    return "matched";
   }
 
   coordinationBinding(

@@ -1,5 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import {
+  validateStructuredAnswers,
+  type StructuredQuestionAnswers,
+} from "./structured-questions.js";
+import {
+  nativeInputEndpointIdentitySchema,
+  nativeEndpointKey,
+  parseNativeInputRequest,
+  runtimeUserInputOutcomeSchema,
+  type NativeInputEndpointIdentity,
+  type RuntimeReplyIntent,
+  type RuntimeUserInputOutcome,
+  type RuntimeUserInputRequest,
+} from "./structured-questions.js";
 import { DomainStore } from "./domain.js";
 import {
   DeliveryStore,
@@ -169,6 +183,65 @@ function canonical(value: unknown): string {
 function payloadHash(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
+
+export type RuntimeQuestionDeliveryState =
+  | "unanswered"
+  | "recorded"
+  | "held"
+  | "sending"
+  | "sent-unconfirmed"
+  | "confirmed"
+  | "unavailable"
+  | "uncertain";
+export interface RuntimeQuestionRecord {
+  interactionId: string;
+  taskId: string;
+  requestingAssignmentId: string;
+  requestingWorkId: string;
+  revision: number;
+  identity: NativeInputEndpointIdentity;
+  request: RuntimeUserInputRequest["request"];
+  qualification: RuntimeUserInputRequest["qualification"];
+  answers: StructuredQuestionAnswers | null;
+  answerDigest: string | null;
+  replyIntentId: string | null;
+  deliveryState: RuntimeQuestionDeliveryState;
+  requestState: "available" | "unavailable";
+  reason: string | null;
+}
+export interface RuntimeQuestionAnswerReceipt {
+  interactionId: string;
+  revision: number;
+  recorded: true;
+  deliveryState: RuntimeQuestionDeliveryState;
+}
+export const runtimeQuestionAnswerCommandSchema = z
+  .object({
+    actor: z.literal("operator"),
+    key: operatorCommandKey,
+    taskId: uuid,
+    interactionId: uuid,
+    expectedRevision: z.number().int().positive(),
+    answers: z.unknown(),
+  })
+  .strict();
+const runtimeAnswerReceiptSchema = z
+  .object({
+    interactionId: uuid,
+    revision: z.number().int().positive(),
+    recorded: z.literal(true),
+    deliveryState: z.enum([
+      "unanswered",
+      "recorded",
+      "held",
+      "sending",
+      "sent-unconfirmed",
+      "confirmed",
+      "unavailable",
+      "uncertain",
+    ]),
+  })
+  .strict();
 
 export interface CoordinationCall {
   threadId: string;
@@ -399,6 +472,15 @@ export class CoordinationStore {
         updatedAt INTEGER NOT NULL DEFAULT (unixepoch()),
         CHECK((kind = 'question' AND action IS NULL AND materialHash IS NULL) OR
           (kind = 'approval' AND action IS NOT NULL AND materialHash IS NOT NULL))
+      );
+      CREATE TABLE IF NOT EXISTS coordination_runtime_questions (
+        interactionId TEXT PRIMARY KEY REFERENCES coordination_interactions(interactionId),
+        endpointKey TEXT NOT NULL UNIQUE, identityJson TEXT NOT NULL, requestJson TEXT NOT NULL,
+        qualificationJson TEXT NOT NULL, requestDigest TEXT NOT NULL,
+        answerJson TEXT, answerDigest TEXT, replyIntentId TEXT UNIQUE,
+        requestState TEXT NOT NULL CHECK(requestState IN ('available','unavailable')),
+        deliveryState TEXT NOT NULL CHECK(deliveryState IN ('unanswered','recorded','held','sending','sent-unconfirmed','confirmed','unavailable','uncertain')),
+        reason TEXT, outcomeJson TEXT
       );
       CREATE TABLE IF NOT EXISTS coordination_operator_attention (
         attentionId TEXT PRIMARY KEY,
@@ -936,6 +1018,297 @@ export class CoordinationStore {
     });
   }
 
+  private runtimeTransaction<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  runtimeQuestions(taskId?: string): RuntimeQuestionRecord[] {
+    const sql = `SELECT runtime.*,interaction.taskId,interaction.requestingAssignmentId,interaction.requestingWorkId,interaction.revision FROM coordination_runtime_questions runtime JOIN coordination_interactions interaction USING(interactionId)${taskId ? " WHERE interaction.taskId = ?" : ""} ORDER BY interaction.createdAt,interaction.interactionId`;
+    const rows = (
+      taskId
+        ? this.db.prepare(sql).all(uuid.parse(taskId))
+        : this.db.prepare(sql).all()
+    ) as Row[];
+    return rows.map((row) => {
+      const identity = nativeInputEndpointIdentitySchema.parse(
+        JSON.parse(String(row.identityJson)),
+      );
+      const qualification = JSON.parse(
+        String(row.qualificationJson),
+      ) as RuntimeUserInputRequest["qualification"];
+      const request = parseNativeInputRequest(
+        JSON.parse(String(row.requestJson)),
+        qualification,
+      );
+      const answers =
+        row.answerJson === null
+          ? null
+          : validateStructuredAnswers(
+              request.questions,
+              JSON.parse(String(row.answerJson)),
+            );
+      return {
+        interactionId: String(row.interactionId),
+        taskId: String(row.taskId),
+        requestingAssignmentId: String(row.requestingAssignmentId),
+        requestingWorkId: String(row.requestingWorkId),
+        revision: Number(row.revision),
+        identity,
+        request,
+        qualification,
+        answers,
+        answerDigest:
+          row.answerDigest === null ? null : String(row.answerDigest),
+        replyIntentId:
+          row.replyIntentId === null ? null : String(row.replyIntentId),
+        deliveryState: runtimeAnswerReceiptSchema.shape.deliveryState.parse(
+          row.deliveryState,
+        ),
+        requestState: z
+          .enum(["available", "unavailable"])
+          .parse(row.requestState),
+        reason: row.reason === null ? null : String(row.reason),
+      };
+    });
+  }
+  private requiredRuntimeQuestion(
+    interactionId: string,
+    taskId?: string,
+  ): RuntimeQuestionRecord {
+    const record = this.runtimeQuestions(taskId).find(
+      (q) => q.interactionId === interactionId,
+    );
+    if (!record) throw new Error("Persisted native question is unavailable");
+    return record;
+  }
+  recordRuntimeQuestion(input: RuntimeUserInputRequest): RuntimeQuestionRecord {
+    const identity = nativeInputEndpointIdentitySchema.parse(input.identity);
+    const request = parseNativeInputRequest(input.request, input.qualification);
+    if (
+      identity.threadId !== request.threadId ||
+      identity.turnId !== request.turnId ||
+      identity.itemId !== request.itemId ||
+      identity.runtimeGeneration !== input.qualification.runtimeGeneration
+    )
+      throw new Error("Native request identity mismatch");
+    const key = nativeEndpointKey(identity);
+    const digest = payloadHash(request);
+    return this.runtimeTransaction(() => {
+      const prior = this.one(
+        "SELECT interactionId,requestDigest FROM coordination_runtime_questions WHERE endpointKey = ?",
+        key,
+      );
+      if (prior) {
+        if (prior.requestDigest !== digest)
+          throw new Error("Conflicting native request replay");
+        return this.requiredRuntimeQuestion(String(prior.interactionId));
+      }
+      const binding = this.currentBinding(identity.threadId, identity.turnId);
+      if (!binding)
+        throw new Error("Native request is not bound to running work");
+      const interactionId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO coordination_interactions (interactionId,taskId,requestingAssignmentId,requestingWorkId,requestingWorkRevision,requestingAssignmentVersion,conversationRevision,kind,status,prompt,revision) VALUES (?,?,?,?,?,?,?,'question','open',?,1)`,
+        )
+        .run(
+          interactionId,
+          String(binding.taskId),
+          String(binding.assignmentId),
+          String(binding.workId),
+          Number(binding.workRevision),
+          Number(binding.assignmentVersion),
+          Number(binding.conversationRevision),
+          request.questions.map((q) => q.question).join("\n"),
+        );
+      this.db
+        .prepare(
+          `INSERT INTO coordination_runtime_questions (interactionId,endpointKey,identityJson,requestJson,qualificationJson,requestDigest,requestState,deliveryState) VALUES (?,?,?,?,?,?,'available','unanswered')`,
+        )
+        .run(
+          interactionId,
+          key,
+          JSON.stringify(identity),
+          JSON.stringify(request),
+          JSON.stringify(input.qualification),
+          digest,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO coordination_operator_attention (attentionId,taskId,interactionId,status,revision) VALUES (?,?,?,'open',1)`,
+        )
+        .run(randomUUID(), String(binding.taskId), interactionId);
+      return this.requiredRuntimeQuestion(
+        interactionId,
+        String(binding.taskId),
+      );
+    });
+  }
+  answerRuntimeQuestion(
+    input: z.infer<typeof runtimeQuestionAnswerCommandSchema>,
+  ): RuntimeQuestionAnswerReceipt {
+    const command = runtimeQuestionAnswerCommandSchema.parse(input);
+    const { key: _key, actor: _actor, ...payload } = command;
+    return this.runtimeTransaction(() => {
+      const prior = this.one(
+        `SELECT payloadHash,result FROM coordination_operator_receipts WHERE scope='answer-runtime-question' AND commandKey=?`,
+        command.key,
+      );
+      if (prior) {
+        if (prior.payloadHash !== payloadHash(payload))
+          throw new Error("Operator command key reused with different content");
+        return runtimeAnswerReceiptSchema.parse(
+          JSON.parse(String(prior.result)),
+        );
+      }
+      const question = this.runtimeQuestions(command.taskId).find(
+        (q) => q.interactionId === command.interactionId,
+      );
+      if (
+        question?.requestState !== "available" ||
+        question.answers ||
+        question.revision !== command.expectedRevision
+      )
+        throw new Error(
+          "Native question unavailable, already answered or stale",
+        );
+      if (
+        !this.one(
+          `SELECT binding.workId FROM task_execution_bindings binding JOIN execution_intents intent ON intent.workId=binding.workId JOIN task_work_revisions revision ON revision.workId=binding.workId JOIN domain_assignments assignment ON assignment.id=binding.assignmentId JOIN assignment_conversations conversation ON conversation.assignmentId=binding.assignmentId JOIN coordination_interactions interaction ON interaction.requestingWorkId=binding.workId WHERE interaction.interactionId=? AND intent.threadId=? AND intent.turnId=? AND intent.state IN ('running','held') AND assignment.version=binding.assignmentVersion AND conversation.revision=binding.conversationRevision AND revision.workRevision=interaction.requestingWorkRevision AND NOT EXISTS(SELECT 1 FROM task_work_revisions newer WHERE newer.assignmentId=revision.assignmentId AND newer.conversationRevision=revision.conversationRevision AND newer.workRevision>revision.workRevision) AND NOT EXISTS(SELECT 1 FROM task_work_revision_ambiguities ambiguous WHERE ambiguous.assignmentId=binding.assignmentId AND ambiguous.conversationRevision=binding.conversationRevision)`,
+          question.interactionId,
+          question.identity.threadId,
+          question.identity.turnId,
+        )
+      )
+        throw new Error("Native requesting work is stale");
+      const answers = validateStructuredAnswers(
+        question.request.questions,
+        command.answers,
+      );
+      const answerDigest = payloadHash(answers);
+      const receipt: RuntimeQuestionAnswerReceipt = {
+        interactionId: question.interactionId,
+        revision: question.revision + 1,
+        recorded: true,
+        deliveryState: "recorded",
+      };
+      this.db
+        .prepare(
+          `UPDATE coordination_runtime_questions SET answerJson=?,answerDigest=?,deliveryState='recorded' WHERE interactionId=? AND answerJson IS NULL`,
+        )
+        .run(JSON.stringify(answers), answerDigest, question.interactionId);
+      this.db
+        .prepare(
+          `UPDATE coordination_interactions SET status='answered',response='Structured answer recorded; runtime delivery pending',revision=revision+1,updatedAt=unixepoch() WHERE interactionId=?`,
+        )
+        .run(question.interactionId);
+      this.db
+        .prepare(
+          `INSERT INTO coordination_operator_receipts (scope,commandKey,payloadHash,result) VALUES ('answer-runtime-question',?,?,?)`,
+        )
+        .run(command.key, payloadHash(payload), JSON.stringify(receipt));
+      return receipt;
+    });
+  }
+  holdRuntimeAnswer(interactionId: string, reason: string): void {
+    this.db
+      .prepare(
+        `UPDATE coordination_runtime_questions SET deliveryState='held',reason=? WHERE interactionId=? AND answerJson IS NOT NULL AND replyIntentId IS NULL AND requestState='available'`,
+      )
+      .run(reason.slice(0, 1024), uuid.parse(interactionId));
+  }
+  beginRuntimeReply(
+    interactionId: string,
+    identity: NativeInputEndpointIdentity,
+  ): RuntimeReplyIntent {
+    return this.runtimeTransaction(() => {
+      const question = this.runtimeQuestions().find(
+        (q) => q.interactionId === interactionId,
+      );
+      if (
+        !question ||
+        nativeEndpointKey(question.identity) !== nativeEndpointKey(identity) ||
+        question.requestState !== "available" ||
+        !question.answers ||
+        !question.answerDigest ||
+        question.replyIntentId
+      )
+        throw new Error("Native reply intent unavailable");
+      const replyIntentId = randomUUID();
+      this.db
+        .prepare(
+          `UPDATE coordination_runtime_questions SET replyIntentId=?,deliveryState='sending',reason=NULL WHERE interactionId=? AND replyIntentId IS NULL`,
+        )
+        .run(replyIntentId, interactionId);
+      return { replyIntentId, answerDigest: question.answerDigest };
+    });
+  }
+  recordRuntimeReplyOutcome(
+    input: RuntimeUserInputOutcome,
+  ): RuntimeQuestionRecord {
+    const outcome = runtimeUserInputOutcomeSchema.parse(input);
+    const {
+      outcome: _outcome,
+      reason: _reason,
+      replyIntentId: _intent,
+      answerDigest: _digest,
+      ...identity
+    } = outcome;
+    return this.runtimeTransaction(() => {
+      const question = this.runtimeQuestions().find(
+        (q) => nativeEndpointKey(q.identity) === nativeEndpointKey(identity),
+      );
+      if (!question) throw new Error("Unknown native outcome identity");
+      if (
+        question.replyIntentId !== (outcome.replyIntentId ?? null) ||
+        (question.replyIntentId !== null &&
+          question.answerDigest !== outcome.answerDigest)
+      )
+        throw new Error("Native outcome intent mismatch");
+      if (!question.replyIntentId && outcome.outcome !== "unavailable")
+        throw new Error("Native outcome requires an intent");
+      if (question.deliveryState === "confirmed") return question;
+      if (
+        ["uncertain", "unavailable"].includes(question.deliveryState) &&
+        outcome.outcome !== question.deliveryState
+      )
+        throw new Error("Native uncertain outcome cannot upgrade");
+      this.db
+        .prepare(
+          `UPDATE coordination_runtime_questions SET deliveryState=?,requestState=?,reason=?,outcomeJson=? WHERE interactionId=?`,
+        )
+        .run(
+          outcome.outcome,
+          outcome.outcome === "sent-unconfirmed" ? "available" : "unavailable",
+          outcome.reason,
+          JSON.stringify(outcome),
+          question.interactionId,
+        );
+      if (outcome.outcome === "confirmed")
+        this.resolveAttention(question.interactionId);
+      return this.requiredRuntimeQuestion(
+        question.interactionId,
+        question.taskId,
+      );
+    });
+  }
+  invalidateRuntimeQuestions(reason: string): void {
+    this.runtimeTransaction(() => {
+      this.db
+        .prepare(
+          `UPDATE coordination_runtime_questions SET requestState='unavailable',deliveryState=CASE WHEN replyIntentId IS NULL THEN 'unavailable' ELSE 'uncertain' END,reason=? WHERE deliveryState<>'confirmed'`,
+        )
+        .run(reason.slice(0, 1024));
+    });
+  }
+
   interactions(taskId?: string): CoordinationInteraction[] {
     const sql =
       "SELECT interactionId, taskId, requestingAssignmentId, " +
@@ -994,6 +1367,13 @@ export class CoordinationStore {
         "SELECT interactionId, taskId, requestingAssignmentId, kind, status, revision FROM coordination_interactions WHERE interactionId = ?",
         command.interactionId,
       );
+      if (
+        this.one(
+          "SELECT interactionId FROM coordination_runtime_questions WHERE interactionId=?",
+          command.interactionId,
+        )
+      )
+        throw new Error("Native questions require their native answer command");
       this.requireOpenInteraction(
         interaction,
         "question",
@@ -2918,6 +3298,12 @@ export class CoordinationStore {
     externalAction = false,
   ): string[] {
     const reasons: string[] = [];
+    if (
+      this.runtimeQuestions(request.taskId).some(
+        (q) => q.deliveryState !== "confirmed",
+      )
+    )
+      reasons.push("unresolved-native-delivery");
     if (!externalAction)
       reasons.push(...this.domain.admission(request.taskId, true).reasons);
     if (terminal !== "completed") reasons.push("lead-work-not-successful");

@@ -40,6 +40,15 @@ and [bounded evidence](evidence/s08a-operations-2026-09-30.md) distinguish the
 deterministic exact-receipt admission journey from the live launchd proof's
 paused/unready fixture.
 
+Delivery [UI01 #739](https://github.com/chrisbanes/ensemble/issues/739) adds the
+bounded native Codex input adapter, durable recorded-versus-delivered lifecycle,
+exact eligible callback reply, conservative restart handling and curated service
+answer seam for UI05. Its bounded protocol T1 and separately granted actual T6
+service journey have passed; deterministic fixtures qualify the remaining bounded
+hold, restart and unsupported-shape contracts.
+Production structured forms and complete native UI acceptance remain outstanding.
+See the [native input evidence](evidence/ui01-runtime-input.md).
+
 ## Purpose and scope
 
 Ensemble is one standalone service coordinating multiple projects for a trusted
