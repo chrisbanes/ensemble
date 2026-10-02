@@ -27,9 +27,204 @@ test("protocol CLI refuses unapproved execution before creating runtime state", 
 const moduleUrl = new URL(`file://${script}`).href;
 const probe = () => import(moduleUrl);
 
+const qualifiedSource = {
+  codex: "codex-cli 0.159.0",
+  executableHash:
+    "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+};
+
+test("qualified Default false/null request records actual waiting before one nonce answer", async (t) => {
+  const { runProtocol } = await probe();
+  const evidence = await runProtocol({
+    source: qualifiedSource,
+    fixture: {
+      executable: process.execPath,
+      args: [resolve("test/ui01/fake-app-server.mjs"), "default"],
+    },
+    budgets: { requestMs: 1000, totalMs: 3000, holdMs: 20, cleanupMs: 500 },
+  });
+  t.after(() => {
+    rmSync(evidence.fixture.path, { recursive: true, force: true });
+    rmSync(evidence.evidencePath, { force: true });
+  });
+  assert.equal(evidence.status, "passed");
+  assert.deepEqual(evidence.request, {
+    isBlocking: false,
+    autoResolutionMs: null,
+    questions: [
+      {
+        id: "delivery",
+        header: "Delivery",
+        question: "Select delivery",
+        isOther: true,
+        isSecret: false,
+        options: [
+          { label: "Local", description: "Local output" },
+          { label: "Remote", description: "Remote output" },
+        ],
+      },
+    ],
+  });
+  assert.equal(evidence.persistence.committedBeforeEffect, true);
+  assert.equal(evidence.consumption.kind, "answer-only-nonce-report");
+  assert.equal(evidence.receipt.kind, "confirmed");
+  assert.equal(evidence.counts.turns, 1);
+  assert.equal(evidence.counts.replies, 1);
+  assert.equal(evidence.cleanup.verified, true);
+});
+
+test("native qualification binds the exact thread's observed Default settings without private instructions", async (t) => {
+  const evidence = await fixture(t, "default");
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.qualification.threadId, "thread-1");
+  assert.equal(
+    evidence.qualification.runtimeGeneration,
+    evidence.runtimeGeneration,
+  );
+  assert.equal(evidence.qualification.mode, "default");
+  assert.equal(evidence.qualification.model, "fixture-model");
+  assert.equal(evidence.qualification.modelProvider, "fixture-provider");
+  assert.equal(evidence.qualification.reasoningEffort, "high");
+  assert.equal(evidence.qualification.serviceTier, null);
+  assert.match(
+    evidence.qualification.developerInstructionsDigest,
+    /^[a-f0-9]{64}$/,
+  );
+  assert.equal(
+    JSON.stringify(evidence).includes("PRIVATE_MODE_INSTRUCTIONS"),
+    false,
+  );
+  const kinds = evidence.observations.map((x: { kind: string }) => x.kind);
+  assert.ok(
+    kinds.indexOf("effective-default-observed") <
+      kinds.indexOf("native-request"),
+  );
+});
+
+test("fixed prompt invokes native input directly without exec discovery or unsupported requests", async (t) => {
+  const evidence = await fixture(t, "prompt");
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.counts.requests, 1);
+  assert.equal(evidence.counts.turns, 1);
+});
+
+test("explicit async origin during a held false/null callback prevents any answer effect", async (t) => {
+  const evidence = await fixture(t, "async-held");
+  assert.equal(evidence.status, "failed");
+  assert.equal(evidence.failure.reason, "unsupported-async-input");
+  assert.equal(evidence.counts.replies, 0);
+  assert.equal(evidence.receipt.kind, "unavailable");
+  assert.equal(evidence.fixture.removed, false);
+  assert.equal(JSON.stringify(evidence).includes("PRIVATE_ASYNC"), false);
+});
+
+test("unsupported standalone free text cannot be smuggled into the fixed native proof", async (t) => {
+  const evidence = await fixture(t, "free-text-group");
+  assert.equal(evidence.status, "failed");
+  assert.equal(evidence.failure.reason, "unsupported-question-set");
+  assert.equal(evidence.counts.replies, 0);
+  assert.equal(evidence.fixture.removed, false);
+});
+
+for (const [mode, reason] of [
+  ["missing-mode", "unsupported-effective-mode"],
+  ["plan-mode", "unsupported-effective-mode"],
+  ["unknown-mode", "unsupported-effective-mode"],
+  ["foreign-resume-thread", "resume-policy-or-identity-mismatch"],
+  ["changed-model", "effective-settings-mismatch"],
+  ["changed-provider", "effective-settings-mismatch"],
+  ["changed-effort", "effective-settings-mismatch"],
+  ["changed-tier", "effective-settings-mismatch"],
+  ["conflicting-mode-settings", "effective-settings-mismatch"],
+  ["missing-instruction-settings", "effective-settings-mismatch"],
+] as const) {
+  test(`effective mode qualification refuses ${mode} before the sole turn`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, reason);
+    assert.equal(evidence.counts.turns, 0);
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.cleanup.verified, true);
+    assert.equal(
+      JSON.stringify(evidence).includes("PRIVATE_MODE_INSTRUCTIONS"),
+      false,
+    );
+  });
+}
+
+for (const source of [
+  { ...qualifiedSource, codex: "codex-cli 0.159.1" },
+  { executableHash: qualifiedSource.executableHash },
+  { ...qualifiedSource, executableHash: "0".repeat(64) },
+  { codex: qualifiedSource.codex },
+]) {
+  test(`unqualified runtime source ${JSON.stringify(source)} starts no thread or turn`, async (t) => {
+    const evidence = await fixture(t, "default", {}, source);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, "unsupported-runtime-source");
+    assert.equal(evidence.counts.threads, 0);
+    assert.equal(evidence.counts.turns, 0);
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.cleanup.verified, true);
+  });
+}
+
+for (const [mode, reason] of [
+  ["async-before-native", "unsupported-async-input"],
+  ["async-function-output", "unsupported-async-input"],
+  ["foreign-async-marker", "async-identity-mismatch"],
+  ["async-rpc", "unexpected-server-request"],
+  ["free-text-only", "unsupported-options"],
+  ["wrong-question", "unsupported-question-identity"],
+  ["terminal-held", "terminal-before-receipt-or-report"],
+  ["report-held", "report-order-or-count-mismatch"],
+] as const) {
+  test(`qualified false/null never permits ${mode}`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, reason);
+    assert.equal(evidence.counts.replies, 0);
+    assert.equal(evidence.cleanup.verified, true);
+    assert.equal(JSON.stringify(evidence).includes("PRIVATE_ASYNC"), false);
+  });
+}
+
+for (const [mode, receipt] of [
+  ["async-after-write", "uncertain"],
+  ["async-after-confirmed", "confirmed"],
+] as const) {
+  test(`async evidence in ${mode} prevents proof pass without rewriting historical receipts`, async (t) => {
+    const evidence = await fixture(t, mode);
+    assert.equal(evidence.status, "failed");
+    assert.equal(evidence.failure.reason, "unsupported-async-input");
+    assert.equal(evidence.counts.replies, 1);
+    assert.equal(evidence.receipt.kind, receipt);
+    assert.equal(evidence.fixture.removed, false);
+    assert.equal(evidence.cleanup.verified, true);
+  });
+}
+
+test("a new fixture process never replays a retained failed generation's request", async (t) => {
+  const held = await fixture(t, "async-held");
+  assert.equal(held.status, "failed");
+  assert.equal(held.counts.replies, 0);
+  assert.equal(held.fixture.removed, false);
+  const replacement = await fixture(t, "default");
+  assert.equal(replacement.status, "passed");
+  // The provider may reuse all textual endpoint ids; only the new generation is eligible.
+  assert.equal(replacement.identity.requestId, held.identity.requestId);
+  assert.notEqual(replacement.runtimeGeneration, held.runtimeGeneration);
+  assert.notEqual(replacement.fixture.taskId, held.fixture.taskId);
+  assert.notEqual(replacement.fixture.path, held.fixture.path);
+  assert.equal(replacement.counts.replies, 1);
+  assert.equal(held.receipt.kind, "unavailable");
+  assert.equal(held.counts.replies, 0);
+});
+
 test("one native callback continues only its exact disposable turn", async () => {
   const { runProtocol } = await probe();
   const evidence = await runProtocol({
+    source: qualifiedSource,
     fixture: {
       executable: process.execPath,
       args: [resolve("test/ui01/fake-app-server.mjs"), "numeric-id"],
@@ -55,6 +250,7 @@ test("one native callback continues only its exact disposable turn", async () =>
 test("persisted answer and intent are independently readable before the reply effect", async () => {
   const { runProtocol } = await probe();
   const evidence = await runProtocol({
+    source: qualifiedSource,
     fixture: {
       executable: process.execPath,
       args: [resolve("test/ui01/fake-app-server.mjs"), "custom"],
@@ -69,6 +265,7 @@ test("persisted answer and intent are independently readable before the reply ef
 test("unreadable cleanup verification retains failure evidence instead of losing the result", async () => {
   const { runProtocol } = await probe();
   const evidence = await runProtocol({
+    source: qualifiedSource,
     fixture: {
       executable: process.execPath,
       args: [resolve("test/ui01/fake-app-server.mjs"), "numeric-id"],
@@ -87,9 +284,15 @@ test("unreadable cleanup verification retains failure evidence instead of losing
   );
 });
 
-async function fixture(t: TestContext, mode: string, overrides = {}) {
+async function fixture(
+  t: TestContext,
+  mode: string,
+  overrides = {},
+  source: Record<string, unknown> = qualifiedSource,
+) {
   const { runProtocol } = await probe();
   const evidence = await runProtocol({
+    source,
     fixture: {
       executable: process.execPath,
       args: [resolve("test/ui01/fake-app-server.mjs"), mode],
@@ -169,7 +372,7 @@ for (const [mode, reason] of [
   ["early-resolution", "resolution-without-reply-write"],
   ["cancelled", "cancelled-or-failed-turn"],
   ["duplicate", "duplicate-native-request"],
-  ["nonblocking", "unsupported-continuation"],
+  ["plan-flag", "unsupported-continuation"],
   ["timed", "unsupported-continuation"],
   ["secret", "unsupported-or-secret-question"],
   ["wrong-id-type", "resolved-identity-mismatch"],

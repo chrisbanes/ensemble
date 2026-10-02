@@ -1,17 +1,18 @@
 # UI01 native input qualification
 
 Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
-[plan revision 1](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5942570298).
-T1 preparation against `1a643463769b2c87f1503b22f9fb14068160d846`, 2 October 2026.
+[plan revision 2](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5952311804),
+prepared against `e544bcb8f7b9a6dc8b716d429937f4017fa3a444`, 2 October 2026.
 
-**Live T1 did not qualify native input.** The lead's single model turn completed
-without a native input callback. Native availability, the operational receipt and
-the required round trip remain unproved. T2–T6 and dependent issues
-[#743](https://github.com/chrisbanes/ensemble/issues/743) /
-[#745](https://github.com/chrisbanes/ensemble/issues/745) remain gated pending
-upstream scope review. No production adapter, package, configuration, login or
-installed service was changed. The one-turn budget is consumed; no retry is
-authorized.
+**The renewed live T1 is pending.** The approved
+[protocol amendment](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5951479959)
+permits one renewed root-owned proof after deterministic repair and fresh independent
+review. The original failed result and consumed grant below remain historical evidence.
+The repaired harness qualifies only the exact installed version's synchronous Default
+route, observed false/null metadata and actual held waiting; source/schema facts and
+fixture tests alone do not qualify native availability or the operational receipt.
+T2–T6, #743 and #745 remain gated. No production adapter, configuration, login or
+installed service was changed. T6 has no live grant, and the renewed T1 has no retry.
 
 ## Read-only installed evidence
 
@@ -41,17 +42,20 @@ only. There is no explicit cardinality or recommended-option field.
 
 | Capability | Current evidence / disposition |
 | --- | --- |
-| Native availability under ordinary production settings | Unproved; the one permitted live turn produced no native callback |
-| Blocking input with no auto-resolution | Fixture-qualified; only `true` / `null` is accepted live |
+| Native availability under ordinary production settings | Unproved; historical turn produced no native callback; renewed proof pending |
+| Synchronous Default input with no auto-resolution | Fixture-qualified; exact version/mode/route plus observed `false` / `null` and actual held waiting required |
 | Single choice | Fixture-qualified; fixed delivery options Local/Remote |
-| Free text / grouped questions | Schema candidate; live support only if observed in the fixed request |
+| Standalone free text / grouped questions | Excluded from the renewed fixed proof; no live support claimed |
 | Custom text | Fixture-qualified; live support only when `isOther` explicitly permits it |
 | Multiple selection / explicit recommendation | Unsupported by the inspected schema; never inferred from arrays or label suffixes |
-| Nonblocking / timed resolution / secret answers | Unsupported by this qualification |
+| Async / nonawaited / timed resolution / secret answers | Unsupported; flags alone never prove synchronous origin |
 | Same-turn answer consumption | Fixture-qualified report/nonce; live observation unproved |
 | Service persistence, hold/restart integration, production UI | Untested here; later approved slices |
 
 ## Protocol experiment contract
+
+This section records revision 1. The approved revision-2 differences appear below;
+the historical command and consumed grant do not authorize another run.
 
 After independent review, the lead invoked this command using pinned Node
 `24.21.0` and npm `12.2.0`:
@@ -207,3 +211,75 @@ This final change is documentation only. Reuse the repaired harness's passing
 341-test full check and 27-test targeted evidence; proportional validation checks
 this document's facts, scope, privacy and diff whitespace. The documentation owner
 ran no App Server or model turn.
+
+## Approved renewal preparation — revision 2
+
+The prompt now directly invokes `functions.request_user_input` synchronously once
+and awaits it. It forbids exec/ALL_TOOLS discovery, async or nonawaited substitutes,
+plaintext fallback and unsupported question variants. The fixed request is one
+Delivery question with Local/Remote options. A custom answer carries the fresh
+nonce only if the observed request explicitly permits `isOther`; otherwise the
+answer is Local and the supported-shape evidence remains narrower.
+
+The installed executable is resolved once and the same path supplies version,
+schema generation and runtime launch. Eligibility requires `codex-cli 0.159.0`
+and executable SHA-256
+`e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a`.
+Immediately after thread creation, a same-thread `thread/resume` reads effective
+mode without model, effort, mode or instruction overrides. Exact thread, Default,
+unchanged model/provider/effort/tier and matching mode settings are required before
+the sole turn. Private instructions are projected to a digest and discarded;
+raw configuration/history/instructions are never retained in evidence.
+
+The source-qualified synchronous RPC has no tool-name field. Tagged
+[direct registration](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/tools/spec_plan.rs#L1169),
+[synchronous handler](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/tools/handlers/request_user_input.rs#L74)
+and [session wait](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/session/mod.rs#L3110)
+explain the direct-only tool and Default false/null metadata while awaiting the answer.
+The tagged [async handler](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/core/src/tools/handlers/request_user_input_async.rs#L127)
+instead emits an async AgentMessage with questions and returns accepted; its inspected
+source SHA-256 is `16be7e521e3f91aaede5bd233a52671e0cd5454ef4d8a4a67eeb71908ab06096`.
+The source path/tag/fingerprint is recorded as inspected attribution, not a claim
+of runtime tool-history completeness. Explicit async delivery/question markers,
+async function outputs and async/unknown server-request methods fail proof.
+Unattributable alternative origins remain unproved; no universal tool allowlist
+or exhaustive history requirement is added.
+
+Selected installed schema fingerprints added to each live evidence artifact:
+
+| Generated definition | SHA-256 |
+| --- | --- |
+| `v2/ThreadResumeResponse.ts` | `080196e4c158212de187a0d3331de28bf8a62df17d90663cf5d1fc2665dd8177` |
+| `CollaborationMode.ts` | `b45d07e3c94550cff97e3d57d33045bd2d47b26a5f25a918fe2978cb08e0948f` |
+| `Settings.ts` | `75a444fb4aa9ce8c906871e5eedeaa04f4da1943fe89906725be16f582044066` |
+| `v2/ThreadItem.ts` | `047df9febb13b40263fb5b0abe244171c4dcb5e83229bbf9efba31abae840746` |
+| `v2/ItemStartedNotification.ts` | `99f52740d4e34f5c2b9850953ef8b41aaf3283ff3a733021d04a2dcec3681cce` |
+| `v2/AgentMessageDelivery.ts` | `2fa497987aab791b697c9dee5cdd634ec566bf0b82cd56b5a796f26241a95957` |
+
+The held checkpoint still requires zero reply/resolution/report/terminal effects.
+Committed answer, command receipt and immutable reply intent must be read through
+an independent SQLite connection before the exact typed reply. The original
+ordered stdin/resolution predicate and same-turn report/nonce/successful terminal
+remain required. Async evidence before write prevents all answer effects; later
+async evidence fails proof and retains uncertain effects or an already confirmed
+historical receipt without rewriting it. Exact process cleanup and retained failed
+fixtures remain unchanged. A new fixture process with reused textual endpoint IDs
+cannot replay a failed generation's answer; this is deterministic harness evidence,
+not service restart or live reattachment qualification.
+
+Only the root may invoke the renewed proof after fresh independent review: one
+thread/turn/request/reply/report, request deadline 90 seconds, total 240 seconds
+including 10 seconds cleanup, existing model/login, never/workspace-write,
+disabled network and workspace-only write roots. Any qualification failure retains
+evidence, stops T2–T6 and leaves UI01 incomplete. No renewed model turn was run by
+the repair owner; no ownership or recovery hold was released.
+
+Revision-2 deterministic validation used pinned Node `24.21.0` / npm `12.2.0`.
+The fresh build passed, targeted harness tests passed **57/57**, and the fresh full
+`npm run check` passed **513/513** with no failures, cancellations or skips. The
+sandboxed attempt encountered the existing localhost `listen EPERM` boundary;
+the exact command passed with local process/network permissions. Existing lint,
+Biome schema-version and Vite directive warnings remain. No real App Server/model
+turn was included. These results qualify the harness only. The final candidate
+packet binds exact file/diff and fresh log hashes; historical 334/341-test logs
+above do not validate this new candidate. Final diff whitespace validation passed.
