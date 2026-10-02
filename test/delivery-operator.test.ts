@@ -44,18 +44,46 @@ test("operator policy form exposes current version and grants without credential
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { browserSuite } from "./fixtures/browser-diagnostics.js";
+const browserTest = browserSuite("delivery");
 import { deliveryFixture } from "./delivery-fixture.js";
 import { OperatorAuth } from "../src/standalone/operator-auth.js";
 import { LocalOperatorHttp } from "../src/standalone/operator.js";
 import { OperatorRouteRegistry } from "../src/standalone/operator-routes.js";
 import { coordinationOperatorRoutes } from "../src/standalone/operator-coordination.js";
 
-test("authenticated Chromium settlement rejects an externally changed head and escapes feedback", async () => {
-  const f = await deliveryFixture();
-  let http: LocalOperatorHttp | undefined;
-  const server = createServer();
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-  try {
+browserTest(
+  "authenticated Chromium settlement rejects an externally changed head and escapes feedback",
+  async (_t, journey) => {
+    const f = await journey.start("fixture.start", () => deliveryFixture());
+    let http: LocalOperatorHttp | undefined;
+    const server = createServer();
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    let auth: OperatorAuth | undefined;
+    journey.ownLocal({
+      browser: async () => {
+        await browser?.close();
+      },
+      listeners: [
+        {
+          name: "http.stop",
+          close: async () => {
+            await http?.stop();
+          },
+        },
+        {
+          name: "probe.close",
+          close: async () => {
+            if (server.listening)
+              await new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+              );
+          },
+        },
+      ],
+      auth: () => auth?.close(),
+      state: () => f.close(),
+    });
     assert.equal(
       (
         await f.call("ensemble_register_pr", {
@@ -67,17 +95,30 @@ test("authenticated Chromium settlement rejects an externally changed head and e
       ).success,
       true,
     );
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve),
+    await journey.start(
+      "probe.listen",
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", resolve);
+        }),
     );
     const port = (server.address() as AddressInfo).port;
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
+    await journey.closeStep(
+      "probe.close",
+      () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
     );
     const origin = `http://127.0.0.1:${port}`,
       authFile = join(f.root, "operator-auth.json");
-    await OperatorAuth.initialize(authFile, "delivery browser password");
-    const auth = await OperatorAuth.open({ authFile, origin });
+    await journey.start("auth.initialize", () =>
+      OperatorAuth.initialize(authFile, "delivery browser password"),
+    );
+    auth = await journey.start("auth.open", () =>
+      OperatorAuth.open({ authFile, origin }),
+    );
     const routes = new OperatorRouteRegistry();
     routes.registerSlot(
       "coordination",
@@ -90,10 +131,13 @@ test("authenticated Chromium settlement rejects an externally changed head and e
     http = new LocalOperatorHttp(new LocalOperatorUi(f.domain), auth, {
       routes,
     });
-    await http.start(port);
-    browser = await chromium.launch({ headless: true });
+    await journey.start("http.start", http.start.bind(http, port));
+    browser = await journey.start("browser.launch", () =>
+      chromium.launch({ headless: true }),
+    );
     const context = await browser.newContext(),
       page = await context.newPage();
+    journey.observe(page);
     const taskPath = `/coordination/task/${f.taskId}`;
     const unauth = await context.request.post(
       `${origin}/coordination/control/delivery/settle`,
@@ -189,11 +233,5 @@ test("authenticated Chromium settlement rejects an externally changed head and e
     );
     assert.ok(outage.status() >= 400);
     assert.equal(f.service.delivery().delivery(f.taskId)?.settlement, null);
-  } finally {
-    if (server.listening)
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    await browser?.close();
-    await http?.stop();
-    await f.close();
-  }
-});
+  },
+);

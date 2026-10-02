@@ -4,8 +4,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "./temp.js";
-import { test } from "node:test";
+import {
+  browserSuite,
+  captureBrowserEvidence,
+} from "./fixtures/browser-diagnostics.js";
+const test = browserSuite("ui06");
 import { actionKinds } from "../src/core/delivery.js";
 import { chromium, type Browser, type Page } from "playwright";
 import {
@@ -13,15 +16,22 @@ import {
   seedOperatorDelivery,
   createOperatorFixture,
 } from "./fixtures/operator-web.js";
-test("Settings guides empty workspace through profile and paused project creation", async (t) => {
-  const f = await createOperatorFixture();
+test("Settings guides empty workspace through profile and paused project creation", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await page.goto(web.origin + "/app/settings");
   await page.getByLabel("Password").fill(web.password);
@@ -56,13 +66,8 @@ test("Settings guides empty workspace through profile and paused project creatio
   assert.equal(f.service.domain().projects()[0]?.paused, 1);
   assert.equal(f.runtime.turns, 0);
 });
-const evidence = join(tmpdir(), `ensemble-ui06-evidence-${process.pid}`);
 async function capture(page: Page, name: string) {
-  await mkdir(evidence, { recursive: true });
-  await page.screenshot({
-    path: join(evidence, `${name}.png`),
-    fullPage: true,
-  });
+  return captureBrowserEvidence(page, name);
 }
 async function signIn(
   page: Page,
@@ -129,16 +134,23 @@ function seedSettings(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   });
   return { profileId, projectId, taskId, assignmentId };
 }
-test("unknown configuration survives scope navigation and exact reconciliation while auth expiry purges private drafts", async (t) => {
-  const f = await createOperatorFixture();
+test("unknown configuration survives scope navigation and exact reconciliation while auth expiry purges private drafts", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   const posts: string[] = [];
   const readBodies: string[] = [];
@@ -255,16 +267,23 @@ test("unknown configuration survives scope navigation and exact reconciliation w
   assert.equal(posts.length, 3);
   assert.deepEqual(errors, []);
 });
-test("configuration inline validation stale revision and revoked lead failures retain editable input", async (t) => {
-  const f = await createOperatorFixture();
+test("configuration inline validation stale revision and revoked lead failures retain editable input", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page.getByLabel("Project name", { exact: true }).fill("");
@@ -348,7 +367,7 @@ test("configuration inline validation stale revision and revoked lead failures r
     .waitFor();
   await capture(page, "1366-revoked-profile-settings");
 });
-test("source replacement verifies repositories without diagnostic echo and observation refresh remains partial", async (t) => {
+test("source replacement verifies repositories without diagnostic echo and observation refresh remains partial", async (_t, journey) => {
   let reads = 0;
   const reader = {
     async readSelection() {
@@ -366,9 +385,20 @@ test("source replacement verifies repositories without diagnostic echo and obser
       return { status: "unknown" as const };
     },
   };
-  const f = await createOperatorFixture(null, () => reader);
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(
+      null,
+      () => reader,
+      undefined,
+      journey.fixtureOptions,
+    ),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f);
   f.service.domain().execute({
     type: "github.configure",
@@ -398,11 +428,12 @@ test("source replacement verifies repositories without diagnostic echo and obser
     selectionId: "Literal <script>bad()</script>",
     expectedVersion: 2,
   });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page
@@ -538,19 +569,26 @@ for (const layout of [
   { name: "390", width: 390, height: 844, scale: 1 },
   { name: "683-zoom", width: 683, height: 410, scale: 2 },
 ])
-  test(`settings and omitted recovery ownership remain readable at ${layout.name}`, async (t) => {
-    const f = await createOperatorFixture();
+  test(`settings and omitted recovery ownership remain readable at ${layout.name}`, async (_t, journey) => {
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
     let browser: Browser | undefined;
-    t.after(() => f.close(browser));
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
     const ids = seedSettings(f);
     seedOperatorRecovery(f, ids);
     await f.service.resumeTask(ids.taskId);
-    const web = await f.startWeb();
-    browser = await chromium.launch();
+    const web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
     const page = await browser.newPage({
       viewport: { width: layout.width, height: layout.height },
       deviceScaleFactor: layout.scale,
     });
+    journey.observe(page);
     page.setDefaultTimeout(5000);
     const external: string[] = [],
       errors: string[] = [];
@@ -676,14 +714,20 @@ for (const layout of [
     assert.deepEqual(errors, []);
     assert.equal(f.runtime.turns, 0);
     console.log(
-      `UI06 screenshots ${evidence}; Chromium ${browser.version()}; ${layout.name}`,
+      `UI06 screenshots ${journey.directory}; Chromium ${browser.version()}; ${layout.name}`,
     );
   });
 
-test("Runtime Settings records lowered capacity separately from usage and retains ownership evidence", async (t) => {
-  const f = await createOperatorFixture();
+test("Runtime Settings records lowered capacity separately from usage and retains ownership evidence", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f);
   seedOperatorRecovery(f, ids);
   await f.service.resumeTask(ids.taskId);
@@ -694,11 +738,12 @@ test("Runtime Settings records lowered capacity separately from usage and retain
       )
       .run(ids.projectId),
   );
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, "/app/settings/runtime");
   await page
@@ -781,16 +826,23 @@ function seedPlacement(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   });
   return { ids, target, destination, taskId, d };
 }
-test("actual source placement retains its original receipt after transfer removes the conflict", async (t) => {
-  const f = await createOperatorFixture();
+test("actual source placement retains its original receipt after transfer removes the conflict", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const { ids, target, taskId, d } = seedPlacement(f);
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page
@@ -834,16 +886,23 @@ test("actual source placement retains its original receipt after transfer remove
   assert.equal(d.task(taskId).version, 3);
 });
 
-test("unknown committed placement stays reachable after conflict disappearance and navigation", async (t) => {
-  const f = await createOperatorFixture();
+test("unknown committed placement stays reachable after conflict disappearance and navigation", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const { ids, target, taskId, d } = seedPlacement(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   await page
@@ -921,10 +980,16 @@ test("unknown committed placement stays reachable after conflict disappearance a
   assert.equal(f.runtime.turns, 0);
   await capture(page, "1366-reconciled-placement-original-receipt");
 });
-test("mounted reference and placement fields have unique associated controls", async (t) => {
-  const f = await createOperatorFixture();
+test("mounted reference and placement fields have unique associated controls", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const { ids, target, d } = seedPlacement(f);
   const second = randomUUID();
   d.execute({
@@ -947,11 +1012,12 @@ test("mounted reference and placement fields have unique associated controls", a
         "INSERT INTO github_memberships VALUES (?,'selection','I_SECOND','[]')",
       ).run(projectId);
   });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   const references = page.getByLabel("Credential reference change", {
@@ -988,16 +1054,23 @@ test("mounted reference and placement fields have unique associated controls", a
   assert.equal(f.runtime.turns, 0);
 });
 
-test("readiness validation focuses the exact invalid row with a real description", async (t) => {
-  const f = await createOperatorFixture();
+test("readiness validation focuses the exact invalid row with a real description", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   const labels = page.getByLabel("Ready label", { exact: true });
@@ -1050,22 +1123,33 @@ test("readiness validation focuses the exact invalid row with a real description
   await capture(page, "1366-readiness-later-row-error-focus");
 });
 
-test("Settings retains exact delivery authority and bound-PR detail without provider effects", async (t) => {
+test("Settings retains exact delivery authority and bound-PR detail without provider effects", async (_t, journey) => {
   let providerCalls = 0;
   const unexpectedProviderCall = async () => {
     providerCalls++;
     throw Error("Unexpected fixture provider call");
   };
-  const f = await createOperatorFixture(null, undefined, {
-    providerFactory: () => ({
-      inspectAction: unexpectedProviderCall,
-      preflight: unexpectedProviderCall,
-      performAction: unexpectedProviderCall,
-      inspectPr: unexpectedProviderCall,
-    }),
-  });
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(
+      null,
+      undefined,
+      {
+        providerFactory: () => ({
+          inspectAction: unexpectedProviderCall,
+          preflight: unexpectedProviderCall,
+          performAction: unexpectedProviderCall,
+          inspectPr: unexpectedProviderCall,
+        }),
+      },
+      journey.fixtureOptions,
+    ),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
     d = f.service.domain();
   const grants = actionKinds.map((action) => ({
@@ -1088,11 +1172,12 @@ test("Settings retains exact delivery authority and bound-PR detail without prov
     requiredChecks: [{ name: "check", appId: 42 }],
   });
   const caller = seedOperatorDelivery(f, ids),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   const external: string[] = [],
     errors: string[] = [];
@@ -1216,20 +1301,27 @@ test("Settings retains exact delivery authority and bound-PR detail without prov
   assert.deepEqual(external, []);
   assert.deepEqual(errors, []);
   console.log(
-    `UI06 retained delivery: two guarded settlement forms, all nine grant kinds, zero provider calls; screenshots ${evidence}`,
+    `UI06 retained delivery: two guarded settlement forms, all nine grant kinds, zero provider calls; screenshots ${journey.directory}`,
   );
 });
 
-test("non-owner project keeps one unknown placement and its original receipt after navigation", async (t) => {
-  const f = await createOperatorFixture();
+test("non-owner project keeps one unknown placement and its original receipt after navigation", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const { ids, target, destination, taskId, d } = seedPlacement(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${target}/settings`);
   await page
@@ -1440,16 +1532,23 @@ test("non-owner project keeps one unknown placement and its original receipt aft
   await capture(page, "1366-non-owner-recorded-placement");
 });
 
-test("initial placement conflict requires explicit loaded revision adoption while preserving choice", async (t) => {
-  const f = await createOperatorFixture();
+test("initial placement conflict requires explicit loaded revision adoption while preserving choice", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const { ids, target, taskId, d } = seedPlacement(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/projects/${target}/settings`);
   await page
@@ -1562,16 +1661,23 @@ test("initial placement conflict requires explicit loaded revision adoption whil
   await capture(page, "1366-placement-adopted-revision-recorded");
 });
 
-test("profile configuration reload observes its current revision without replacing dirty input", async (t) => {
-  const f = await createOperatorFixture();
+test("profile configuration reload observes its current revision without replacing dirty input", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web, `/app/profiles/${ids.profileId}/settings`);
   await page
@@ -1638,20 +1744,28 @@ test("profile configuration reload observes its current revision without replaci
   assert.equal(f.service.domain().profile(ids.profileId).version, 3);
   assert.equal(f.runtime.turns, 0);
 });
-test("new private input survives a detached receipt and old-session 401 after same-document reauthentication", async (t) => {
+test("new private input survives a detached receipt and old-session 401 after same-document reauthentication", async (_t, journey) => {
   for (const mode of ["receipt-expiry", "401-logout"] as const) {
-    const f = await createOperatorFixture();
+    journey.restart();
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
     let browser: Browser | undefined;
-    t.after(() => f.close(browser));
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
     const ids = seedSettings(f),
-      web = await f.startWeb();
-    browser = await chromium.launch();
+      web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
     const page = await browser.newPage({
       viewport:
         mode === "receipt-expiry"
           ? { width: 1366, height: 820 }
           : { width: 390, height: 844 },
     });
+    journey.observe(page);
     page.setDefaultTimeout(5000);
     const posts: string[] = [],
       publicBodies: string[] = [],
@@ -1793,16 +1907,23 @@ test("new private input survives a detached receipt and old-session 401 after sa
     assert.deepEqual(errors, []);
   }
 });
-test("aborted old configuration read preserves new input and a current logout 401 releases its pending control", async (t) => {
-  const f = await createOperatorFixture();
+test("aborted old configuration read preserves new input and a current logout 401 releases its pending control", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const ids = seedSettings(f),
-    web = await f.startWeb();
-  browser = await chromium.launch();
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   const errors: string[] = [];
   let posts = 0;

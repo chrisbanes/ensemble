@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { browserSuite } from "./fixtures/browser-diagnostics.js";
+const test = browserSuite("conversation");
 import { type Browser, chromium } from "playwright";
 import type { Runtime } from "../src/standalone/codex.js";
 import {
@@ -44,7 +45,7 @@ function command(service: StandaloneService, body: Record<string, unknown>) {
     .execute({ actor: "operator", key: randomUUID(), ...body } as never);
 }
 
-test("assignment UI renders bounded sanitized history, omissions and immutable generations after restart", async (t) => {
+test("assignment UI renders bounded sanitized history, omissions and immutable generations after restart", async (_t, journey) => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-s05-history-ui-"));
   const dataDir = join(root, "data");
   let currentSecret = "";
@@ -59,14 +60,34 @@ test("assignment UI renders bounded sanitized history, omissions and immutable g
   let browser: Browser | undefined;
   let http: LocalOperatorHttp | undefined;
   let auth: OperatorAuth | undefined;
-  t.after(async () => {
-    await browser?.close();
-    await http?.stop();
-    auth?.close();
-    await service.stop();
-    rmSync(root, { recursive: true, force: true });
+  let reservation: ReturnType<typeof createServer> | undefined;
+  journey.ownLocal({
+    browser: async () => {
+      await browser?.close();
+    },
+    listeners: [
+      {
+        name: "http.stop",
+        close: async () => {
+          await http?.stop();
+        },
+      },
+      {
+        name: "probe.close",
+        close: async () => {
+          const held = reservation;
+          if (held?.listening)
+            await new Promise<void>((resolve, reject) =>
+              held.close((error) => (error ? reject(error) : resolve())),
+            );
+        },
+      },
+    ],
+    auth: () => auth?.close(),
+    state: () => service.stop(),
+    directory: () => rmSync(root, { recursive: true, force: true }),
   });
-  await service.start();
+  await journey.start("service.start", () => service.start());
   const profileId = randomUUID();
   const projectId = randomUUID();
   command(service, {
@@ -280,25 +301,39 @@ test("assignment UI renders bounded sanitized history, omissions and immutable g
     assert.doesNotMatch(otherBody, /Safe assistant|Visible history/);
   };
   await verify();
-  await service.stop();
+  await journey.closeStep("state.close", () => service.stop());
+  journey.restart();
   service = createService();
-  await service.start();
+  await journey.start("service.start", () => service.start());
   await verify();
 
-  const reservation = createServer();
-  await new Promise<void>((resolve, reject) => {
-    reservation.once("error", reject);
-    reservation.listen(0, "127.0.0.1", resolve);
-  });
+  const probe = createServer();
+  reservation = probe;
+  await journey.start(
+    "probe.listen",
+    () =>
+      new Promise<void>((resolve, reject) => {
+        probe.once("error", reject);
+        probe.listen(0, "127.0.0.1", resolve);
+      }),
+  );
   const port = (reservation.address() as AddressInfo).port;
-  await new Promise<void>((resolve, reject) =>
-    reservation.close((error) => (error ? reject(error) : resolve())),
+  await journey.closeStep(
+    "probe.close",
+    () =>
+      new Promise<void>((resolve, reject) =>
+        probe.close((error) => (error ? reject(error) : resolve())),
+      ),
   );
   const origin = `http://127.0.0.1:${port}`;
   const authFile = join(root, "history-ui-auth.json");
   const password = "Disposable history UI test password";
-  await OperatorAuth.initialize(authFile, password);
-  auth = await OperatorAuth.open({ authFile, origin });
+  await journey.start("auth.initialize", () =>
+    OperatorAuth.initialize(authFile, password),
+  );
+  auth = await journey.start("auth.open", () =>
+    OperatorAuth.open({ authFile, origin }),
+  );
   const routes = new OperatorRouteRegistry();
   routes.registerSlot(
     "coordination",
@@ -311,10 +346,13 @@ test("assignment UI renders bounded sanitized history, omissions and immutable g
   http = new LocalOperatorHttp(new LocalOperatorUi(service.domain()), auth, {
     routes,
   });
-  await http.start(port);
-  browser = await chromium.launch({ headless: true });
+  await journey.start("http.start", http.start.bind(http, port));
+  browser = await journey.start("browser.launch", () =>
+    chromium.launch({ headless: true }),
+  );
   const context = await browser.newContext();
   const browserPage = await context.newPage();
+  journey.observe(browserPage);
   const historyUrl = `${origin}/coordination/assignment/${first.assignmentId}`;
   await browserPage.goto(historyUrl);
   assert.match(await browserPage.locator("body").innerText(), /Sign in/);

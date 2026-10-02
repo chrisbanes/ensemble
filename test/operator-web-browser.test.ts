@@ -1,21 +1,19 @@
+import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, access } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
-import { test } from "node:test";
+import {
+  browserSuite,
+  captureBrowserEvidence,
+} from "./fixtures/browser-diagnostics.js";
+const test = browserSuite("ui02");
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
-import { tmpdir } from "./temp.js";
-const evidence = join(tmpdir(), `ensemble-ui02-evidence-${process.pid}`);
 async function screenshot(page: Page, name: string) {
-  await mkdir(evidence, { recursive: true });
-  await page.screenshot({
-    path: join(evidence, `${name}.png`),
-    fullPage: true,
-  });
+  return captureBrowserEvidence(page, name);
 }
 function contrast(first: string, second: string) {
   const luminance = (color: string) => {
@@ -43,17 +41,24 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 683, height: 410 },
 ])
-  test(`React shell browser lifecycle, states, focus and layout ${viewport.width}`, async (t) => {
-    const f = await createOperatorFixture();
+  test(`React shell browser lifecycle, states, focus and layout ${viewport.width}`, async (_t, journey) => {
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
     let browser: Browser | undefined;
-    t.after(() => f.close(browser));
-    const web = await f.startWeb();
-    browser = await chromium.launch();
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
+    const web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
     const context = await browser.newContext({
       viewport,
       deviceScaleFactor: viewport.width === 683 ? 2 : 1,
     });
     const page = await context.newPage();
+    journey.observe(page);
     page.setDefaultTimeout(5000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -316,18 +321,25 @@ for (const viewport of [
     assert.deepEqual(external, []);
     assert.deepEqual(violations, []);
     assert.deepEqual(pageErrors, []);
-    console.log(`UI02 browser evidence: ${evidence}`);
+    console.log(`UI02 browser evidence: ${journey.directory}`);
   });
-test("browser API guards, absolute expiry, successful logout and restart reject private reads and writes", async (t) => {
-  const f = await createOperatorFixture();
+test("browser API guards, absolute expiry, successful logout and restart reject private reads and writes", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
-  let web = await f.startWeb();
-  browser = await chromium.launch();
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  let web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const context = await browser.newContext({
     viewport: { width: 1366, height: 820 },
   });
   const page = await context.newPage();
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await page.goto(`${web.origin}/app`);
   await page.getByLabel("Password", { exact: true }).fill(web.password);
@@ -403,9 +415,10 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   const oldOrigin = web.origin;
   await web.close();
-  await f.service.stop();
-  await f.service.start();
-  web = await f.startWeb();
+  await journey.closeStep("service.stop", () => f.service.stop(), f.lifecycle);
+  journey.restart();
+  await journey.start("service.start", () => f.service.start());
+  web = await journey.start("fixture.web", () => f.startWeb());
   assert.notEqual(web.origin, oldOrigin);
   assert.equal(
     (
@@ -418,37 +431,41 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   assert.equal(f.runtime.turns, 0);
 });
 
-test("failed browser assertion surfaces without listener/client cleanup deadlock", {
-  timeout: 20000,
-}, async () => {
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
-  const child = spawn(
-    process.execPath,
-    [
-      "--test",
-      "--test-timeout=15000",
-      fileURLToPath(
-        new URL("./fixtures/operator-browser-failure.js", import.meta.url),
-      ),
-    ],
-    { env, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  child.stdout.on("data", (chunk) => {
-    output += String(chunk);
-  });
-  child.stderr.on("data", (chunk) => {
-    output += String(chunk);
-  });
-  const [code] = await once(child, "close");
-  assert.equal(code, 1, output);
-  assert.match(
-    output,
-    /Injected browser assertion must surface before cleanup rescue/,
-  );
-  assert.doesNotMatch(output, /owned client watchdog rescue/, output);
-  const directory = output.match(/failure fixture removed: ([^\r\n]+)/)?.[1];
-  assert.ok(directory, output);
-  await assert.rejects(access(directory));
-});
+nodeTest(
+  "failed browser assertion surfaces without listener/client cleanup deadlock",
+  {
+    timeout: 20000,
+  },
+  async () => {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(
+      process.execPath,
+      [
+        "--test",
+        "--test-timeout=15000",
+        fileURLToPath(
+          new URL("./fixtures/operator-browser-failure.js", import.meta.url),
+        ),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      output += String(chunk);
+    });
+    const [code] = await once(child, "close");
+    assert.equal(code, 1, output);
+    assert.match(
+      output,
+      /Injected browser assertion must surface before cleanup rescue/,
+    );
+    assert.doesNotMatch(output, /owned client watchdog rescue/, output);
+    const directory = output.match(/failure fixture removed: ([^\r\n]+)/)?.[1];
+    assert.ok(directory, output);
+    await assert.rejects(access(directory));
+  },
+);
