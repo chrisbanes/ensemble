@@ -17,6 +17,7 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /project/:id | github.preview | preview selections; activation via preview receipt | UI06 #744 | no |
 | /project/:id | github.refresh | refresh observation | UI06 #744 | no |
 | /project/:id | github.place | conflicting placement | UI06 #744 | no |
+| /project/:id | delivery.configure | completion mode; scoped grants; required checks; set/clear credential reference | UI06 #744 retained exact policy/authority editor | no |
 | /project/:id | task.create | draft; create and start; retained alongside delivered `/app/tasks/new` composer | UI03 #741 delivered | yes |
 | /task/:id | task.configure | local title; outcome; readiness | UI04 #742 | yes |
 | /task/:id | source.review | source identity; body; status; Project fields; native blockers; review; hold resolution | UI04 #742 | no |
@@ -29,6 +30,9 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /runtime/assignment/:id | read | generation; holds; advanced recovery evidence | UI06 #744 | read subset |
 | /coordination/task/:id | /coordination/control/message | message recipient; exact version; durable message | UI04 #742 | yes |
 | /coordination/task/:id | /coordination/control/result/recipient | unresolved results; destination reconciliation | UI04 #742 | yes |
+| /coordination/task/:id | read | separate issue/Project, PR and task facts; delivery holds; action outcomes; provider feedback | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/settle | Accept handback; Settle outcome as closed; exact task/delivery/policy revisions and PR identity/head | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/refresh | Refresh delivery observations | UI04 #742 retained detail | no |
 | /coordination/assignment/:id | read | retained captured history; omissions; results | UI04 #742 | yes |
 | /coordination/task/:id | /coordination/control/question/answer | plain question and exact revision answer | UI05 #743 | yes |
 | /coordination/task/:id | /coordination/control/approval/decision | retained exact material; approve; deny | UI05 #743 | yes |
@@ -36,6 +40,8 @@ Each semicolon-separated control is individually retained at the listed destinat
 | all authenticated views | /logout | sign-out | UI02 #740 | yes |
 | all views | navigation | delivered overview/project List/Board/composer; retained task/profile/assignment/Runtime/Coordination destinations | UI03 #741 delivered / UI04 #742 | curated reads |
 | `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
+
+The delivery rows record the existing S07a controls and the ownership in the [reviewed UI06 revision 2 plan](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5948676415): UI06 retains the exact policy/authority editor, while UI04 owns the task delivery facts, guarded handback settlement and observation refresh. These controls have no JSON delivery adapter in this foundation. Settlement records an operator decision; refresh requests provider observations. Neither action alone completes the local task.
 
 Programmatic support (no new HTTP exposure):
 
