@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { chromium, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { tmpdir } from "./temp.js";
 const evidence = join(tmpdir(), `ensemble-ui03-evidence-${process.pid}`);
@@ -27,7 +27,8 @@ async function signIn(
 }
 test("List and Board preserve identical filtered task IDs and never submit commands", async (t) => {
   const f = await createOperatorFixture();
-  t.after(() => f.close());
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
   const d = f.service.domain(),
     projectId = randomUUID();
   d.execute({
@@ -50,9 +51,8 @@ test("List and Board preserve identical filtered task IDs and never submit comma
       outcome: "Work",
       ready: false,
     });
-  const web = await f.startWeb(),
-    browser = await chromium.launch();
-  t.after(() => browser.close());
+  const web = await f.startWeb();
+  browser = await chromium.launch();
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
@@ -92,7 +92,8 @@ test("Save draft and Create and start record real task outcomes without claiming
       throw Error("Explicit assignment must bypass routing");
     },
   });
-  t.after(() => f.close());
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
   const d = f.service.domain(),
     projectId = randomUUID(),
     profileId = randomUUID(),
@@ -145,9 +146,8 @@ test("Save draft and Create and start record real task outcomes without claiming
     outcome: "Finish",
     ready: false,
   });
-  const web = await f.startWeb(),
-    browser = await chromium.launch();
-  t.after(() => browser.close());
+  const web = await f.startWeb();
+  browser = await chromium.launch();
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
@@ -251,7 +251,8 @@ test("Save draft and Create and start record real task outcomes without claiming
 
 test("browser frozen storage failure sends zero commands and restores only last saved input", async (t) => {
   const f = await createOperatorFixture();
-  t.after(() => f.close());
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
   const d = f.service.domain(),
     projectId = randomUUID();
   d.execute({
@@ -262,9 +263,8 @@ test("browser frozen storage failure sends zero commands and restores only last 
     name: "Storage project",
     leadProfileId: null,
   });
-  const web = await f.startWeb(),
-    browser = await chromium.launch();
-  t.after(() => browser.close());
+  const web = await f.startWeb();
+  browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   page.setDefaultTimeout(5000);
   await signIn(
@@ -326,7 +326,8 @@ test("browser frozen storage failure sends zero commands and restores only last 
 });
 test("committed lost-response creation survives reload expiry and exact reconciliation; failed read retains receipt", async (t) => {
   const f = await createOperatorFixture();
-  t.after(() => f.close());
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
   const d = f.service.domain(),
     projectId = randomUUID(),
     profileId = randomUUID(),
@@ -358,9 +359,8 @@ test("committed lost-response creation survives reload expiry and exact reconcil
     outcome: "First",
     ready: false,
   });
-  const web = await f.startWeb(),
-    browser = await chromium.launch();
-  t.after(() => browser.close());
+  const web = await f.startWeb();
+  browser = await chromium.launch();
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
@@ -706,10 +706,10 @@ for (const viewport of [
 ])
   test(`UI03 critical journeys remain usable at laptop phone and scaled layout ${viewport.width}`, async (t) => {
     const f = await createOperatorFixture();
-    t.after(() => f.close());
-    const web = await f.startWeb(),
-      browser = await chromium.launch();
-    t.after(() => browser.close());
+    let browser: Browser | undefined;
+    t.after(() => f.close(browser));
+    const web = await f.startWeb();
+    browser = await chromium.launch();
     const context = await browser.newContext({
         viewport,
         deviceScaleFactor: viewport.width === 683 ? 2 : 1,
@@ -1173,7 +1173,8 @@ for (const viewport of [
 
 test("composer switches scoped options despite delayed prior response and preserves input after revoked assignee", async (t) => {
   const f = await createOperatorFixture();
-  t.after(() => f.close());
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
   const d = f.service.domain(),
     a = randomUUID(),
     b = randomUUID(),
@@ -1211,9 +1212,8 @@ test("composer switches scoped options despite delayed prior response and preser
       ready: false,
     });
   }
-  const web = await f.startWeb(),
-    browser = await chromium.launch();
-  t.after(() => browser.close());
+  const web = await f.startWeb();
+  browser = await chromium.launch();
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   let release!: () => void;

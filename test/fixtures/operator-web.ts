@@ -1,3 +1,4 @@
+import type { Browser } from "playwright";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -155,7 +156,9 @@ export async function createOperatorFixture(
       listeners.add(close);
       return { origin, password, auth, http, close };
     },
-    async close() {
+    async close(browser?: Browser) {
+      // Clients must close before server.close waits for their connections.
+      await browser?.close();
       for (const close of listeners) await close();
       await service.stop();
       await rm(directory, { recursive: true, force: true });
