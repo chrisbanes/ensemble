@@ -1,5 +1,5 @@
 import { z } from "zod";
-const nonempty = z.string().trim().min(1).max(512);
+export const nonempty = z.string().trim().min(1).max(512);
 const envReference = z.string().regex(/^env:[A-Z][A-Z0-9_]*$/);
 export const projectFieldsSchema = z.array(
   z

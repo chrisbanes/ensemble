@@ -5,13 +5,36 @@ This qualifies the changed presentation against the approved UI06 contract using
 ## Source and environment
 
 - Issue #744 Agent Brief: comment `5941793027`; source digest `sha256:5662ee53ac75f788b9023d8c2d26e30db94de67094f900a3eaeaff9cca4f9d7b`.
-- Approved plan: [revision 1](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5946479127); semantic digest `sha256:03403732acb79ac87cd6077f122b681e9e88edaed28f7aff342aff77f5b09cbc`; file SHA-256 `c761830d9582e5c47df369607f94f39bcdf83fabf0988d2899f66f6419c58fc4`.
-- Fixed base: `ac128e8fa35ac45cecfc50489bd7941c1c2c956f`. The lead holds remote writes and final independent acceptance. Exact committed candidate/tree/diff identity is supplied in the owner-only final review packet; this file is part of that candidate.
+- Historical approved plan: [revision 1](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5946479127); semantic digest `sha256:03403732acb79ac87cd6077f122b681e9e88edaed28f7aff342aff77f5b09cbc`; file SHA-256 `c761830d9582e5c47df369607f94f39bcdf83fabf0988d2899f66f6419c58fc4`.
+- Historical base: `ac128e8fa35ac45cecfc50489bd7941c1c2c956f`. The lead holds remote writes and final independent acceptance. Exact committed candidate/tree/diff identity is supplied in the owner-only final review packet; this file is part of that candidate.
 - Node `24.21.0`, npm `12.2.0`, React `19.3.0`, Vite `8.3.2`, Zod `4.6.5`, Playwright `1.63.0`, Chromium `153.0.8010.12`, cached revision `1243`.
 - Pinned `npm ci` passed, installing 60 locked packages. No dependencies or lockfile changed. The optional macOS fsevents install script remained blocked by existing allowScripts policy.
 - Existing GitHub validators moved to `src/core/github-source-contracts.ts` and are re-exported from `github-source.ts`. This is one exact browser-safe schema set; Node Git verification/storage remains in its original module. Explicit input hashes remain compatible; only omitted GitHub command credential references are normalized to actual omission.
 
-## Serial slice evidence
+## Revision 2 integration evidence
+
+The approved [revision 2](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5948676415) realizes the unchanged source at exact base `dee2cc61a2a8e3293e66637017eea7ff37008560`; semantic digest `sha256:738b9d0fb3e6cebbf98a67f2cf555cd2bf0900f98d5c57c4ec24a847cfc2d57e`, plan file SHA-256 `353e38ab489893e0e735303d7577a7bb3253a27d3c27a982f7ad4f8928726586`. The original repaired candidate `7993707c14f00a789d1b2865997a3d05d27db331` was retained and exact dee2 merged without rewriting its commits. The five overlapping paths preserve delivered S07a/UI01 changes. Earlier404 checks and reviews qualify the old base only.
+
+The integrated build first failed on the closure reader's missing `nonempty` binding. Exporting/importing the same canonical browser-safe validator restores the delivered closure schema without changing constraints, required/nullable delivery policy or explicit receipt hashes. A fake environment fixture then failed on delivery reference/key/value leakage and on a deliberately unavailable lookup; the bounded exclusions now include routing/discovery/delivery references, environment keys and nonempty values, fail closed, and restore the fake variable's exact previous presence/value in teardown. Public JSON still offers no delivery command.
+
+| Slice | Renewed integrated evidence |
+| --- | --- |
+| T1 | Build red→green for canonical closure binding; two meaningful delivery privacy/fail-closed reds→green. Configuration/contracts/API/domain/GitHub/delivery policy/store/service/completion79/79. |
+| T2 | Client/state8/8 retains exact frozen unknown bytes, original scope/choice/revision correlation and auth purge. |
+| T3 | Explicit retained delivery-policy link absent browser red→green; setup/state/settings/HTTP28/28, including all12 retained UI06 browser cases and three layouts. |
+| T4 | Configuration/source/reconciliation/race/settings/HTTP36/36, renewing fake-reader preview/replay and actual Git verification. |
+| T5 | Configuration/runtime/API/recovery/scheduler/settings60/60, retaining all verified scoped holds before newest20, actual21-row omission, independent task Stop/taskHold and selected generation. |
+| T6 | Bound synthetic P7/R1 fixture invokes `DeliveryStore.registerPrWithinTransaction` in its own transaction with concrete task/assignment/work/revisions. Missing settlement-route inventory red→green. Measured84 individual operations at15 reachable destinations,42 rendered forms,13 discriminants,14 actions,18 extension routes. Both guarded settlement decisions, delivery refresh and all nine scoped grant kinds/check app binding remain at explicit retained destinations. Final T6 browser/parity/security30/30 and full pinned repository check478/478 pass; hashes are supplied in the final immutable packet. |
+
+The new read-only production browser journey follows Settings to the exact delivery policy editor and checks completion modes, all nine grants with repository/Project/field/options, required-check app binding and credential set/clear. It inspects both bound-PR settlement forms' original task/delivery/policy and repository/PR/node/head guards and cached issue/Project/PR/provider/local facts. Screenshots include laptop and phone retained policy/detail. No GET mutates a task, changes settlement, calls the fake provider or starts execution. Fixture label selectors account for populated retained HTML's wrapping label text while exact values remain asserted.
+
+Final `npm run check` passed **478/478**, zero fail/cancel/skip/todo, duration23197.891708ms; service/web typecheck, lint, formatting and production builds passed. Existing nonfatal Biome/Radix warnings remain. The sandbox attempt stopped at loopback EPERM (477 registered cases,438 passed/39 failed, including the injected-failure child not reaching its planned assertion); the exact full command was retried outside that restriction without code changes. Final log `/tmp/ensemble-744-rev2-check-retry.log`. All13 UI06 browser cases pass; the named injected-failure teardown regression also passes.
+
+Final screenshots: portable `ensemble-ui06-evidence-81697`,26 captures including all22 renewed historical journey frames and four new laptop/phone retained-delivery policy/detail frames. Screenshots persist outside fixture directories; nullable prelaunch hooks close each owned browser before auth/listeners/service/runtime/data, with no failed cleanup hooks. Exact frame/log hashes, committed HEAD/tree and full dee2-to-candidate diff are in the final immutable packet. After the successful check only this evidence file's counts/artifact metadata changed; subsequent format/diff verification records that provenance.
+
+S07a real handback/through-merge journeys remain unrun and required; UI01 native one-turn qualification retains failed zero-callback evidence and consumed budget. #737/#739 remain required open gates. This integration grants no public fixture access, native retry, live model/provider call, new adapter, release or cutover.
+
+## Historical serial slice evidence
 
 | Slice | Meaningful failing seam and resulting behavior | Verification |
 | --- | --- | --- |
@@ -32,7 +55,7 @@ Keyboard coverage includes Tab/Shift+Tab between configuration controls, drawer 
 
 Each browser consumer registers exactly one nullable prelaunch teardown hook. It closes its owned browser before listeners/auth/service/runtime and removes only fixture-owned SQLite/Git/data directories. The existing injected-failure regression passes with its literal assertion visible and fixture removal complete, without watchdog rescue. Screenshot files use `test/temp.ts` portable temp-root resolution and persist separately from fixture directories.
 
-## Commands and artifacts
+## Historical commands and artifacts
 
 Independent review of candidate `b0c463ca18be706695433c8639487e9fc55f291b` found four bounded issues. R1's production browser red lost the reconciliation control after a committed placement response was lost, the conflict disappeared and internal navigation returned; green verifies an independent original-scope outcome surface, later400/403/409 remain unknown, and five identical submissions return one original receipt with one mutation. R2's state red accepted a schema-valid receipt for the wrong chosen project; green rejects it as unknown/frozen and confirms exact replay. R3's browser red found duplicate reference/placement IDs; React IDs now preserve independent labels/controls with two reference inputs and two placements. R4's browser reds exposed missing descriptions and readiness focus; green confirms single-row and later-row invalid focus with actual error targets, while server repository errors retain the fixed safe group path. Exact red/green log hashes and final repair range are supplied in the repair packet.
 

@@ -569,6 +569,14 @@ export function ProjectConfiguration(p: SettingsProps & { projectId: string }) {
           <a href={`/project/${projectId}`}>
             Open exact private project editor
           </a>
+          <p className="body muted">
+            Delivery completion mode, scoped authority grants, required checks
+            and credentials remain in the authenticated{" "}
+            <a href={`/project/${projectId}`}>
+              Open delivery policy and authority editor
+            </a>
+            .
+          </p>
           <form
             onSubmit={(e) =>
               void submitDraft(e, d, p.client, p.session, command(), () => {

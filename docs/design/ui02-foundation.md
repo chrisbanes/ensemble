@@ -17,6 +17,10 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /project/:id | github.preview | preview selections; activation via preview receipt | UI06 #744 | no |
 | /project/:id | github.refresh | refresh observation | UI06 #744 | no |
 | /project/:id | github.place | conflicting placement | UI06 #744 | no |
+| /project/:id | delivery.configure | completion mode; scoped grants; required checks; set/clear credential reference | UI06 #744 retained exact editor | no |
+| /coordination/task/:id | delivery.read | issue observation; Project field observations; PR identity/head/state; provider feedback; external action states; local task state; delivery holds | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/settle | Accept handback; Settle outcome as closed; task/delivery/policy revisions; repository/PR/node/head guard | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/refresh | refresh delivery observations | UI04 #742 retained detail | no |
 | /project/:id | task.create | draft; create and start; retained alongside delivered `/app/tasks/new` composer | UI03 #741 delivered | yes |
 | /task/:id | task.configure | local title; outcome; readiness | UI04 #742 | yes |
 | /task/:id | source.review | source identity; body; status; Project fields; native blockers; review; hold resolution | UI04 #742 | no |

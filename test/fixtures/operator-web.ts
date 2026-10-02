@@ -24,7 +24,11 @@ import type {
   RuntimeToolCall,
   RuntimeToolResult,
 } from "../../src/standalone/codex.js";
-import { StandaloneService } from "../../src/standalone/service.js";
+import {
+  StandaloneService,
+  type StandaloneServiceOptions,
+} from "../../src/standalone/service.js";
+import { DeliveryStore } from "../../src/core/delivery.js";
 import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
@@ -63,6 +67,7 @@ import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
 export async function createOperatorFixture(
   routingClient: RoutingChoiceClient | null = null,
   readerFactory?: GitHubReaderFactory,
+  delivery?: StandaloneServiceOptions["delivery"],
 ) {
   const directory = await mkdtemp(join(tmpdir(), "ensemble-ui02-"));
   const runtime = new OperatorFixtureRuntime();
@@ -73,6 +78,7 @@ export async function createOperatorFixture(
     {
       power: { enabled: false },
       routingClient,
+      ...(delivery ? { delivery } : {}),
       ...(readerFactory ? { github: { readerFactory } } : {}),
     },
   );
@@ -215,4 +221,70 @@ export function seedOperatorRecovery(
       "INSERT INTO task_writer_holds (taskId,reason) VALUES (?,'Task stopped')",
     ).run(ids.taskId);
   });
+}
+
+// A registered synthetic PR makes the retained settlement controls observable.
+// No runtime admission or provider call occurs in this read-only fixture.
+export function seedOperatorDelivery(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  ids: { projectId: string; taskId: string; assignmentId: string },
+) {
+  const d = f.service.domain(),
+    assignment = d.assignment(ids.assignmentId),
+    task = d.task(ids.taskId),
+    workId = "ui06-bound-delivery-work";
+  const caller = {
+    ...ids,
+    taskVersion: Number(task.version),
+    assignmentVersion: Number(assignment.version),
+    workId,
+    workRevision: 1,
+    conversationRevision: 1,
+  };
+  f.seedPersistedState((db) => {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(
+        "INSERT INTO execution_intents(id,workId,prompt,workspace,state,reason,threadId,turnId,accountType,sandbox,approval) VALUES (?,?,'fixture','fixture','completed',NULL,'fixture-thread','fixture-turn','chatgpt','workspaceWrite','never')",
+      ).run(randomUUID(), workId);
+      db.prepare(
+        "INSERT INTO task_execution_bindings(workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision) VALUES (?,?,?,?,?,?,?)",
+      ).run(
+        workId,
+        ids.taskId,
+        ids.assignmentId,
+        caller.assignmentVersion,
+        Number(assignment.instructionsRevision),
+        Number(assignment.profileRevision),
+        caller.conversationRevision,
+      );
+      const binding = new DeliveryStore(db).registerPrWithinTransaction(
+        caller,
+        {
+          repositoryId: "R1",
+          nodeId: "P7",
+          number: 7,
+          baseRef: "main",
+          headRef: "cb/change",
+          headSha: "1".repeat(40),
+          baseSha: "2".repeat(40),
+          state: "OPEN",
+          draft: false,
+          merged: false,
+          reviewDecision: null,
+          checks: [],
+          closedIssueNodeIds: [],
+          mergeBlockers: [],
+          allowedMethods: ["squash"],
+        },
+        ids.assignmentId,
+      );
+      db.exec("COMMIT");
+      return binding;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  });
+  return caller;
 }

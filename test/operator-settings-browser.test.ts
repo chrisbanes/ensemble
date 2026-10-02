@@ -6,9 +6,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "./temp.js";
 import { test } from "node:test";
+import { actionKinds } from "../src/core/delivery.js";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   seedOperatorRecovery,
+  seedOperatorDelivery,
   createOperatorFixture,
 } from "./fixtures/operator-web.js";
 test("Settings guides empty workspace through profile and paused project creation", async (t) => {
@@ -571,6 +573,15 @@ for (const layout of [
       ),
       false,
     );
+    assert.equal(
+      await page
+        .getByRole("link", {
+          name: "Open delivery policy and authority editor",
+          exact: true,
+        })
+        .getAttribute("href"),
+      `/project/${ids.projectId}`,
+    );
     await capture(page, `${layout.name}-paused-configuration`);
     await page.getByLabel("Project name", { exact: true }).focus();
     await page.keyboard.press("Tab");
@@ -1018,4 +1029,172 @@ test("readiness validation focuses the exact invalid row with a real description
   assert.equal(posts, 0);
   assert.equal(f.runtime.turns, 0);
   await capture(page, "1366-readiness-later-row-error-focus");
+});
+
+test("Settings retains exact delivery authority and bound-PR detail without provider effects", async (t) => {
+  let providerCalls = 0;
+  const unexpectedProviderCall = async () => {
+    providerCalls++;
+    throw Error("Unexpected fixture provider call");
+  };
+  const f = await createOperatorFixture(null, undefined, {
+    providerFactory: () => ({
+      inspectAction: unexpectedProviderCall,
+      preflight: unexpectedProviderCall,
+      performAction: unexpectedProviderCall,
+      inspectPr: unexpectedProviderCall,
+    }),
+  });
+  let browser: Browser | undefined;
+  t.after(() => f.close(browser));
+  const ids = seedSettings(f),
+    d = f.service.domain();
+  const grants = actionKinds.map((action) => ({
+    action,
+    repositoryId: "R1",
+    mode: "approval" as const,
+    ...(action === "project.field"
+      ? { projectNodeId: "P1", fieldNodeId: "F1", optionNodeIds: ["O1"] }
+      : {}),
+  }));
+  d.execute({
+    type: "delivery.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids.projectId,
+    expectedVersion: 1,
+    mode: "reviewable-pr",
+    credentialRef: null,
+    grants,
+    requiredChecks: [{ name: "check", appId: 42 }],
+  });
+  const caller = seedOperatorDelivery(f, ids),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  const external: string[] = [],
+    errors: string[] = [];
+  page.on("request", (r) => {
+    if (!r.url().startsWith(web.origin)) external.push(r.url());
+  });
+  page.on("pageerror", (e) => errors.push(e.message));
+  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+  await page
+    .getByRole("link", {
+      name: "Open delivery policy and authority editor",
+      exact: true,
+    })
+    .click();
+  const policy = page.locator('form[data-command="delivery.configure"]');
+  assert.equal(
+    await policy.locator('[name="expectedVersion"]').inputValue(),
+    "2",
+  );
+  assert.equal(
+    await policy.getByLabel(/^mode(?:\s|$)/).inputValue(),
+    "reviewable-pr",
+  );
+  assert.deepEqual(
+    await policy
+      .getByLabel(/^mode(?:\s|$)/)
+      .locator("option")
+      .allTextContents(),
+    ["Reviewable PR", "Through merge"],
+  );
+  assert.deepEqual(
+    JSON.parse(await policy.getByLabel(/^grants(?:\s|$)/).inputValue()),
+    grants,
+  );
+  assert.deepEqual(
+    JSON.parse(await policy.getByLabel(/^requiredChecks(?:\s|$)/).inputValue()),
+    [{ name: "check", appId: 42 }],
+  );
+  assert.equal(
+    await policy.getByLabel("credentialRef", { exact: true }).inputValue(),
+    "",
+  );
+  assert.equal(
+    await policy.getByLabel("clearCredentialRef", { exact: true }).isChecked(),
+    false,
+  );
+  for (const viewport of [
+    { width: 1366, height: 820 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await capture(page, `${viewport.width}-retained-delivery-policy`);
+  }
+  await page.goto(`${web.origin}/coordination/task/${ids.taskId}`);
+  const settlements = page.locator(
+    'form[action="/coordination/control/delivery/settle"]',
+  );
+  assert.equal(await settlements.count(), 2);
+  for (const [index, decision] of ["accepted", "closed"].entries()) {
+    const form = settlements.nth(index);
+    const material = await form
+      .locator("input")
+      .evaluateAll((inputs) =>
+        Object.fromEntries(
+          inputs.map((e) => [
+            (e as HTMLInputElement).name,
+            (e as HTMLInputElement).value,
+          ]),
+        ),
+      );
+    assert.equal(material.taskId, ids.taskId);
+    assert.equal(material.expectedTaskVersion, String(caller.taskVersion));
+    assert.equal(material.expectedDeliveryRevision, "1");
+    assert.equal(material.expectedPolicyVersion, "2");
+    assert.equal(material.repositoryId, "R1");
+    assert.equal(material.prNumber, "7");
+    assert.equal(material.expectedPrNodeId, "P7");
+    assert.equal(material.expectedHeadSha, "1".repeat(40));
+    assert.equal(material.decision, decision);
+    assert.equal(
+      await form.getByRole("button").innerText(),
+      index === 0 ? "Accept handback" : "Settle outcome as closed",
+    );
+  }
+  for (const fact of [
+    "No imported issue observation.",
+    "Project field observations: None observed.",
+    "PR 7 (P7)",
+    "provider state OPEN",
+    "Provider feedback: None observed.",
+    "No external actions.",
+    "Local task: open",
+    "Delivery holds:",
+  ])
+    assert.equal(
+      (await page.locator("body").innerText()).includes(fact),
+      true,
+      fact,
+    );
+  assert.equal(
+    await page
+      .getByRole("button", {
+        name: "Refresh delivery observations",
+        exact: true,
+      })
+      .count(),
+    1,
+  );
+  for (const viewport of [
+    { width: 1366, height: 820 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await capture(page, `${viewport.width}-retained-bound-delivery-detail`);
+  }
+  assert.equal(d.deliveryConfiguration(ids.projectId).version, 2);
+  assert.equal(d.task(ids.taskId).version, caller.taskVersion);
+  assert.equal(f.service.delivery().delivery(ids.taskId)?.settlement, null);
+  assert.equal(f.runtime.turns, 0);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(external, []);
+  assert.deepEqual(errors, []);
+  console.log(
+    `UI06 retained delivery: two guarded settlement forms, all nine grant kinds, zero provider calls; screenshots ${evidence}`,
+  );
 });

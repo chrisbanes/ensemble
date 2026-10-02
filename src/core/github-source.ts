@@ -48,6 +48,7 @@ export interface GitHubObservationBinding {
 }
 
 import {
+  nonempty,
   projectFieldsSchema,
   repositoryLinkSchema,
   readinessSchema,

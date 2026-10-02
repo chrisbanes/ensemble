@@ -147,10 +147,15 @@ export class OperatorApi {
           covered.add(`project:${id}:${revision}`);
         }
         const g = d.githubConfiguration(id);
-        for (const ref of [d.routingCredentialReference(id), g.credentialRef])
+        for (const ref of [
+          d.routingCredentialReference(id),
+          g.credentialRef,
+          d.deliveryCredentialReference(id),
+        ])
           if (ref) {
-            values.push(ref);
-            const value = process.env[ref.slice(4)];
+            const envKey = ref.slice(4);
+            values.push(ref, envKey);
+            const value = process.env[envKey];
             if (value) values.push(value);
           }
         if (g.repositories.length > 128) return undefined;

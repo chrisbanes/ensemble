@@ -454,3 +454,142 @@ test("private labels are unavailable for editing and strict public configuration
   );
   assert.equal(f.service.domain().project(projectId).version, 1);
 });
+
+test("delivery and source credential reference, key and value are excluded from public configuration and receipts", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const envKey = "UI06_FAKE_DELIVERY_REDACTION",
+    previous = process.env[envKey],
+    hadKey = Object.hasOwn(process.env, envKey),
+    envValue = "UI06_FAKE_PRIVATE_DELIVERY_VALUE",
+    reference = `env:${envKey}`;
+  process.env[envKey] = envValue;
+  t.after(() => {
+    if (hadKey) process.env[envKey] = previous;
+    else delete process.env[envKey];
+  });
+  const d = f.service.domain(),
+    api = new OperatorApi(f.service, [f.directory]);
+  for (const privateText of [reference, envKey, envValue]) {
+    const projectId = randomUUID(),
+      profileId = randomUUID(),
+      taskId = randomUUID();
+    d.execute({
+      type: "profile.create",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      name: privateText,
+      instructions: "Ordinary instructions",
+      capabilities: privateText,
+    });
+    d.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: privateText,
+      leadProfileId: profileId,
+    });
+    d.execute({
+      type: "delivery.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      mode: "reviewable-pr",
+      credentialRef: reference,
+      grants: [],
+      requiredChecks: [],
+    });
+    d.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      credentialRef: null,
+      selections: [],
+      repositories: [],
+      readiness: {
+        mode: "all",
+        conditions: [{ kind: "label", name: privateText }],
+      },
+    });
+    d.execute({
+      type: "task.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      title: privateText,
+      outcome: privateText,
+      ready: false,
+    });
+    const receipt = await api.execute({
+      type: "profile.configure",
+      key: randomUUID(),
+      profileId,
+      expectedVersion: 1,
+      name: privateText,
+    });
+    const publicData = {
+      workspace: await api.readWorkspace(),
+      project: await api.readProjectConfiguration(projectId),
+      profile: await api.readProfileConfiguration(profileId),
+      task: await api.readTask(taskId),
+      receipt,
+    };
+    for (const excluded of [reference, envKey, envValue])
+      assert.equal(
+        JSON.stringify(publicData).includes(excluded),
+        false,
+        "private delivery material excluded",
+      );
+    assert.equal(publicData.project.data.project.name, null);
+    assert.equal(publicData.project.data.source.readiness, null);
+    assert.equal(publicData.profile.data.capabilities, "[redacted]");
+    await assert.rejects(
+      api.execute({
+        type: "delivery.configure",
+        key: randomUUID(),
+        projectId,
+        expectedVersion: 2,
+        mode: "reviewable-pr",
+        credentialRef: reference,
+        grants: [],
+        requiredChecks: [],
+      }),
+    );
+  }
+  assert.equal(f.runtime.turns, 0);
+});
+
+test("unavailable delivery exclusions fail closed without replacing safe labels with private material", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const projectId = randomUUID(),
+    api = new OperatorApi(f.service, [f.directory]);
+  await api.execute({
+    type: "project.create",
+    key: randomUUID(),
+    projectId,
+    name: "Project label",
+    leadProfileId: null,
+  });
+  const original = DomainStore.prototype.deliveryCredentialReference;
+  DomainStore.prototype.deliveryCredentialReference = () => {
+    throw Error("private lookup failure");
+  };
+  try {
+    const result = await api.readProjectConfiguration(projectId);
+    assert.equal(result.data.project.name, null);
+    assert.equal(
+      JSON.stringify(result).includes("private lookup failure"),
+      false,
+    );
+  } finally {
+    DomainStore.prototype.deliveryCredentialReference = original;
+  }
+  assert.equal(f.runtime.turns, 0);
+});
