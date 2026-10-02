@@ -8,7 +8,7 @@ import {
   realpath,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   test as nodeTest,
   type TestContext,
@@ -336,7 +336,7 @@ async function ownedDirectory(path: string) {
   if (!(await lstat(path)).isDirectory())
     throw Error("Browser evidence directory must not be a symlink");
 }
-async function evidenceDirectory(
+export async function createTestEvidenceDirectory(
   suite: string,
   name: string,
   configured?: string,
@@ -377,6 +377,50 @@ async function evidenceDirectory(
       throw Error("Browser evidence directory contains unowned files");
   }
   return directory;
+}
+export async function writeTestEvidence(
+  directory: string,
+  name: string,
+  data: string | Uint8Array,
+) {
+  const allowed = (filename: string) =>
+    /^(manifest\.json|std(out|err)\.sanitized\.log|[a-z0-9-]{1,100}\.png)$/.test(
+      filename,
+    );
+  if (!allowed(name)) throw Error("evidence.write: invalid evidence filename");
+  const parent = dirname(directory);
+  if (
+    !isAbsolute(directory) ||
+    !/^[a-f0-9]{16}$/.test(basename(directory)) ||
+    !/^[a-z0-9-]{1,40}-\d+$/.test(basename(parent)) ||
+    !(await lstat(directory)).isDirectory() ||
+    !(await lstat(parent)).isDirectory() ||
+    !(
+      await lstat(join(dirname(parent), ".ensemble-test-evidence-v1"))
+    ).isDirectory()
+  )
+    throw Error("evidence.write: unowned evidence directory");
+  const bytes = Buffer.byteLength(data);
+  const maximum = name.endsWith(".png")
+    ? browserEvidenceLimits.screenshotBytes
+    : browserEvidenceLimits.metadataBytes;
+  if (bytes > maximum) throw Error("evidence.write: file byte limit exceeded");
+  const existing = await readdir(directory);
+  if (
+    !existing.includes(name) &&
+    existing.length >= browserEvidenceLimits.files
+  )
+    throw Error("evidence.write: file count limit exceeded");
+  let total = bytes;
+  for (const entry of existing) {
+    const stat = await lstat(join(directory, entry));
+    if (!allowed(entry) || !stat.isFile())
+      throw Error("evidence.write: unowned evidence file");
+    if (entry !== name) total += stat.size;
+  }
+  if (total > browserEvidenceLimits.bytes)
+    throw Error("evidence.write: directory byte limit exceeded");
+  await writeFile(join(directory, name), data, { mode: 0o600 });
 }
 function safeStep(step: FixtureStep) {
   return {
@@ -425,7 +469,11 @@ export async function runBrowserJourney(
   let directory = "";
   const initialization = await waitFor(
     async () => {
-      directory = await evidenceDirectory(suite, name, options.evidenceRoot);
+      directory = await createTestEvidenceDirectory(
+        suite,
+        name,
+        options.evidenceRoot,
+      );
     },
     Math.min(5000, overallMs),
   );
@@ -437,7 +485,7 @@ export async function runBrowserJourney(
   const writer =
     options.writeEvidence ??
     ((filename: string, data: string | Uint8Array) =>
-      writeFile(filename, data, { mode: 0o600, flag: "w" }));
+      writeTestEvidence(dirname(filename), basename(filename), data));
   const write = async (filename: string, data: string | Uint8Array) => {
     const limit = filename.endsWith(".png")
       ? browserEvidenceLimits.screenshotBytes

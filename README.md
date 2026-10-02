@@ -121,7 +121,12 @@ npm run check
 ```
 
 The checks cover types, lint, formatting, compilation and tests, including the
-operator's browser tests. Live runtime qualification is a separate, explicit
+operator's browser tests. `npm run test:fixture-preflight` checks writable temporary
+storage, real listeners, browser cleanup and evidence from an expected assertion
+failure. Set `ENSEMBLE_TEST_EVIDENCE_DIR` to an absolute, dedicated directory to
+retain bounded synthetic screenshots, phase manifests and allowlisted diagnostic
+logs. Test deadlines end waiting; they do not prove execution termination or
+complete cleanup. Live runtime qualification is a separate, explicit
 step. See the [development reference](docs/development.md) for commands and
 service contracts, or the [macOS operations guide](docs/operations/standalone-macos.md)
 for authentication, service management and backups.
