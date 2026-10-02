@@ -1,3 +1,6 @@
+import type { OperatorWebBoundary } from "./operator-web.js";
+import { OperatorApiError } from "./operator-api.js";
+import { apiErrorSchema, sessionSchema } from "../operator/contracts.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -538,6 +541,7 @@ export class LocalOperatorUi {
 
 type OperatorHttpOptions = {
   routes?: OperatorRouteRegistry;
+  web?: OperatorWebBoundary;
 };
 
 const SESSION_COOKIE = "ensemble_operator_session";
@@ -608,6 +612,52 @@ function decodePathSegment(value: string): string | undefined {
     return result;
   } catch {
     return undefined;
+  }
+}
+
+function publicMessage(code: string): string {
+  const messages: Record<string, string> = {
+    unauthenticated: "Sign in required.",
+    forbidden: "Request denied.",
+    "not-found": "Not found.",
+    "method-not-allowed": "Method not allowed.",
+    "invalid-input": "Review the request fields.",
+    "unsupported-media": "JSON input required.",
+    "body-too-large": "Request is too large.",
+    conflict:
+      "Saved state conflicts with this request. Review before retrying.",
+    unavailable: "Service unavailable. Try again.",
+    "command-outcome-unknown":
+      "Command outcome is unknown. Reconcile the same key and input.",
+  };
+  return messages[code] ?? "Request unavailable.";
+}
+async function readJson(request: IncomingMessage): Promise<unknown> {
+  if (
+    !/^application\/json(?:;\s*charset=utf-8)?$/i.test(
+      String(request.headers["content-type"] ?? ""),
+    )
+  ) {
+    request.resume();
+    throw new OperatorHttpError(415);
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_FORM_BYTES) {
+      request.resume();
+      throw new OperatorHttpError(413);
+    }
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
+    );
+  } catch {
+    throw new OperatorHttpError(400);
   }
 }
 
@@ -736,12 +786,14 @@ export class LocalOperatorHttp {
   private server: Server | undefined;
   private readonly routes: OperatorRouteRegistry;
   private readonly secureCookie: boolean;
+  private readonly web: OperatorWebBoundary | undefined;
 
   constructor(
     private readonly ui: LocalOperatorUi,
     private readonly auth: OperatorAuth,
     options: OperatorHttpOptions = {},
   ) {
+    this.web = options.web;
     this.routes = options.routes ?? new OperatorRouteRegistry();
     this.secureCookie = new URL(auth.origin).protocol === "https:";
   }
@@ -791,6 +843,9 @@ export class LocalOperatorHttp {
         }
         const id = cookieId(request);
         session = id ? this.auth.getSession(id) : undefined;
+
+        if (this.web && (await this.handleWeb(request, response, url, session)))
+          return;
 
         if (url.pathname === "/login" && request.method === "GET") {
           if (session?.authenticated) {
@@ -1053,6 +1108,198 @@ export class LocalOperatorHttp {
     } else {
       throw new Error();
     }
+  }
+
+  private async handleWeb(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    session: OperatorSession | undefined,
+  ): Promise<boolean> {
+    const web = this.web;
+    if (!web || !web.owns(url.pathname)) return false;
+    const path = url.pathname,
+      method = request.method;
+    const headers = {
+      ...RESPONSE_HEADERS,
+      "content-security-policy":
+        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+    };
+    const json = (
+      status: number,
+      value: unknown,
+      extra: Record<string, string> = {},
+    ) => {
+      response.writeHead(status, {
+        ...headers,
+        "content-type": "application/json; charset=utf-8",
+        ...extra,
+      });
+      response.end(JSON.stringify(value));
+    };
+    const deny = (status: number, code: string) => {
+      request.resume();
+      json(
+        status,
+        apiErrorSchema.parse({ error: { code, message: publicMessage(code) } }),
+      );
+    };
+    if (!path.startsWith("/api")) {
+      if (path === "/login" && method !== "GET") return false;
+      if (method !== "GET" && method !== "HEAD") {
+        deny(405, "method-not-allowed");
+        return true;
+      }
+      const asset = web.bundle.asset(web.shell(path) ? "/app" : path);
+      if (!asset) {
+        deny(404, "not-found");
+        return true;
+      }
+      response.writeHead(200, { ...headers, "content-type": asset.type });
+      response.end(method === "HEAD" ? undefined : asset.body);
+      return true;
+    }
+    try {
+      if (!web.knownApi(path)) {
+        deny(404, "not-found");
+        return true;
+      }
+      const expected = [
+        "/api/operator/login",
+        "/api/operator/logout",
+        "/api/operator/commands",
+      ].includes(path)
+        ? "POST"
+        : "GET";
+      if (method !== expected) {
+        deny(405, "method-not-allowed");
+        return true;
+      }
+      if (path === "/api/operator/session") {
+        const current = session ?? this.auth.createAnonymousSession();
+        json(
+          200,
+          sessionSchema.parse({
+            authenticated: current.authenticated,
+            csrfToken: current.csrfToken,
+          }),
+          { "set-cookie": cookieHeader(current.id, this.secureCookie) },
+        );
+        return true;
+      }
+      if (path !== "/api/operator/login" && !session?.authenticated) {
+        deny(401, "unauthenticated");
+        return true;
+      }
+      if (method === "POST") {
+        if (
+          !session ||
+          request.headers.origin !== this.auth.origin ||
+          !this.auth.validateCsrf(
+            session.id,
+            String(request.headers["x-csrf-token"] ?? ""),
+          )
+        ) {
+          deny(403, "forbidden");
+          return true;
+        }
+        const body = await readJson(request);
+        if (path === "/api/operator/login") {
+          const input = z
+            .object({ password: z.string().max(8192) })
+            .strict()
+            .parse(body);
+          if (session.authenticated) {
+            deny(403, "forbidden");
+            return true;
+          }
+          const current = await this.auth.authenticate(
+            session.id,
+            input.password,
+          );
+          if (!current) {
+            deny(401, "unauthenticated");
+            return true;
+          }
+          json(
+            200,
+            sessionSchema.parse({
+              authenticated: true,
+              csrfToken: current.csrfToken,
+            }),
+            { "set-cookie": cookieHeader(current.id, this.secureCookie) },
+          );
+          return true;
+        }
+        if (path === "/api/operator/logout") {
+          z.object({}).strict().parse(body);
+          this.auth.logout(session.id);
+          json(
+            200,
+            { authenticated: false },
+            { "set-cookie": clearedCookie(this.secureCookie) },
+          );
+          return true;
+        }
+        json(200, await web.api.execute(body));
+        return true;
+      }
+      const data = await web.read(path);
+      if (data === undefined) deny(404, "not-found");
+      else json(200, data);
+    } catch (error) {
+      const status =
+        error instanceof OperatorApiError
+          ? error.status
+          : error instanceof OperatorHttpError
+            ? error.status
+            : error instanceof z.ZodError
+              ? 400
+              : 503;
+      const code =
+        error instanceof OperatorApiError
+          ? error.code
+          : error instanceof OperatorHttpError
+            ? ({
+                400: "invalid-input",
+                413: "body-too-large",
+                415: "unsupported-media",
+              }[error.status] ?? "invalid-input")
+            : error instanceof z.ZodError
+              ? "invalid-input"
+              : method === "POST"
+                ? "command-outcome-unknown"
+                : "unavailable";
+      json(
+        status,
+        apiErrorSchema.parse({
+          error: {
+            code,
+            message: publicMessage(code),
+            ...(error instanceof z.ZodError
+              ? {
+                  fieldPaths: [
+                    ...new Set(
+                      error.issues
+                        .map((i) =>
+                          i.path
+                            .filter(
+                              (p) =>
+                                typeof p === "string" &&
+                                /^[A-Za-z][A-Za-z0-9]*$/.test(p),
+                            )
+                            .join("."),
+                        )
+                        .filter(Boolean),
+                    ),
+                  ],
+                }
+              : {}),
+          },
+        }),
+      );
+    }
+    return true;
   }
 
   private async authorizeRead(
