@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { ExecutionState } from "../src/standalone/state.js";
+import type { TaskListSummary } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 
@@ -303,6 +304,8 @@ import {
   parseTaskFilters,
   taskColumn,
   taskDetailHref,
+  taskReasons,
+  reasonLabels,
 } from "../web/src/tasks.js";
 test("a complete task aggregate rejects changing membership and repeated page cursors", async (t) => {
   const f = await createOperatorFixture();
@@ -555,4 +558,138 @@ test("Stop without an active execution remains normal Work", async (t) => {
   ).data.tasks.find((t) => t.id === taskId);
   assert.equal(task?.execution.state, "stopping");
   assert.deepEqual(task?.attention.codes, []);
+});
+
+test("catalog and composer options project effective overrides above and below default capacity", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f),
+    taskId = createTask(f, ids.projectId),
+    d = f.service.domain(),
+    api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(d.capacityLimits([ids.projectId]).defaultProjectLimit, 2);
+  for (const limit of [10, 1]) {
+    d.execute({
+      type: "capacity.configure",
+      key: randomUUID(),
+      actor: "operator",
+      globalLimit: 20,
+      projectOverrides: { [ids.projectId]: limit },
+    });
+    const task = (await api.readTaskListPage()).data.tasks.find(
+      (t) => t.id === taskId,
+    );
+    assert.ok(task);
+    assert.equal(task.capacity.projectLimit, limit);
+    assert.equal(
+      (await api.readComposerOptions(ids.projectId)).data.capacity.projectLimit,
+      limit,
+    );
+  }
+});
+
+test("shared task reasons retain all current interventions and deduplicate uncertainty without prospective terminal waits", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const ids = await projectFixture(f, false),
+    taskId = createTask(f, ids.projectId, "Action", true),
+    api = new OperatorApi(f.service, [f.directory]);
+  const template = (await api.readTaskListPage()).data.tasks.find(
+    (t) => t.id === taskId,
+  );
+  assert.ok(template);
+  const codes: typeof template.attention.codes = [
+    "question",
+    "approval",
+    "unresolved-result",
+    "completion-rejected",
+    "lead-review",
+    "execution-uncertain",
+  ];
+  for (const code of codes) {
+    const task: TaskListSummary = {
+      ...template,
+      attention: { codes: [code], count: 1 },
+    };
+    assert.ok(
+      taskReasons(task).includes(reasonLabels[code] ?? ""),
+      `current ${code} action is legible`,
+    );
+  }
+  const runtimeUnconfirmed = {
+    ...template,
+    attention: { codes: [], count: 0 },
+    execution: {
+      ...template.execution,
+      state: "uncertain" as const,
+      reasonCodes: ["runtime-unconfirmed" as const],
+    },
+  };
+  assert.ok(
+    taskReasons(runtimeUnconfirmed).includes(
+      reasonLabels["execution-uncertain"] ?? "",
+    ),
+  );
+  const uncertainStop = {
+    ...template,
+    attention: { codes: ["execution-uncertain" as const], count: 1 },
+    execution: {
+      ...template.execution,
+      state: "stopping" as const,
+      holds: { ...template.execution.holds, stop: true, uncertainty: true },
+    },
+  };
+  assert.equal(
+    taskReasons(uncertainStop).filter(
+      (r) => r === reasonLabels["execution-uncertain"],
+    ).length,
+    1,
+  );
+  assert.ok(
+    taskReasons(uncertainStop).includes("Stop requested; effects may continue"),
+  );
+  const normalStop = {
+    ...uncertainStop,
+    attention: { codes: [], count: 0 },
+    execution: {
+      ...uncertainStop.execution,
+      holds: { ...uncertainStop.execution.holds, uncertainty: false },
+    },
+  };
+  assert.equal(
+    taskReasons(normalStop).includes(reasonLabels["execution-uncertain"] ?? ""),
+    false,
+  );
+  for (const state of ["done", "cancelled"] as const) {
+    const terminal: TaskListSummary = {
+      ...uncertainStop,
+      state,
+      attention: { codes: [...codes], count: codes.length },
+      admission: {
+        eligible: false,
+        reasons: ["task-unready" as const, "local-dependency" as const],
+      },
+      capacity: {
+        ...template.capacity,
+        globalUsage: 10,
+        globalLimit: 10,
+        projectUsage: 10,
+        projectLimit: 10,
+      },
+    };
+    for (const code of codes)
+      assert.ok(taskReasons(terminal).includes(reasonLabels[code] ?? ""));
+    assert.equal(
+      taskReasons(terminal).some((r) =>
+        /Draft: not Ready|dependency|Capacity currently full/.test(r),
+      ),
+      false,
+    );
+    assert.equal(
+      taskReasons(terminal).filter(
+        (r) => r === reasonLabels["execution-uncertain"],
+      ).length,
+      1,
+    );
+  }
 });

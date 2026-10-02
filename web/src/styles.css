@@ -326,10 +326,6 @@ textarea {
   border-radius: var(--radius-8);
   margin: var(--space-24) 0;
 }
-.attention-reasons {
-  color: var(--color-on-warning-container);
-  padding: var(--space-8) 0;
-}
 .column-navigation {
   display: flex;
   flex-wrap: wrap;

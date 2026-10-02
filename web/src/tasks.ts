@@ -127,7 +127,7 @@ export function filterTasks(
         )),
   );
 }
-export const reasonLabels: Record<string, string> = {
+export const reasonLabels = {
   "project-paused": "Project paused",
   "project-lead-unconfigured": "Configure a project lead",
   "project-lead-revoked": "Project lead revoked",
@@ -144,21 +144,27 @@ export const reasonLabels: Record<string, string> = {
   "completion-rejected": "Completion requires review",
   "execution-uncertain": "Execution ownership is uncertain",
   "lead-review": "Allocation requires lead review",
-};
+} satisfies Record<string, string>;
 export function taskReasons(task: TaskListSummary) {
   const terminal = task.state === "done" || task.state === "cancelled";
-  const reasons = (terminal ? [] : task.admission.reasons).map(
-    (r) => reasonLabels[r] ?? "Admission held",
-  );
+  const reasons: string[] = [
+    ...task.attention.codes.map((code) => reasonLabels[code]),
+    ...(terminal ? [] : task.admission.reasons).map(
+      (r) => reasonLabels[r] ?? "Admission held",
+    ),
+  ];
   if (task.execution.holds.stop)
     reasons.unshift("Stop requested; effects may continue");
-  if (task.execution.holds.uncertainty)
-    reasons.unshift("Execution is uncertain");
+  if (
+    task.execution.holds.uncertainty ||
+    task.execution.reasonCodes.includes("runtime-unconfirmed")
+  )
+    reasons.unshift(reasonLabels["execution-uncertain"]);
   if (
     !terminal &&
     (task.capacity.globalUsage >= task.capacity.globalLimit ||
       task.capacity.projectUsage >= task.capacity.projectLimit)
   )
     reasons.push("Capacity currently full; admission rechecks usage");
-  return reasons;
+  return [...new Set(reasons)];
 }

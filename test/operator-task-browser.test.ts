@@ -809,6 +809,14 @@ for (const viewport of [
         .count(),
       1,
     );
+    assert.equal(
+      await work
+        .locator(`[data-task-id="${ids.running.id}"]`)
+        .getByText(/Capacity currently full/)
+        .count(),
+      0,
+      "override ten does not falsely report five reservations as full",
+    );
     await screenshot(page, `${viewport.width}-overview-attention-work`);
     let commandPosts = 0;
     page.on("request", (r) => {
@@ -825,6 +833,26 @@ for (const viewport of [
         .getAttribute("href"),
       "/coordination",
     );
+    await page.goto(`${web.origin}/app/tasks`);
+    await page
+      .locator(`[data-task-id="${ids.question.id}"]`)
+      .getByText("Question needs an answer", { exact: true })
+      .waitFor();
+    assert.equal(
+      await page
+        .locator(`[data-task-id="${ids.uncertainStop.id}"]`)
+        .getByText("Execution ownership is uncertain", { exact: true })
+        .count(),
+      1,
+    );
+    assert.equal(
+      await page
+        .locator(`[data-task-id="${ids.normal.id}"]`)
+        .getByText("Execution ownership is uncertain", { exact: true })
+        .count(),
+      0,
+    );
+    await screenshot(page, `${viewport.width}-list-interventions`);
     await page.goto(`${web.origin}/app/tasks?view=board`);
     await page
       .getByRole("heading", { name: "All tasks", exact: true })
@@ -850,6 +878,19 @@ for (const viewport of [
         .getByRole("region", { name: `${column} tasks`, exact: true })
         .getByRole("link", { name: title, exact: true })
         .waitFor({ state: "visible" });
+      if (column === "Running")
+        await page
+          .locator(`[data-task-id="${ids.question.id}"]`)
+          .getByText("Question needs an answer", { exact: true })
+          .waitFor({ state: "visible" });
+      if (column === "Stopping")
+        assert.equal(
+          await page
+            .locator(`[data-task-id="${ids.uncertainStop.id}"]`)
+            .getByText("Execution ownership is uncertain", { exact: true })
+            .count(),
+          1,
+        );
       if (column === "Done" || column === "Cancelled") {
         const terminal = page.getByRole("region", {
           name: `${column} tasks`,
@@ -866,6 +907,44 @@ for (const viewport of [
       }
       await screenshot(page, `${viewport.width}-board-${column.toLowerCase()}`);
     }
+    f.service.domain().execute({
+      type: "capacity.configure",
+      key: randomUUID(),
+      actor: "operator",
+      globalLimit: 10,
+      projectOverrides: { [ids.projectId]: 1 },
+    });
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
+    await page.getByRole("button", { name: /^Running \(/ }).click();
+    await page
+      .locator(`[data-task-id="${ids.running.id}"]`)
+      .getByText("Capacity currently full; admission rechecks usage", {
+        exact: true,
+      })
+      .waitFor({ state: "visible" });
+    await screenshot(page, `${viewport.width}-board-actual-capacity-full`);
+    await page.getByRole("button", { name: "List", exact: true }).click();
+    await page
+      .locator(`[data-task-id="${ids.running.id}"]`)
+      .getByText("Capacity currently full; admission rechecks usage", {
+        exact: true,
+      })
+      .waitFor({ state: "visible" });
+    await screenshot(page, `${viewport.width}-list-actual-capacity-full`);
+    f.service.domain().execute({
+      type: "capacity.configure",
+      key: randomUUID(),
+      actor: "operator",
+      globalLimit: 10,
+      projectOverrides: { [ids.projectId]: 10 },
+    });
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Board", exact: true }).click();
+    await page.getByRole("button", { name: /^Ready \(/ }).click();
     if (viewport.width < 760) {
       await visibleControl(page, "Previous column");
       await page
@@ -914,6 +993,11 @@ for (const viewport of [
     await page.goForward();
     assert.ok(page.url().includes("state=Stopping"));
     assert.equal(commandPosts, 0);
+    await page.goto(`${web.origin}/app/projects/${ids.projectId}`);
+    await page
+      .locator(`[data-task-id="${ids.question.id}"]`)
+      .getByText("Question needs an answer", { exact: true })
+      .waitFor();
     await page.goto(
       `${web.origin}/app/projects/${ids.projectId}?source=github`,
     );
@@ -1006,6 +1090,16 @@ for (const viewport of [
       .waitFor();
     await screenshot(page, `${viewport.width}-no-match`);
     await page.goto(`${web.origin}/app/tasks/new?project=${ids.projectId}`);
+    await page.getByText(/^Capacity: \d+\/10 project/).waitFor();
+    f.service.domain().execute({
+      type: "capacity.configure",
+      key: randomUUID(),
+      actor: "operator",
+      globalLimit: 10,
+      projectOverrides: { [ids.projectId]: 1 },
+    });
+    await page.reload();
+    await page.getByText(/^Capacity: \d+\/1 project/).waitFor();
     await page.getByRole("button", { name: "Save draft", exact: true }).click();
     await page.waitForFunction(
       () => document.activeElement?.id === "composer-title",

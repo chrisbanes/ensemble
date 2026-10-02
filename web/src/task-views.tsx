@@ -13,7 +13,6 @@ import {
   taskDetailHref,
   taskFiltersUrl,
   taskReasons,
-  reasonLabels,
   type TaskAggregate,
   type TaskFilters,
 } from "./tasks.js";
@@ -234,12 +233,7 @@ export function TaskViews({
             </p>
           )}
           {attention.map((t) => (
-            <div key={t.id}>
-              <TaskRow task={t} />
-              <p className="body attention-reasons">
-                {t.attention.codes.map((c) => reasonLabels[c]).join(" · ")}
-              </p>
-            </div>
+            <TaskRow key={t.id} task={t} />
           ))}
         </section>
       )}

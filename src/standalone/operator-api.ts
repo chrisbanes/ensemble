@@ -385,7 +385,7 @@ export class OperatorApi {
     });
   }
   private capacity(projectId: string) {
-    const c = this.domain().capacityLimits();
+    const c = this.domain().capacityLimits([projectId]);
     return {
       globalUsage: c.currentUsage.global,
       globalLimit: c.globalLimit,
