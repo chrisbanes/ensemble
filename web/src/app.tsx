@@ -228,7 +228,13 @@ export function App() {
           key={session.csrfToken}
           client={client}
           session={session}
-          onSignedIn={setSession}
+          onSignedIn={(next) => {
+            if (path === "/login") {
+              history.replaceState(null, "", "/app");
+              setPath("/app");
+            }
+            setSession(next);
+          }}
         />
         {logoutNotice && (
           <p className="logout-notice body" role="alert">

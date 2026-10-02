@@ -7,16 +7,14 @@ test("built React assets, JSON and retained routes share one service listener an
   t.after(() => f.close());
   const web = await f.startWeb();
   const projectId = randomUUID();
-  f.service
-    .domain()
-    .execute({
-      type: "project.create",
-      actor: "operator",
-      key: randomUUID(),
-      projectId,
-      name: "Real project",
-      leadProfileId: null,
-    });
+  f.service.domain().execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Real project",
+    leadProfileId: null,
+  });
   let r = await fetch(`${web.origin}/api/operator/session`);
   let cookie = r.headers.get("set-cookie")?.split(";")[0] ?? "";
   let session = (await r.json()) as { csrfToken: string };
@@ -36,7 +34,7 @@ test("built React assets, JSON and retained routes share one service listener an
   session = (await r.json()) as { csrfToken: string };
   assert.equal(r.status, 200);
   const shell = await (await fetch(`${web.origin}/app`)).text();
-  const assets = [...shell.matchAll(/(?:src|href)="([^\"]+)"/g)].map(
+  const assets = [...shell.matchAll(/(?:src|href)="([^"]+)"/g)].map(
     (m) => m[1],
   );
   assert.ok(assets.length >= 2);

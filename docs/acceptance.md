@@ -267,3 +267,17 @@ and the browser boundary from that host. It does not prove independent-device
 reachability or constitute S05 acceptance. Missing fixture configuration is a
 blocker, not a waived gate. This work does not authorize persistent Serve
 changes, deployment or cutover.
+
+## React foundation implementation status
+
+Delivery [UI02 #740](https://github.com/chrisbanes/ensemble/issues/740) adds the
+staged React `/app` shell, same-origin validated APIs, existing session/security
+boundary, durable command receipts and retained-control navigation. Its scope
+and evidence are recorded in the [foundation contract](design/ui02-foundation.md)
+and [foundation evidence](evidence/ui02-foundation.md).
+
+This delivery name is distinct from the existing **UI02 native-question runtime
+acceptance scenario**. That scenario remains unproved; no native availability is
+claimed. UI01/UI03–UI07 screens, runtime-question integration and parent #736
+final acceptance remain separate. Existing controls stay available. This
+foundation does not authorize deployment or cutover.

@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { OperatorAuth } from "../../src/standalone/operator-auth.js";
@@ -72,6 +73,14 @@ export async function createOperatorFixture() {
     directory,
     runtime,
     service,
+    seedPersistedState(seed: (db: DatabaseSync) => void) {
+      const db = new DatabaseSync(join(directory, "data", "standalone.sqlite"));
+      try {
+        seed(db);
+      } finally {
+        db.close();
+      }
+    },
     advanceClock(ms: number) {
       now += ms;
     },

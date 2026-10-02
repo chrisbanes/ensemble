@@ -35,8 +35,19 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /login | /login | password sign-in | UI02 #740 | yes |
 | all authenticated views | /logout | sign-out | UI02 #740 | yes |
 | all views | navigation | home; project; task; profile; assignment; Runtime; Coordination | UI03 #741 / UI04 #742 | shell only |
+| `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
 
-Programmatic `LocalOperatorUi.submit` cases that are not current HTTP controls: `assignment.create`, `assignment.apply`, `dependency.add`, `dependency.remove`, `imported-blockers.set`. The latter remains unexposed. `github.activate` is applied from the existing preview flow and has no arbitrary JSON adapter.
+Programmatic support (no new HTTP exposure):
+
+| Command | Replacement owner/destination | Disposition |
+| --- | --- | --- |
+| `assignment.create` | UI03 #741 task composer with UI04 #742 assignment detail | Existing programmatic support; no UI02 creation endpoint |
+| `assignment.apply` | UI04 #742 assignment detail | Durable adapter and retained `/runtime/control/instruction-apply` |
+| `dependency.add` | UI04 #742 task dependency controls | Durable adapter and retained `/runtime/control/dependency/add` |
+| `dependency.remove` | UI04 #742 task dependency controls | Durable adapter and retained `/runtime/control/dependency/remove` |
+| `imported-blockers.set` | Explicitly unsupported operator exposure | Existing programmatic case only; no HTTP or JSON endpoint |
+
+`LocalOperatorUi.submit` cases that are not current HTTP controls: `assignment.create`, `assignment.apply`, `dependency.add`, `dependency.remove`, `imported-blockers.set`. The latter remains unexposed. `github.activate` is applied from the existing preview flow and has no arbitrary JSON adapter.
 
 ## Transport and safe projection
 
@@ -44,7 +55,9 @@ Reads: `/api/operator/session`, `/workspace`, `/projects/:projectId`, `/tasks/:t
 
 Active request selection crosses configured assignment revisions before falling back to the current version. Execution generation remains the selected actual request's work/version/instruction/profile snapshots; configured revisions describe the next turn. Unresolved results supply their own positive destination revision and permitted same-task recipient, with null when unavailable. Existing reconciliation policy validates writes again.
 
-Unsafe approval material becomes unavailable and deny-only; altered/redacted material is never approvable. Provider timestamps are stored observations; unavailable successful sync/history is explicit. Native structured input belongs to UI01/UI05 after qualification. UI02 neither enables native availability nor resumes deferred X work.
+Unsafe approval material becomes unavailable and deny-only; altered/redacted material is never approvable. A denial may omit material: the adapter supplies only the immutable retained JSON for that same task and interaction, privately, while preserving the submitted revision, action and target. This reconstruction does not depend on current display redaction, so a matching saved-key replay remains stable after privacy context changes. Client-supplied material is never replaced; approvals still require exposed exact material, and unavailable action or target cannot be substituted. Legacy interactions without retained JSON keep material omitted. Existing policy checks remain authoritative.
+
+Provider timestamps are stored observations; unavailable successful sync/history is explicit. Native structured input belongs to UI01/UI05 after qualification. UI02 neither enables native availability nor resumes deferred X work.
 
 ## Client and staged access
 

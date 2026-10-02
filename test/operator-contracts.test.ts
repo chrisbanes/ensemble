@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   operatorCommandSchema,
+  materialSchema,
   workspaceSchema,
   taskSchema,
 } from "../src/operator/contracts.js";
@@ -61,4 +62,92 @@ test("read envelopes reject row fields and invalid states", () => {
     }).success,
     false,
   );
+});
+
+test("all supported command variants validate exact revisions and bounded material without completion convenience", () => {
+  const base = { key, taskId: key };
+  for (const command of [
+    { ...create, ready: false },
+    {
+      type: "task.configure",
+      ...base,
+      projectId: key,
+      expectedVersion: 1,
+      ready: true,
+    },
+    {
+      type: "dependency.add",
+      ...base,
+      projectId: key,
+      blockerTaskId: key,
+      expectedVersion: 1,
+    },
+    {
+      type: "dependency.remove",
+      ...base,
+      projectId: key,
+      blockerTaskId: key,
+      expectedVersion: 1,
+    },
+    {
+      type: "assignment.apply",
+      key,
+      projectId: key,
+      assignmentId: key,
+      expectedVersion: 1,
+    },
+    {
+      type: "message",
+      ...base,
+      recipientAssignmentId: key,
+      expectedAssignmentVersion: 1,
+      message: "Retained",
+    },
+    {
+      type: "question.answer",
+      ...base,
+      interactionId: key,
+      expectedRevision: 1,
+      answer: "A",
+    },
+    {
+      type: "approval.decide",
+      ...base,
+      interactionId: key,
+      expectedRevision: 1,
+      decision: "denied",
+      action: "Publish",
+    },
+    {
+      type: "approval.decide",
+      ...base,
+      interactionId: key,
+      expectedRevision: 1,
+      decision: "approved",
+      action: "Publish",
+      material: { version: "next" },
+    },
+    {
+      type: "result.recipient",
+      ...base,
+      resultId: key,
+      expectedRevision: 1,
+      recipientAssignmentId: key,
+    },
+  ])
+    assert.equal(operatorCommandSchema.safeParse(command).success, true);
+  assert.equal(
+    operatorCommandSchema.safeParse({
+      type: "task.configure",
+      ...base,
+      projectId: key,
+      expectedVersion: 1,
+      state: "done",
+    }).success,
+    false,
+  );
+  assert.equal(materialSchema.safeParse("😀".repeat(3000)).success, false);
+  let deep: unknown = "value";
+  for (let i = 0; i < 13; i++) deep = [deep];
+  assert.equal(materialSchema.safeParse(deep).success, false);
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, symlink, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import {
   OperatorWebBundle,
@@ -88,16 +88,14 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
     200,
   );
   const projectId = randomUUID();
-  f.service
-    .domain()
-    .execute({
-      type: "project.create",
-      key: randomUUID(),
-      actor: "operator",
-      projectId,
-      name: "Private project",
-      leadProfileId: null,
-    });
+  f.service.domain().execute({
+    type: "project.create",
+    key: randomUUID(),
+    actor: "operator",
+    projectId,
+    name: "Private project",
+    leadProfileId: null,
+  });
   const create = {
     type: "task.create",
     key: randomUUID(),
@@ -192,6 +190,21 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
     (await post("/api/operator/commands", { actor: "agent" })).status,
     400,
   );
+  assert.equal(
+    (
+      await fetch(`${origin}/api/operator/commands`, {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: "http://127.0.0.1:8787",
+          "x-csrf-token": session.csrfToken,
+          "content-type": "application/json",
+        },
+        body: Buffer.from([0x7b, 0xc3, 0x28]),
+      })
+    ).status,
+    400,
+  );
   for (const path of [
     "/assets/no.js",
     "/assets/main.js/extra",
@@ -235,4 +248,56 @@ test("bundle denies symlinks, unsupported assets and missing emitted references"
   await writeFile(join(path, "index.html"), "<html></html>");
   await writeFile(join(path, "assets/source.map"), "sensitive");
   await assert.rejects(OperatorWebBundle.open(path));
+  await unlink(join(path, "assets/source.map"));
+  await writeFile(join(f.directory, "private.txt"), "FIXTURE SECRET");
+  await symlink(
+    join(f.directory, "private.txt"),
+    join(path, "assets/linked.js"),
+  );
+  await assert.rejects(OperatorWebBundle.open(path));
+});
+test("HTTPS configured origin retains Secure host-only cookie and rejects loopback Origin", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const path = join(f.directory, "https-bundle");
+  await mkdir(join(path, "assets"), { recursive: true });
+  await writeFile(join(path, "index.html"), "<html></html>");
+  const authFile = join(f.directory, "https-auth");
+  await OperatorAuth.initialize(authFile, "fixture password");
+  const configured = "https://ensemble.fixture.ts.net";
+  const auth = await OperatorAuth.open({ authFile, origin: configured });
+  t.after(() => auth.close());
+  const http = new LocalOperatorHttp(
+    new LocalOperatorUi(f.service.domain()),
+    auth,
+    {
+      web: new OperatorWebBoundary(
+        await OperatorWebBundle.open(path),
+        new OperatorApi(f.service, [f.directory]),
+      ),
+    },
+  );
+  const port = await http.start();
+  t.after(() => http.stop());
+  const origin = `http://127.0.0.1:${port}`;
+  const response = await fetch(`${origin}/api/operator/session`);
+  const setCookie = response.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Secure/);
+  assert.doesNotMatch(setCookie, /Domain=/);
+  const session = (await response.json()) as { csrfToken: string };
+  for (const requestOrigin of [origin, configured]) {
+    const login = await fetch(`${origin}/api/operator/login`, {
+      method: "POST",
+      headers: {
+        cookie: setCookie.split(";")[0] ?? "",
+        origin: requestOrigin,
+        "x-csrf-token": session.csrfToken,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ password: "fixture password" }),
+    });
+    assert.equal(login.status, requestOrigin === configured ? 200 : 403);
+  }
 });

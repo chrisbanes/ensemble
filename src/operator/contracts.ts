@@ -12,18 +12,20 @@ export type JsonValue =
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
-const json: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([
-    z.null(),
-    z.boolean(),
-    z.number().finite(),
-    text,
-    z.array(json).max(256),
-    z.record(z.string().max(512), json),
-  ]),
-);
-export const materialSchema = json.refine(
-  (value) => JSON.stringify(value).length <= 8192,
+const scalar = z.union([z.null(), z.boolean(), z.number().finite(), text]);
+let boundedJson: z.ZodType<JsonValue> = scalar;
+for (let depth = 0; depth < 12; depth++) {
+  const child = boundedJson;
+  boundedJson = z.union([
+    scalar,
+    z.array(child).max(256),
+    z
+      .record(z.string().max(512), child)
+      .refine((value) => Object.keys(value).length <= 256),
+  ]);
+}
+export const materialSchema = boundedJson.refine(
+  (value) => new TextEncoder().encode(JSON.stringify(value)).length <= 8192,
 );
 export const sessionSchema = z
   .object({

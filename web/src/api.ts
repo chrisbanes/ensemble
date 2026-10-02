@@ -36,7 +36,8 @@ export class OperatorClient {
       throw new ClientError("invalid-input", 400);
     let response: Response;
     try {
-      response = await this.fetcher(path, {
+      const fetcher = this.fetcher;
+      response = await fetcher(path, {
         ...init,
         credentials: "same-origin",
       });
@@ -48,7 +49,7 @@ export class OperatorClient {
       );
     }
     if (response.status === 401) {
-      this.expired();
+      if (path !== "/api/operator/login") this.expired();
       throw new ClientError("unauthenticated", 401);
     }
     let body: unknown;

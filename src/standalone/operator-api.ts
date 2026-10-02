@@ -1,3 +1,4 @@
+import type { CoordinationView } from "./coordination-view.js";
 import { z } from "zod";
 import { DomainCommands, DomainConflictError } from "../core/domain.js";
 import type {
@@ -50,6 +51,8 @@ export class OperatorApi {
   constructor(
     private readonly service: StandaloneService,
     private readonly controlPaths: readonly string[] = [],
+    private readonly coordination: () => CoordinationView = () =>
+      service.coordinationView(),
   ) {
     this.commands = new DomainCommands(service.domain());
   }
@@ -134,8 +137,10 @@ export class OperatorApi {
     excluded: readonly string[] | undefined,
   ): string | null {
     if (value === null || value === undefined) return null;
+    const prose = String(value);
+    if (prose.length > 16000) return null;
     return excluded
-      ? (sanitizeConversationText(String(value), excluded) ?? null)
+      ? (sanitizeConversationText(prose, excluded) ?? null)
       : null;
   }
   private async project(row: Row) {
@@ -273,7 +278,7 @@ export class OperatorApi {
     )
       state = "selected";
     else {
-      const view = this.service.coordinationView().readTask(String(task.id));
+      const view = this.coordination().readTask(String(task.id));
       if (
         [...view.questions, ...view.approvals].some((i) => i.status === "open")
       )
@@ -378,7 +383,7 @@ export class OperatorApi {
       d = this.domain(),
       p = d.project(projectId),
       excluded = await this.exclusions(projectId, taskId),
-      view = this.service.coordinationView().readTask(taskId),
+      view = this.coordination().readTask(taskId),
       assignments = d.assignments(taskId),
       lead = d
         .leadBindings()
@@ -557,10 +562,16 @@ export class OperatorApi {
         [
           t.title,
           t.outcome,
+          issue?.observedBody,
+          issue?.observedTitle,
+          ...view.messages.map((m) => m.text),
           ...view.results.map((r) => r.summary),
           ...view.questions.map((i) => i.prompt),
           ...view.approvals.map((i) => i.prompt),
-        ].some((v) => v !== null && this.safe(v, excluded) === null),
+        ].some(
+          (v) =>
+            v !== null && v !== undefined && this.safe(v, excluded) === null,
+        ),
     };
     return taskSchema.parse({ data, observedAt: Date.now() });
   }
@@ -720,13 +731,33 @@ export class OperatorApi {
         });
       }
       this.requireTask(c.taskId);
-      const view = this.service.coordinationView();
-      const { type, ...command } = c;
+      const view = this.coordination();
+      const { type, ...submitted } = c;
+      let command: typeof submitted = submitted;
+      if (
+        c.type === "approval.decide" &&
+        c.decision === "denied" &&
+        c.material === undefined
+      ) {
+        const retained = view
+          .readTask(c.taskId)
+          .approvals.find((i) => i.interactionId === c.interactionId);
+        if (
+          retained?.materialJson !== null &&
+          retained?.materialJson !== undefined
+        ) {
+          command = {
+            ...submitted,
+            material: materialSchema.parse(JSON.parse(retained.materialJson)),
+          };
+        }
+      }
       if (c.type === "approval.decide" && c.decision === "approved") {
         const approval = (await this.readTask(c.taskId)).data.approvals.find(
           (a) => a.interactionId === c.interactionId,
         );
-        if (!approval?.approvable) throw new OperatorApiError(403, "forbidden");
+        if (!approval?.approvable && approval?.status !== "approved")
+          throw new OperatorApiError(403, "forbidden");
       }
       const saved =
         type === "message"

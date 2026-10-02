@@ -1138,7 +1138,7 @@ export class LocalOperatorHttp {
     session: OperatorSession | undefined,
   ): Promise<boolean> {
     const web = this.web;
-    if (!web || !web.owns(url.pathname)) return false;
+    if (!web?.owns(url.pathname)) return false;
     const path = url.pathname,
       method = request.method;
     const headers = {
