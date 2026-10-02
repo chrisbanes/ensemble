@@ -4,14 +4,18 @@ Issue [#739](https://github.com/chrisbanes/ensemble/issues/739), approved
 [plan revision 1](https://github.com/chrisbanes/ensemble/issues/739#issuecomment-5942570298).
 T1 preparation against `1a643463769b2c87f1503b22f9fb14068160d846`, 2 October 2026.
 
-**Native availability and the operational receipt are unproved.** This candidate
-prepares the protocol experiment and deterministic fixtures. It starts no real
-Codex model turn and changes no production adapter, package, configuration, login
-or installed service. T2–T6 remain gated on a passing live T1 result.
+**Live T1 did not qualify native input.** The lead's single model turn completed
+without a native input callback. Native availability, the operational receipt and
+the required round trip remain unproved. T2–T6 and dependent issues
+[#743](https://github.com/chrisbanes/ensemble/issues/743) /
+[#745](https://github.com/chrisbanes/ensemble/issues/745) remain gated pending
+upstream scope review. No production adapter, package, configuration, login or
+installed service was changed. The one-turn budget is consumed; no retry is
+authorized.
 
 ## Read-only installed evidence
 
-`/opt/homebrew/bin/codex --version` reports `codex-cli 0.159.0`.
+`codex --version` reports `codex-cli 0.159.0`.
 `codex app-server generate-ts --experimental` was refreshed without execution.
 The generated bundle remains outside the repository. These SHA-256 fingerprints
 identify the relevant definitions; the CLI refreshes fingerprints and records
@@ -37,7 +41,7 @@ only. There is no explicit cardinality or recommended-option field.
 
 | Capability | Current evidence / disposition |
 | --- | --- |
-| Native availability under ordinary production settings | Unproved; requires the single live experiment |
+| Native availability under ordinary production settings | Unproved; the one permitted live turn produced no native callback |
 | Blocking input with no auto-resolution | Fixture-qualified; only `true` / `null` is accepted live |
 | Single choice | Fixture-qualified; fixed delivery options Local/Remote |
 | Free text / grouped questions | Schema candidate; live support only if observed in the fixed request |
@@ -47,27 +51,31 @@ only. There is no explicit cardinality or recommended-option field.
 | Same-turn answer consumption | Fixture-qualified report/nonce; live observation unproved |
 | Service persistence, hold/restart integration, production UI | Untested here; later approved slices |
 
-## Prepared protocol command
+## Protocol experiment contract
 
-After pinned build and independent review, the lead runs exactly:
+After independent review, the lead invoked this command using pinned Node
+`24.21.0` and npm `12.2.0`:
 
 ```sh
-PATH=/tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin:$PATH /tmp/ensemble-node.T1JoRI/node-v24.21.0-darwin-arm64/bin/node test/ui01/runtime-contract.mjs --live --phase protocol
+node test/ui01/runtime-contract.mjs --live --phase protocol
 ```
+
+This records the executed experiment; it does not authorize another run.
 
 The CLI accepts only those three arguments. It uses existing ChatGPT login,
 `experimentalApi: true`, `never`, `workspace-write`, a private marked workspace,
 and the existing explicit per-turn workspace policy with network disabled and
 both temporary-root exclusions. It supplies no collaboration-mode override.
-There is one disposable repository-free task/thread, one turn, one native request
-and one reporting callback. The native request deadline is 90 seconds; the total
-budget is 240 seconds, reserving 10 seconds for scoped cleanup. There is no retry.
+The limits are one disposable repository-free task/thread, one turn, one native
+request and one reporting callback. The native request deadline is 90 seconds;
+the total budget is 240 seconds, reserving 10 seconds for scoped cleanup. There is no retry.
 
-At the blocked checkpoint the probe has sent zero native replies and observed
-no resolution, report or terminal. The synthetic answer, command receipt and
-immutable intent/digest commit in one real SQLite transaction; a second connection
-reads them while replies remain zero. The one reply preserves the typed RPC id.
-Sequence evidence distinguishes write initiation, stdin callback and native
+The harness requires a blocked checkpoint with zero native replies and no
+resolution, report or terminal. The live attempt did not reach this checkpoint.
+For a supported request the harness commits the synthetic answer, command receipt
+and immutable intent/digest in one real SQLite transaction; a second connection
+must read them while replies remain zero. The one reply preserves the typed RPC
+id. Sequence evidence distinguishes write initiation, stdin callback and native
 resolution. A resolution during the write waits for callback success. Neither
 signal alone confirms receipt. Reporting callback resolution is tracked separately.
 A matching report establishes experiment consumption, then its response must end
@@ -115,8 +123,8 @@ The lead's first protocol attempt at `ab7d786836a2406f3d9cd2b4cfd10b1cb4f0acff`
 stopped during `initialize-and-policy` with `oversized-message`. It created
 **zero threads and zero turns**, with no native request, answer or report. The
 exact created process `49274` was independently verified absent on the same boot.
-Its sanitized evidence remains at
-`/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-ui01-protocol-UzleQs.json`.
+Its sanitized evidence artifact, `ensemble-ui01-protocol-UzleQs.json`, is retained
+by the lead with the failed fixture.
 This attempt proves a harness startup defect, not a native capability failure.
 
 The subsequent lead-owned startup-only diagnostic observed initialize at 180
@@ -124,7 +132,7 @@ bytes, account/read at 274 bytes, notifications at 210/105 bytes, and the
 **config/read response at 1,601,330 bytes**. It retained message types and byte
 counts only, no configuration payload. It also created **zero threads and zero
 turns**; exact process `50666` was independently verified absent on the same boot.
-The diagnostic is `/tmp/ensemble-ui01-startup-diagnostic.json`.
+The sanitized diagnostic artifact is `ensemble-ui01-startup-diagnostic.json`.
 
 The repaired probe keeps the 1 MiB limit for every other message. Only an exact
 typed pending `config/read` response with no RPC error can use an envelope up to
@@ -147,3 +155,55 @@ cancellations or skips. All 27 harness tests passed. The sandboxed check again
 failed only the eight existing loopback HTTP/browser tests; the exact rerun with
 local process/network permissions passed. Final diff whitespace validation passed.
 No App Server or real model turn was executed by the repair owner.
+
+## Bounded live result — 2 October 2026
+
+The lead ran the independently reviewed repaired harness at
+`7ca45e15f749f5b854ffcc1e1849321833749421`. The runtime was
+`codex-cli 0.159.0`, executable SHA-256
+`e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a`,
+with the schema fingerprints above. Existing ChatGPT login, experimental API,
+`never`, `workspace-write`, the explicit workspace-only write roots, disabled
+network, both temporary-root exclusions and no collaboration-mode override were
+retained. Startup successfully consumed the 1,601,330-byte `config/read` response
+without retaining its unrelated payload.
+
+| Observation | Result |
+| --- | --- |
+| Created disposable tasks / threads / model turns | 1 / 1 / 1 |
+| Native input requests / replies / reporting callbacks | 0 / 0 / 0 |
+| Input deadline / total budget / reserved cleanup | 90 s / 240 s / 10 s |
+| Failure stage / reason | `native-request` / `terminal-before-receipt-or-report` |
+| Live native availability / operational receipt / answer consumption | Unproved / unproved / unproved |
+| Qualified endpoint item / typed request id | None established |
+| Fixture | Retained; removal was not attempted after failed proof |
+| Created process | `68482`, birth identity `Fri Oct  2 00:59:52 2026` |
+| Scoped cleanup | Interrupt requested; exact process exit independently verified on the same boot by `mac-pid-absent-same-boot` at `2026-10-02T00:00:02.780Z` |
+
+The sanitized artifact `ensemble-ui01-protocol-vaBwMI.json` and failed fixture
+remain with the lead. Raw stderr, model history, unrelated configuration and
+credentials are excluded from this document. Provider thread records may remain;
+cleanup did not request their deletion. No durable native answer, reply intent,
+callback receipt or consumption report was created because no native request was
+observed.
+
+The mandatory T1 transport contract failed qualification: this one-turn experiment
+did not demonstrate a usable native blocking/no-auto-resolution callback, its
+qualified receipt, or the same-turn answer-consumption round trip. This result
+leaves broader runtime availability and the cause unresolved.
+The one-turn proof budget is consumed. Stop T2–T6, keep #739 incomplete and
+[#743](https://github.com/chrisbanes/ensemble/issues/743) /
+[#745](https://github.com/chrisbanes/ensemble/issues/745) gated, and request an
+upstream scope decision before any retry or change to the accepted contract.
+There was no plaintext answer substitute, second turn or policy/mode change.
+
+All existing S01 trust and recovery boundaries remain: successful terminal alone
+does not qualify this native proof, historical resume is not live reattachment,
+and no crash, Stop, ownership or unresolved-execution hold is released by this
+result. The exact created App Server's verified exit is scoped cleanup evidence;
+it is no guarantee of descendant containment or an independent Ensemble sandbox.
+
+This final change is documentation only. Reuse the repaired harness's passing
+341-test full check and 27-test targeted evidence; proportional validation checks
+this document's facts, scope, privacy and diff whitespace. The documentation owner
+ran no App Server or model turn.
