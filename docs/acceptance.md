@@ -107,6 +107,41 @@ acceptance remains required on #736.
 | UI02 | Selected runtime issues its supported AskUserQuestion-style equivalent; restart around answer persistence/delivery, replay submissions, or answer a stale/cancelled/already answered request | The durable question maps to the exact requesting assignment/runtime request; persisted answers survive restart and produce no duplicate answer or continuation; stale/cancelled requests reject new answers and conflicting repeats cannot replace accepted answers; pause, Stop, dependency and ownership holds remain effective; unsupported/unavailable interactions are explicit, with no fabricated answer or silent chat fallback; record the actual runtime API/version and observed round trip | Runtime + service fault injection + UI |
 | UI03 | Switch List/Board in cross-project and project views with shared filters and a mix of local/imported tasks, including Ready-but-blocked, waiting, paused, stopping and uncertain work | Same filtered task set in both views; switching changes no task state; cards show title, project, lead, imported source identity and relevant wait/intervention reasons, and open the same detail; all states remain reachable on desktop and narrow screens with keyboard-accessible controls; readiness remains distinct from execution holds; GitHub state/Project fields remain source-owned; any offered card transition uses a permitted command and cannot bypass holds or silently write to GitHub; drag-and-drop is not required | UI + service + adapter |
 
+### Task overview and evidence design review — 3 October 2026
+
+Review the [task overview specification](SPEC.md#task-overview-and-evidence--design-direction-3-october-2026)
+in Pen before implementation. These observable outcomes guide design review and
+subsequent UI validation; a mockup does not prove persistence, permissions, runtime
+behaviour or delivery. GitHub issues retain delivery scope and sequencing under
+[#736](https://github.com/chrisbanes/ensemble/issues/736), with task detail in
+[#742](https://github.com/chrisbanes/ensemble/issues/742) and assembled UI acceptance
+in [#745](https://github.com/chrisbanes/ensemble/issues/745).
+
+- **Brief provenance:** local and imported examples show the desired outcome,
+  supplied criteria and recorded decisions without inventing missing content.
+  GitHub requirements stay source-owned; agent plans and decisions are distinct.
+- **Delegation:** parallel assignments, including two using the same profile,
+  have distinguishable responsibilities, requesters and result destinations.
+  The project lead remains identifiable; known waits and unknown state are clear.
+- **Results and evidence:** show current and earlier results with reporting
+  assignment and relevant revision. Recorded evidence-to-criterion relationships
+  are visible. Agent claims, recorded verification and missing, stale, unavailable
+  or redacted evidence remain distinguishable; absence is never a pass.
+- **Navigation and attention:** List, Board, overview and attention entry points
+  preserve task/project/source context. Ordinary progress and dependency waiting
+  stay outside the attention inbox. Questions, approvals and uncertain execution
+  remain visible and their existing controls reachable.
+- **Reading and responsive states:** laptop and phone designs cover empty tasks,
+  long briefs, parallel work, pending requests, failed refresh and unavailable
+  evidence. Expanded detail, reading position and unfinished replies survive
+  updates; routine progress does not interrupt the operator's reading.
+
+Link the reviewed Pen design from the specification and relevant delivery issues
+before implementation, including its interaction and state handoff. No routes,
+API schema, artifact-storage mechanism or new runtime capability is prescribed
+by these checks. Existing evidence remains historical; these additions do not
+claim completed UI04, release qualification or reopened native integrations.
+
 ## Implemented service and integration proofs
 
 These are later S02–S07 integration obligations (GitHub coverage starts in S06).

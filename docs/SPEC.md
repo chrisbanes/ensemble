@@ -408,6 +408,52 @@ then questions and approvals oldest first. Show project and task context on each
 item. Unresolved questions, pending approvals and failures remain visible even
 when related history is collapsed.
 
+### Task overview and evidence — design direction, 3 October 2026
+
+Chris approved bringing the task brief, delegation, latest result and supporting
+evidence together, informed by Intent's shared-spec and verification experience.
+This is a specification change. Design and review the experience in Pen before
+implementing it; this amendment does not approve a screen layout.
+The following describes desired behaviour, not implemented capability or a fixed
+screen layout. Existing GitHub delivery issues remain authoritative for sequencing
+and slice acceptance; this amendment does not complete UI04 or qualify release.
+
+- **Shared task brief.** Make the desired outcome, supplied acceptance criteria,
+  current approach, recorded decisions and unresolved questions easy to find.
+  Preserve provenance: imported GitHub content remains authoritative and read-only
+  locally, while agent plans and decisions are distinguishable from requirements.
+  Do not create a competing editable specification or invent missing criteria.
+- **Evidence beside results.** Present relevant screenshots, artifacts and
+  validation alongside the result or acceptance criterion they support, when that
+  relationship is recorded. Identify the reporting assignment and relevant work
+  or artifact revision. Distinguish agent-reported claims from recorded verification;
+  absent, unavailable, stale or redacted evidence cannot imply a passed criterion.
+  Keep earlier results accessible without presenting them as the current outcome.
+- **Readable delegation.** Show each assignment's responsibility, assignee,
+  requester, known reason for waiting and result destination. Keep the accountable
+  project lead identifiable and distinguish assignments sharing a profile. Use
+  durable coordination and runtime observations rather than inferring ownership,
+  waiting or completion from conversation text. Unknown state stays explicit.
+- **Compact progress across tasks.** Summarize the current work state, known wait
+  reason and latest available result using source-faithful text. Keep ordinary
+  progress and dependency waiting separate from decisions needing the operator.
+  List, Board, overview and attention entry points must lead to a consistent task
+  experience without losing project or source context.
+
+The Pen design should explore information hierarchy, concise previews and expanded
+detail on laptop and phone. Include tasks with no assignments or results, parallel
+delegation, long briefs, a pending question or approval, dependency waits, failed
+refresh, uncertain execution and unavailable evidence. Preserve visible actionable
+requests, reading position, disclosure choices and unfinished replies. Existing
+execution, recovery and exact-material approval controls must remain reachable.
+Do not freeze routes, API fields, attachment storage or rendering technology through
+the design; settle those against the reviewed experience and existing boundaries.
+
+Centralized, consolidated PR feedback is a separate technical idea to assess against
+Ensemble's existing implementation, not a new requirement in this amendment.
+Integrated editors, terminals, browsers, extra execution providers and remote
+execution are outside this change. The deferred native integrations remain paused.
+
 ### Kanban board
 
 Provide a List/Board switch for cross-project and project task views. Both views
