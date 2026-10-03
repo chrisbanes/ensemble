@@ -481,6 +481,35 @@ test("source replacement verifies repositories without diagnostic echo and obser
     repositoryDescription,
     "Check linked repository IDs, paths and refs.",
   );
+  await page.waitForFunction(
+    () => {
+      const field = document.querySelector(
+        '[aria-describedby="source-repositories-error"][aria-invalid="true"]',
+      );
+      return (
+        field !== null &&
+        getComputedStyle(field).borderTopColor === "rgba(255, 102, 105, 0.6)"
+      );
+    },
+    { timeout: 1000 },
+  );
+  const invalidStyle = await page
+    .getByLabel("New local repository path", { exact: true })
+    .evaluate((e) => {
+      const style = getComputedStyle(e);
+      return {
+        border: style.borderTopColor,
+        foreground: style.color,
+        background: getComputedStyle(document.body).backgroundColor,
+        slot: e.getAttribute("data-slot"),
+        invalid: e.getAttribute("aria-invalid"),
+      };
+    });
+  assert.equal(invalidStyle.slot, "input");
+  assert.equal(invalidStyle.invalid, "true");
+  assert.match(invalidStyle.border, /255, 102, 105/);
+  assert.equal(invalidStyle.foreground, "rgb(250, 250, 250)");
+  assert.equal(invalidStyle.background, "rgb(10, 10, 10)");
   await capture(page, "1366-repository-error");
   await page
     .getByRole("button", {
@@ -750,6 +779,30 @@ test("Runtime Settings records lowered capacity separately from usage and retain
     .getByText("Global usage 2 / 4; default project limit 2.", { exact: true })
     .waitFor();
   await page.getByText("Execution hold recorded", { exact: true }).waitFor();
+  const capacityControl = await page
+    .getByLabel("Global active-turn cap", { exact: true })
+    .evaluate((e) => ({
+      height: getComputedStyle(e).height,
+      slot: e.getAttribute("data-slot"),
+      family: getComputedStyle(e).fontFamily,
+    }));
+  assert.equal(capacityControl.height, "36px");
+  assert.equal(capacityControl.slot, "input");
+  assert.match(capacityControl.family, /Inter/);
+  const capacityOverride = await page
+    .getByLabel("Set capacity override for Paused configuration project", {
+      exact: true,
+    })
+    .evaluate((e) => ({
+      width: getComputedStyle(e).width,
+      height: getComputedStyle(e).height,
+      checked: (e as HTMLInputElement).checked,
+    }));
+  assert.deepEqual(capacityOverride, {
+    width: "20px",
+    height: "20px",
+    checked: false,
+  });
   await page.getByLabel("Global active-turn cap", { exact: true }).fill("1");
   await page
     .getByRole("button", { name: "Save capacity", exact: true })

@@ -731,3 +731,11 @@ final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
 
 Delivery [UI06 #744](https://github.com/chrisbanes/ensemble/issues/744) implements the [configuration/recovery presentation contract](design/ui06-configuration.md), retaining exact private editors and operational destinations. Production-bundle integration is qualified with disposable SQLite and deterministic runtime/provider fixtures; this does not replace live-runtime, provider or release evidence.
+
+Delivery [UI08 #765](https://github.com/chrisbanes/ensemble/issues/765) provides
+the shared owned shadcn/ui source and semantic tokens across the React shell,
+configuration/recovery screens and retained production HTML. See the [UI08
+contract](design/ui08-foundation.md) and [fixture evidence](evidence/ui08-foundation.md).
+It changes presentation only; it does not add task-detail, search, or Inbox
+capabilities, and it does not qualify the web-disabled diagnostic fallback for
+production visual parity.

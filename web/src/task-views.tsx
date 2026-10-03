@@ -3,7 +3,15 @@ import type {
   Workspace,
   TaskListSummary,
 } from "../../src/operator/contracts.js";
-import { Button, ResourceStatus, StatusBadge } from "./components.js";
+import {
+  ActionLink,
+  Button,
+  ResourceStatus,
+  StatusBadge,
+} from "./components.js";
+import { Card } from "./ui/card.js";
+import { Input } from "./ui/input.js";
+import { NativeSelect } from "./ui/native-select.js";
 import type { ResourceState } from "./resource.js";
 import {
   columns,
@@ -19,7 +27,7 @@ import {
 function TaskContents({ task }: { task: TaskListSummary }) {
   return (
     <>
-      <p className="metadata muted">
+      <p className="metadata muted task-project-metadata">
         {task.project.name ?? "Project name unavailable"} ·{" "}
         {task.source
           ? `GitHub ${task.source.repositoryName ?? "repository unavailable"} #${task.source.number ?? "?"}`
@@ -28,7 +36,7 @@ function TaskContents({ task }: { task: TaskListSummary }) {
       <a className="small-heading task-title" href={taskDetailHref(task)}>
         {task.title ?? "Title unavailable"}
       </a>
-      <p className="body">
+      <p className="body task-status">
         <StatusBadge tone={task.attention.count ? "warning" : "neutral"}>
           {taskColumn(task)}
         </StatusBadge>{" "}
@@ -36,12 +44,12 @@ function TaskContents({ task }: { task: TaskListSummary }) {
           {task.ready ? "Ready" : "Not Ready"} · {task.execution.state}
         </span>
       </p>
-      <p className="metadata">
+      <p className="metadata task-lead">
         Task lead:{" "}
         {task.lead?.name ?? (task.lead ? "Name unavailable" : "Unconfigured")}
       </p>
       {task.source && (
-        <p className="metadata muted">
+        <p className="metadata muted task-source-state">
           GitHub source: {task.source.state ?? "state unavailable"}
         </p>
       )}
@@ -62,8 +70,10 @@ export function TaskRow({ task }: { task: TaskListSummary }) {
 }
 export function TaskCard({ task }: { task: TaskListSummary }) {
   return (
-    <article className="task-card" data-task-id={task.id}>
-      <TaskContents task={task} />
+    <article data-task-id={task.id}>
+      <Card className="task-card">
+        <TaskContents task={task} />
+      </Card>
     </article>
   );
 }
@@ -77,10 +87,11 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
         aria-label="Board columns"
       >
         {columns.map((column, index) => (
-          <button
+          <Button
             key={column}
             type="button"
-            className="control column-tab"
+            variant={selected === index ? "primary" : "secondary"}
+            className="column-tab"
             aria-pressed={selected === index}
             onClick={() => {
               setSelected(index);
@@ -90,7 +101,7 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
             }}
           >
             {column} ({tasks.filter((t) => taskColumn(t) === column).length})
-          </button>
+          </Button>
         ))}
       </div>
       <div className="phone-column-controls">
@@ -181,23 +192,20 @@ export function TaskViews({
       )}
       <div className="task-actions">
         {projectId && (
-          <a
-            className="control button secondary"
+          <ActionLink
+            variant="secondary"
             href={`/app/projects/${projectId}/settings`}
           >
             Project settings
-          </a>
+          </ActionLink>
         )}
         {projectId && (
-          <a
-            className="control button secondary"
-            href={`/project/${projectId}`}
-          >
+          <ActionLink variant="secondary" href={`/project/${projectId}`}>
             Open existing project controls
-          </a>
+          </ActionLink>
         )}
-        <a
-          className="control button primary"
+        <ActionLink
+          variant="primary"
           href={`/app/tasks/new${projectId ? `?project=${projectId}` : ""}`}
           onClick={(e) => {
             e.preventDefault();
@@ -205,7 +213,7 @@ export function TaskViews({
           }}
         >
           New task
-        </a>
+        </ActionLink>
         <Button variant="secondary" onClick={refresh} disabled={state.pending}>
           Refresh tasks
         </Button>
@@ -221,28 +229,30 @@ export function TaskViews({
         </p>
       )}
       {overview && (
-        <section className="attention-preview" aria-label="Needs attention">
-          <div className="section-title">
-            <h2 className="section-heading">Needs attention</h2>
-            <a
-              className="control"
-              href="/app/inbox"
-              onClick={(e) => {
-                e.preventDefault();
-                navigate("/app/inbox");
-              }}
-            >
-              View Inbox
-            </a>
-          </div>
-          {state.data && !attention.length && (
-            <p className="body muted">
-              No action requests in this observation.
-            </p>
-          )}
-          {attention.map((t) => (
-            <TaskRow key={t.id} task={t} />
-          ))}
+        <section aria-label="Needs attention">
+          <Card className="attention-preview">
+            <div className="section-title">
+              <h2 className="section-heading">Needs attention</h2>
+              <a
+                className="control"
+                href="/app/inbox"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/app/inbox");
+                }}
+              >
+                View Inbox
+              </a>
+            </div>
+            {state.data && !attention.length && (
+              <p className="body muted">
+                No action requests in this observation.
+              </p>
+            )}
+            {attention.map((t) => (
+              <TaskRow key={t.id} task={t} />
+            ))}
+          </Card>
         </section>
       )}
       <section aria-label={overview ? "Work" : "Tasks"}>
@@ -250,9 +260,8 @@ export function TaskViews({
         <div className="task-filters">
           <label className="field body" htmlFor="task-search">
             Search tasks
-            <input
+            <Input
               id="task-search"
-              className="control"
               value={filters.q}
               maxLength={512}
               onChange={(e) => update({ q: e.target.value })}
@@ -261,7 +270,7 @@ export function TaskViews({
           {!projectId && (
             <label className="field body" htmlFor="task-project">
               Project
-              <select
+              <NativeSelect
                 id="task-project"
                 aria-label="Project"
                 value={filters.project}
@@ -273,12 +282,12 @@ export function TaskViews({
                     {p.name ?? "Name unavailable"}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
           )}
           <label className="field body" htmlFor="task-state">
             State
-            <select
+            <NativeSelect
               id="task-state"
               aria-label="State"
               value={filters.state}
@@ -288,11 +297,11 @@ export function TaskViews({
               {columns.map((c) => (
                 <option key={c}>{c}</option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label className="field body" htmlFor="task-source">
             Source
-            <select
+            <NativeSelect
               id="task-source"
               aria-label="Source"
               value={filters.source}
@@ -301,11 +310,11 @@ export function TaskViews({
               <option value="">All sources</option>
               <option value="local">Local</option>
               <option value="github">GitHub</option>
-            </select>
+            </NativeSelect>
           </label>
           <label className="field body" htmlFor="task-ready">
             Readiness
-            <select
+            <NativeSelect
               id="task-ready"
               aria-label="Readiness"
               value={filters.ready}
@@ -314,7 +323,7 @@ export function TaskViews({
               <option value="">Any readiness</option>
               <option value="yes">Ready</option>
               <option value="no">Not Ready</option>
-            </select>
+            </NativeSelect>
           </label>
         </div>
         <div
@@ -323,14 +332,14 @@ export function TaskViews({
           aria-label="Task presentation"
         >
           <Button
-            variant="secondary"
+            variant={filters.view === "list" ? "primary" : "secondary"}
             aria-pressed={filters.view === "list"}
             onClick={() => update({ view: "list" })}
           >
             List
           </Button>
           <Button
-            variant="secondary"
+            variant={filters.view === "board" ? "primary" : "secondary"}
             aria-pressed={filters.view === "board"}
             onClick={() => update({ view: "board" })}
           >

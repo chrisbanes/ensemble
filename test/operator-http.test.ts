@@ -367,6 +367,9 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
 
     const loginPage = await fetch(`${origin}/login`);
     assert.equal(loginPage.status, 200);
+    const loginMarkup = await loginPage.text();
+    assert.doesNotMatch(loginMarkup, /legacy-operator|rel="stylesheet"/);
+    assert.match(loginMarkup, /<main>/);
     const anonymousCookie = cookiePair(loginPage);
     const anonymousSession = auth.getSession(
       anonymousCookie.split("=", 2)[1] ?? "",
@@ -387,8 +390,7 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
     assert.equal(loginPage.headers.get("x-content-type-options"), "nosniff");
     assert.ok(loginPage.headers.get("content-security-policy"));
 
-    const loginHtml = await loginPage.text();
-    const loginCsrf = csrfFrom(loginHtml);
+    const loginCsrf = csrfFrom(loginMarkup);
     const wrongCsrf = await fetch(`${origin}/login`, {
       method: "POST",
       headers: {
