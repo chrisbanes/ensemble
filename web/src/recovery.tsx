@@ -286,6 +286,13 @@ export function AssignmentRecovery(
                 {r.receiptRecorded ? "recorded" : "not recorded"}; workspace{" "}
                 {r.workspace}.
               </p>
+              {r.preTurnRejection && (
+                <p className="body">
+                  Before-turn archived resume witness {r.preTurnRejection.id}.
+                  Source {r.preTurnRejection.source}. This records rejection
+                  evidence, not recovery or permission to dispatch.
+                </p>
+              )}
               <p className="metadata">
                 Stop {r.holds.stop ? "active" : "inactive"}; writer{" "}
                 {r.holds.writer ? "held" : "not recorded"}; capacity{" "}

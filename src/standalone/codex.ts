@@ -32,6 +32,10 @@ import type {
   RuntimeProcessIdentity,
 } from "./recovery-types.js";
 import { captureProcessIdentity } from "./termination.js";
+import {
+  ArchivedResumeRejectedError,
+  archivedResumeRejectionSchema,
+} from "./pre-turn-recovery.js";
 
 const rpc = z.object({
   id: z.union([z.string(), z.number()]).optional(),
@@ -973,6 +977,9 @@ export class CodexRuntime implements Runtime {
       reject(error: Error): void;
       beforeResolve?(value: unknown): void;
       timer: NodeJS.Timeout;
+      method: string;
+      params: unknown;
+      processIdentity: RuntimeProcessIdentity | null;
     }
   >();
   private readonly events = new EventEmitter();
@@ -1329,6 +1336,9 @@ export class CodexRuntime implements Runtime {
         resolve,
         reject,
         timer,
+        method,
+        params,
+        processIdentity: this.processIdentityValue,
         ...(beforeResolve ? { beforeResolve } : {}),
       });
       void this.send(`${JSON.stringify({ id, method, params })}\n`).catch(
@@ -1410,9 +1420,23 @@ export class CodexRuntime implements Runtime {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(Number(message.id));
-      if (message.error !== undefined)
-        pending.reject(new Error(JSON.stringify(message.error)));
-      else {
+      if (message.error !== undefined) {
+        const params = z
+          .object({ threadId: z.string() })
+          .safeParse(pending.params);
+        const rejection = archivedResumeRejectionSchema.safeParse({
+          method: pending.method,
+          requestId: message.id,
+          threadId: params.success ? params.data.threadId : undefined,
+          processIdentity: pending.processIdentity,
+          error: message.error,
+        });
+        pending.reject(
+          rejection.success && message.result === undefined
+            ? new ArchivedResumeRejectedError(rejection.data)
+            : new Error(JSON.stringify(message.error)),
+        );
+      } else {
         try {
           pending.beforeResolve?.(message.result);
           pending.resolve(message.result);

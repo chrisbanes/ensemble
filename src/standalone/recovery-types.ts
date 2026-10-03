@@ -48,17 +48,7 @@ export interface TerminationVerifier {
   verify(identity: RuntimeProcessIdentity): Promise<TerminationVerification>;
 }
 
-export interface RecoveryReceipt {
-  workId: string;
-  workRevision: number | null;
-  requestSequence: number;
-  threadId: string;
-  turnId: string;
-  processIdentity: RuntimeProcessIdentity;
-  termination: ProcessExitEvidence;
-  effects: "settled";
-  workspace: "preserved" | "reconciled";
-}
+export type { RecoveryReceipt } from "./pre-turn-recovery.js";
 
 export interface RecoveryRecord {
   workId: string;
@@ -95,4 +85,9 @@ export interface RecoveryRecord {
     stop: boolean;
   };
   receipt: { id: string; workspaceDisposition: string } | null;
+  preTurnRejection?: {
+    id: string;
+    source: "runtime" | "operator-adopted";
+    predecessorThreadId: string;
+  };
 }

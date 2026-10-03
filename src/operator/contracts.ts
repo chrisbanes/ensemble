@@ -936,6 +936,14 @@ export const assignmentRecoverySchema = envelope(
               holds: recoveryHolds,
               observations: z.array(recoveryObservationSchema).max(12),
               pendingEffectCount: time,
+              preTurnRejection: z
+                .object({
+                  id: uuid,
+                  source: z.enum(["runtime", "operator-adopted"]),
+                  predecessorThreadId: safeText,
+                })
+                .strict()
+                .optional(),
               receiptRecorded: z.boolean(),
               workspace: z.enum(["preserved", "reconciled", "unknown"]),
             })

@@ -1,3 +1,13 @@
+import { canonicalMaterial } from "../core/delivery.js";
+import {
+  archivedResumeRejectionSchema,
+  historicalPreTurnAdoptionSchema,
+  replaceConversationCommandSchema,
+  type ArchivedResumeRejection,
+  type HistoricalPreTurnAdoption,
+  type ReplaceConversationCommand,
+} from "./pre-turn-recovery.js";
+import { recoveryReceiptSchema } from "./pre-turn-recovery.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "../core/store.js";
@@ -9,6 +19,23 @@ import type {
   VerifiedTermination,
 } from "./recovery-types.js";
 import type { ConversationHistoryBinding } from "./conversation-history.js";
+
+const recoveryReceiptColumns = `(
+      id TEXT PRIMARY KEY,
+      workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      workRevision INTEGER,
+      requestSequence INTEGER NOT NULL,
+      threadId TEXT,
+      turnId TEXT,
+      processId TEXT NOT NULL,
+      processStartedAt TEXT NOT NULL,
+      bootId TEXT NOT NULL,
+      terminationMethod TEXT NOT NULL,
+      terminationVerifiedAt TEXT NOT NULL,
+      effectsState TEXT NOT NULL CHECK(effectsState = 'settled'),
+      workspaceDisposition TEXT NOT NULL CHECK(workspaceDisposition IN ('preserved','reconciled')),
+      createdAt INTEGER NOT NULL
+    )`;
 
 const intentSchema = z.object({
   id: z.string().uuid(),
@@ -172,20 +199,6 @@ const processIdentitySchema = z.object({
   processStartedAt: z.string().min(1).max(128),
   bootId: z.string().min(1).max(128),
 });
-
-const recoveryReceiptSchema = z
-  .object({
-    workId: z.string().min(1),
-    workRevision: z.number().int().positive().nullable(),
-    requestSequence: z.number().int().positive(),
-    threadId: z.string().min(1),
-    turnId: z.string().min(1),
-    processIdentity: processIdentitySchema,
-    termination: z.object({ kind: z.literal("process-exit") }).strict(),
-    effects: z.literal("settled"),
-    workspace: z.enum(["preserved", "reconciled"]),
-  })
-  .strict();
 
 const verifiedTerminationSchema = z
   .object({
@@ -374,22 +387,7 @@ export class ExecutionState {
       reason TEXT,
       PRIMARY KEY(workId, effectKey)
     );
-    CREATE TABLE IF NOT EXISTS execution_recovery_receipts (
-      id TEXT PRIMARY KEY,
-      workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
-      workRevision INTEGER,
-      requestSequence INTEGER NOT NULL,
-      threadId TEXT NOT NULL,
-      turnId TEXT NOT NULL,
-      processId TEXT NOT NULL,
-      processStartedAt TEXT NOT NULL,
-      bootId TEXT NOT NULL,
-      terminationMethod TEXT NOT NULL,
-      terminationVerifiedAt TEXT NOT NULL,
-      effectsState TEXT NOT NULL CHECK(effectsState = 'settled'),
-      workspaceDisposition TEXT NOT NULL CHECK(workspaceDisposition IN ('preserved','reconciled')),
-      createdAt INTEGER NOT NULL
-    );
+    CREATE TABLE IF NOT EXISTS execution_recovery_receipts ${recoveryReceiptColumns};
     CREATE TABLE IF NOT EXISTS execution_power_supervision (
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
       cursor TEXT,
@@ -404,6 +402,7 @@ export class ExecutionState {
     INSERT OR IGNORE INTO execution_power_supervision (singleton) VALUES (1);
     INSERT OR IGNORE INTO scheduler_capacity_limits (singleton, globalLimit)
       VALUES (1, 4)`);
+    this.migratePreTurnReceipts();
     // Workspace recovery runs before this state is opened. Any remaining hold
     // belonged to an interrupted process; the recovered workspace state now
     // decides whether execution or another cleanup attempt is possible.
@@ -1278,7 +1277,383 @@ export class ExecutionState {
     );
   }
 
-  /** Recheck retained receipt and the exact recovered generation on every use. */
+  /** Rebuild only the recognized receipt schema without changing legacy material. */
+  private migratePreTurnReceipts(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(execution_recovery_receipts)")
+      .all() as Array<{ name: string; notnull: number }>;
+    const stored = this.db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_recovery_receipts'",
+      )
+      .get() as { sql: string };
+    const normalize = (sql: string) =>
+      sql
+        .replace(
+          /"execution_recovery_receipts"/g,
+          "execution_recovery_receipts",
+        )
+        .split(/('(?:[^']|'')*')/)
+        .map((part) =>
+          part.startsWith("'") ? part : part.replace(/\s+/g, "").toUpperCase(),
+        )
+        .join("");
+    const current = `CREATE TABLE execution_recovery_receipts ${recoveryReceiptColumns}`;
+    const legacy = current
+      .replace("threadId TEXT,", "threadId TEXT NOT NULL,")
+      .replace("turnId TEXT,", "turnId TEXT NOT NULL,");
+    const names = [
+      "id",
+      "workId",
+      "workRevision",
+      "requestSequence",
+      "threadId",
+      "turnId",
+      "processId",
+      "processStartedAt",
+      "bootId",
+      "terminationMethod",
+      "terminationVerifiedAt",
+      "effectsState",
+      "workspaceDisposition",
+      "createdAt",
+    ];
+    if (
+      ![normalize(current), normalize(legacy)].includes(
+        normalize(stored.sql),
+      ) ||
+      JSON.stringify(columns.map((c) => c.name)) !== JSON.stringify(names) ||
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE tbl_name='execution_recovery_receipts' AND type IN ('index','trigger') AND sql IS NOT NULL",
+        )
+        .get()
+    )
+      throw new Error(
+        "Unrecognized recovery receipt schema; migration refused",
+      );
+    if (
+      columns.some(
+        (c) =>
+          (c.name === "threadId" || c.name === "turnId") && c.notnull === 1,
+      )
+    ) {
+      const foreignKeys = (
+        this.db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }
+      ).foreign_keys;
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      let started = false;
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+        started = true;
+        this.db.exec(`CREATE TABLE execution_recovery_receipts_nullable ${recoveryReceiptColumns};
+          INSERT INTO execution_recovery_receipts_nullable SELECT * FROM execution_recovery_receipts;
+          DROP TABLE execution_recovery_receipts;
+          ALTER TABLE execution_recovery_receipts_nullable RENAME TO execution_recovery_receipts;`);
+        if (this.db.prepare("PRAGMA foreign_key_check").all().length)
+          throw new Error("Pre-turn receipt migration broke a foreign key");
+        this.db.exec("COMMIT");
+        started = false;
+      } catch (error) {
+        if (started) this.db.exec("ROLLBACK");
+        throw error;
+      } finally {
+        this.db.exec(`PRAGMA foreign_keys = ${foreignKeys}`);
+      }
+    }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS execution_pre_turn_rejections (
+      id TEXT PRIMARY KEY, workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      source TEXT NOT NULL CHECK(source IN ('runtime','operator-adopted')),
+      contextMaterial TEXT NOT NULL, evidenceMaterial TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS execution_pre_turn_receipts (
+      receiptId TEXT PRIMARY KEY REFERENCES execution_recovery_receipts(id),
+      workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      witnessId TEXT NOT NULL UNIQUE REFERENCES execution_pre_turn_rejections(id), witnessMaterial TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS execution_pre_turn_commands (
+      commandKey TEXT PRIMARY KEY, scope TEXT NOT NULL, payloadMaterial TEXT NOT NULL, result TEXT NOT NULL
+    );`);
+  }
+
+  preTurnCommandReplay(
+    scope: string,
+    command: { key: string },
+  ): Record<string, string | number> | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT scope,payloadMaterial,result FROM execution_pre_turn_commands WHERE commandKey = ?",
+      )
+      .get(command.key) as
+      | { scope: string; payloadMaterial: string; result: string }
+      | undefined;
+    if (!row) return undefined;
+    if (
+      row.scope !== scope ||
+      row.payloadMaterial !== canonicalMaterial(command)
+    )
+      throw new Error(
+        "Pre-turn command key was reused with different material",
+      );
+    return JSON.parse(row.result) as Record<string, string | number>;
+  }
+  private recordPreTurnCommand(
+    scope: string,
+    command: { key: string },
+    result: unknown,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO execution_pre_turn_commands (commandKey,scope,payloadMaterial,result) VALUES (?,?,?,?)",
+      )
+      .run(
+        command.key,
+        scope,
+        canonicalMaterial(command),
+        JSON.stringify(result),
+      );
+  }
+  private preTurnContext(
+    workId: string,
+  ): Record<string, string | number | null> | undefined {
+    if (!this.hasTurnRequests) return undefined;
+    return this.db
+      .prepare(`SELECT request.workId, revision.workRevision, request.sequence AS requestSequence,
+      request.taskId, request.projectId, request.assignmentId, request.taskVersion, request.assignmentVersion,
+      request.instructionsRevision, request.profileRevision, binding.conversationRevision,
+      identity.processId, identity.processStartedAt, identity.bootId, intent.workspace,
+      admission.sequence AS writerSequence, predecessor.workId AS predecessorWorkId,
+      predecessor.threadId AS predecessorThreadId, predecessor.turnId AS predecessorTurnId
+    FROM turn_requests request JOIN execution_intents intent ON intent.workId=request.workId
+    JOIN execution_recovery_identities identity ON identity.workId=request.workId
+    JOIN task_work_revisions revision ON revision.workId=request.workId
+    JOIN task_execution_bindings binding ON binding.workId=request.workId
+    JOIN task_writer_admissions admission ON admission.workId=request.workId
+    JOIN execution_request_predecessors link ON link.workId=request.workId AND link.predecessorKnown=1
+    JOIN execution_intents predecessor ON predecessor.workId=request.previousWorkId AND predecessor.workId=link.previousWorkId
+    JOIN task_execution_bindings priorBinding ON priorBinding.workId=predecessor.workId
+    WHERE request.workId=? AND request.kind='assignment'
+      AND intent.state IN ('submitting','held','reconciled')
+      AND intent.threadId IS NULL AND intent.turnId IS NULL AND identity.threadId IS NULL AND identity.turnId IS NULL
+      AND identity.workRevision=revision.workRevision AND identity.requestSequence=request.sequence
+      AND identity.processId IS NOT NULL AND identity.processStartedAt IS NOT NULL AND identity.bootId IS NOT NULL
+      AND binding.taskId=request.taskId AND binding.assignmentId=request.assignmentId
+      AND binding.assignmentVersion=request.assignmentVersion AND binding.instructionsRevision=request.instructionsRevision
+      AND binding.profileRevision=request.profileRevision AND revision.assignmentId=request.assignmentId
+      AND revision.conversationRevision=binding.conversationRevision AND admission.workspace=intent.workspace
+      AND predecessor.state='completed' AND predecessor.threadId IS NOT NULL AND predecessor.turnId IS NOT NULL
+      AND priorBinding.taskId=binding.taskId AND priorBinding.assignmentId=binding.assignmentId
+      AND priorBinding.conversationRevision=binding.conversationRevision`)
+      .get(workId) as Record<string, string | number | null> | undefined;
+  }
+  private witnessForWork(workId: string):
+    | {
+        id: string;
+        workId: string;
+        source: "runtime" | "operator-adopted";
+        contextMaterial: string;
+        evidenceMaterial: string;
+      }
+    | undefined {
+    const witness = this.db
+      .prepare("SELECT * FROM execution_pre_turn_rejections WHERE workId=?")
+      .get(workId) as
+      | {
+          id: string;
+          workId: string;
+          source: "runtime" | "operator-adopted";
+          contextMaterial: string;
+          evidenceMaterial: string;
+        }
+      | undefined;
+    const context = this.preTurnContext(workId);
+    if (
+      !witness ||
+      !context ||
+      canonicalMaterial(context) !== witness.contextMaterial
+    )
+      return undefined;
+    try {
+      const evidence = JSON.parse(witness.evidenceMaterial);
+      const value =
+        witness.source === "runtime"
+          ? archivedResumeRejectionSchema.parse(evidence)
+          : historicalPreTurnAdoptionSchema.parse(evidence);
+      const threadId =
+        "threadId" in value ? value.threadId : value.predecessorThreadId;
+      if (
+        threadId !== context.predecessorThreadId ||
+        value.processIdentity.processId !== context.processId ||
+        value.processIdentity.processStartedAt !== context.processStartedAt ||
+        value.processIdentity.bootId !== context.bootId
+      )
+        return undefined;
+      if (witness.source === "operator-adopted") {
+        const replay = this.preTurnCommandReplay(
+          "adopt",
+          value as HistoricalPreTurnAdoption,
+        );
+        if (replay?.witnessId !== witness.id || replay.workId !== workId)
+          return undefined;
+      }
+      return witness;
+    } catch {
+      return undefined;
+    }
+  }
+  capturePreTurnRejection(
+    workId: string,
+    rejection: ArchivedResumeRejection,
+  ): boolean {
+    const value = archivedResumeRejectionSchema.parse(rejection);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const context = this.preTurnContext(workId);
+      const intent = this.db
+        .prepare("SELECT id,state FROM execution_intents WHERE workId=?")
+        .get(workId) as { id: string; state: string } | undefined;
+      if (
+        !context ||
+        intent?.state !== "submitting" ||
+        value.threadId !== context.predecessorThreadId ||
+        value.processIdentity.processId !== context.processId ||
+        value.processIdentity.processStartedAt !== context.processStartedAt ||
+        value.processIdentity.bootId !== context.bootId
+      ) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db
+        .prepare(
+          "INSERT INTO execution_pre_turn_rejections (id,workId,source,contextMaterial,evidenceMaterial) VALUES (?,?,'runtime',?,?)",
+        )
+        .run(
+          randomUUID(),
+          workId,
+          canonicalMaterial(context),
+          canonicalMaterial(value),
+        );
+      this.hold(
+        intent.id,
+        `Runtime submission or observation uncertain: Error: ${JSON.stringify(value.error)}`,
+      );
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  adoptHistoricalPreTurnRejection(command: HistoricalPreTurnAdoption): {
+    witnessId: string;
+    workId: string;
+  } {
+    const value = historicalPreTurnAdoptionSchema.parse(command);
+    const replay = this.preTurnCommandReplay("adopt", value);
+    if (replay)
+      return z
+        .object({ witnessId: z.string().uuid(), workId: z.string().min(1) })
+        .strict()
+        .parse(replay);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const context = this.preTurnContext(value.workId);
+      const intent = this.db
+        .prepare("SELECT state,reason FROM execution_intents WHERE workId=?")
+        .get(value.workId) as { state: string; reason: string } | undefined;
+      const request = this.db
+        .prepare("SELECT state,reason FROM turn_requests WHERE workId=?")
+        .get(value.workId) as { state: string; reason: string } | undefined;
+      if (
+        !context ||
+        intent?.state !== "held" ||
+        request?.state !== "held" ||
+        intent.reason !== value.retainedReason ||
+        request.reason !== value.retainedReason ||
+        value.retainedReason !==
+          `Runtime submission or observation uncertain: Error: ${JSON.stringify(value.rpcError)}` ||
+        context.workRevision !== value.workRevision ||
+        context.requestSequence !== value.requestSequence ||
+        context.predecessorWorkId !== value.predecessorWorkId ||
+        context.predecessorThreadId !== value.predecessorThreadId ||
+        context.processId !== value.processIdentity.processId ||
+        context.processStartedAt !== value.processIdentity.processStartedAt ||
+        context.bootId !== value.processIdentity.bootId ||
+        !this.db
+          .prepare(
+            "SELECT 1 FROM execution_capacity_reservations WHERE workId=?",
+          )
+          .get(value.workId)
+      )
+        throw new Error(
+          "Historical pre-turn adoption does not match the exact held generation",
+        );
+      const result = { witnessId: randomUUID(), workId: value.workId };
+      this.db
+        .prepare(
+          "INSERT INTO execution_pre_turn_rejections (id,workId,source,contextMaterial,evidenceMaterial) VALUES (?,?,'operator-adopted',?,?)",
+        )
+        .run(
+          result.witnessId,
+          value.workId,
+          canonicalMaterial(context),
+          canonicalMaterial(value),
+        );
+      this.recordPreTurnCommand("adopt", value, result);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  replaceConversationCommand(command: ReplaceConversationCommand): {
+    revision: number;
+  } {
+    const value = replaceConversationCommandSchema.parse(command);
+    const replay = this.preTurnCommandReplay("replace-conversation", value);
+    if (replay)
+      return z
+        .object({ revision: z.number().int().positive() })
+        .strict()
+        .parse(replay);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const assignment = this.db
+        .prepare("SELECT version,taskId FROM domain_assignments WHERE id=?")
+        .get(value.assignmentId) as
+        | { version: number; taskId: string }
+        | undefined;
+      const conversation = this.db
+        .prepare(
+          "SELECT revision FROM assignment_conversations WHERE assignmentId=?",
+        )
+        .get(value.assignmentId) as { revision: number } | undefined;
+      if (
+        !assignment ||
+        assignment.version !== value.expectedAssignmentVersion ||
+        (conversation?.revision ?? 1) !== value.expectedConversationRevision
+      )
+        throw new Error("Conversation replacement material is stale");
+      if (
+        this.db
+          .prepare(
+            `SELECT 1 FROM task_writer_holds WHERE taskId=? UNION SELECT 1 FROM task_writer_ambiguity_holds WHERE taskId=? UNION SELECT 1 FROM task_archival_holds WHERE taskId=?`,
+          )
+          .get(assignment.taskId, assignment.taskId, assignment.taskId)
+      )
+        throw new Error("Task remains held for recovery");
+      const result = { revision: this.replaceConversation(value.assignmentId) };
+      this.recordPreTurnCommand("replace-conversation", value, result);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Recheck the distinct bound-turn or pre-turn proof on every use. */
   reconciledAssignmentProof(
     workId: string,
   ): ReconciledAssignmentProof | undefined {
@@ -1311,8 +1686,8 @@ export class ExecutionState {
         AND binding.assignmentVersion = request.assignmentVersion
         AND binding.instructionsRevision = request.instructionsRevision
         AND binding.profileRevision = request.profileRevision
-        AND intent.threadId = receipt.threadId AND identity.threadId = receipt.threadId
-        AND intent.turnId = receipt.turnId AND identity.turnId = receipt.turnId
+        AND intent.threadId IS receipt.threadId AND identity.threadId IS receipt.threadId
+        AND intent.turnId IS receipt.turnId AND identity.turnId IS receipt.turnId
         AND identity.processId = receipt.processId
         AND identity.processStartedAt = receipt.processStartedAt
         AND identity.bootId = receipt.bootId
@@ -1339,13 +1714,50 @@ export class ExecutionState {
         .safeParse(row.terminationVerifiedAt).success
     )
       return undefined;
+    const discriminator = this.db
+      .prepare("SELECT * FROM execution_pre_turn_receipts WHERE receiptId=?")
+      .get(String(row.id)) as
+      | {
+          receiptId: string;
+          workId: string;
+          witnessId: string;
+          witnessMaterial: string;
+        }
+      | undefined;
+    let material = JSON.stringify(row);
+    if (row.threadId === null && row.turnId === null) {
+      const witness = this.witnessForWork(workId);
+      const conversation = this.db
+        .prepare(
+          "SELECT revision FROM assignment_conversations WHERE assignmentId=?",
+        )
+        .get(String(row.assignmentId)) as { revision: number } | undefined;
+      if (
+        !witness ||
+        !discriminator ||
+        discriminator.workId !== workId ||
+        discriminator.witnessId !== witness.id ||
+        discriminator.witnessMaterial !== canonicalMaterial(witness) ||
+        (conversation?.revision ?? 1) <= Number(row.conversationRevision)
+      )
+        return undefined;
+      material = JSON.stringify({ receipt: row, witness, discriminator });
+    } else if (
+      row.threadId === null ||
+      row.turnId === null ||
+      discriminator ||
+      this.db
+        .prepare("SELECT 1 FROM execution_pre_turn_rejections WHERE workId=?")
+        .get(workId)
+    )
+      return undefined;
     return {
       workId,
       receiptId: String(row.id),
       taskId: String(row.taskId),
       assignmentId: String(row.assignmentId),
       assignmentVersion: Number(row.assignmentVersion),
-      material: JSON.stringify(row),
+      material,
     };
   }
 
@@ -1896,8 +2308,24 @@ export class ExecutionState {
           : holdRow
             ? recoveryReason("unknown")
             : null;
+      const preTurnWitness = this.witnessForWork(workId);
       return {
         workId,
+        ...(preTurnWitness
+          ? {
+              preTurnRejection: {
+                id: preTurnWitness.id,
+                source: preTurnWitness.source,
+                predecessorThreadId: String(
+                  (
+                    JSON.parse(preTurnWitness.contextMaterial) as {
+                      predecessorThreadId: string;
+                    }
+                  ).predecessorThreadId,
+                ),
+              },
+            }
+          : {}),
         generation: {
           workRevision: z
             .number()
@@ -1981,11 +2409,28 @@ export class ExecutionState {
   resolveHeldExecution(
     receipt: RecoveryReceipt,
     verification: VerifiedTermination,
+    command?: { key: string; receipt: RecoveryReceipt },
   ): { id: string; workId: string; state: "reconciled" } {
     const value = recoveryReceiptSchema.parse(receipt);
     const proof = verifiedTerminationSchema.parse(verification);
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (command) {
+        const replay = this.preTurnCommandReplay("recover", command);
+        if (replay) {
+          const result = z
+            .object({
+              id: z.string().uuid(),
+              workId: z.string().min(1),
+              state: z.literal("reconciled"),
+            })
+            .strict()
+            .parse(replay);
+          this.db.exec("COMMIT");
+          return result;
+        }
+      }
+
       const intent = this.db
         .prepare(`SELECT id, state, threadId, turnId
         FROM execution_intents WHERE workId = ?`)
@@ -2053,11 +2498,29 @@ export class ExecutionState {
           "Exact generation no longer owns its writer and capacity holds",
         );
 
+      const preTurnWitness =
+        value.kind === "pre-turn-rejection"
+          ? this.witnessForWork(value.workId)
+          : undefined;
+      if (
+        value.kind === "pre-turn-rejection" &&
+        (!command || !preTurnWitness || preTurnWitness.id !== value.witnessId)
+      )
+        throw new Error(
+          "Pre-turn recovery requires its exact persisted witness and keyed command",
+        );
+      if (
+        value.kind !== "pre-turn-rejection" &&
+        this.db
+          .prepare("SELECT 1 FROM execution_pre_turn_rejections WHERE workId=?")
+          .get(value.workId)
+      )
+        throw new Error("Bound-turn receipt cannot adopt a pre-turn witness");
       const receiptId = randomUUID();
       const changed = this.db
         .prepare(`UPDATE execution_intents
         SET state = 'reconciled', reason = 'Execution reconciled from validated recovery receipt'
-        WHERE workId = ? AND state = 'held' AND threadId = ? AND turnId = ?
+        WHERE workId = ? AND state = 'held' AND threadId IS ? AND turnId IS ?
         RETURNING id`)
         .get(value.workId, value.threadId, value.turnId) as
         | { id: string }
@@ -2087,6 +2550,17 @@ export class ExecutionState {
           value.workspace,
           Date.now(),
         );
+      if (preTurnWitness)
+        this.db
+          .prepare(
+            "INSERT INTO execution_pre_turn_receipts (receiptId,workId,witnessId,witnessMaterial) VALUES (?,?,?,?)",
+          )
+          .run(
+            receiptId,
+            value.workId,
+            preTurnWitness.id,
+            canonicalMaterial(preTurnWitness),
+          );
       this.db
         .prepare(`UPDATE execution_pending_effects SET state = 'settled', reason = NULL
         WHERE workId = ? AND state = 'pending'`)
@@ -2108,6 +2582,12 @@ export class ExecutionState {
           recoveryReason("receipt-accepted"),
           Date.now(),
         );
+      if (command)
+        this.recordPreTurnCommand("recover", command, {
+          id: receiptId,
+          workId: value.workId,
+          state: "reconciled",
+        });
       this.db.exec("COMMIT");
       return { id: receiptId, workId: value.workId, state: "reconciled" };
     } catch (error) {

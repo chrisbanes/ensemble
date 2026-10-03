@@ -53,13 +53,32 @@ cleanup independently verified termination of its new App Server process
 `28577`. No new turn reservation or turn was recorded; the original three turns
 remain counted against the 12-turn ceiling.
 
-This newly admitted pre-turn hold does not meet the existing nonnull thread/turn
+At that checkpoint, the newly admitted pre-turn hold did not meet the existing
+nonnull thread/turn
 recovery receipt contract. Missing identities, process cleanup or unused turn
 allowance do not release it. The archived session was not unarchived, and no
 replacement conversation, fixture reset or blind retry was performed. Handback
 completion remains failed/unqualified; through-merge completion and remote
 cleanup remain unproved. A different recovery proof requires a concrete reviewed
 decision under the existing recovery boundary.
+
+## Approved pre-turn repair preparation (3 October 2026)
+
+Chris approved the bounded pre-turn proof and explicit historical evidence adoption
+in the [recorded decision](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5966681364).
+The repair implements typed, correlated archived-resume rejection capture and
+separate operator adoption/recovery command receipts. It preserves null execution
+identities truthfully and requires exact process termination verification plus
+settled effects/workspace before reconciliation. Existing bound-turn receipt columns
+and audit material are preserved through the transactional nullability migration.
+An explicit conversation replacement and a new operator message remain necessary
+before a fresh thread can run; receipt or message replay cannot supply new authority.
+
+The new historical adoption and real continuation have not been qualified live.
+The retained newly admitted generation and fixture remain held; this preparation
+adds no runtime turn, remote effect, fixture reset, unarchive or cleanup claim.
+Handback and through-merge completion remain unqualified pending the remaining
+finite real journeys and recorded cleanup.
 
 ## 2 October qualification and checkpoint repair
 

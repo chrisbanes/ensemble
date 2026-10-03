@@ -79,6 +79,9 @@ export interface RuntimeOperatorApi {
   stopTask(taskId: string): Promise<StopObservation>;
   resumeTask(taskId: string): Promise<void>;
   taskHold(taskId: string): string | undefined;
+  adoptHistoricalPreTurnRejection?: StandaloneService["adoptHistoricalPreTurnRejection"];
+  recoverPreTurnExecution?: StandaloneService["recoverPreTurnExecution"];
+  replaceConversationCommand?: StandaloneService["replaceConversationCommand"];
 }
 
 function overview(api: RuntimeOperatorApi, csrfToken: string): string {
@@ -287,11 +290,14 @@ function recoveryRecordEvidence(
     request?.reason ??
     "No uncertainty reason is recorded";
   const taskHoldReason = record.holds.task ?? taskHold;
+  const rejection = record.preTurnRejection
+    ? `Recorded before-turn rejection witness: ${escapeHtml(record.preTurnRejection.id)}; source: ${escapeHtml(record.preTurnRejection.source)}; predecessor thread: ${escapeHtml(record.preTurnRejection.predecessorThreadId)}`
+    : "Recorded before-turn rejection witness: none";
   const receipt = record.receipt
     ? `Recorded recovery receipt: ${escapeHtml(record.receipt.id)}; workspace disposition: ${escapeHtml(record.receipt.workspaceDisposition)}`
     : "Recorded recovery receipt: none";
 
-  return `<li><h3>Recovery record: ${escapeHtml(record.workId)}</h3><ul><li>${assignment}</li><li>Generation: work revision ${workRevision}; request sequence ${requestSequence}</li><li>Runtime intent: ${escapeHtml(record.intent.state)}; intent reason: ${escapeHtml(record.intent.reason ?? "not recorded")}</li><li>Turn request: ${escapeHtml(request?.state ?? "not recorded")}; request reason: ${escapeHtml(request?.reason ?? "not recorded")}</li><li>${thread}; not proof of termination or release</li><li>${turn}; not proof of termination or release</li><li>${process}; not proof of termination or release</li><li>${receipt}; not proof of termination or release</li><li>Task hold reason: ${escapeHtml(taskHoldReason ?? "not recorded")}</li><li>Uncertainty hold: ${record.holds.uncertainty ? `active; reason: ${escapeHtml(uncertaintyReason)}` : "not active for this record"}</li><li>Writer hold: ${record.holds.writer ? "active" : "not recorded"}; capacity hold: ${record.holds.capacity ? "active" : "not recorded"}; Stop hold: ${record.holds.stop ? "active" : "not recorded"}</li><li>Observations:<ul>${observations}</ul></li><li>Pending effects:<ul>${pendingEffects}</ul></li></ul></li>`;
+  return `<li><h3>Recovery record: ${escapeHtml(record.workId)}</h3><ul><li>${assignment}</li><li>Generation: work revision ${workRevision}; request sequence ${requestSequence}</li><li>Runtime intent: ${escapeHtml(record.intent.state)}; intent reason: ${escapeHtml(record.intent.reason ?? "not recorded")}</li><li>Turn request: ${escapeHtml(request?.state ?? "not recorded")}; request reason: ${escapeHtml(request?.reason ?? "not recorded")}</li><li>${thread}; not proof of termination or release</li><li>${turn}; not proof of termination or release</li><li>${process}; not proof of termination or release</li><li>${receipt}; not proof of termination or release</li><li>${rejection}; recovery still requires exact independent evidence</li><li>Task hold reason: ${escapeHtml(taskHoldReason ?? "not recorded")}</li><li>Uncertainty hold: ${record.holds.uncertainty ? `active; reason: ${escapeHtml(uncertaintyReason)}` : "not active for this record"}</li><li>Writer hold: ${record.holds.writer ? "active" : "not recorded"}; capacity hold: ${record.holds.capacity ? "active" : "not recorded"}; Stop hold: ${record.holds.stop ? "active" : "not recorded"}</li><li>Observations:<ul>${observations}</ul></li><li>Pending effects:<ul>${pendingEffects}</ul></li></ul></li>`;
 }
 
 function executionHoldSection(taskId: string, api: RuntimeOperatorApi): string {
@@ -527,6 +533,74 @@ export class RuntimeOperatorRoutes {
           body: overview(this.api, csrfToken),
         }),
       },
+      ...(this.api.adoptHistoricalPreTurnRejection
+        ? [
+            {
+              method: "POST" as const,
+              path: "/runtime/control/pre-turn/adopt",
+              handler: ({
+                fields,
+              }: import("./operator-routes.js").OperatorRouteContext) => {
+                const { payload } = z
+                  .object({ payload: z.string().max(12000) })
+                  .strict()
+                  .parse(fields);
+                const operation = this.api.adoptHistoricalPreTurnRejection;
+                if (!operation)
+                  throw new Error("Operator recovery operation unavailable");
+                operation.call(this.api, JSON.parse(payload));
+                return { kind: "redirect" as const, location: "/runtime" };
+              },
+            },
+          ]
+        : []),
+      ...(this.api.recoverPreTurnExecution
+        ? [
+            {
+              method: "POST" as const,
+              path: "/runtime/control/pre-turn/recover",
+              handler: async ({
+                fields,
+              }: import("./operator-routes.js").OperatorRouteContext) => {
+                const { payload } = z
+                  .object({ payload: z.string().max(12000) })
+                  .strict()
+                  .parse(fields);
+                const operation = this.api.recoverPreTurnExecution;
+                if (!operation)
+                  throw new Error("Operator recovery operation unavailable");
+                await operation.call(this.api, JSON.parse(payload));
+                return { kind: "redirect" as const, location: "/runtime" };
+              },
+            },
+          ]
+        : []),
+      ...(this.api.replaceConversationCommand
+        ? [
+            {
+              method: "POST" as const,
+              path: "/runtime/control/conversation-replace",
+              handler: ({
+                fields,
+              }: import("./operator-routes.js").OperatorRouteContext) => {
+                const input = z
+                  .object({
+                    key: uuid,
+                    assignmentId: uuid,
+                    expectedAssignmentVersion: positiveIntegerString,
+                    expectedConversationRevision: positiveIntegerString,
+                  })
+                  .strict()
+                  .parse(fields);
+                const operation = this.api.replaceConversationCommand;
+                if (!operation)
+                  throw new Error("Operator recovery operation unavailable");
+                operation.call(this.api, input);
+                return { kind: "redirect" as const, location: "/runtime" };
+              },
+            },
+          ]
+        : []),
       {
         method: "POST",
         path: "/runtime/control/capacity",

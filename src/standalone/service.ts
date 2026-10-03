@@ -1,3 +1,11 @@
+import { z } from "zod";
+import {
+  ArchivedResumeRejectedError,
+  preTurnRecoveryCommandSchema,
+  type HistoricalPreTurnAdoption,
+  type PreTurnRecoveryCommand,
+  type ReplaceConversationCommand,
+} from "./pre-turn-recovery.js";
 import {
   DeliveryStore,
   canonicalMaterial,
@@ -697,6 +705,28 @@ export class StandaloneService {
 
   resolveHeldExecution(receipt: RecoveryReceipt) {
     return this.requireSupervisor().resolveHeldExecution(receipt);
+  }
+  adoptHistoricalPreTurnRejection(command: HistoricalPreTurnAdoption) {
+    return this.requireState().adoptHistoricalPreTurnRejection(command);
+  }
+  recoverPreTurnExecution(command: PreTurnRecoveryCommand) {
+    const value = preTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay("recover", value);
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  replaceConversationCommand(command: ReplaceConversationCommand) {
+    return this.requireState().replaceConversationCommand(command);
   }
 
   turnRequests(): TurnRequest[] {
@@ -2361,6 +2391,7 @@ export class StandaloneService {
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
+    let submissionStage: "resume" | "thread" | "bound" | "turn" = "thread";
     let captureThreadId: string | undefined;
     let conversationCapture: ConversationHistoryCapture | undefined;
     try {
@@ -2372,6 +2403,7 @@ export class StandaloneService {
       if (previous?.threadId) {
         if (state.get(intent.id).state !== "submitting")
           throw new Error("Execution admission was held");
+        submissionStage = "resume";
         await runtime.resumeThread(previous.threadId, tools);
         threadId = previous.threadId;
       } else {
@@ -2379,6 +2411,7 @@ export class StandaloneService {
           throw new Error("Execution admission was held");
         threadId = await runtime.startThread(workspace, tools);
       }
+      submissionStage = "bound";
       const threadBound = state.bindThread(intent.id, threadId);
       this.requireSupervisor().threadBound(request.workId, threadId);
       if (!threadBound) throw new Error("Thread binding was held or changed");
@@ -2390,6 +2423,7 @@ export class StandaloneService {
         workspace,
         threadId,
       );
+      submissionStage = "turn";
       const turnId = await runtime.startTurn(
         threadId,
         workspace,
@@ -2527,6 +2561,13 @@ export class StandaloneService {
         }
       }
     } catch (error) {
+      if (
+        submissionStage === "resume" &&
+        error instanceof ArchivedResumeRejectedError &&
+        previous?.threadId === error.rejection.threadId &&
+        state.get(intent.id).state === "submitting"
+      )
+        state.capturePreTurnRejection(request.workId, error.rejection);
       if (state.get(intent.id).state !== "held")
         state.hold(
           intent.id,
