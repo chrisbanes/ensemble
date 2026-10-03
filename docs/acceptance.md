@@ -142,6 +142,22 @@ API schema, artifact-storage mechanism or new runtime capability is prescribed
 by these checks. Existing evidence remains historical; these additions do not
 claim completed UI04, release qualification or reopened native integrations.
 
+### Operator UX refinements — 3 October 2026
+
+These approved requirements await implementation and qualification. UX identifiers
+are acceptance scenarios, not delivery issues or claims that existing evidence
+passes them. Exercise the same fixtures through Overview, Inbox, cross-project and
+project List/Board, and task detail wherever applicable. Check desktop and phone
+layouts, keyboard access, readable text and distinguishable task titles.
+
+| ID | Given / when | Required observable result | Layer |
+| --- | --- | --- | --- |
+| UX01 | A failed check has a recorded agent-owned repair; a different running task has no evidence identifying the repair owner | The first shows the repair responsibility without creating operator attention solely for the check; the second does not infer repair from running activity and shows responsibility as unknown. Independent questions, approvals and recovery problems remain visible; all applicable entry points agree on state and next actor | UI + service |
+| UX02 | Open a specific operator question or approval from Overview, Inbox or task detail, inspect its evidence, respond and return | The request explains what is needed, its requester when known, why the operator is needed and the permitted response. Evidence stays within task context. Exact approval material remains available. Confirmation reflects the recorded outcome; returning preserves filters and position. Failed submission retains input; stale evidence is labelled; answering does not clear an independent dependency hold | UI + service + SQLite |
+| UX03 | Inspect actionable readiness, completion with evidence and no decision, cancellation, provider closure without delivery, capacity waiting and uncertain execution | These situations remain distinguishable; provider closure does not imply task completion, normal capacity waiting creates no attention, and uncertainty retains its recovery explanation. Attention does not replace work state. The existing board mapping is preserved | UI + service + adapter |
+| UX04 | Open a task containing several assignments and conversations, then inspect its history as updates arrive | The initial view explains the outcome, current situation, next actor or unknown responsibility, unresolved decisions and relevant evidence. Lead accountability and assignment/conversation identities remain distinct. Recorded facts and attributed excerpts suffice without reading runtime output; omissions/staleness remain visible. Updates preserve reading position, disclosure and unfinished replies | UI + service |
+| UX05 | Create a task with optional context, references, assignee and dependencies, collapse/reopen those controls, then submit with a validation error or capacity wait | Project, title and outcome remain prominent; supplied optional settings have a visible summary and retain values through disclosure. Errors remain discoverable. Create and start / Save draft retain their semantics; confirmed creation and execution waiting are distinct. Existing draft and unknown-outcome reconciliation guarantees remain effective | UI + service + SQLite |
+
 ## Implemented service and integration proofs
 
 These are later S02–S07 integration obligations (GitHub coverage starts in S06).

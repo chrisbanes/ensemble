@@ -2,6 +2,13 @@
 
 Delivery UI03 #741 adds the `/app` attention preview, `/app/tasks` and `/app/projects/:id` List/Board views, and `/app/tasks/new`. One complete aggregate feeds both presentations and their shared URL filters. Rows and cards open the existing `/task/:id`; Inbox links `/coordination`. Project controls, local task configuration, Runtime and Coordination remain operational. UI04 #742, UI05 #743 and UI06 #744 retain their replacement responsibilities; UI07 and parent #736 acceptance remain separate.
 
+The 3 October 2026 [operator UX refinement](../SPEC.md#operator-interface-and-human-requests)
+adds requirements for evidence-backed next actors, separate attention and work
+state, and progressive composer disclosure. The [reviewed design handoff](../../design/DESIGN.md#approved-refinement-brief--3-october-2026)
+records the completed Pen revision and its static review. The delivery record below and existing evidence
+do not establish implementation or qualification of those refinements. The board
+mapping and command/admission contracts remain unchanged.
+
 ## Creation and admission
 
 `task.create` accepts optional unique same-project `blockerTaskIds` (maximum 128) and `initialAssignment: {assignmentId, profileId}`. Its one outer transaction reuses private dependency and assignment policy before committing the original receipt and waking admission. Invalid profile/project/edge policy rolls the entire creation back. An explicit permitted active assignee bypasses routing; admission still enforces project configuration, pause, capacity, dependency, Stop and ownership holds. Assignment result accountability remains with the retained task lead.
