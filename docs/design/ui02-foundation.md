@@ -41,6 +41,17 @@ Each semicolon-separated control is individually retained at the listed destinat
 | all views | navigation | delivered overview/project List/Board/composer; retained task/profile/assignment/Runtime/Coordination destinations | UI03 #741 delivered / UI04 #742 | curated reads |
 | `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
 
+Advanced authenticated recovery routes added for the approved #737 pre-turn
+recovery boundary have no rendered form or new React control. The host operator
+supplies the reviewed evidence and exact command material under the existing
+Origin, session and CSRF checks; model tools have no adoption authority.
+
+| Advanced route | Owner and disposition |
+| --- | --- |
+| `/runtime/control/pre-turn/adopt` | #737 historical pre-turn evidence adoption; exact held generation, operator attestation and immutable command receipt. Witness acknowledgement appears on the shared task/assignment runtime history and assignment recovery view. |
+| `/runtime/control/pre-turn/recover` | #737 exact witness-bound recovery; independently verified termination and settled effects/workspace reconcile ownership without dispatch. Existing runtime history records the receipt and retained holds. |
+| `/runtime/control/conversation-replace` | #737 explicit recovery counterpart; assignment/conversation revision checks and immutable keyed result prevent duplicate increments. Fresh operator message remains separately required for continuation. |
+
 Programmatic support (no new HTTP exposure):
 
 | Command | Replacement owner/destination | Disposition |
