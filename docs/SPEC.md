@@ -474,8 +474,9 @@ remote-write reconciliation and permission rules.
 Default to meaningful task activity and group conversation content by durable
 assignment. Identify each group by assignment, assignee, latest status and time,
 with a source-faithful excerpt rather than an invented summary. Older completed
-groups can be collapsed. Opening a group initially shows the latest three available
-messages and its result, with Show earlier for the rest. Long messages have
+groups can be collapsed. Opening a group initially shows a bounded recent preview
+and its result, with Show earlier for the rest. The preview count is a presentation
+choice, not a fixed acceptance requirement. Long messages have
 expandable previews. Provide Expand all, Collapse all and a chronological view of
 available captured conversation content, retaining omission and redaction notices.
 
@@ -499,6 +500,15 @@ selection constraints, and an explicit recommended option when supplied. Allow
 custom text when the request permits it. A recommended or preselected option is
 not a submitted answer. Validate each answer against its question and keep
 unfinished input on submission failure.
+
+The full Ensemble question model is distinct from the selected runtime's supported
+native inputs. The 3 October 2026 acceptance amendment retains the full form model
+above, qualified through deterministic service/browser tests or Ensemble question
+tools. Native MVP acceptance uses the bounded shapes qualified by #739: the
+observed single-choice/custom-text round trip and deterministic grouped-shape
+coverage. Native standalone free text, multiple selection and recommendation
+fields are not additional MVP runtime-proof gates. Unsupported native requests
+remain visibly unresolved, without fabricated answers or silent chat conversion.
 
 Persist answers before confirming submission and route them to the requesting
 assignment/runtime request, rather than treating them as an unrelated message to

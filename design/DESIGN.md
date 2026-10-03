@@ -163,8 +163,9 @@ The imported desktop workspace uses 28px padding and 20px gaps.
   on-device unfinished-input recovery from a confirmed Ensemble draft task.
 - **Task detail:** retain unresolved requests outside collapsible history. History
   scrolls independently with reserved reply space. Keep dependency holds visible
-  beside approvals. Opening an assignment shows its latest three messages and
-  result; earlier content remains available through disclosure.
+  beside approvals. Opening an assignment shows a bounded recent preview and
+  result; earlier content remains available through disclosure. The illustrated
+  three-message preview is not a fixed acceptance requirement.
 - **Imported task:** source content and Ensemble execution are visually separate.
   Desktop has source/execution panes; phone has GitHub source and Ensemble tabs,
   each preserving its position. External state is never implied by local activity.

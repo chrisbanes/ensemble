@@ -1,17 +1,23 @@
 # S07a GitHub delivery evidence
 
-Status: **handback qualified; through-merge and remote cleanup unqualified**.
-The latest 3 October 2026 continuation exercised approved pre-turn evidence
-adoption and recovery, explicit conversation replacement and a fresh operator
-message. Handback completed with a new settlement and finalized current completion.
-A later private qualification harness error stopped the through-merge attempt and
-left a newly admitted request held before thread binding or turn submission.
-Five of the approved 12 turns are counted, with four successful terminals; the
-original interrupted third turn is not recorded as successful. No fixture merge
-or remote cleanup is proved. The earlier
+Status: **bounded real handback, through-merge and cleanup qualified**.
+The final 3 October 2026 continuation recovered the exact admitted no-turn hold
+through the approved authenticated operator path, explicitly replaced its
+conversation and delivered a new operator message. Both designated tasks reached
+Done with current finalized completion evidence. Exactly one fixture squash merge
+was performed; failing-gate merge requests made no provider attempt. Restart
+preserved the recovery proofs and delivery history without replay, and recorded
+cleanup verified process termination and disposition of the owned remote artifacts.
+
+Nine of the approved 12 turns are counted, with eight successful terminals. The
+original interrupted third turn remains reconciled, never classified as successful.
+This is bounded S07a qualification evidence; it does not establish production
+merge authority, deployed operation, release, MVP completion or Haze cutover.
+The earlier
 [durable live checkpoint](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5966459064)
 and [draft repair PR #760](https://github.com/chrisbanes/ensemble/pull/760)
-retain the prior recovery context.
+retain the prior recovery context. The dated failed checkpoints below remain part
+of the evidence history.
 
 The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
 against `46e9fc8de5ab0a527732d9c24d2f9c6d7b20fac6`. This inventory records
@@ -21,8 +27,8 @@ implementation evidence, not a parallel delivery plan.
 | --- | --- | --- |
 | 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
 | 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
-| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; reviewed private retained-fixture continuation | **Handback passed; through-merge unqualified with a new admitted hold; remote cleanup unproved** |
-| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair source 38c4738: full check 765/765, preflight 3/3 and independent `ship` for all three review contracts; **remaining live qualification pending** |
+| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; reviewed private retained-fixture continuations with exact historical recovery proofs | **Handback, through-merge and recorded cleanup passed; 9/12 turns and exactly one fixture squash merge** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, frozen source/runtime/harness identities, full pinned checks and independent repair review | Repair source 3b4b147: full check 807/807, focused 128/128, preflight 3/3 and independent source `ship` for all three review contracts; final documentation review remains a publication gate |
 
 ## 3 October retained-fixture recovery repair and continuation
 
@@ -31,8 +37,9 @@ The repair candidate `369f5cad931d627c07911c348b6fd6ffc5671152` passed
 `npm run check`: type checking, lint, formatting, build and 725/725 tests.
 Focused refused-initial, recovery-continuation and original recovery tests passed
 62/62; the preflight passed 3/3. Independent review returned `ship` for all three
-review contracts (correctness/standards, reuse/clarity/efficiency, overengineering). These checks qualify the bounded source repair, not successful
-completion of either real delivery journey.
+review contracts (correctness/standards, reuse/clarity/efficiency, overengineering).
+These checks qualified the bounded source repair, not successful completion of
+either real delivery journey at that checkpoint.
 
 R1 allows a fresh operator message to continue after a positively proved
 never-admitted canonical initial refusal. Current task material is supplied while
@@ -131,11 +138,84 @@ its absence of a `startTurn` invocation does not prove that no idle thread was
 created. Generic stop errors, null identities or process absence do not qualify.
 Existing R1/R2/R3 proof material and the archived-resume predicate remain unchanged.
 
-The new proof has not been qualified live. Recovery still requires exact-process
-termination verification and independently settled workspace/effects, followed by
+At the preparation checkpoint, the new proof had not been qualified live.
+Recovery still requires exact-process termination verification and independently
+settled workspace/effects, followed by
 explicit conversation replacement and a NEW operator message. The sequence-8 hold
-remains preserved; no release, retry, additional turn, merge or remote cleanup is
-claimed by this preparation. Through-merge remains unqualified.
+remained preserved; this preparation claimed no release, retry, additional turn,
+merge or remote cleanup. Through-merge was unqualified at that checkpoint.
+
+## Historical no-turn recovery and final delivery qualification (3 October 2026)
+
+The frozen runtime source `3b4b14756cf09db180d8efefa2f723b647fc2d89`, tree
+`ffba3a0eed8863075319595e6d8482086786062f`, passed `npm ci` and the pinned
+Node `24.21.0` / npm `12.2.0` full `npm run check`: type checking, lint,
+formatting, build and 807/807 tests. The focused `no-turn-recovery`,
+`recovery-continuation`, `recovery` and `refused-initial-continuation` real-SQLite
+suites passed 128/128; fixture preflight passed 3/3.
+Independent source review returned `ship` for all three review contracts
+(correctness/standards, reuse/clarity/efficiency, overengineering). The live runtime
+was Codex CLI `0.159.0`. The final reviewed private continuation harness SHA-256
+was `ae22636e88a4e67e9bb88829d65fbca296a4030402b66ae84c2c7ac017fe49c1`,
+with launcher SHA-256
+`b32560f5097f4e35831dfe52d3b7a04d2bf2c06e0d772ac098eec471a2bd5c78`.
+
+The first R4 startup attempt stopped safely before adoption or recovery. Its
+reconciliation packet recorded the same eight requests and held generation,
+preserved historical rows and workspaces, zero new turns and zero provider writes.
+It recorded only a no-proof startup observation and no recovery audit or success
+claim. Exact-identity cleanup verified termination of process `10269`. That failed
+packet was retained rather than replaced by the subsequent passing result.
+
+The final continuation independently assessed the unchanged historical evidence
+bundle SHA-256
+`457d056e461f326fbd8163b27484d0afdf7104d513535ab678903cd2cb5cec63`
+and complete invocation ledger SHA-256
+`6244574404b1222d4870cdaf3ff5e0936c94d71a76f917ecbe9667cfe3ba872b`.
+Authenticated historical adoption and recovery reconciled the exact sequence-8,
+work-revision-1 generation with its captured known-null predecessor and truthful
+null thread/turn identities. The admission-time pending assignment result was
+settled as discarded, without claiming successful runtime delivery. Explicit keyed
+conversation replacement advanced the merge assignment to revision 2; a NEW
+operator message supplied continuation authority. Recovery alone dispatched no
+successor. Four fresh turns brought the total to nine, with eight successful
+terminals across the two journeys; the old interrupted third turn remains
+reconciled.
+
+The failing `s07a-ci` gate held the merge action with zero provider attempts. After
+the exact current gate passed, request sequence 11 performed exactly one actual
+`PUT` squash merge of fixture PR #4 at head
+`fb48a54e18f31635a6da61241fde88d52a543820`. Provider readback recorded merge
+SHA `913860b280eda62fbc66d7e57df8fd462ec0f5da` and closure of its own issue #3.
+The final lead completion at request sequence 12 matched conversation revision 2
+and the completed terminal for thread
+`01a10141-864a-7102-8524-3efe78c874ba`, turn
+`01a10143-bb84-7f51-88bf-0025e97f2faa`. Both designated tasks were Done with
+current settlement and finalized completion evidence.
+
+Restart recorded no replay and preserved all protected earlier recovery proofs,
+continuation audits, actions, settlements and completions, plus the new no-turn
+audit. Recorded cleanup verified exact process termination for `35919` and `38539`,
+closed the owned handback PR #2 and issue #1, and confirmed merged PR #4 and closed
+issue #3. Each owned branch was deleted only after checking its recorded head SHA;
+subsequent GETs returned 404. The fixture repository and private Project remain
+retained. Independent root readback confirmed both tasks Done, preservation of
+97 protected historical rows, the old null identities, the discarded assignment
+result, clean foreign keys and empty workspaces. Fresh same-boot PID-absence
+verification confirmed termination of both final processes.
+
+The final private evidence packet SHA-256 is
+`a9e20388bef76df75551fc9908a75f9105156d64258459408ff43e7f6b168b41`;
+it links the preserved first-attempt packet SHA-256
+`bcd2d603743b76efc6b72ed631566eb8f73b027eeb9db1754d0d52c79cb592e6`.
+Only sanitized outcomes and artifact identities are recorded here. The accepted
+no-turn proof permits an unobserved idle thread from `thread/start`; it proves no
+`startTurn` invocation, not thread noncreation or positive RPC rejection. Generic
+stop errors, null identities or process absence remain insufficient. R1/R2/R3
+proof material and predicates are unchanged. This result does not authorise a
+production merge or establish release, operational cutover, optional native/App
+features or paid-provider qualification. Final documentation review and production
+PR acceptance remain separate gates.
 
 ## 2 October qualification and checkpoint repair
 
