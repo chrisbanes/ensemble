@@ -16,7 +16,9 @@ records presentation and design references. The user approved shadcn as the comp
 
 The [task overview specification amendment](../docs/SPEC.md#task-overview-and-evidence--design-direction-3-october-2026)
 and [design-review criteria](../docs/acceptance.md#task-overview-and-evidence-design-review--3-october-2026)
-add shared brief, delegation, evidence and compact progress requirements. Design
+add shared brief, delegation, evidence and compact progress requirements. This is
+the separate amendment from PR #763, retained when rebasing; the approved
+operator refinements below do not qualify it. Design
 and review these in Pen before implementation. The existing canvas and handoff
 are not evidence that this amendment has been designed or approved visually.
 After review, update the relevant screen/state references and interaction handoff
@@ -235,7 +237,7 @@ receipts and lifecycle states. No recommendation is inferred from running activi
 | Failed check with recorded repair owner, no attention | Overview `N9G11A`; List `nD0nh`; cross-project/project boards `E7qC9`, `MUFPD`; task `oipj4` | `zs53F` |
 | Running with unknown repair responsibility | Overview `N9G11A`; List `nD0nh`; boards `E7qC9`, `MUFPD`; task `kiPK9` | `zs53F` |
 | Specific audience question, requester, reason and evidence | Inbox `cGjau`; Overview and paused task row/card | Queue `U3RAH`; request `pmu7r`; evidence `YjRad` |
-| Failed submission, stale read, confirmation and return | Existing lifecycle reference `jKzRk`, shared receipt `pDmEe`, interaction contract `BvX5O` | Failed `uJVe2`; stale `e1kkI`; recorded `o6O3M`; anchored return `q2vYE` |
+| Failed submission, stale read, confirmation and return | Existing lifecycle reference `jKzRk`, shared receipt `w5VRs`, interaction contract `BvX5O` | Failed `uJVe2`; stale `e1kkI`; recorded `o6O3M`; anchored return `q2vYE` |
 | Exact approval and independent dependency hold | Review `DAeiN`; recorded approval `US7Kv`; imported task `biA7p` | Task `K045bl`; review `ZWQIU` |
 | Completed result and retained evidence, no decision | Task `Q24BPH`; outcomes `zeoGi`; Overview recent results | `Thy1i` |
 | Cancellation and provider closure without delivery | Outcomes `zeoGi` | Cancelled `rn49D`; provider-closed/Ensemble-paused `ALMfc` |

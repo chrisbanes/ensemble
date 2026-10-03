@@ -4,8 +4,8 @@ Delivery UI03 #741 adds the `/app` attention preview, `/app/tasks` and `/app/pro
 
 The 3 October 2026 [operator UX refinement](../SPEC.md#operator-interface-and-human-requests)
 adds requirements for evidence-backed next actors, separate attention and work
-state, and progressive composer disclosure. The [design brief](../../design/DESIGN.md#approved-refinement-brief--3-october-2026)
-guides the pending Pen revision. The delivery record below and existing evidence
+state, and progressive composer disclosure. The [reviewed design handoff](../../design/DESIGN.md#approved-refinement-brief--3-october-2026)
+records the completed Pen revision and its static review. The delivery record below and existing evidence
 do not establish implementation or qualification of those refinements. The board
 mapping and command/admission contracts remain unchanged.
 
