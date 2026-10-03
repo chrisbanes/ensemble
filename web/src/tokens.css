@@ -1,61 +1,90 @@
 @font-face {
-  font-family: "Space Grotesk";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("../../node_modules/@fontsource/space-grotesk/files/space-grotesk-latin-600-normal.woff2")
-    format("woff2");
-}
-@font-face {
-  font-family: "Instrument Sans";
+  font-family: "Inter";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("../../node_modules/@fontsource/instrument-sans/files/instrument-sans-latin-400-normal.woff2")
+  src: url("../../node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2")
     format("woff2");
 }
 @font-face {
-  font-family: "Instrument Sans";
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../../node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2")
+    format("woff2");
+}
+@font-face {
+  font-family: "Inter";
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url("../../node_modules/@fontsource/instrument-sans/files/instrument-sans-latin-600-normal.woff2")
+  src: url("../../node_modules/@fontsource/inter/files/inter-latin-600-normal.woff2")
     format("woff2");
 }
 @font-face {
-  font-family: "IBM Plex Mono";
+  font-family: "JetBrains Mono";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("../../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2")
+  src: url("../../node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2")
     format("woff2");
 }
-/* Traceable design/DESIGN.md semantic tokens. */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}
+
 :root {
-  --color-surface: #ffffff;
-  --color-scroll-thumb: #b8bfcb;
-  --color-on-surface: #202b3d;
-  --color-on-surface-variant: #59677d;
-  --color-surface-container: #f4f7fc;
-  --color-surface-container-low: #f8fafd;
-  --color-outline: #dfe6f0;
-  --color-primary: #2864d7;
-  --color-primary-container: #eef0fc;
-  --color-on-warning-container: #865f18;
-  --color-warning-container: #fff8e8;
-  --color-on-error-container: #a53c38;
-  --color-error-container: #fcf1f0;
-  --color-on-success-container: #286a53;
-  --color-success-container: #ecf5f0;
-  --color-scroll-track: #eef0f4;
-  --color-outline-selected: #d3d3ee;
-  --color-outline-focus: #bccdee;
-  --color-outline-error: #eed6d3;
-  --color-on-primary: #ffffff;
-  --color-on-primary-container: #202b3d;
-  --font-heading: "Space Grotesk", sans-serif;
-  --font-body: "Instrument Sans", sans-serif;
-  --font-mono: "IBM Plex Mono", monospace;
+  color-scheme: dark;
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #171717;
+  --card-foreground: #fafafa;
+  --popover: #171717;
+  --popover-foreground: #fafafa;
+  --primary: #e5e5e5;
+  --primary-foreground: #171717;
+  --secondary: #262626;
+  --secondary-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+  --accent: #262626;
+  --accent-foreground: #fafafa;
+  --destructive: #ff666999;
+  --border: #ffffff1a;
+  --input: #ffffff1a;
+  --ring: #737373;
+  --sidebar: #18181b;
+  --sidebar-foreground: #fafafa;
+  --sidebar-accent: #2a2a30;
+  --sidebar-accent-foreground: #fafafa;
   --space-0: 0px;
   --space-4: 4px;
   --space-8: 8px;
@@ -66,97 +95,62 @@
   --space-28: 28px;
   --space-32: 32px;
   --space-40: 40px;
-  --radius-2: 2px;
-  --radius-6: 6px;
-  --radius-8: 8px;
-  --radius-10: 10px;
-  --radius-12: 12px;
-  --radius-14: 14px;
-  --radius-15: 15px;
   --type-xs: 12px;
   --type-sm: 14px;
   --type-md: 16px;
   --type-lg: 18px;
-  --type-xl: 22px;
-  --type-2xl: 26px;
-  --type-3xl: 32px;
-  --type-4xl: 40px;
   --weight-regular: 400;
+  --weight-medium: 500;
   --weight-semibold: 600;
-  --leading-1-1: 1.1;
-  --leading-1-12: 1.12;
   --leading-1-25: 1.25;
   --leading-1-5: 1.5;
 }
-.metadata {
-  font-family: var(--font-body);
+
+.metadata,
+.identifier {
   font-size: var(--type-xs);
-  font-weight: var(--weight-regular);
   line-height: var(--leading-1-25);
+}
+.metadata {
+  font-family: var(--font-sans);
+  font-weight: var(--weight-regular);
 }
 .identifier {
   font-family: var(--font-mono);
-  font-size: var(--type-xs);
   font-weight: var(--weight-regular);
-  line-height: var(--leading-1-25);
 }
 .control {
-  font-family: var(--font-body);
+  font-family: var(--font-sans);
   font-size: var(--type-sm);
-  font-weight: var(--weight-regular);
+  font-weight: var(--weight-medium);
   line-height: var(--leading-1-25);
 }
 .body {
-  font-family: var(--font-body);
+  font-family: var(--font-sans);
   font-size: var(--type-sm);
-  font-weight: var(--weight-regular);
-  line-height: var(--leading-1-5);
-}
-.introduction {
-  font-family: var(--font-body);
-  font-size: var(--type-md);
-  font-weight: var(--weight-regular);
-  line-height: var(--leading-1-5);
-}
-.callout {
-  font-family: var(--font-body);
-  font-size: var(--type-lg);
   font-weight: var(--weight-regular);
   line-height: var(--leading-1-5);
 }
 .small-heading {
-  font-family: var(--font-heading);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-1-25);
+}
+.card-heading,
+.section-heading {
   font-size: var(--type-md);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-1-25);
 }
-.card-heading {
-  font-family: var(--font-heading);
+
+.introduction {
+  font-size: var(--type-sm);
+  line-height: var(--leading-1-5);
+}
+
+.page-heading,
+.feature-heading {
   font-size: var(--type-lg);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-1-25);
-}
-.section-heading {
-  font-family: var(--font-heading);
-  font-size: var(--type-xl);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-1-25);
-}
-.feature-heading {
-  font-family: var(--font-heading);
-  font-size: var(--type-2xl);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-1-25);
-}
-.page-heading {
-  font-family: var(--font-heading);
-  font-size: var(--type-3xl);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-1-12);
-}
-.display-heading {
-  font-family: var(--font-heading);
-  font-size: var(--type-4xl);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-1-1);
 }

@@ -15,6 +15,7 @@ import {
 import { ClientError, OperatorClient } from "./api.js";
 import { useOperatorResource } from "./resource.js";
 import {
+  ActionLink,
   Button,
   TextField,
   StatusBadge,
@@ -504,15 +505,16 @@ export function App() {
           ) : (
             <>
               <p className="introduction muted">{description}</p>
-              <a
-                className="control button primary action-link"
+              <ActionLink
+                variant="primary"
+                className="action-link"
                 href={destination}
               >
                 Open existing{" "}
                 {pathname === "/app/inbox"
                   ? "coordination controls"
                   : "operator controls"}
-              </a>
+              </ActionLink>
               <p className="metadata muted">
                 Task detail, complete Inbox and settings controls remain
                 available in the existing operator.

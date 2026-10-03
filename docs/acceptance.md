@@ -368,3 +368,10 @@ final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
 
 UI06 presentation evidence is recorded in [configuration and recovery evidence](evidence/ui06-configuration.md). Fixture browser/API evidence qualifies the changed same-origin presentation; real-runtime/provider, final visual/usability UI07 and release/cutover gates remain separate.
+
+Delivery [UI08 #765](https://github.com/chrisbanes/ensemble/issues/765)
+reconciles the shared React/production-HTML presentation foundation. Its
+[contract](design/ui08-foundation.md) and [evidence](evidence/ui08-foundation.md)
+record owned components, responsive browser checks, preserved retained forms,
+font/CSP verification and visual gaps. This does not complete the human UI
+acceptance or release/cutover gates owned by #736.

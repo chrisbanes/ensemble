@@ -76,6 +76,43 @@ test("List and Board preserve identical filtered task IDs and never submit comma
     );
   const list = await links();
   assert.deepEqual(list, [{ id: ids[0], href: `/task/${ids[0]}` }]);
+  const rowGeometry = await page
+    .locator(`[data-task-id="${ids[0]}"]`)
+    .evaluate((el) => ({
+      display: getComputedStyle(el).display,
+      height: el.getBoundingClientRect().height,
+    }));
+  assert.equal(rowGeometry.display, "grid");
+  assert.ok(
+    rowGeometry.height <= 220,
+    `desktop task row is ${rowGeometry.height}px`,
+  );
+  const taskTitleType = await page
+    .locator(`[data-task-id="${ids[0]}"] .task-title`)
+    .evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        decoration: style.textDecorationLine,
+      };
+    });
+  assert.deepEqual(taskTitleType, {
+    fontSize: "14px",
+    fontWeight: "600",
+    decoration: "underline",
+  });
+  const beforeSwitch = await Promise.all(
+    ["List", "Board"].map((name) =>
+      page.getByRole("button", { name, exact: true }).evaluate((el) => ({
+        pressed: el.getAttribute("aria-pressed"),
+        background: getComputedStyle(el).backgroundColor,
+      })),
+    ),
+  );
+  assert.equal(beforeSwitch[0]?.pressed, "true");
+  assert.equal(beforeSwitch[1]?.pressed, "false");
+  assert.notEqual(beforeSwitch[0]?.background, beforeSwitch[1]?.background);
   await page.getByRole("button", { name: "Board", exact: true }).click();
   assert.deepEqual(await links(), list);
   assert.ok(page.url().includes("q=Literal"));

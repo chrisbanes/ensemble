@@ -134,6 +134,145 @@ function seedSettings(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   });
   return { profileId, projectId, taskId, assignmentId };
 }
+function contrast(first: string, second: string) {
+  const luminance = (color: string) => {
+    const parts = (color.match(/[\d.]+/g) ?? [])
+      .slice(0, 3)
+      .map(Number)
+      .map((value) => {
+        const linear = value / 255;
+        return linear <= 0.04045
+          ? linear / 12.92
+          : ((linear + 0.055) / 1.055) ** 2.4;
+      });
+    return (
+      (parts[0] ?? 0) * 0.2126 +
+      (parts[1] ?? 0) * 0.7152 +
+      (parts[2] ?? 0) * 0.0722
+    );
+  };
+  const a = luminance(first),
+    b = luminance(second);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+test("ordinary links stay distinct while styled actions and long controls fit small viewports", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const ids = seedSettings(f),
+    web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 820 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await signIn(page, web, "/app/settings");
+
+  const ordinary = page.getByRole("link", {
+    name: "Paused configuration project",
+    exact: true,
+  });
+  const ordinaryStyle = await ordinary.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { decoration: style.textDecorationLine, color: style.color };
+  });
+  assert.equal(ordinaryStyle.decoration, "underline");
+  assert.equal(ordinaryStyle.color, "rgb(250, 250, 250)");
+
+  const navigation = page.locator(".sidebar .nav-link").first();
+  assert.equal(
+    await navigation.evaluate(
+      (element) => getComputedStyle(element).textDecorationLine,
+    ),
+    "none",
+  );
+  const action = page.getByRole("link", {
+    name: "Create project",
+    exact: true,
+  });
+  const actionStyle = await action.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      foreground: style.color,
+      background: style.backgroundColor,
+      decoration: style.textDecorationLine,
+      slot: element.getAttribute("data-slot"),
+    };
+  });
+  assert.equal(actionStyle.slot, "button");
+  assert.equal(actionStyle.foreground, "rgb(23, 23, 23)");
+  assert.equal(actionStyle.background, "rgb(229, 229, 229)");
+  assert.equal(actionStyle.decoration, "none");
+  assert.ok(contrast(actionStyle.foreground, actionStyle.background) >= 4.5);
+
+  await page.goto(`${web.origin}/app/projects/${ids.projectId}/settings`);
+  const editorLink = page.getByRole("link", { name: "exact source editor" });
+  assert.equal(
+    await editorLink.evaluate(
+      (element) => getComputedStyle(element).textDecorationLine,
+    ),
+    "underline",
+  );
+  const observationButton = page.getByRole("button", {
+    name: "Request installation-wide source observations",
+    exact: true,
+  });
+  assert.equal(
+    await observationButton.evaluate(
+      (element) => getComputedStyle(element).height,
+    ),
+    "36px",
+  );
+  for (const width of [320, 360]) {
+    await page.setViewportSize({ width, height: 844 });
+    await observationButton.scrollIntoViewIfNeeded();
+    const layout = await observationButton.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return {
+        width: rect.width,
+        left: rect.left,
+        right: rect.right,
+        height: rect.height,
+        whiteSpace: style.whiteSpace,
+        minHeight: style.minHeight,
+        overflowWrap: style.overflowWrap,
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    });
+    assert.equal(layout.whiteSpace, "normal", `${width}px button wraps`);
+    assert.equal(layout.minHeight, "44px", `${width}px phone target remains`);
+    assert.ok(
+      layout.overflowWrap === "break-word" ||
+        layout.overflowWrap === "anywhere",
+    );
+    assert.ok(
+      layout.height >= 44,
+      `${width}px button keeps phone touch target`,
+    );
+    assert.ok(
+      layout.left >= 0 && layout.right <= width,
+      `${width}px button fits`,
+    );
+    if (width === 320)
+      assert.ok(layout.height > 44, "long label wraps and grows at 320px");
+    assert.ok(
+      layout.documentWidth <= layout.viewportWidth,
+      `${width}px page has no overflow`,
+    );
+    if (width === 320)
+      await captureBrowserEvidence(page, "320-long-source-observations-button");
+  }
+  assert.equal(f.runtime.turns, 0);
+});
 test("unknown configuration survives scope navigation and exact reconciliation while auth expiry purges private drafts", async (_t, journey) => {
   const f = await journey.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
@@ -481,6 +620,35 @@ test("source replacement verifies repositories without diagnostic echo and obser
     repositoryDescription,
     "Check linked repository IDs, paths and refs.",
   );
+  await page.waitForFunction(
+    () => {
+      const field = document.querySelector(
+        '[aria-describedby="source-repositories-error"][aria-invalid="true"]',
+      );
+      return (
+        field !== null &&
+        getComputedStyle(field).borderTopColor === "rgba(255, 102, 105, 0.6)"
+      );
+    },
+    { timeout: 1000 },
+  );
+  const invalidStyle = await page
+    .getByLabel("New local repository path", { exact: true })
+    .evaluate((e) => {
+      const style = getComputedStyle(e);
+      return {
+        border: style.borderTopColor,
+        foreground: style.color,
+        background: getComputedStyle(document.body).backgroundColor,
+        slot: e.getAttribute("data-slot"),
+        invalid: e.getAttribute("aria-invalid"),
+      };
+    });
+  assert.equal(invalidStyle.slot, "input");
+  assert.equal(invalidStyle.invalid, "true");
+  assert.match(invalidStyle.border, /255, 102, 105/);
+  assert.equal(invalidStyle.foreground, "rgb(250, 250, 250)");
+  assert.equal(invalidStyle.background, "rgb(10, 10, 10)");
   await capture(page, "1366-repository-error");
   await page
     .getByRole("button", {
@@ -750,6 +918,30 @@ test("Runtime Settings records lowered capacity separately from usage and retain
     .getByText("Global usage 2 / 4; default project limit 2.", { exact: true })
     .waitFor();
   await page.getByText("Execution hold recorded", { exact: true }).waitFor();
+  const capacityControl = await page
+    .getByLabel("Global active-turn cap", { exact: true })
+    .evaluate((e) => ({
+      height: getComputedStyle(e).height,
+      slot: e.getAttribute("data-slot"),
+      family: getComputedStyle(e).fontFamily,
+    }));
+  assert.equal(capacityControl.height, "36px");
+  assert.equal(capacityControl.slot, "input");
+  assert.match(capacityControl.family, /Inter/);
+  const capacityOverride = await page
+    .getByLabel("Set capacity override for Paused configuration project", {
+      exact: true,
+    })
+    .evaluate((e) => ({
+      width: getComputedStyle(e).width,
+      height: getComputedStyle(e).height,
+      checked: (e as HTMLInputElement).checked,
+    }));
+  assert.deepEqual(capacityOverride, {
+    width: "20px",
+    height: "20px",
+    checked: false,
+  });
   await page.getByLabel("Global active-turn cap", { exact: true }).fill("1");
   await page
     .getByRole("button", { name: "Save capacity", exact: true })
@@ -1121,6 +1313,55 @@ test("readiness validation focuses the exact invalid row with a real description
   assert.equal(posts, 0);
   assert.equal(f.runtime.turns, 0);
   await capture(page, "1366-readiness-later-row-error-focus");
+
+  await labels.nth(1).fill("ready-again");
+  await page.route("**/api/operator/commands", async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "invalid-input",
+          message: "Check input",
+          fieldPaths: ["readiness.mode"],
+        },
+      }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  const mode = page.getByLabel("Readiness matching", { exact: true });
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLSelectElement>(
+        'select[aria-label="Readiness matching"][aria-invalid="true"]',
+      ) !== null,
+    { timeout: 1000 },
+  );
+  assert.equal(await mode.getAttribute("aria-invalid"), "true");
+  const modeDescription = await mode.evaluate((e) => {
+    const id = e.getAttribute("aria-describedby");
+    return id ? document.getElementById(id)?.textContent : null;
+  });
+  assert.equal(modeDescription, "Check this field.");
+  await page.waitForFunction(
+    () => {
+      const field = document.querySelector(
+        'select[aria-label="Readiness matching"][aria-invalid="true"]',
+      );
+      return (
+        field !== null &&
+        getComputedStyle(field).borderTopColor === "rgba(255, 102, 105, 0.6)"
+      );
+    },
+    { timeout: 1000 },
+  );
+  const modeBorder = await mode.evaluate(
+    (e) => getComputedStyle(e).borderTopColor,
+  );
+  assert.equal(modeBorder, "rgba(255, 102, 105, 0.6)");
+  await capture(page, "1366-readiness-mode-select-error");
 });
 
 test("Settings retains exact delivery authority and bound-PR detail without provider effects", async (_t, journey) => {

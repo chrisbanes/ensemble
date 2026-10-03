@@ -606,7 +606,7 @@ const COMMANDS = new Set([
 const RESPONSE_HEADERS = {
   "cache-control": "no-store",
   "content-security-policy":
-    "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -803,6 +803,7 @@ function document(
   body: string,
   session: OperatorSession,
   webEnabled = false,
+  stylesheets: readonly string[] = [],
 ): string {
   const logout = session.authenticated
     ? `<form method="post" action="/logout">${hidden("csrfToken", session.csrfToken)}<button type="submit">Log out</button></form>`
@@ -810,7 +811,12 @@ function document(
   const navigation = session.authenticated
     ? `<nav>${webEnabled ? '<a href="/app">New interface</a> ' : ""}<a href="/">Existing operator controls</a> <a href="/runtime">Runtime</a> <a href="/coordination">Coordination</a></nav>${logout}`
     : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ensemble</title></head><body>${navigation}${body}</body></html>`;
+  const styles = webEnabled
+    ? stylesheets
+        .map((href) => `<link rel="stylesheet" href="${href}">`)
+        .join("")
+    : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ensemble</title>${styles}</head><body${webEnabled ? ' class="legacy-operator"' : ""}>${navigation}${body}</body></html>`;
 }
 
 function loginContent(session: OperatorSession, message = "Sign in"): string {
@@ -906,7 +912,12 @@ export class LocalOperatorHttp {
           writeHtml(
             response,
             200,
-            document(loginContent(session), session, Boolean(this.web)),
+            document(
+              loginContent(session),
+              session,
+              Boolean(this.web),
+              this.web?.bundle.stylesheets,
+            ),
             {
               "set-cookie": cookieHeader(session.id, this.secureCookie),
             },
@@ -944,6 +955,7 @@ export class LocalOperatorHttp {
                 loginContent(session, "Sign in failed"),
                 session,
                 Boolean(this.web),
+                this.web?.bundle.stylesheets,
               ),
             );
             return;
@@ -1045,7 +1057,12 @@ export class LocalOperatorHttp {
             writeHtml(
               response,
               200,
-              document(html, authorized, Boolean(this.web)),
+              document(
+                html,
+                authorized,
+                Boolean(this.web),
+                this.web?.bundle.stylesheets,
+              ),
             );
             return;
           }
@@ -1165,7 +1182,12 @@ export class LocalOperatorHttp {
       writeHtml(
         response,
         200,
-        document(result.body, session, Boolean(this.web)),
+        document(
+          result.body,
+          session,
+          Boolean(this.web),
+          this.web?.bundle.stylesheets,
+        ),
       );
     } else {
       throw new Error();
@@ -1384,7 +1406,12 @@ export class LocalOperatorHttp {
     writeHtml(
       response,
       200,
-      document(loginContent(preLogin), preLogin, Boolean(this.web)),
+      document(
+        loginContent(preLogin),
+        preLogin,
+        Boolean(this.web),
+        this.web?.bundle.stylesheets,
+      ),
       {
         "set-cookie": cookieHeader(preLogin.id, this.secureCookie),
       },

@@ -22,9 +22,13 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   await mkdir(join(bundlePath, "assets"), { recursive: true });
   await writeFile(
     join(bundlePath, "index.html"),
-    '<html><script src="/assets/main.js"></script></html>',
+    '<html><link rel="stylesheet" href="/assets/main.css"><script src="/assets/main.js"></script></html>',
   );
   await writeFile(join(bundlePath, "assets/main.js"), 'console.log("static");');
+  await writeFile(
+    join(bundlePath, "assets/main.css"),
+    "body { color: white; }",
+  );
   const authFile = join(f.directory, "auth");
   await OperatorAuth.initialize(authFile, "fixture-password");
   let now = 100;
@@ -36,12 +40,14 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
     absoluteTimeoutMs: 3000,
   });
   t.after(() => auth.close());
+  const bundle = await OperatorWebBundle.open(bundlePath);
+  assert.deepEqual(bundle.stylesheets, ["/assets/main.css"]);
   const http = new LocalOperatorHttp(
     new LocalOperatorUi(f.service.domain()),
     auth,
     {
       web: new OperatorWebBoundary(
-        await OperatorWebBundle.open(bundlePath),
+        bundle,
         new OperatorApi(f.service, [f.directory]),
       ),
     },
@@ -50,6 +56,15 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   t.after(() => http.stop());
   const origin = `http://127.0.0.1:${port}`;
   assert.equal((await fetch(`${origin}/app`)).status, 200);
+  const loginPage = await fetch(`${origin}/runtime`);
+  const loginHtml = await loginPage.text();
+  assert.equal(loginPage.status, 200);
+  assert.match(loginHtml, /<body class="legacy-operator">/);
+  assert.match(loginHtml, /<link rel="stylesheet" href="\/assets\/main\.css">/);
+  const stylesheet = await fetch(`${origin}/assets/main.css`);
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get("content-type") ?? "", /text\/css/);
+  assert.equal(await stylesheet.text(), "body { color: white; }");
   assert.equal((await fetch(`${origin}/api/operator/workspace`)).status, 401);
   for (const path of [
     "/api/operator/task-list",

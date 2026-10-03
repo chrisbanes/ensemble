@@ -21,7 +21,16 @@ import type {
   ConfigurationDrafts,
 } from "./settings-state.js";
 import { useOperatorResource } from "./resource.js";
-import { Button, ResourceStatus, StatusBadge } from "./components.js";
+import {
+  ActionLink,
+  Button,
+  ResourceStatus,
+  StatusBadge,
+} from "./components.js";
+import { Alert } from "./ui/alert.js";
+import { Input } from "./ui/input.js";
+import { NativeSelect } from "./ui/native-select.js";
+import { Textarea } from "./ui/textarea.js";
 export interface SettingsProps {
   client: OperatorClient;
   session: Session;
@@ -72,11 +81,11 @@ export function DraftField({
     <label className="field body" htmlFor={id}>
       {label}
       {children ? (
-        <select {...props}>{children}</select>
+        <NativeSelect {...props}>{children}</NativeSelect>
       ) : multiline ? (
-        <textarea {...props} rows={4} />
+        <Textarea {...props} rows={4} />
       ) : (
-        <input {...props} type={type} />
+        <Input {...props} type={type} />
       )}{" "}
       {error && (
         <span id={`${id}-error`} className="error-text" role="alert">
@@ -95,10 +104,14 @@ export function DraftCheck({
   field: string;
   label: string;
 }) {
+  const id = useId();
   return (
-    <label className="body check-field">
-      <input
+    <label className="body check-field" htmlFor={id}>
+      <Input
+        id={id}
+        data-slot="checkbox-input"
         type="checkbox"
+        className="native-check size-5 shrink-0 p-0 accent-foreground"
         checked={Boolean(draft.values[field])}
         disabled={
           draft.phase === "pending" ||
@@ -142,12 +155,27 @@ export function DraftOutcome({
         )}
       </div>
       {draft.notice && (
-        <p className="body" role="status">
+        <Alert
+          variant={
+            draft.phase === "unknown" ||
+            draft.phase === "rejected" ||
+            draft.phase === "conflict"
+              ? "destructive"
+              : "default"
+          }
+          role={
+            draft.phase === "unknown" ||
+            draft.phase === "rejected" ||
+            draft.phase === "conflict"
+              ? "alert"
+              : "status"
+          }
+        >
           {draft.notice}
-        </p>
+        </Alert>
       )}
       {draft.receipt?.kind === "configuration" && (
-        <p className="metadata">
+        <Alert role="status">
           {draft.receipt.result.commandType === "capacity.configure" ? (
             <>
               Recorded capacity limits: global{" "}
@@ -167,7 +195,7 @@ export function DraftOutcome({
             </>
           )}
           .
-        </p>
+        </Alert>
       )}
     </>
   );
@@ -198,18 +226,15 @@ export function SettingsWorkspace(p: SettingsProps) {
         Each change is saved separately.
       </p>
       <div className="settings-actions">
-        <a className="control button primary" href="/app/settings/projects/new">
+        <ActionLink href="/app/settings/projects/new">
           Create project
-        </a>
-        <a
-          className="control button secondary"
-          href="/app/settings/profiles/new"
-        >
+        </ActionLink>
+        <ActionLink variant="secondary" href="/app/settings/profiles/new">
           Create profile
-        </a>
-        <a className="control button secondary" href="/app/settings/runtime">
+        </ActionLink>
+        <ActionLink variant="secondary" href="/app/settings/runtime">
           Runtime and recovery
-        </a>
+        </ActionLink>
       </div>
       <h2 className="section-heading">Projects</h2>
       {p.workspace?.data.projects.map((r) => (
@@ -774,9 +799,15 @@ export function RoutingConfiguration(
         >
           <legend className="body">Complete replacement candidates</legend>
           {p.data.profiles.map((r) => (
-            <label key={r.id} className="check-field body">
-              <input
+            <label
+              key={r.id}
+              className="check-field body"
+              htmlFor={`candidate-${r.id}`}
+            >
+              <Input
+                id={`candidate-${r.id}`}
                 type="checkbox"
+                className="native-check size-5 shrink-0 p-0 accent-foreground"
                 checked={candidates.includes(r.id)}
                 disabled={r.revoked}
                 onChange={(e) =>
@@ -893,7 +924,7 @@ export function SourceConfiguration(
   const input = (field: string, index: number, name: string, label: string) => (
     <label className="field body" htmlFor={`source-${field}-${index}-${name}`}>
       {label}
-      <input
+      <Input
         className="control"
         id={`source-${field}-${index}-${name}`}
         aria-invalid={Boolean(rowError(field, index, name))}
@@ -993,7 +1024,7 @@ export function SourceConfiguration(
             <div className="settings-card" key={r.rowKey}>
               <label className="field body" htmlFor={`selection-kind-${i}`}>
                 Selection kind
-                <select
+                <NativeSelect
                   className="control"
                   id={`selection-kind-${i}`}
                   value={r.kind}
@@ -1024,7 +1055,7 @@ export function SourceConfiguration(
                   <option value="repository">Repository</option>
                   <option value="search">Search</option>
                   <option value="project">GitHub Project</option>
-                </select>
+                </NativeSelect>
               </label>
               {input("selections", i, "id", "Selection ID")}
               {r.kind === "repository" ? (
@@ -1104,7 +1135,7 @@ export function SourceConfiguration(
             <div className="settings-card" key={r.rowKey}>
               <label className="field body" htmlFor={`condition-kind-${i}`}>
                 Condition kind
-                <select
+                <NativeSelect
                   className="control"
                   id={`condition-kind-${i}`}
                   aria-invalid={Boolean(rowError("conditions", i, "kind"))}
@@ -1133,7 +1164,7 @@ export function SourceConfiguration(
                 >
                   <option value="label">Label</option>
                   <option value="project-field">Project field</option>
-                </select>
+                </NativeSelect>
               </label>
               {r.kind === "label" ? (
                 input("conditions", i, "name", "Ready label")

@@ -72,6 +72,17 @@ for (const viewport of [
         violations.push(m.text());
     });
     await page.goto(`${web.origin}/login`);
+    const loadedFonts = await page.evaluate(async () => {
+      await document.fonts.load('400 14px "Inter"');
+      await document.fonts.load('400 12px "JetBrains Mono"');
+      await document.fonts.ready;
+      return {
+        inter: document.fonts.check('400 14px "Inter"'),
+        mono: document.fonts.check('400 12px "JetBrains Mono"'),
+      };
+    });
+    assert.equal(loadedFonts.inter, true);
+    assert.equal(loadedFonts.mono, true);
     await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
     assert.equal(
       await page
@@ -89,13 +100,15 @@ for (const viewport of [
           background: s.backgroundColor,
           family: s.fontFamily,
           size: s.fontSize,
+          height: s.height,
         };
       });
-    assert.equal(loginStyle.background, "rgb(40, 100, 215)");
-    assert.equal(loginStyle.foreground, "rgb(255, 255, 255)");
+    assert.equal(loginStyle.background, "rgb(229, 229, 229)");
+    assert.equal(loginStyle.foreground, "rgb(23, 23, 23)");
     assert.ok(contrast(loginStyle.foreground, loginStyle.background) >= 4.5);
-    assert.match(loginStyle.family, /Instrument Sans/);
+    assert.match(loginStyle.family, /Inter/);
     assert.equal(loginStyle.size, "14px");
+    assert.equal(loginStyle.height, viewport.width < 760 ? "44px" : "36px");
     await page.keyboard.press("Tab");
     assert.equal(
       await page
@@ -108,17 +121,10 @@ for (const viewport of [
       .getByRole("button", { name: "Sign in", exact: true })
       .evaluate((el) => {
         const s = getComputedStyle(el);
-        return {
-          active: document.activeElement === el,
-          outline: s.outlineStyle,
-          width: s.outlineWidth,
-          color: s.outlineColor,
-        };
+        return { active: document.activeElement === el, ring: s.boxShadow };
       });
     assert.equal(focus.active, true);
-    assert.equal(focus.outline, "solid");
-    assert.equal(focus.width, "3px");
-    assert.equal(focus.color, "rgb(40, 100, 215)");
+    assert.match(focus.ring, /115, 115, 115/);
     await page.keyboard.press("Shift+Tab");
     assert.equal(
       await page
@@ -142,6 +148,17 @@ for (const viewport of [
     await page
       .getByRole("heading", { name: "Overview", exact: true })
       .waitFor();
+    const primaryAction = await page
+      .getByRole("link", { name: "New task", exact: true })
+      .evaluate((el) => {
+        const style = getComputedStyle(el);
+        return { foreground: style.color, background: style.backgroundColor };
+      });
+    assert.equal(primaryAction.foreground, "rgb(23, 23, 23)");
+    assert.equal(primaryAction.background, "rgb(229, 229, 229)");
+    assert.ok(
+      contrast(primaryAction.foreground, primaryAction.background) >= 4.5,
+    );
     await screenshot(page, `${viewport.width}-loading`);
     release();
     await page
@@ -170,6 +187,16 @@ for (const viewport of [
       .locator(`a[href="/app/projects/${projectId}"]`)
       .first()
       .waitFor({ state: viewport.width < 760 ? "attached" : "visible" });
+    if (viewport.width >= 760) {
+      const desktopNavLinkHeight = await page
+        .locator('.sidebar nav[aria-label="Operator navigation"] .nav-link')
+        .first()
+        .evaluate((el) => el.getBoundingClientRect().height);
+      assert.equal(desktopNavLinkHeight, 33.5);
+      console.log(
+        `UI08 navigation geometry ${viewport.width}px desktop: first sidebar target ${desktopNavLinkHeight}px`,
+      );
+    }
     if (viewport.width < 760) {
       const trigger = page.getByRole("button", {
         name: "Projects and navigation",
@@ -179,6 +206,33 @@ for (const viewport of [
         name: "Projects and navigation",
       });
       await dialog.waitFor();
+      const phoneNavLinks = await dialog
+        .locator('nav[aria-label="Operator navigation"] .nav-link')
+        .evaluateAll((links) =>
+          links.map((link) => ({
+            label: link.textContent?.trim(),
+            href: link.getAttribute("href"),
+            height: link.getBoundingClientRect().height,
+          })),
+        );
+      assert.deepEqual(
+        phoneNavLinks.map(({ href }) => href),
+        [
+          "/app",
+          "/app/inbox",
+          "/app/tasks",
+          `/app/projects/${projectId}`,
+          "/app/settings",
+          "/",
+        ],
+      );
+      assert.ok(
+        phoneNavLinks.every(({ height }) => height >= 44),
+        `phone navigation destinations must each be at least 44px tall: ${JSON.stringify(phoneNavLinks)}`,
+      );
+      console.log(
+        `UI08 navigation geometry ${viewport.width}px phone sheet: ${JSON.stringify(phoneNavLinks)}`,
+      );
       for (let i = 0; i < 12; i++) await page.keyboard.press("Tab");
       assert.equal(
         await dialog.evaluate((el) => el.contains(document.activeElement)),
@@ -257,21 +311,32 @@ for (const viewport of [
           line: s.lineHeight,
         };
       });
-    assert.match(typography.family, /Space Grotesk/);
-    assert.equal(typography.size, "32px");
+    assert.match(typography.family, /Inter/);
+    assert.equal(typography.size, "18px");
     assert.equal(typography.weight, "600");
     const supporting = await page
       .locator("main .introduction")
       .evaluate((el) => {
         const s = getComputedStyle(el),
           body = getComputedStyle(document.body);
-        return { foreground: s.color, background: body.backgroundColor };
+        return {
+          foreground: s.color,
+          background: body.backgroundColor,
+          family: s.fontFamily,
+          size: s.fontSize,
+          weight: s.fontWeight,
+        };
       });
     assert.ok(contrast(supporting.foreground, supporting.background) >= 4.5);
-    const badge = await page.locator("main .badge.warning").evaluate((el) => {
-      const s = getComputedStyle(el);
-      return { foreground: s.color, background: s.backgroundColor };
-    });
+    assert.match(supporting.family, /Inter/);
+    assert.equal(supporting.size, "14px");
+    assert.equal(supporting.weight, "400");
+    const badge = await page
+      .locator('main [data-slot="badge"]')
+      .evaluate((el) => {
+        const s = getComputedStyle(el);
+        return { foreground: s.color, background: s.backgroundColor };
+      });
     assert.ok(contrast(badge.foreground, badge.background) >= 4.5);
     if (viewport.width === 683) await screenshot(page, "1366-zoom200");
     const action = page.getByRole("link", {
