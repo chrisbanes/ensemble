@@ -50,6 +50,8 @@ Origin, session and CSRF checks; model tools have no adoption authority.
 | --- | --- |
 | `/runtime/control/pre-turn/adopt` | #737 historical pre-turn evidence adoption; exact held generation, operator attestation and immutable command receipt. Witness acknowledgement appears on the shared task/assignment runtime history and assignment recovery view. |
 | `/runtime/control/pre-turn/recover` | #737 exact witness-bound recovery; independently verified termination and settled effects/workspace reconcile ownership without dispatch. Existing runtime history records the receipt and retained holds. |
+| `/runtime/control/no-turn/adopt` | #737 distinct historical no-turn-submission evidence adoption; reviewed complete invocation ledger and exact known-null-predecessor generation. Shared task/assignment runtime history and assignment recovery view acknowledge the witness while retaining possible idle-thread creation. |
+| `/runtime/control/no-turn/recover` | #737 exact no-turn witness-bound recovery; verified process termination and settled effects/workspace reconcile ownership without dispatch. Separate conversation replacement and NEW message remain required; no model tool authority or new forms in the curated operator UI. |
 | `/runtime/control/conversation-replace` | #737 explicit recovery counterpart; assignment/conversation revision checks and immutable keyed result prevent duplicate increments. Fresh operator message remains separately required for continuation. |
 
 Programmatic support (no new HTTP exposure):

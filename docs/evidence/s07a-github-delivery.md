@@ -120,6 +120,23 @@ contract requires a material decision and explicit approval before implementatio
 or use. No release, retry or additional live run is recorded. Handback
 qualification does not complete #737 or qualify the through-merge journey.
 
+## Approved historical no-turn repair preparation (3 October 2026)
+
+Chris approved the distinct bounded no-turn-submission proof and historical
+operator adoption in the [recorded decision](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5967469231).
+The repair adds a separate witness/receipt kind for the exact admitted generation
+with a captured known-null predecessor. The host operator must independently assess
+frozen source/harness and the complete synchronous write-ahead invocation ledger;
+its absence of a `startTurn` invocation does not prove that no idle thread was
+created. Generic stop errors, null identities or process absence do not qualify.
+Existing R1/R2/R3 proof material and the archived-resume predicate remain unchanged.
+
+The new proof has not been qualified live. Recovery still requires exact-process
+termination verification and independently settled workspace/effects, followed by
+explicit conversation replacement and a NEW operator message. The sequence-8 hold
+remains preserved; no release, retry, additional turn, merge or remote cleanup is
+claimed by this preparation. Through-merge remains unqualified.
+
 ## 2 October qualification and checkpoint repair
 
 On 2 October 2026 Chris approved publication of the synthetic fixture, at most 12

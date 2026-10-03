@@ -81,6 +81,32 @@ export const historicalPreTurnAdoptionSchema = generationSchema
 export type HistoricalPreTurnAdoption = z.infer<
   typeof historicalPreTurnAdoptionSchema
 >;
+export const historicalNoTurnAdoptionSchema = generationSchema
+  .extend({
+    key: z.string().uuid(),
+    kind: z.literal("historical-no-turn-submission"),
+    conversationRevision: z.number().int().positive(),
+    writerSequence: z.number().int().positive().safe(),
+    retainedReason: z.string().min(1).max(4000),
+    evidence: historicalPreTurnAdoptionSchema.shape.evidence
+      .extend({
+        invocationLedgerSha256: digest,
+      })
+      .strict(),
+    attestation: z
+      .object({
+        completeSynchronousWriteAheadLedger: z.literal(true),
+        noStartTurnInvocation: z.literal(true),
+        independentlyReviewed: z.literal(true),
+        idleThreadMayExist: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
+export type HistoricalNoTurnAdoption = z.infer<
+  typeof historicalNoTurnAdoptionSchema
+>;
+
 const receiptBase = z.object({
   workId: z.string().min(1),
   workRevision: z.number().int().positive().nullable(),
@@ -99,6 +125,18 @@ export const preTurnRecoveryReceiptSchema = receiptBase
     turnId: z.null(),
   })
   .strict();
+export const noTurnRecoveryReceiptSchema = preTurnRecoveryReceiptSchema
+  .extend({
+    kind: z.literal("no-turn-submission"),
+  })
+  .strict();
+export const noTurnRecoveryCommandSchema = z
+  .object({
+    key: z.string().uuid(),
+    receipt: noTurnRecoveryReceiptSchema,
+  })
+  .strict();
+export type NoTurnRecoveryCommand = z.infer<typeof noTurnRecoveryCommandSchema>;
 export const recoveryReceiptSchema = z.union([
   receiptBase
     .extend({
@@ -108,6 +146,7 @@ export const recoveryReceiptSchema = z.union([
     })
     .strict(),
   preTurnRecoveryReceiptSchema,
+  noTurnRecoveryReceiptSchema,
 ]);
 export type RecoveryReceipt = z.infer<typeof recoveryReceiptSchema>;
 export const preTurnRecoveryCommandSchema = z

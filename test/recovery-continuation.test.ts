@@ -1720,3 +1720,80 @@ test("receipt migration rejects unknown column order, constraints, indexes and t
       }
     });
 });
+
+test("R4 witness storage initialization preserves existing R2 and R3 receipt and audit bytes", async (t) => {
+  for (const preTurn of [false, true])
+    await t.test(preTurn ? "R3" : "R2", async () => {
+      const f = await heldFixture(preTurn);
+      let service = f.service;
+      try {
+        f.pause(true);
+        if (preTurn) {
+          await service.recoverPreTurnExecution(preTurnRecovery(f));
+          service.replaceConversation(required(f.old.assignmentId));
+        } else await service.resolveHeldExecution(f.receipt);
+        await service.coordinationView().postOperatorMessage(f.message);
+        const retained = () =>
+          JSON.stringify({
+            receipt: internals(service)
+              .db.prepare(
+                "SELECT * FROM execution_recovery_receipts WHERE workId=?",
+              )
+              .get(f.old.workId),
+            audit: audit(service, f.old.workId),
+            preTurnWitness: internals(service)
+              .db.prepare(
+                "SELECT * FROM execution_pre_turn_rejections WHERE workId=?",
+              )
+              .get(f.old.workId),
+            preTurnReceipt: internals(service)
+              .db.prepare(
+                "SELECT * FROM execution_pre_turn_receipts WHERE workId=?",
+              )
+              .get(f.old.workId),
+            commands: internals(service)
+              .db.prepare(
+                "SELECT * FROM execution_pre_turn_commands ORDER BY commandKey",
+              )
+              .all(),
+            proof: internals(service).state.reconciledAssignmentProof(
+              f.old.workId,
+            ),
+          });
+        const before = retained();
+        assert.ok(
+          internals(service).state.reconciledAssignmentProof(f.old.workId),
+        );
+        await service.stop();
+        const legacy = new DatabaseSync(
+          join(f.directory, "data", "standalone.sqlite"),
+        );
+        legacy.exec(
+          "DROP TABLE execution_no_turn_receipts;DROP TABLE execution_no_turn_submissions",
+        );
+        legacy.close();
+        service = f.makeService();
+        await service.start();
+        assert.equal(retained(), before);
+        assert.equal(
+          internals(service)
+            .db.prepare(
+              "SELECT COUNT(*) AS n FROM execution_no_turn_submissions",
+            )
+            .get()?.n,
+          0,
+        );
+        assert.equal(
+          internals(service).db.prepare("PRAGMA foreign_keys").get()
+            ?.foreign_keys,
+          1,
+        );
+        assert.deepEqual(
+          internals(service).db.prepare("PRAGMA foreign_key_check").all(),
+          [],
+        );
+      } finally {
+        await close(f, service);
+      }
+    });
+});

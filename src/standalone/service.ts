@@ -2,6 +2,9 @@ import { z } from "zod";
 import {
   ArchivedResumeRejectedError,
   preTurnRecoveryCommandSchema,
+  noTurnRecoveryCommandSchema,
+  type HistoricalNoTurnAdoption,
+  type NoTurnRecoveryCommand,
   type HistoricalPreTurnAdoption,
   type PreTurnRecoveryCommand,
   type ReplaceConversationCommand,
@@ -712,6 +715,28 @@ export class StandaloneService {
   recoverPreTurnExecution(command: PreTurnRecoveryCommand) {
     const value = preTurnRecoveryCommandSchema.parse(command);
     const replay = this.requireState().preTurnCommandReplay("recover", value);
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  adoptHistoricalNoTurnSubmission(command: HistoricalNoTurnAdoption) {
+    return this.requireState().adoptHistoricalNoTurnSubmission(command);
+  }
+  recoverNoTurnExecution(command: NoTurnRecoveryCommand) {
+    const value = noTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay(
+      "recover-no-turn",
+      value,
+    );
     if (replay)
       return Promise.resolve(
         z

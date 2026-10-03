@@ -2,9 +2,11 @@ import { canonicalMaterial } from "../core/delivery.js";
 import {
   archivedResumeRejectionSchema,
   historicalPreTurnAdoptionSchema,
+  historicalNoTurnAdoptionSchema,
   replaceConversationCommandSchema,
   type ArchivedResumeRejection,
   type HistoricalPreTurnAdoption,
+  type HistoricalNoTurnAdoption,
   type ReplaceConversationCommand,
 } from "./pre-turn-recovery.js";
 import { recoveryReceiptSchema } from "./pre-turn-recovery.js";
@@ -1371,6 +1373,15 @@ export class ExecutionState {
       workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
       witnessId TEXT NOT NULL UNIQUE REFERENCES execution_pre_turn_rejections(id), witnessMaterial TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS execution_no_turn_submissions (
+      id TEXT PRIMARY KEY, workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      contextMaterial TEXT NOT NULL, evidenceMaterial TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS execution_no_turn_receipts (
+      receiptId TEXT PRIMARY KEY REFERENCES execution_recovery_receipts(id),
+      workId TEXT NOT NULL UNIQUE REFERENCES execution_intents(workId),
+      witnessId TEXT NOT NULL UNIQUE REFERENCES execution_no_turn_submissions(id), witnessMaterial TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS execution_pre_turn_commands (
       commandKey TEXT PRIMARY KEY, scope TEXT NOT NULL, payloadMaterial TEXT NOT NULL, result TEXT NOT NULL
     );`);
@@ -1446,6 +1457,148 @@ export class ExecutionState {
       AND priorBinding.conversationRevision=binding.conversationRevision`)
       .get(workId) as Record<string, string | number | null> | undefined;
   }
+  private noTurnContext(
+    workId: string,
+  ): Record<string, string | number | null> | undefined {
+    if (!this.hasTurnRequests) return undefined;
+    return this.db
+      .prepare(`SELECT request.workId, revision.workRevision, request.sequence AS requestSequence,
+      request.taskId, request.projectId, request.assignmentId, request.taskVersion, request.assignmentVersion,
+      request.instructionsRevision, request.profileRevision, binding.conversationRevision,
+      identity.processId, identity.processStartedAt, identity.bootId, intent.workspace,
+      admission.sequence AS writerSequence, link.previousWorkId AS predecessorWorkId,
+      link.predecessorKnown
+    FROM turn_requests request JOIN execution_intents intent ON intent.workId=request.workId
+    JOIN execution_recovery_identities identity ON identity.workId=request.workId
+    JOIN task_work_revisions revision ON revision.workId=request.workId
+    JOIN task_execution_bindings binding ON binding.workId=request.workId
+    JOIN task_writer_admissions admission ON admission.workId=request.workId
+    JOIN execution_request_predecessors link ON link.workId=request.workId AND link.predecessorKnown=1
+    WHERE request.workId=? AND request.kind='assignment'
+      AND intent.state IN ('submitting','held','reconciled')
+      AND intent.threadId IS NULL AND intent.turnId IS NULL AND identity.threadId IS NULL AND identity.turnId IS NULL
+      AND identity.workRevision=revision.workRevision AND identity.requestSequence=request.sequence
+      AND identity.processId IS NOT NULL AND identity.processStartedAt IS NOT NULL AND identity.bootId IS NOT NULL
+      AND binding.taskId=request.taskId AND binding.assignmentId=request.assignmentId
+      AND binding.assignmentVersion=request.assignmentVersion AND binding.instructionsRevision=request.instructionsRevision
+      AND binding.profileRevision=request.profileRevision AND revision.assignmentId=request.assignmentId
+      AND revision.conversationRevision=binding.conversationRevision AND admission.workspace=intent.workspace
+      AND request.previousWorkId IS NULL AND link.previousWorkId IS NULL`)
+      .get(workId) as Record<string, string | number | null> | undefined;
+  }
+  private noTurnWitnessForWork(workId: string):
+    | {
+        id: string;
+        workId: string;
+        contextMaterial: string;
+        evidenceMaterial: string;
+      }
+    | undefined {
+    const witness = this.db
+      .prepare("SELECT * FROM execution_no_turn_submissions WHERE workId=?")
+      .get(workId) as
+      | {
+          id: string;
+          workId: string;
+          contextMaterial: string;
+          evidenceMaterial: string;
+        }
+      | undefined;
+    const context = this.noTurnContext(workId);
+    if (
+      !witness ||
+      !context ||
+      canonicalMaterial(context) !== witness.contextMaterial
+    )
+      return undefined;
+    try {
+      const value = historicalNoTurnAdoptionSchema.parse(
+        JSON.parse(witness.evidenceMaterial),
+      );
+      if (
+        value.workId !== workId ||
+        value.workRevision !== context.workRevision ||
+        value.requestSequence !== context.requestSequence ||
+        value.conversationRevision !== context.conversationRevision ||
+        value.writerSequence !== context.writerSequence ||
+        value.processIdentity.processId !== context.processId ||
+        value.processIdentity.processStartedAt !== context.processStartedAt ||
+        value.processIdentity.bootId !== context.bootId
+      )
+        return undefined;
+      const replay = this.preTurnCommandReplay("adopt-no-turn", value);
+      if (replay?.witnessId !== witness.id || replay.workId !== workId)
+        return undefined;
+      return witness;
+    } catch {
+      return undefined;
+    }
+  }
+  adoptHistoricalNoTurnSubmission(command: HistoricalNoTurnAdoption): {
+    witnessId: string;
+    workId: string;
+  } {
+    const value = historicalNoTurnAdoptionSchema.parse(command);
+    const replay = this.preTurnCommandReplay("adopt-no-turn", value);
+    if (replay)
+      return z
+        .object({ witnessId: z.string().uuid(), workId: z.string().min(1) })
+        .strict()
+        .parse(replay);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const context = this.noTurnContext(value.workId);
+      const intent = this.db
+        .prepare("SELECT state,reason FROM execution_intents WHERE workId=?")
+        .get(value.workId) as { state: string; reason: string } | undefined;
+      const request = this.db
+        .prepare("SELECT state,reason FROM turn_requests WHERE workId=?")
+        .get(value.workId) as { state: string; reason: string } | undefined;
+      if (
+        !context ||
+        intent?.state !== "held" ||
+        request?.state !== "held" ||
+        intent.reason !== value.retainedReason ||
+        request.reason !== value.retainedReason ||
+        context.workRevision !== value.workRevision ||
+        context.requestSequence !== value.requestSequence ||
+        context.conversationRevision !== value.conversationRevision ||
+        context.writerSequence !== value.writerSequence ||
+        context.processId !== value.processIdentity.processId ||
+        context.processStartedAt !== value.processIdentity.processStartedAt ||
+        context.bootId !== value.processIdentity.bootId ||
+        !this.db
+          .prepare(
+            "SELECT 1 FROM execution_capacity_reservations WHERE workId=?",
+          )
+          .get(value.workId) ||
+        this.db
+          .prepare("SELECT 1 FROM execution_pre_turn_rejections WHERE workId=?")
+          .get(value.workId)
+      )
+        throw new Error(
+          "Historical no-turn adoption does not match the exact held generation",
+        );
+      const result = { witnessId: randomUUID(), workId: value.workId };
+      this.db
+        .prepare(
+          "INSERT INTO execution_no_turn_submissions (id,workId,contextMaterial,evidenceMaterial) VALUES (?,?,?,?)",
+        )
+        .run(
+          result.witnessId,
+          value.workId,
+          canonicalMaterial(context),
+          canonicalMaterial(value),
+        );
+      this.recordPreTurnCommand("adopt-no-turn", value, result);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private witnessForWork(workId: string):
     | {
         id: string;
@@ -1724,9 +1877,41 @@ export class ExecutionState {
           witnessMaterial: string;
         }
       | undefined;
+    const noTurnDiscriminator = this.db
+      .prepare("SELECT * FROM execution_no_turn_receipts WHERE receiptId=?")
+      .get(String(row.id)) as
+      | {
+          receiptId: string;
+          workId: string;
+          witnessId: string;
+          witnessMaterial: string;
+        }
+      | undefined;
     let material = JSON.stringify(row);
     if (row.threadId === null && row.turnId === null) {
-      const witness = this.witnessForWork(workId);
+      const preTurnWitness = this.witnessForWork(workId);
+      const noTurnWitness = this.noTurnWitnessForWork(workId);
+      const witness = noTurnWitness ?? preTurnWitness;
+      const proofDiscriminator = noTurnDiscriminator ?? discriminator;
+      const mixed =
+        Boolean(noTurnDiscriminator && discriminator) ||
+        Boolean(noTurnWitness && preTurnWitness) ||
+        Boolean(
+          noTurnDiscriminator &&
+            this.db
+              .prepare(
+                "SELECT 1 FROM execution_pre_turn_rejections WHERE workId=?",
+              )
+              .get(workId),
+        ) ||
+        Boolean(
+          discriminator &&
+            this.db
+              .prepare(
+                "SELECT 1 FROM execution_no_turn_submissions WHERE workId=?",
+              )
+              .get(workId),
+        );
       const conversation = this.db
         .prepare(
           "SELECT revision FROM assignment_conversations WHERE assignmentId=?",
@@ -1734,18 +1919,26 @@ export class ExecutionState {
         .get(String(row.assignmentId)) as { revision: number } | undefined;
       if (
         !witness ||
-        !discriminator ||
-        discriminator.workId !== workId ||
-        discriminator.witnessId !== witness.id ||
-        discriminator.witnessMaterial !== canonicalMaterial(witness) ||
+        mixed ||
+        !proofDiscriminator ||
+        Boolean(noTurnWitness) !== Boolean(noTurnDiscriminator) ||
+        proofDiscriminator.workId !== workId ||
+        proofDiscriminator.witnessId !== witness.id ||
+        proofDiscriminator.witnessMaterial !== canonicalMaterial(witness) ||
         (conversation?.revision ?? 1) <= Number(row.conversationRevision)
       )
         return undefined;
-      material = JSON.stringify({ receipt: row, witness, discriminator });
+      material = noTurnWitness
+        ? JSON.stringify({ receipt: row, noTurnWitness, noTurnDiscriminator })
+        : JSON.stringify({ receipt: row, witness, discriminator });
     } else if (
       row.threadId === null ||
       row.turnId === null ||
       discriminator ||
+      noTurnDiscriminator ||
+      this.db
+        .prepare("SELECT 1 FROM execution_no_turn_submissions WHERE workId=?")
+        .get(workId) ||
       this.db
         .prepare("SELECT 1 FROM execution_pre_turn_rejections WHERE workId=?")
         .get(workId)
@@ -2309,8 +2502,18 @@ export class ExecutionState {
             ? recoveryReason("unknown")
             : null;
       const preTurnWitness = this.witnessForWork(workId);
+      const noTurnWitness = this.noTurnWitnessForWork(workId);
       return {
         workId,
+        ...(noTurnWitness
+          ? {
+              noTurnSubmission: {
+                id: noTurnWitness.id,
+                source: "operator-adopted" as const,
+                idleThreadMayExist: true as const,
+              },
+            }
+          : {}),
         ...(preTurnWitness
           ? {
               preTurnRejection: {
@@ -2416,7 +2619,10 @@ export class ExecutionState {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (command) {
-        const replay = this.preTurnCommandReplay("recover", command);
+        const replay = this.preTurnCommandReplay(
+          value.kind === "no-turn-submission" ? "recover-no-turn" : "recover",
+          command,
+        );
         if (replay) {
           const result = z
             .object({
@@ -2509,6 +2715,24 @@ export class ExecutionState {
         throw new Error(
           "Pre-turn recovery requires its exact persisted witness and keyed command",
         );
+      const noTurnWitness =
+        value.kind === "no-turn-submission"
+          ? this.noTurnWitnessForWork(value.workId)
+          : undefined;
+      if (
+        value.kind === "no-turn-submission" &&
+        (!command || !noTurnWitness || noTurnWitness.id !== value.witnessId)
+      )
+        throw new Error(
+          "No-turn recovery requires its exact persisted witness and keyed command",
+        );
+      if (
+        value.kind !== "no-turn-submission" &&
+        this.db
+          .prepare("SELECT 1 FROM execution_no_turn_submissions WHERE workId=?")
+          .get(value.workId)
+      )
+        throw new Error("Other receipt kinds cannot adopt a no-turn witness");
       if (
         value.kind !== "pre-turn-rejection" &&
         this.db
@@ -2561,6 +2785,17 @@ export class ExecutionState {
             preTurnWitness.id,
             canonicalMaterial(preTurnWitness),
           );
+      if (noTurnWitness)
+        this.db
+          .prepare(
+            "INSERT INTO execution_no_turn_receipts (receiptId,workId,witnessId,witnessMaterial) VALUES (?,?,?,?)",
+          )
+          .run(
+            receiptId,
+            value.workId,
+            noTurnWitness.id,
+            canonicalMaterial(noTurnWitness),
+          );
       this.db
         .prepare(`UPDATE execution_pending_effects SET state = 'settled', reason = NULL
         WHERE workId = ? AND state = 'pending'`)
@@ -2583,11 +2818,15 @@ export class ExecutionState {
           Date.now(),
         );
       if (command)
-        this.recordPreTurnCommand("recover", command, {
-          id: receiptId,
-          workId: value.workId,
-          state: "reconciled",
-        });
+        this.recordPreTurnCommand(
+          value.kind === "no-turn-submission" ? "recover-no-turn" : "recover",
+          command,
+          {
+            id: receiptId,
+            workId: value.workId,
+            state: "reconciled",
+          },
+        );
       this.db.exec("COMMIT");
       return { id: receiptId, workId: value.workId, state: "reconciled" };
     } catch (error) {

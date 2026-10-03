@@ -299,6 +299,29 @@ replay. Admission, completion and external actions revalidate the pre-turn witne
 receipt and continuation audit at use time. Independent holds, current admission
 gates and persistent late-callback/survivor holds remain enforced.
 
+A distinct historical no-turn-submission proof covers an admitted generation
+with a captured known-null predecessor and unbound thread/turn identities. It is
+operator-only adoption of independently reviewed frozen source, harness and a
+complete synchronous write-ahead invocation ledger establishing that `startTurn`
+was never called for the exact generation. A generic stop error, missing identities,
+process absence or metadata syntax alone cannot establish this proof. An initial
+`thread/start` may have created an unobserved idle thread; this contract does not
+claim thread noncreation, a positive archived-resume rejection or successful work.
+The existing archived-resume predicate and bound-turn proofs remain unchanged.
+
+The separate no-turn witness and receipt discriminator bind request/work,
+conversation/writer revisions, assignment snapshots, process and immutable operator
+command material. Recovery independently verifies exact-process termination and
+requires settled current workspace/effects, preserving null identities and all
+older receipt/audit material. It leaves the request held and produces no successful
+assignment result or automatic dispatch. Existing keyed conversation replacement
+and a NEW authenticated operator message are both required for continuation. The
+old batch records `operator-reconciled` processing without replay. Admission,
+completion and actions recheck the distinct witness/receipt/audit and current gates;
+late callbacks or known survivors persist a hold and retract successors across
+restart. The advanced authenticated host routes expose bounded acknowledgement,
+with no new model tool authority or forms in the curated operator UI.
+
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No
 queued turn, follow-up, delegation or replacement may gain admission while Ensemble

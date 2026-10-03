@@ -1272,6 +1272,9 @@ export class OperatorApi {
             ),
           ],
           pendingEffectCount: r.pendingEffects.length,
+          ...(r.noTurnSubmission
+            ? { noTurnSubmission: r.noTurnSubmission }
+            : {}),
           ...(r.preTurnRejection
             ? {
                 preTurnRejection: {

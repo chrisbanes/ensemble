@@ -85,6 +85,11 @@ export interface RecoveryRecord {
     stop: boolean;
   };
   receipt: { id: string; workspaceDisposition: string } | null;
+  noTurnSubmission?: {
+    id: string;
+    source: "operator-adopted";
+    idleThreadMayExist: true;
+  };
   preTurnRejection?: {
     id: string;
     source: "runtime" | "operator-adopted";
