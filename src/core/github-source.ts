@@ -1,3 +1,4 @@
+import { TaskReviewStore } from "./task-review.js";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
@@ -604,6 +605,10 @@ export class GitHubSourceStore {
             issue.nodeId,
             JSON.stringify(issue.projectFields),
           );
+        new TaskReviewStore(this.db).captureSource(taskId, "github", {
+          title: issue.title,
+          body: issue.body,
+        });
         this.updateReadiness(taskId);
       }
       if (snapshot.complete) {
@@ -736,6 +741,11 @@ export class GitHubSourceStore {
           JSON.stringify(snapshot.labels),
           snapshot.nodeId,
         );
+      new TaskReviewStore(this.db).captureSource(
+        String(issue.taskId),
+        "github",
+        { title: snapshot.title, body: snapshot.body },
+      );
       const priorHold = this.db
         .prepare("SELECT active,reason FROM github_source_holds WHERE nodeId=?")
         .get(snapshot.nodeId) as Row | undefined;

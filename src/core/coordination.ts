@@ -1,3 +1,8 @@
+import {
+  TaskReviewStore,
+  reviewMetadataSchema,
+  feedbackReferenceSchema,
+} from "./task-review.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -31,7 +36,12 @@ const reportCallSchema = z
     turnId: z.string().min(1).max(512),
     callId: z.string().min(1).max(512),
     tool: z.literal("ensemble_report_result"),
-    arguments: z.object({ summary: summarySchema }).strict(),
+    arguments: z
+      .object({
+        summary: summarySchema,
+        review: reviewMetadataSchema.optional(),
+      })
+      .strict(),
   })
   .strict();
 const generalCallSchema = z
@@ -149,6 +159,7 @@ const operatorMessageSchema = z
     recipientAssignmentId: uuid,
     expectedAssignmentVersion: z.number().int().positive(),
     message: summarySchema,
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const routingFallbackAttentionSchema = z
@@ -425,7 +436,12 @@ export class CoordinationStore {
       isNeverAdmittedRefusedAssignmentWork;
   }
 
+  taskReview(): TaskReviewStore {
+    return new TaskReviewStore(this.db);
+  }
+
   migrate(): void {
+    new TaskReviewStore(this.db).migrate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_external_delivery_notices (taskId TEXT NOT NULL REFERENCES domain_tasks(id),identity TEXT NOT NULL,eventId TEXT NOT NULL,PRIMARY KEY(taskId,identity));
@@ -722,7 +738,10 @@ export class CoordinationStore {
   }
   /** Matching lost-response retries replay before any current-generation query. */
   receipt(input: CoordinationCall): CoordinationReceipt | undefined {
-    const call = generalCallSchema.parse(input);
+    const call =
+      input.tool === "ensemble_report_result"
+        ? reportCallSchema.parse(input)
+        : generalCallSchema.parse(input);
     const row = this.one(
       "SELECT threadId, turnId, callId, tool, payloadHash, taskId, assignmentId, workId, workRevision, response " +
         "FROM coordination_receipts WHERE threadId = ? AND turnId = ? AND callId = ?",
@@ -827,7 +846,7 @@ export class CoordinationStore {
       );
       let result: AssignmentResult;
       if (priorResult) {
-        if (priorResult.summary !== call.arguments.summary)
+        if (priorResult.payloadHash !== callHash)
           throw new Error("Result already recorded with different content");
         result = this.parseResult(priorResult);
       } else {
@@ -894,6 +913,19 @@ export class CoordinationStore {
           WHERE assignmentId = ? AND assignmentVersion = ? AND state = 'queued'`)
           .run(String(binding.assignmentId), Number(binding.assignmentVersion));
         result = this.resultById(resultId);
+        if (call.arguments.review)
+          new TaskReviewStore(this.db).recordResult(
+            result,
+            call.arguments.review,
+          );
+        else
+          new TaskReviewStore(this.db).indexResult(
+            result.resultId,
+            result.taskId,
+            String(binding.projectId),
+            result.summary,
+            result.createdAt * 1000,
+          );
       }
       const settledEffect = this.db
         .prepare(`UPDATE execution_pending_effects
@@ -1555,6 +1587,7 @@ export class CoordinationStore {
     recipientAssignmentId: string;
     expectedAssignmentVersion: number;
     message: string;
+    reference?: z.infer<typeof feedbackReferenceSchema> | undefined;
   }): InboxEvent {
     const command = operatorMessageSchema.parse(input);
     const payload = {
@@ -1562,6 +1595,7 @@ export class CoordinationStore {
       recipientAssignmentId: command.recipientAssignmentId,
       expectedAssignmentVersion: command.expectedAssignmentVersion,
       message: command.message,
+      ...(command.reference ? { reference: command.reference } : {}),
     };
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1584,12 +1618,20 @@ export class CoordinationStore {
         throw new Error("Message recipient assignment version conflict");
       if (assignment.state !== "pending" && assignment.state !== "running")
         throw new Error("Message recipient must be pending or running");
+      if (command.reference)
+        new TaskReviewStore(this.db).validateReference(
+          command.taskId,
+          command.reference,
+        );
       const event = this.newEvent(
         command.taskId,
         command.recipientAssignmentId,
         "operator-message",
         null,
-        JSON.stringify({ message: command.message }),
+        JSON.stringify({
+          message: command.message,
+          ...(command.reference ? { reference: command.reference } : {}),
+        }),
       );
       this.saveOperatorReceipt(
         "operator-message",

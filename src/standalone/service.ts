@@ -759,6 +759,11 @@ export class StandaloneService {
     return this.schedulerStore.list();
   }
 
+  taskReview() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.taskReview();
+  }
+
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;

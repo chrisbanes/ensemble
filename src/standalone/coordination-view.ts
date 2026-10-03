@@ -1,3 +1,4 @@
+import { feedbackReferenceSchema } from "../core/task-review.js";
 import {
   handbackSettlementSchema,
   type HandbackSettlement,
@@ -34,7 +35,12 @@ import type {
 
 const uuid = z.string().uuid();
 const commandKey = z.string().uuid();
-const assignmentMessageSchema = z.object({ message: z.string() }).strict();
+const assignmentMessageSchema = z
+  .object({
+    message: z.string(),
+    reference: feedbackReferenceSchema.optional(),
+  })
+  .strict();
 const answerEventSchema = z
   .object({
     interactionId: uuid,
@@ -246,6 +252,7 @@ const operatorMessageCommand = z
     recipientAssignmentId: uuid,
     expectedAssignmentVersion: z.number().int().positive(),
     message: z.string().trim().min(1).max(16000),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const resultRecipientCommand = z
