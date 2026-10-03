@@ -63,6 +63,32 @@ test("retained HTML routes share the production foundation and native interactio
     requesterAssignmentId: null,
   });
 
+  const approvalWorkId = randomUUID();
+  const approvalInteractionId = randomUUID();
+  const approvalMaterial = JSON.stringify({
+    command: "Publish approved release notes",
+    details: "approved material ".repeat(12),
+  });
+  const longHistory = "retained assistant history ".repeat(12);
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "INSERT INTO execution_intents(id,workId,prompt,workspace,state,reason,threadId,turnId,accountType,sandbox,approval) VALUES (?,?,'fixture','fixture','completed',NULL,'fixture-thread','fixture-turn','chatgpt','workspaceWrite','never')",
+    ).run(randomUUID(), approvalWorkId);
+    db.prepare(
+      "INSERT INTO coordination_interactions(interactionId,taskId,requestingAssignmentId,requestingWorkId,requestingWorkRevision,requestingAssignmentVersion,conversationRevision,kind,status,prompt,action,target,materialHash,materialJson,revision) VALUES (?,?,?, ?,1,1,1,'approval','open','Approve release notes','Publish approved release notes','release-42',?, ?,1)",
+    ).run(
+      approvalInteractionId,
+      taskId,
+      assignmentId,
+      approvalWorkId,
+      "a".repeat(64),
+      approvalMaterial,
+    );
+    db.prepare(
+      "INSERT INTO conversation_history_items(workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision,workRevision,threadId,turnId,itemId,lifecycle,text,omissionReason,deltaBytes,createdAt,updatedAt) VALUES (?, ?, ?,1,1,1,1,1,'fixture-thread','fixture-turn','foundation-long-history','completed',?,NULL,0,1,1)",
+    ).run(approvalWorkId, taskId, assignmentId, longHistory);
+  });
+
   const web = await journey.start("fixture.web", () => f.startWeb());
   browser = await journey.start("browser.launch", () => chromium.launch());
   const desktop = await browser.newPage({
@@ -216,7 +242,68 @@ test("retained HTML routes share the production foundation and native interactio
     true,
   );
   await captureBrowserEvidence(phone, "390-retained-runtime-controls");
+  await phone.goto(`${web.origin}/coordination/task/${taskId}`);
+  const approvalPre = phone
+    .locator("body.legacy-operator pre")
+    .filter({ hasText: approvalMaterial.slice(0, 30) });
+  await approvalPre.waitFor();
+  assert.equal(await approvalPre.textContent(), approvalMaterial);
+  const approvalForm = phone
+    .locator('form[action="/coordination/control/approval/decision"]')
+    .filter({ has: phone.locator('input[name="decision"][value="approved"]') })
+    .filter({
+      has: phone.locator(
+        'input[name="action"][value="Publish approved release notes"]',
+      ),
+    });
+  const approvalFields = await approvalForm
+    .locator("input[type=hidden]")
+    .evaluateAll((inputs) =>
+      Object.fromEntries(
+        inputs.map((input) => [
+          (input as HTMLInputElement).name,
+          (input as HTMLInputElement).value,
+        ]),
+      ),
+    );
+  assert.equal(approvalFields.taskId, taskId);
+  assert.equal(approvalFields.interactionId, approvalInteractionId);
+  assert.equal(approvalFields.expectedRevision, "1");
+  assert.equal(approvalFields.decision, "approved");
+  assert.equal(approvalFields.action, "Publish approved release notes");
+  assert.equal(approvalFields.target, "release-42");
+  assert.equal(approvalFields.materialJson, approvalMaterial);
+  assert.match(approvalFields.key ?? "", /^[0-9a-f-]{36}$/i);
+  assert.ok(approvalFields.csrfToken);
+  await assertPhonePreContained(phone, approvalPre);
+  await captureBrowserEvidence(phone, "390-retained-long-approval-material");
+
+  await phone.goto(`${web.origin}/coordination/assignment/${assignmentId}`);
+  const historyPre = phone.locator("body.legacy-operator pre").filter({
+    hasText: longHistory.slice(0, 30),
+  });
+  await historyPre.waitFor();
+  assert.equal(await historyPre.textContent(), longHistory);
+  await assertPhonePreContained(phone, historyPre);
+  await captureBrowserEvidence(phone, "390-retained-long-assignment-history");
   await phone.getByRole("link", { name: "New interface", exact: true }).click();
   await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
   assert.equal(new URL(phone.url()).pathname, "/app");
 });
+
+async function assertPhonePreContained(
+  page: import("playwright").Page,
+  pre: import("playwright").Locator,
+) {
+  const dimensions = await pre.evaluate((element) => ({
+    preWidth: element.getBoundingClientRect().width,
+    preScrollWidth: element.scrollWidth,
+    viewportWidth: document.documentElement.clientWidth,
+    documentWidth: document.documentElement.scrollWidth,
+    whiteSpace: getComputedStyle(element).whiteSpace,
+  }));
+  assert.equal(dimensions.whiteSpace, "pre-wrap");
+  assert.ok(dimensions.preWidth <= dimensions.viewportWidth);
+  assert.ok(dimensions.preScrollWidth <= dimensions.preWidth + 1);
+  assert.ok(dimensions.documentWidth <= dimensions.viewportWidth);
+}

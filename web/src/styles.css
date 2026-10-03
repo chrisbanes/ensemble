@@ -469,6 +469,12 @@ nav h2 {
   max-width: 900px;
 }
 
+.legacy-operator pre {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .legacy-operator h1,
 .legacy-operator h2,
 .legacy-operator h3 {

@@ -106,14 +106,51 @@ editor layouts, and complete setup/recovery frames are unavailable; the
 responsive adapter and accessible native controls are therefore qualified by
 browser assertions rather than claimed as frame-level visual matches.
 
+## Independent-review repairs
+
+The authenticated production HTML phone fixture now seeds a persisted, 190+
+character approval-material JSON record and a long assignment-history item,
+then opens `/coordination/task/:id` and `/coordination/assignment/:id` at 390px.
+The browser asserts the `<pre>` retains each exact string, stays within the
+viewport, and does not widen the document. It also reads the approval form's
+hidden key, CSRF token, task ID, interaction ID, revision, decision, action,
+target and exact `materialJson`; it does not submit the form or start runtime
+work. These fixture rows are inserted directly into the test SQLite store to
+exercise the retained display paths, so they demonstrate presentation of
+persisted records rather than runtime-originated history or a live approval.
+
+`NativeSelect` now carries the same shared invalid-border/ring utilities as
+`Input` and `Textarea`. The settings browser test covers its actual
+“Readiness matching” `DraftField`: a deterministic HTTP 400 fixture response
+with `readiness.mode` verifies the rendered select retains `aria-invalid`, its
+`aria-describedby` error text, and the settled destructive border color. That
+synthetic response qualifies the existing field-error presentation path; it
+does not add or claim a backend validation case.
+
+| Capture | Evidence and limitation | File and SHA-256 |
+| --- | --- | --- |
+| 390 long approval material | Authenticated production HTML route; exact seeded material and approval form hidden identities retained; no horizontal overflow | `/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-f6jDx9/ui08-legacy-33918/f28e1b6f758ee08b/390-retained-long-approval-material.png` — `3ae12f28b5a2a97d734ce6b74ac93f20015617aed15594ddb08da71969032f04` |
+| 390 long assignment history | Authenticated production HTML route; exact seeded history text retained and contained | `/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-f6jDx9/ui08-legacy-33918/f28e1b6f758ee08b/390-retained-long-assignment-history.png` — `b56ebeb998042fd02e21fc12f9e1fcce49cd853fe8e3320e1859bf96f08a8c72` |
+| 1366 invalid readiness select | Real settings select with fixture 400 field path, associated error and settled destructive border | `/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-NBrtZ5/ui06-33919/970680a2c5810715/1366-readiness-mode-select-error.png` — `18d696c7554d33f5d095d2b4cb9b93439480f04c1c25141a6a6d7e3e9fcf5143` |
+
+The repaired browser suites passed 19/19, including the production HTML route
+containment assertions and the readiness select state. Output is retained at
+`/tmp/ui08-review-repair-browser.log`; the build output is
+`/tmp/ui08-review-repair-build.log`.
+
 ## Integrated validation
 
 After removing the three unused Space Grotesk, Instrument Sans and IBM Plex
 Mono packages, pinned `npm ci` passed with 80 packages added, 81 audited and no
-vulnerabilities. The pinned integrated `npm run check` passed: TypeScript
-typecheck, Biome lint, formatting, build, and all **808 tests** (808 pass, 0
-fail, 0 skipped). Full output is retained at `/tmp/ui08-check-final.log`; clean
-install output is `/tmp/ui08-npm-ci.log`. The renewed UI03 and retained-HTML
+vulnerabilities. The pinned integrated `npm run check` passed after the review
+repairs: TypeScript typecheck, Biome lint, formatting, build, and all **808
+tests** (808 pass, 0 fail, 0 skipped). The first repair run had one transient
+failure in the untouched scheduler capacity test; that exact test passed in
+isolation and the complete retry passed. Logs are retained at
+`/tmp/ui08-review-repairs-check-final.log` (first attempt) and
+`/tmp/ui08-review-repairs-check-final-retry.log` (pass). The earlier candidate
+check remains at `/tmp/ui08-check-final.log`; clean install output is
+`/tmp/ui08-npm-ci.log`. The renewed UI03 and retained-HTML
 browser check passed 15/15 at `/tmp/ui08-final-browser.log`; its build output is
 `/tmp/ui08-final-build.log`. The complete T4 suite passed 24/24 at
 `/tmp/ui08-t4-tests.log`; its build output is `/tmp/ui08-build.log`. `git diff

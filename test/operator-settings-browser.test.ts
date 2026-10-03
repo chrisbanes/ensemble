@@ -1174,6 +1174,55 @@ test("readiness validation focuses the exact invalid row with a real description
   assert.equal(posts, 0);
   assert.equal(f.runtime.turns, 0);
   await capture(page, "1366-readiness-later-row-error-focus");
+
+  await labels.nth(1).fill("ready-again");
+  await page.route("**/api/operator/commands", async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "invalid-input",
+          message: "Check input",
+          fieldPaths: ["readiness.mode"],
+        },
+      }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Replace source configuration", exact: true })
+    .click();
+  const mode = page.getByLabel("Readiness matching", { exact: true });
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLSelectElement>(
+        'select[aria-label="Readiness matching"][aria-invalid="true"]',
+      ) !== null,
+    { timeout: 1000 },
+  );
+  assert.equal(await mode.getAttribute("aria-invalid"), "true");
+  const modeDescription = await mode.evaluate((e) => {
+    const id = e.getAttribute("aria-describedby");
+    return id ? document.getElementById(id)?.textContent : null;
+  });
+  assert.equal(modeDescription, "Check this field.");
+  await page.waitForFunction(
+    () => {
+      const field = document.querySelector(
+        'select[aria-label="Readiness matching"][aria-invalid="true"]',
+      );
+      return (
+        field !== null &&
+        getComputedStyle(field).borderTopColor === "rgba(255, 102, 105, 0.6)"
+      );
+    },
+    { timeout: 1000 },
+  );
+  const modeBorder = await mode.evaluate(
+    (e) => getComputedStyle(e).borderTopColor,
+  );
+  assert.equal(modeBorder, "rgba(255, 102, 105, 0.6)");
+  await capture(page, "1366-readiness-mode-select-error");
 });
 
 test("Settings retains exact delivery authority and bound-PR detail without provider effects", async (_t, journey) => {
