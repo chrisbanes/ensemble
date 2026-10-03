@@ -158,6 +158,28 @@ at `/tmp/ui08-review-r3r4-browser.log`; it exposed an overly strict test
 expectation that the label must wrap at 360px, which was narrowed to require
 wrapping at 320px and viewport containment at both widths.
 
+The R5 phone-navigation repair applies a 44px minimum to every `.nav-link` in
+the production Sheet portal below 760px. At 390px and 683px, the real populated
+navigation sheet exposed six destinations (Overview, Inbox, All tasks, the
+fixture project, Settings, and Existing operator controls); each link measured
+44px, except the long wrapped project label at 97.5px. At 1366px, the first
+desktop sidebar link remained 33.5px, preserving its existing geometry. The
+browser assertion checks the full destination list, every phone target's
+bounding-box height, desktop height, and the existing focus containment,
+Escape-close, and trigger-focus restoration paths. The production route was
+exercised at both phone breakpoints with real SQLite-backed app data.
+
+The affected production browser suite passed 5/5 with zero skipped tests at
+`/tmp/ui08-r5-browser-final.log`; build output is `/tmp/ui08-r5-build-final.log`.
+The captured populated phone sheet shows the 390px state:
+`/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-1my1zx/ui02-24373/606e3a9c3dc93c3e/390-populated.png`
+(SHA-256 `ce33fa0a12ca5547dd6e1b5dd8f2fd42ccf950241c87ec89f3c662f0c50aa202`).
+The final pinned `npm run check` passed **809/809** tests with zero failures,
+cancellations, or skips after R5; its attributable output is
+`/tmp/ui08-r5-check-final.log`. The initial attempt stopped at formatting and
+is retained at `/tmp/ui08-r5-check.log`; its single Biome line-wrap issue was
+corrected before the passing run.
+
 ## Integrated validation
 
 After removing the three unused Space Grotesk, Instrument Sans and IBM Plex

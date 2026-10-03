@@ -187,6 +187,16 @@ for (const viewport of [
       .locator(`a[href="/app/projects/${projectId}"]`)
       .first()
       .waitFor({ state: viewport.width < 760 ? "attached" : "visible" });
+    if (viewport.width >= 760) {
+      const desktopNavLinkHeight = await page
+        .locator('.sidebar nav[aria-label="Operator navigation"] .nav-link')
+        .first()
+        .evaluate((el) => el.getBoundingClientRect().height);
+      assert.equal(desktopNavLinkHeight, 33.5);
+      console.log(
+        `UI08 navigation geometry ${viewport.width}px desktop: first sidebar target ${desktopNavLinkHeight}px`,
+      );
+    }
     if (viewport.width < 760) {
       const trigger = page.getByRole("button", {
         name: "Projects and navigation",
@@ -196,6 +206,33 @@ for (const viewport of [
         name: "Projects and navigation",
       });
       await dialog.waitFor();
+      const phoneNavLinks = await dialog
+        .locator('nav[aria-label="Operator navigation"] .nav-link')
+        .evaluateAll((links) =>
+          links.map((link) => ({
+            label: link.textContent?.trim(),
+            href: link.getAttribute("href"),
+            height: link.getBoundingClientRect().height,
+          })),
+        );
+      assert.deepEqual(
+        phoneNavLinks.map(({ href }) => href),
+        [
+          "/app",
+          "/app/inbox",
+          "/app/tasks",
+          `/app/projects/${projectId}`,
+          "/app/settings",
+          "/",
+        ],
+      );
+      assert.ok(
+        phoneNavLinks.every(({ height }) => height >= 44),
+        `phone navigation destinations must each be at least 44px tall: ${JSON.stringify(phoneNavLinks)}`,
+      );
+      console.log(
+        `UI08 navigation geometry ${viewport.width}px phone sheet: ${JSON.stringify(phoneNavLinks)}`,
+      );
       for (let i = 0; i < 12; i++) await page.keyboard.press("Tab");
       assert.equal(
         await dialog.evaluate((el) => el.contains(document.activeElement)),

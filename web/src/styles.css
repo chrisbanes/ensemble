@@ -564,6 +564,10 @@ nav h2 {
     display: block;
   }
 
+  [data-slot="sheet-content"] .nav-link {
+    min-height: 44px;
+  }
+
   .topbar {
     padding: var(--space-16);
   }
