@@ -239,6 +239,10 @@ The imported desktop workspace uses 28px padding and 20px gaps.
 - **Board:** desktop exposes named column links and horizontally navigable columns;
   columns scroll vertically. Phone shows one column with named tabs and previous/
   next navigation. Stopping and Uncertain remain reachable with visible counts.
+  Ready-but-blocked retains its Ready label in the Waiting column: readiness is
+  distinct from work-state grouping. Cross-project and project counts, phone
+  selection and previous/next controls reflect this mapping. The cross-project
+  Waiting viewport shows two of its three tasks, with a labelled continuation.
 
 The earlier responsive notes propose switching the sidebar to a drawer below
 760px. Treat that as a design starting point to validate with actual content,
@@ -328,7 +332,7 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 | Question lifecycle and interaction notes | 22 `evQB1`, 26 `e839O` |
 | Matching list and cross-project board | 24 `nD0nh`, 18 `E7qC9`, 18b `x9cPnW` |
 | Project board | 23 `MUFPD` |
-| Phone Ready and Uncertain columns | 25 `GWXOi`, 25b `CTUzI` |
+| Phone Waiting (Ready with a hold) and Uncertain columns | 25 `GWXOi`, 25b `CTUzI` |
 | Full-content composer and task detail | 02 `MhM7z`, 03 `QGdAx` |
 | Expanded captured history and state references | 05 `nfqO8`, 04 `wLhJT` |
 | Refinement section and evidence/response journey | Section `uhRIV`; 27 `YjRad`, 28 `uJVe2`, 29 `e1kkI`, 30 `o6O3M`, 31 `q2vYE` |
@@ -362,12 +366,15 @@ the acceptance plan. No application code, GitHub issues or implementation eviden
 were changed. The design does not cover every fixture at every viewport and entry
 point; the matrix names the representative coverage and interaction annotations.
 
-### Open mapping handoff question
+### Spec authority and resolved board mapping
 
-The pre-existing Pen board places Ready-but-blocked work in its Ready column. The
-current [UI03 implementation record](../docs/design/ui03-tasks.md#attention-and-board)
-places the same work in Waiting while retaining its Ready readiness. This revision
-preserves the existing Pen mapping as requested, pending clarification, and adds
-no new board grouping rule. Resolve that discrepancy before implementing these
-screens. Done, Cancelled and provider-closed fixtures are shown in All tasks and
-task views without redefining the existing active-board mapping.
+SPEC.md is the source of truth. It requires grouping by Ensemble work state,
+separating readiness from dependency holds and preserving the existing board
+mapping. A task can retain Ready readiness while appearing in Waiting, as the
+[UI03 mapping record](../docs/design/ui03-tasks.md#attention-and-board) describes.
+The stale Pen placement has been corrected across cross-project, project and
+phone boards. This is a presentation correction, not a change to readiness,
+dependency or admission rules. The mapping question is resolved.
+
+Done, Cancelled and provider-closed fixtures remain in All tasks and task views
+without redefining the existing active-board mapping.

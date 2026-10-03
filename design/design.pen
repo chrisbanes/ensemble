@@ -16883,7 +16883,12 @@
                       "name": "Ready column link",
                       "width": "fill_container",
                       "x": 0,
-                      "y": 0
+                      "y": 0,
+                      "descendants": {
+                        "Ym7A6": {
+                          "content": "Ready · 0"
+                        }
+                      }
                     },
                     {
                       "id": "gi0YZ",
@@ -16911,7 +16916,7 @@
                       "descendants": {
                         "Ym7A6": {
                           "name": "Waiting label and count",
-                          "content": "Waiting · 2"
+                          "content": "Waiting · 3"
                         }
                       }
                     },
@@ -16992,47 +16997,24 @@
                           "fill": "$color/on-surface",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Ready · 1",
+                          "content": "Ready · 0",
                           "lineHeight": "$leading/1-25",
                           "fontFamily": "$font/heading",
                           "fontSize": "$type/md",
                           "fontWeight": "$weight/semibold"
                         },
                         {
-                          "id": "l4yepO",
-                          "type": "ref",
-                          "ref": "tR6lF",
-                          "name": "Prepare release checklist",
+                          "type": "text",
+                          "id": "yP3E8",
+                          "name": "Empty Ready column explanation",
+                          "fill": "$color/on-surface-variant",
+                          "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "descendants": {
-                            "gcX0z": {
-                              "content": "Prepare release checklist"
-                            },
-                            "XPAkv": {
-                              "content": "Atlas · Local task"
-                            },
-                            "nhJhn": {
-                              "content": "Ready",
-                              "fill": "$color/primary"
-                            },
-                            "feaKs": {
-                              "content": "Blocked · depends on Ship accessible command menu",
-                              "fill": "$color/on-warning-container"
-                            },
-                            "C9e7z": {
-                              "content": "Next: dependency owner"
-                            },
-                            "t3u7iI": {
-                              "content": "No operator decision",
-                              "fill": "$color/on-surface-variant"
-                            },
-                            "TsRSv": {
-                              "content": "M"
-                            },
-                            "YyDxP": {
-                              "content": "Mira · accountable lead"
-                            }
-                          }
+                          "content": "No tasks ready to start.\nReadied work with a hold appears in Waiting.",
+                          "lineHeight": "$leading/1-5",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/sm",
+                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -17151,11 +17133,47 @@
                           "fill": "$color/on-surface",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Waiting · 2",
+                          "content": "Waiting · 3",
                           "lineHeight": "$leading/1-25",
                           "fontFamily": "$font/heading",
                           "fontSize": "$type/md",
                           "fontWeight": "$weight/semibold"
+                        },
+                        {
+                          "id": "l4yepO",
+                          "type": "ref",
+                          "ref": "tR6lF",
+                          "name": "Prepare release checklist",
+                          "width": "fill_container",
+                          "descendants": {
+                            "gcX0z": {
+                              "content": "Prepare release checklist"
+                            },
+                            "XPAkv": {
+                              "content": "Atlas · Local task"
+                            },
+                            "nhJhn": {
+                              "content": "Ready",
+                              "fill": "$color/primary"
+                            },
+                            "feaKs": {
+                              "content": "Blocked · depends on Ship accessible command menu",
+                              "fill": "$color/on-warning-container"
+                            },
+                            "C9e7z": {
+                              "content": "Next: dependency owner"
+                            },
+                            "t3u7iI": {
+                              "content": "No operator decision",
+                              "fill": "$color/on-surface-variant"
+                            },
+                            "TsRSv": {
+                              "content": "M"
+                            },
+                            "YyDxP": {
+                              "content": "Mira · accountable lead"
+                            }
+                          }
                         },
                         {
                           "id": "V0Lz1F",
@@ -17197,8 +17215,9 @@
                           "id": "f65Ln",
                           "type": "ref",
                           "ref": "tR6lF",
-                          "name": "Document retry policy",
-                          "width": "fill_container",
+                          "name": "Document retry policy / next vertical scroll position",
+                          "width": 322,
+                          "enabled": false,
                           "descendants": {
                             "gcX0z": {
                               "content": "Document retry policy"
@@ -17240,7 +17259,7 @@
                   "fill": "$color/primary",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Columns 1–3 of 6 · scroll horizontally or choose a column above.    Paused / Stopping / Uncertain →",
+                  "content": "Waiting: 2 of 3 shown · scroll for Document retry policy / Choose retry limits ↓   |   More columns →",
                   "lineHeight": "$leading/1-25",
                   "fontFamily": "$font/body",
                   "fontSize": "$type/xs",
@@ -17560,7 +17579,12 @@
                       "width": "fill_container",
                       "fill": "$color/surface-container",
                       "x": 0,
-                      "y": 0
+                      "y": 0,
+                      "descendants": {
+                        "Ym7A6": {
+                          "content": "Ready · 0"
+                        }
+                      }
                     },
                     {
                       "id": "U5Q7O",
@@ -17590,7 +17614,7 @@
                       "descendants": {
                         "Ym7A6": {
                           "name": "Waiting label and count",
-                          "content": "Waiting · 2"
+                          "content": "Waiting · 3"
                         }
                       }
                     },
@@ -17762,7 +17786,7 @@
                               "content": "Next: runtime · confirm execution ended"
                             },
                             "t3u7iI": {
-                              "content": "Stop requested; not yet stopped",
+                              "content": "No operator request recorded",
                               "fill": "$color/on-surface-variant"
                             },
                             "TsRSv": {
@@ -17992,9 +18016,9 @@
               "id": "Uj9ky",
               "name": "Execution uncertainty",
               "width": "fill_container",
-              "fill": "$color/error-container",
+              "fill": "$color/surface-container-low",
               "cornerRadius": "$radius/12",
-              "stroke": "$color/outline-error",
+              "stroke": "$color/outline",
               "strokeWidth": 1,
               "gap": "$space/16",
               "padding": [
@@ -18028,7 +18052,7 @@
                       "fill": "$color/on-surface",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "1 stopping task · Document the action registry",
+                      "content": "Stopping · Document the action registry",
                       "lineHeight": "$leading/1-25",
                       "fontFamily": "$font/body",
                       "fontSize": "$type/sm",
@@ -18041,7 +18065,7 @@
                       "fill": "$color/on-surface-variant",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "Stop requested. Execution has not yet confirmed it ended.",
+                      "content": "Next: runtime · confirm execution ended. No operator request recorded.",
                       "lineHeight": "$leading/1-25",
                       "fontFamily": "$font/body",
                       "fontSize": "$type/xs",
@@ -18056,7 +18080,7 @@
                   "name": "Inspect execution",
                   "descendants": {
                     "PkDny": {
-                      "content": "Inspect execution"
+                      "content": "Open task"
                     }
                   }
                 },
@@ -18176,7 +18200,12 @@
                       "name": "Ready column link",
                       "width": "fill_container",
                       "x": 0,
-                      "y": 0
+                      "y": 0,
+                      "descendants": {
+                        "Ym7A6": {
+                          "content": "Ready · 0"
+                        }
+                      }
                     },
                     {
                       "id": "iSaHT",
@@ -18204,7 +18233,7 @@
                       "descendants": {
                         "Ym7A6": {
                           "name": "Waiting label and count",
-                          "content": "Waiting · 1"
+                          "content": "Waiting · 2"
                         }
                       }
                     },
@@ -18285,47 +18314,24 @@
                           "fill": "$color/on-surface",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Ready · 1",
+                          "content": "Ready · 0",
                           "lineHeight": "$leading/1-25",
                           "fontFamily": "$font/heading",
                           "fontSize": "$type/md",
                           "fontWeight": "$weight/semibold"
                         },
                         {
-                          "id": "Df2U1",
-                          "type": "ref",
-                          "ref": "tR6lF",
-                          "name": "Prepare release checklist",
+                          "type": "text",
+                          "id": "b3wfvH",
+                          "name": "Empty Ready column explanation",
+                          "fill": "$color/on-surface-variant",
+                          "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "descendants": {
-                            "gcX0z": {
-                              "content": "Prepare release checklist"
-                            },
-                            "XPAkv": {
-                              "content": "Atlas · Local task"
-                            },
-                            "nhJhn": {
-                              "content": "Ready",
-                              "fill": "$color/primary"
-                            },
-                            "feaKs": {
-                              "content": "Blocked · depends on Ship accessible command menu",
-                              "fill": "$color/on-warning-container"
-                            },
-                            "C9e7z": {
-                              "content": "Next: dependency owner"
-                            },
-                            "t3u7iI": {
-                              "content": "No operator decision",
-                              "fill": "$color/on-surface-variant"
-                            },
-                            "TsRSv": {
-                              "content": "M"
-                            },
-                            "YyDxP": {
-                              "content": "Mira · accountable lead"
-                            }
-                          }
+                          "content": "No tasks ready to start.\nReadied work with a hold appears in Waiting.",
+                          "lineHeight": "$leading/1-5",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/sm",
+                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -18444,11 +18450,47 @@
                           "fill": "$color/on-surface",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Waiting · 1",
+                          "content": "Waiting · 2",
                           "lineHeight": "$leading/1-25",
                           "fontFamily": "$font/heading",
                           "fontSize": "$type/md",
                           "fontWeight": "$weight/semibold"
+                        },
+                        {
+                          "id": "Df2U1",
+                          "type": "ref",
+                          "ref": "tR6lF",
+                          "name": "Prepare release checklist",
+                          "width": "fill_container",
+                          "descendants": {
+                            "gcX0z": {
+                              "content": "Prepare release checklist"
+                            },
+                            "XPAkv": {
+                              "content": "Atlas · Local task"
+                            },
+                            "nhJhn": {
+                              "content": "Ready",
+                              "fill": "$color/primary"
+                            },
+                            "feaKs": {
+                              "content": "Blocked · depends on Ship accessible command menu",
+                              "fill": "$color/on-warning-container"
+                            },
+                            "C9e7z": {
+                              "content": "Next: dependency owner"
+                            },
+                            "t3u7iI": {
+                              "content": "No operator decision",
+                              "fill": "$color/on-surface-variant"
+                            },
+                            "TsRSv": {
+                              "content": "M"
+                            },
+                            "YyDxP": {
+                              "content": "Mira · accountable lead"
+                            }
+                          }
                         },
                         {
                           "id": "z9Npol",
@@ -18514,7 +18556,7 @@
       "id": "GWXOi",
       "x": 1540,
       "y": 11337,
-      "name": "25 · Phone / Kanban Ready column · 390 × 844",
+      "name": "25 · Phone / Kanban Waiting column · Ready with dependency hold",
       "clip": true,
       "width": 390,
       "height": 844,
@@ -18623,10 +18665,18 @@
                   "id": "hgve4",
                   "type": "ref",
                   "ref": "tNyAS",
-                  "name": "Ready · 1 tab",
+                  "name": "Ready · 0 tab",
                   "width": "fill_container",
                   "x": 0,
-                  "y": 0
+                  "y": 0,
+                  "fill": "$color/surface",
+                  "stroke": "$color/outline",
+                  "strokeWidth": 1,
+                  "descendants": {
+                    "m726D": {
+                      "content": "Ready · 0"
+                    }
+                  }
                 },
                 {
                   "id": "sZ2IW",
@@ -18650,17 +18700,17 @@
                   "id": "LJ00E",
                   "type": "ref",
                   "ref": "tNyAS",
-                  "name": "Waiting · 2 tab",
+                  "name": "Waiting · 3 tab",
                   "width": "fill_container",
-                  "fill": "$color/surface",
-                  "stroke": "$color/outline",
-                  "strokeWidth": 1,
+                  "fill": "$color/primary-container",
+                  "stroke": "$color/primary",
+                  "strokeWidth": 2,
                   "x": 238.66666666666666,
                   "y": 0,
                   "descendants": {
                     "m726D": {
                       "name": "Waiting · 2 label",
-                      "content": "Waiting · 2"
+                      "content": "Waiting · 3"
                     }
                   }
                 }
@@ -18750,7 +18800,7 @@
               "fill": "$color/on-surface",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Ready · 1 task",
+              "content": "Waiting · task 1 of 3",
               "lineHeight": "$leading/1-25",
               "fontFamily": "$font/heading",
               "fontSize": "$type/lg",
@@ -18799,7 +18849,7 @@
               "fill": "$color/on-surface-variant",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Ready describes the work. This task is not eligible to execute while its dependency is unresolved.",
+              "content": "Readiness: Ready. Work is waiting for its dependency; no execution can start.\n\n2 more waiting tasks ↓",
               "lineHeight": "$leading/1-5",
               "fontFamily": "$font/body",
               "fontSize": "$type/sm",
@@ -18818,11 +18868,11 @@
               "id": "cnWtg",
               "type": "ref",
               "ref": "QXGhI",
-              "name": "First column",
+              "name": "Previous column",
               "height": 44,
               "descendants": {
                 "PkDny": {
-                  "content": "1 of 6 · Ready"
+                  "content": "← Running"
                 }
               }
             },
@@ -18834,7 +18884,7 @@
               "height": 44,
               "descendants": {
                 "ssfyO": {
-                  "content": "Running →"
+                  "content": "Paused →"
                 }
               }
             }
@@ -18956,13 +19006,18 @@
                   "id": "DytSU",
                   "type": "ref",
                   "ref": "tNyAS",
-                  "name": "Ready · 1 tab",
+                  "name": "Ready · 0 tab",
                   "width": "fill_container",
                   "fill": "$color/surface",
                   "stroke": "$color/outline",
                   "strokeWidth": 1,
                   "x": 0,
-                  "y": 0
+                  "y": 0,
+                  "descendants": {
+                    "m726D": {
+                      "content": "Ready · 0"
+                    }
+                  }
                 },
                 {
                   "id": "g2lhYd",
@@ -18986,7 +19041,7 @@
                   "id": "iO5Mk",
                   "type": "ref",
                   "ref": "tNyAS",
-                  "name": "Waiting · 2 tab",
+                  "name": "Waiting · 3 tab",
                   "width": "fill_container",
                   "fill": "$color/surface",
                   "stroke": "$color/outline",
@@ -18996,7 +19051,7 @@
                   "descendants": {
                     "m726D": {
                       "name": "Waiting · 2 label",
-                      "content": "Waiting · 2"
+                      "content": "Waiting · 3"
                     }
                   }
                 }
@@ -33454,7 +33509,7 @@
           "fill": "$color/on-surface",
           "textGrowth": "fixed-width",
           "width": "fill_container",
-          "content": "Check readable titles and supporting text; role-based fonts and semantic colours; selected versus focused controls; aligned edges; no clipped evidence or covered actions; matching state / next actor / attention across entry points; failed input retained; exact approval revisions and dependency hold still visible. These are canvas checks, not browser, keyboard, contrast-compliance or runtime test results.",
+          "content": "Check readable titles and supporting text; role-based fonts and semantic colours; focused versus selected controls; aligned edges; no clipped evidence or covered actions; matching state / next actor / attention across entry points; failed input retained; exact approval revisions and dependency hold still visible. These are canvas checks, not implementation or runtime test results.\n\nSPEC.md is authoritative: board placement describes work state; readiness and execution holds remain separate. Ready-but-blocked retains its Ready label in the Waiting column, preserving the existing mapping recorded in UI03. The stale Pen placement has been corrected across cross-project, project and phone boards; no readiness or admission rule changes.",
           "lineHeight": "$leading/1-5",
           "fontFamily": "$font/body",
           "fontSize": "$type/sm",
@@ -34026,6 +34081,818 @@
                   "fontFamily": "$font/body",
                   "fontSize": "$type/sm",
                   "fontWeight": "$weight/regular"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "kiPK9",
+      "x": 2932,
+      "y": 16651,
+      "name": "45 · Task workspace / running, repair responsibility unknown",
+      "clip": true,
+      "width": 1366,
+      "height": 900,
+      "fill": "$color/surface",
+      "children": [
+        {
+          "id": "Jlba1",
+          "type": "ref",
+          "ref": "vV9lW",
+          "name": "Project navigation",
+          "height": "fill_container"
+        },
+        {
+          "type": "frame",
+          "id": "fUmWt",
+          "name": "Main content",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "gap": "$space/16",
+          "padding": [
+            "$space/24",
+            "$space/28"
+          ],
+          "children": [
+            {
+              "type": "frame",
+              "id": "LKaoL",
+              "name": "Task breadcrumb",
+              "width": "fill_container",
+              "gap": "$space/12",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "S5AoUF",
+                  "name": "Back",
+                  "fill": "$color/primary",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "← Work / Atlas / AT-156",
+                  "lineHeight": "$leading/1-25",
+                  "fontFamily": "$font/body",
+                  "fontSize": "$type/sm",
+                  "fontWeight": "$weight/regular"
+                },
+                {
+                  "id": "SLURG",
+                  "type": "ref",
+                  "ref": "QXGhI",
+                  "name": "Pause task",
+                  "stroke": "$color/outline",
+                  "cornerRadius": "$radius/8",
+                  "padding": [
+                    "$space/12",
+                    "$space/16"
+                  ],
+                  "descendants": {
+                    "PkDny": {
+                      "content": "Pause task",
+                      "fill": "$color/on-surface"
+                    }
+                  }
+                },
+                {
+                  "id": "Jzayo",
+                  "type": "ref",
+                  "ref": "QXGhI",
+                  "name": "Stop…",
+                  "stroke": "$color/outline",
+                  "cornerRadius": "$radius/8",
+                  "padding": [
+                    "$space/12",
+                    "$space/16"
+                  ],
+                  "descendants": {
+                    "PkDny": {
+                      "content": "Stop…",
+                      "fill": "$color/on-surface"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "N6eZ0G",
+              "name": "Task outcome",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": "$space/8",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "WzSgD",
+                  "name": "Eyebrow",
+                  "fill": "$color/on-surface-variant",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "LOCAL TASK · AT-156",
+                  "lineHeight": "$leading/1-25",
+                  "fontFamily": "$font/mono",
+                  "fontSize": "$type/xs",
+                  "fontWeight": "$weight/regular"
+                },
+                {
+                  "type": "text",
+                  "id": "BaAVP",
+                  "name": "Page title",
+                  "fill": "$color/on-surface-variant",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "Reduce image-cache misses",
+                  "lineHeight": "$leading/1-25",
+                  "fontFamily": "$font/heading",
+                  "fontSize": "$type/2xl",
+                  "fontWeight": "$weight/semibold"
+                },
+                {
+                  "type": "text",
+                  "id": "y6lEYQ",
+                  "name": "Introduction",
+                  "fill": "$color/on-surface-variant",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "Reduce avoidable image-cache misses.",
+                  "lineHeight": "$leading/1-25",
+                  "fontFamily": "$font/body",
+                  "fontSize": "$type/sm",
+                  "fontWeight": "$weight/regular"
+                },
+                {
+                  "type": "frame",
+                  "id": "asuS7",
+                  "name": "Task metadata",
+                  "width": "fill_container",
+                  "gap": "$space/12",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "id": "kpssB",
+                      "type": "ref",
+                      "ref": "i5qvLV",
+                      "fill": "$color/primary-container",
+                      "name": "◷ Waiting for approval",
+                      "x": 0,
+                      "y": 0,
+                      "descendants": {
+                        "k8Jwe": {
+                          "content": "Running",
+                          "fill": "$color/primary",
+                          "name": "◷ Waiting for approval label"
+                        }
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "id": "HPE2b",
+                      "name": "Ownership",
+                      "fill": "$color/on-surface",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Next actor unknown for this failure   |   Accountable lead: Mira · 10:57",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/regular"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ZxHsH",
+              "name": "Persistent decision",
+              "width": "fill_container",
+              "fill": "$color/surface-container",
+              "cornerRadius": "$radius/6",
+              "stroke": "$color/outline",
+              "strokeWidth": 1,
+              "layout": "vertical",
+              "gap": "$space/8",
+              "padding": "$space/12",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "fANHd",
+                  "name": "Approval header",
+                  "width": "fill_container",
+                  "gap": "$space/12",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "DziLk",
+                      "name": "Decision title",
+                      "fill": "$color/on-primary-container",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Repair responsibility is unknown",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/heading",
+                      "fontSize": "$type/lg",
+                      "fontWeight": "$weight/semibold"
+                    },
+                    {
+                      "id": "A7FMq",
+                      "type": "ref",
+                      "ref": "i5qvLV",
+                      "name": "Pending",
+                      "x": 1006,
+                      "y": 0,
+                      "enabled": false,
+                      "width": 70,
+                      "descendants": {
+                        "k8Jwe": {
+                          "name": "Pending label",
+                          "content": "Pending"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "qo4gr",
+                  "name": "Approval provenance",
+                  "fill": "$color/on-surface-variant",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "No operator question or approval is recorded.",
+                  "lineHeight": "$leading/1-25",
+                  "fontFamily": "$font/body",
+                  "fontSize": "$type/xs",
+                  "fontWeight": "$weight/regular"
+                },
+                {
+                  "type": "text",
+                  "id": "S5EVp",
+                  "name": "Exact approval scope",
+                  "fill": "$color/on-primary-container",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "The image-cache check failed at 10:55. Agent activity was observed at 10:57.\nNo record links an assignment to repairing that failure. Running is not proof of repair.",
+                  "lineHeight": "$leading/1-5",
+                  "fontFamily": "$font/body",
+                  "fontSize": "$type/sm",
+                  "fontWeight": "$weight/regular"
+                },
+                {
+                  "type": "frame",
+                  "id": "MwfMB",
+                  "x": 12,
+                  "y": 116,
+                  "name": "Approval controls",
+                  "enabled": false,
+                  "width": 1000,
+                  "gap": "$space/12",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "id": "YEJ7Q",
+                      "type": "ref",
+                      "ref": "gFnEM",
+                      "name": "Review material & decide",
+                      "fill": "$color/primary",
+                      "cornerRadius": "$radius/8",
+                      "padding": [
+                        "$space/12",
+                        "$space/16"
+                      ],
+                      "descendants": {
+                        "ssfyO": {
+                          "content": "Review material & decide"
+                        }
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "id": "h6kQmD",
+                      "name": "Approval boundary",
+                      "fill": "$color/on-surface-variant",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Publishing needs your permission. No merge or deployment.",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/xs",
+                      "fontWeight": "$weight/regular"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "t6Hb8",
+              "name": "Task workspace",
+              "width": "fill_container",
+              "height": "fill_container",
+              "gap": "$space/24",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "P0oc5",
+                  "name": "Relevant evidence and disclosed history",
+                  "width": "fill_container",
+                  "height": "fill_container",
+                  "layout": "vertical",
+                  "gap": "$space/12",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "rOwWO",
+                      "name": "History heading",
+                      "width": "fill_container",
+                      "gap": "$space/12",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "MVhmn",
+                          "name": "Title",
+                          "fill": "$color/on-surface",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Evidence & responsibility gap",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/heading",
+                          "fontSize": "$type/lg",
+                          "fontWeight": "$weight/semibold"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Z1Cdqw",
+                          "name": "Counts",
+                          "fill": "$color/on-surface-variant",
+                          "content": "Recorded · 10:57",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/xs",
+                          "fontWeight": "$weight/regular"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "OOjWX",
+                          "x": 605,
+                          "y": 0,
+                          "name": "New updates control",
+                          "enabled": false,
+                          "width": 280,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "id": "md0aA",
+                              "type": "ref",
+                              "ref": "QXGhI",
+                              "name": "↓  2 new updates · jump to latest",
+                              "stroke": "$color/outline",
+                              "cornerRadius": "$radius/8",
+                              "padding": [
+                                "$space/12",
+                                "$space/16"
+                              ],
+                              "descendants": {
+                                "PkDny": {
+                                  "content": "↓  2 new updates · jump to latest",
+                                  "fill": "$color/on-surface"
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "EFdIs",
+                      "x": 0,
+                      "y": 50,
+                      "name": "History controls",
+                      "enabled": false,
+                      "width": 700,
+                      "gap": "$space/16",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "pNvs4",
+                          "name": "Expand all",
+                          "fill": "$color/primary",
+                          "content": "Expand all",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/xs",
+                          "fontWeight": "$weight/regular"
+                        },
+                        {
+                          "type": "text",
+                          "id": "nSSKD",
+                          "name": "Collapse all",
+                          "fill": "$color/primary",
+                          "content": "Collapse all",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/xs",
+                          "fontWeight": "$weight/regular"
+                        },
+                        {
+                          "type": "text",
+                          "id": "A5IqZ",
+                          "name": "Chronological",
+                          "fill": "$color/primary",
+                          "content": "Chronological history ↗",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/xs",
+                          "fontWeight": "$weight/regular"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "CFBZ6",
+                      "name": "Evidence links",
+                      "fill": "$color/primary",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Failed check · image-cache ↗   ·   Activity observation · 10:57 ↗",
+                      "lineHeight": "$leading/1-5",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/regular"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Oicq4",
+                      "name": "Assignment history / independent scroll viewport",
+                      "width": "fill_container",
+                      "height": 116,
+                      "gap": "$space/12",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "yAldY",
+                          "name": "Visible history slice",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": "$space/8",
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "YHB5O",
+                              "x": 0,
+                              "y": 0,
+                              "name": "Completed assignments / collapsed",
+                              "enabled": false,
+                              "width": 700,
+                              "fill": "$color/surface-container",
+                              "gap": "$space/12",
+                              "padding": "$space/12",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "zudtJ",
+                                  "name": "Earlier assignments",
+                                  "fill": "$color/primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "›  3 earlier completed assignments",
+                                  "lineHeight": "$leading/1-25",
+                                  "fontFamily": "$font/body",
+                                  "fontSize": "$type/sm",
+                                  "fontWeight": "$weight/semibold"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "g9vY7",
+                                  "name": "Assignees",
+                                  "fill": "$color/on-surface-variant",
+                                  "content": "Eli · Sora · Eli",
+                                  "lineHeight": "$leading/1-25",
+                                  "fontFamily": "$font/body",
+                                  "fontSize": "$type/xs",
+                                  "fontWeight": "$weight/regular"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "rkqeV",
+                              "name": "A-104 / expanded group in scroll viewport",
+                              "width": "fill_container",
+                              "fill": "$color/surface",
+                              "cornerRadius": "$radius/8",
+                              "stroke": "$color/outline",
+                              "strokeWidth": 1,
+                              "layout": "vertical",
+                              "gap": "$space/8",
+                              "padding": "$space/12",
+                              "children": [
+                                {
+                                  "type": "frame",
+                                  "id": "auoTU",
+                                  "name": "Opened assignment header",
+                                  "width": "fill_container",
+                                  "gap": "$space/8",
+                                  "alignItems": "center",
+                                  "children": [
+                                    {
+                                      "type": "text",
+                                      "id": "ZUNr2",
+                                      "name": "Title",
+                                      "fill": "$color/on-surface",
+                                      "textGrowth": "fixed-width",
+                                      "width": "fill_container",
+                                      "content": "Recorded observations · not repair ownership",
+                                      "lineHeight": "$leading/1-25",
+                                      "fontFamily": "$font/body",
+                                      "fontSize": "$type/sm",
+                                      "fontWeight": "$weight/semibold"
+                                    },
+                                    {
+                                      "id": "l4r157",
+                                      "type": "ref",
+                                      "ref": "i5qvLV",
+                                      "name": "Waiting",
+                                      "fill": "$color/warning-container",
+                                      "x": 745,
+                                      "y": 0,
+                                      "enabled": false,
+                                      "width": 70,
+                                      "descendants": {
+                                        "k8Jwe": {
+                                          "name": "Waiting label",
+                                          "fill": "$color/on-warning-container",
+                                          "content": "Waiting"
+                                        }
+                                      }
+                                    }
+                                  ]
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "NKyLp",
+                                  "name": "Assignment identity",
+                                  "fill": "$color/on-surface-variant",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "AT-156 → A-109 → C-109 · activity observed 10:57",
+                                  "lineHeight": "$leading/1-25",
+                                  "fontFamily": "$font/body",
+                                  "fontSize": "$type/xs",
+                                  "fontWeight": "$weight/regular"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "C229DT",
+                                  "name": "Latest message excerpt",
+                                  "fill": "$color/on-surface-variant",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "No repair assignment is recorded for the failed image-cache check.",
+                                  "lineHeight": "$leading/1-5",
+                                  "fontFamily": "$font/body",
+                                  "fontSize": "$type/sm",
+                                  "fontWeight": "$weight/regular"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "Du9D0",
+                          "x": 842,
+                          "y": 0,
+                          "name": "History scroll track",
+                          "enabled": false,
+                          "width": 4,
+                          "height": 100,
+                          "fill": "$color/scroll-track",
+                          "cornerRadius": "$radius/2",
+                          "layout": "vertical",
+                          "padding": [
+                            "$space/28",
+                            "$space/0",
+                            "$space/0",
+                            "$space/0"
+                          ],
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "oALiQ",
+                              "name": "History scroll thumb",
+                              "width": "fill_container",
+                              "height": 70,
+                              "fill": "$color/scroll-thumb",
+                              "cornerRadius": "$radius/2"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "Cqfzw",
+                      "name": "Assignments disclosure",
+                      "fill": "$color/primary",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "› Assignments & conversations · A-109 / C-109",
+                      "lineHeight": "$leading/1-5",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/semibold"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "V91cD",
+                      "name": "Retained private message draft",
+                      "width": "fill_container",
+                      "cornerRadius": "$radius/8",
+                      "stroke": "$color/outline",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "gap": "$space/4",
+                      "padding": "$space/12",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "UPe2c",
+                          "name": "Draft reply",
+                          "fill": "$color/on-surface",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Message Mira about this task…",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/sm",
+                          "fontWeight": "$weight/regular"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "Dpe3W",
+                          "name": "Reply footer",
+                          "width": "fill_container",
+                          "gap": "$space/12",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "uws7q",
+                              "name": "Draft saved",
+                              "fill": "$color/on-surface-variant",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Private message · not an answer or approval",
+                              "lineHeight": "$leading/1-25",
+                              "fontFamily": "$font/body",
+                              "fontSize": "$type/xs",
+                              "fontWeight": "$weight/regular"
+                            },
+                            {
+                              "id": "ls1o3",
+                              "type": "ref",
+                              "ref": "gFnEM",
+                              "name": "Send to lead",
+                              "fill": "$color/primary",
+                              "cornerRadius": "$radius/8",
+                              "padding": [
+                                "$space/12",
+                                "$space/16"
+                              ],
+                              "descendants": {
+                                "ssfyO": {
+                                  "content": "Send to lead"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "uz0Bm",
+                          "name": "Delivery semantics",
+                          "fill": "$color/on-surface-variant",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Your message will reach Mira on her next eligible turn. Sending does not bypass pause or stop.",
+                          "lineHeight": "$leading/1-25",
+                          "fontFamily": "$font/body",
+                          "fontSize": "$type/xs",
+                          "fontWeight": "$weight/regular"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "UVW0r",
+                      "name": "Capture notice",
+                      "fill": "$color/on-surface-variant",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "A running assignment is visible. Its responsibility for this failure is not established.",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/xs",
+                      "fontWeight": "$weight/regular"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "fqoxM",
+                  "name": "Task context / summary",
+                  "width": 224,
+                  "stroke": "$color/outline",
+                  "strokeWidth": {
+                    "left": 1
+                  },
+                  "layout": "vertical",
+                  "gap": "$space/8",
+                  "padding": [
+                    "$space/0",
+                    "$space/0",
+                    "$space/0",
+                    "$space/20"
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "NkKvt",
+                      "name": "Context title",
+                      "fill": "$color/on-surface-variant",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Current situation",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/heading",
+                      "fontSize": "$type/xl",
+                      "fontWeight": "$weight/semibold"
+                    },
+                    {
+                      "type": "text",
+                      "id": "zzyKy",
+                      "name": "Dependencies",
+                      "fill": "$color/on-surface",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Work: running\nCheck: failed at 10:55",
+                      "lineHeight": "$leading/1-5",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/regular"
+                    },
+                    {
+                      "type": "text",
+                      "id": "q0VPES",
+                      "name": "Dependent task",
+                      "fill": "$color/on-surface",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Next actor: unknown\nNo repair owner recorded",
+                      "lineHeight": "$leading/1-5",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/regular"
+                    },
+                    {
+                      "type": "text",
+                      "id": "L56zry",
+                      "name": "Results title",
+                      "fill": "$color/on-surface",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Attention",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/semibold"
+                    },
+                    {
+                      "type": "text",
+                      "id": "r068CM",
+                      "name": "PR description v2 ↗",
+                      "fill": "$color/primary",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "None recorded. An independent request would remain visible here.",
+                      "lineHeight": "$leading/1-25",
+                      "fontFamily": "$font/body",
+                      "fontSize": "$type/sm",
+                      "fontWeight": "$weight/regular"
+                    }
+                  ]
                 }
               ]
             }
