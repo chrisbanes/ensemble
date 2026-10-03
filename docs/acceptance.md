@@ -82,6 +82,25 @@ journey have passed for the bounded native adapter and curated service seam. The
 results do not complete UI01/UI02 frontend acceptance; UI05 and parent #736 own the
 forms and assembled UI.
 
+Chris approved a bounded native-input and evidence-reuse amendment on 3 October
+2026. UI01 below retains the full Ensemble form model, qualified by deterministic
+service/SQLite/browser tests or Ensemble question tools. UI02 requires the native
+shapes qualified by #739: its observed single-choice/custom-text round trip and
+deterministic grouped-shape coverage. Native standalone free text, multiple
+selection and recommendation fields are not additional MVP runtime-proof gates.
+Unsupported native requests stay visibly unresolved; this does not claim support,
+permit fabricated answers or waive identity, persistence, duplicate-prevention or
+hold requirements.
+
+UI07 #745 and S07b #697 share one attributable evidence inventory and may reuse
+the same still-valid bounded assembled UI/service/runtime journey. Reuse #739/#743
+evidence with its source/runtime identity and scope; add missing delivery/provider
+integration checks in S07b. Test pause, Stop, restart, replay, failure and session
+expiry combinations deterministically unless a changed integration boundary or a
+demonstrated failure requires a bounded live check. A later gate alone is not a
+reason to repeat a live journey. Chris's final integrated visual/usability
+acceptance remains required on #736.
+
 | ID | Given / when | Required observable result | Layer |
 | --- | --- | --- | --- |
 | UI01 | Agent issues individual and grouped questions using free text, single choice and multiple choice; operator answers from inbox or task detail on desktop and phone | Question/option text, descriptions, explicit recommendations and selection constraints are preserved; custom text is available when permitted; recommended/preselected choices do not submit themselves; validation identifies the affected question; failed submission retains input and unresolved status; confirmed submission shows a recorded answer, distinct from approval or ordinary messaging | Service + UI + SQLite |
@@ -185,7 +204,7 @@ These extend A01–A30; they are required alongside the product scenarios.
 | R03 | Sleep assertion exists only during active execution and releases when idle or supervision ends. Forced sleep/wake reconciles execution before more dispatch, without duplicates. | S03 |
 | R04 | Web UI is privately reachable over Tailscale and independently requires an Ensemble login. Unauthenticated requests cannot read private data or mutate controls; authenticated browser actions have session and origin/CSRF protection. | S04; verified in S05 |
 | R05 | Conversation history and durable operator messages survive restart. Duplicate submission does not duplicate delivery; the next eligible turn receives the message without bypassing holds. No live steering is exposed. | S04; verified in S05 |
-| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08a backup/restore preparation; S08b final recovery/cutover |
+| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08a backup/restore preparation; S08b final recovery/proposal; S08c actual cutover |
 | R07 | Routing-enabled eligible task supplies its initial brief without a lead turn. Explicit permitted assignee bypasses TypeSafe; disabled projects allocate through the lead without API calls. Profile capabilities and project routing guidance are used; ineligible profiles cannot be selected and full transcripts/credentials are excluded. | S04; verified in S05 |
 | R08 | Uncertain/no-fit/missing-context/API-failure outcomes wake the lead once with the brief and evidence. Lead can allocate without TypeSafe. Busy selected profile waits for capacity; repairs retain assignee. All dispatch rechecks current permissions and holds. | S03/S04; verified in S05 |
 | R09 | Nested results resume their delegator, initial results resume the task-scoped lead, including restart and capacity-one cases. Two tasks using the lead profile keep separate histories. Worker success alone cannot complete a task; lead completion requests satisfy service gates. | S04; verified in S05 |
@@ -236,9 +255,14 @@ A28/A30 and R01–R05, R07–R10 plus R06 fresh-database separation. Physical R0
 sleep/wake proof is deferred to follow-up #732; it remains unproved and does not
 pass the operational release gate. S06–S07 complete GitHub portions and all
 A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
-qualification. S08b verifies final-schema and external-effect recovery and operational
-cutover against the S07 release candidate, reusing valid S08a evidence. The operational
-release gate requires the S07 release candidate and S08 operational evidence;
+qualification. S08b verifies final-schema and external-effect recovery against the
+S07 release candidate, reusing valid S08a evidence, and delivers a reviewed,
+executable cutover proposal. Under the approved 3 October split, #698 may complete
+after that technical evidence and proposal review; actual separately authorised
+cutover is tracked by S08c #761. Technical readiness does not establish deployed
+operation or completed cutover. The operational release gate retains the S07
+candidate, required S08 evidence, physical R03 proof before operational use on the
+Mac, and verified authorised cutover;
 X01–X08 are deferred and do not block the MVP. The #698 prerequisite on #728 is removed;
 a cutover is not a prerequisite for building or testing the release candidate.
 S08a evidence is composed deliberately: deterministic T4 tests prove exact
@@ -247,7 +271,7 @@ post-recovery admission; the disposable launchd proof backs up/restores
 populated paused/unready public records and confirms start/restart/stop without
 admission. The latter does not inject a live exact recovery receipt because
 #704 does not own a recovery-control surface. Neither result passes S08b's
-final-schema, external-effect, old-work disposition or cutover checks.
+final-schema/external-effect checks or S08c's actual old-work disposition/cutover.
 
 Record every proof as passed, failed or unproved with its runtime/source identity,
 observed effects and limits. Missing evidence is never a pass. Earlier termination,
