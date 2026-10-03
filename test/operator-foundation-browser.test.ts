@@ -157,6 +157,18 @@ test("retained HTML routes share the production foundation and native interactio
     assert.match(style.family, /Inter/);
     assert.equal(style.scripts, 0, "legacy HTML remains non-hydrated");
     assert.equal(style.overflow, false, path);
+    if (path === `/coordination/task/${taskId}`) {
+      const requester = desktop.getByRole("link", {
+        name: "the task-scoped assignment",
+        exact: true,
+      });
+      assert.equal(
+        await requester.evaluate(
+          (element) => getComputedStyle(element).textDecorationLine,
+        ),
+        "underline",
+      );
+    }
     const fontFaces = await desktop.evaluate(async () => {
       const inter = await document.fonts.load('14px "Inter"');
       const mono = await document.fonts.load('14px "JetBrains Mono"');

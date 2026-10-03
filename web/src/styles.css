@@ -19,8 +19,9 @@ p {
 }
 
 @layer base {
-  a {
+  a:not(.nav-link):not([data-slot="button"]) {
     color: var(--foreground);
+    text-decoration-line: underline;
     text-underline-offset: 4px;
   }
 }
@@ -220,7 +221,6 @@ nav h2 {
 
 .task-title {
   display: inline-block;
-  text-decoration: none;
   overflow-wrap: anywhere;
   font-size: var(--type-sm);
   font-weight: var(--weight-semibold);

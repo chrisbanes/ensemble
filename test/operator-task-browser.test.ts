@@ -91,9 +91,17 @@ test("List and Board preserve identical filtered task IDs and never submit comma
     .locator(`[data-task-id="${ids[0]}"] .task-title`)
     .evaluate((el) => {
       const style = getComputedStyle(el);
-      return { fontSize: style.fontSize, fontWeight: style.fontWeight };
+      return {
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        decoration: style.textDecorationLine,
+      };
     });
-  assert.deepEqual(taskTitleType, { fontSize: "14px", fontWeight: "600" });
+  assert.deepEqual(taskTitleType, {
+    fontSize: "14px",
+    fontWeight: "600",
+    decoration: "underline",
+  });
   const beforeSwitch = await Promise.all(
     ["List", "Board"].map((name) =>
       page.getByRole("button", { name, exact: true }).evaluate((el) => ({

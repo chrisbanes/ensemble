@@ -138,13 +138,34 @@ containment assertions and the readiness select state. Output is retained at
 `/tmp/ui08-review-repair-browser.log`; the build output is
 `/tmp/ui08-review-repair-build.log`.
 
+The follow-up link and long-label repairs keep ordinary inline/editor and task
+title links underlined in React and retained HTML while `.nav-link` and action
+anchors retain their designed treatment. Browser checks measure the ordinary
+link, sidebar navigation and primary action anchor; the action retains its
+original foreground/background contrast. The source-observation button
+measures 36px at desktop, grows to wrap its label at 320px, and stays within the
+page at 320px and 360px while retaining the 44px phone minimum. No action was
+submitted.
+
+| Capture | Evidence | File and SHA-256 |
+| --- | --- | --- |
+| 320 long source-observation button | Real project-settings route; wrapped label, inline links visible, no horizontal page overflow | `/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-an6zuo/ui06-94343/8a8f80356a0779e7/320-long-source-observations-button.png` — `d09cf710f96803f7b673b06b35f720e1bafb144b29f2a351de1ebdc95293196e` |
+
+The affected React-shell, retained-HTML, settings and task browser suites passed
+34/34 at `/tmp/ui08-review-r3r4-browser-final.log`; build output is
+`/tmp/ui08-review-r3r4-build-final.log`. The first R3/R4 browser attempt is preserved
+at `/tmp/ui08-review-r3r4-browser.log`; it exposed an overly strict test
+expectation that the label must wrap at 360px, which was narrowed to require
+wrapping at 320px and viewport containment at both widths.
+
 ## Integrated validation
 
 After removing the three unused Space Grotesk, Instrument Sans and IBM Plex
 Mono packages, pinned `npm ci` passed with 80 packages added, 81 audited and no
-vulnerabilities. The pinned integrated `npm run check` passed after the review
-repairs: TypeScript typecheck, Biome lint, formatting, build, and all **808
-tests** (808 pass, 0 fail, 0 skipped). The first repair run had one transient
+vulnerabilities. At the first independent-review checkpoint (R1/R2), the
+pinned integrated `npm run check` passed: TypeScript typecheck, Biome lint,
+formatting, build, and all **808 tests** (808 pass, 0 fail, 0 skipped). The
+first repair run had one transient
 failure in the untouched scheduler capacity test; that exact test passed in
 isolation and the complete retry passed. Logs are retained at
 `/tmp/ui08-review-repairs-check-final.log` (first attempt) and
@@ -157,3 +178,8 @@ browser check passed 15/15 at `/tmp/ui08-final-browser.log`; its build output is
 --check` passed, and the active source/package grep found no old font package or
 token references. These test counts and artifact paths are also captured in
 `/tmp/ui08-delivery.json` with final commit/tree identity.
+
+After the R3/R4 link and button-wrap repairs, the pinned full check passed on
+the integrated candidate with **809 tests** (809 pass, 0 fail, 0 skipped);
+output is `/tmp/ui08-review-r3r4-check.log`. The final affected browser suite
+passed 25/25 at `/tmp/ui08-review-r3r4-browser-final.log`.
