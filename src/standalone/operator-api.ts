@@ -1272,6 +1272,20 @@ export class OperatorApi {
             ),
           ],
           pendingEffectCount: r.pendingEffects.length,
+          ...(r.noTurnSubmission
+            ? { noTurnSubmission: r.noTurnSubmission }
+            : {}),
+          ...(r.preTurnRejection
+            ? {
+                preTurnRejection: {
+                  ...r.preTurnRejection,
+                  predecessorThreadId: this.safe(
+                    r.preTurnRejection.predecessorThreadId,
+                    excluded,
+                  ),
+                },
+              }
+            : {}),
           receiptRecorded: r.receipt !== null,
           workspace:
             r.receipt?.workspaceDisposition === "preserved"

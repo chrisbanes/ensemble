@@ -2171,3 +2171,131 @@ for (const mode of [
       await runtime.stop();
     }
   });
+
+test("archived resume rejection retains its exact correlated request and process before any turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-archived-resume-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    [
+      `#!${process.execPath}`,
+      "import { createInterface } from 'node:readline';",
+      "const write = m => process.stdout.write(JSON.stringify(m) + '\\n');",
+      "for await (const line of createInterface({input:process.stdin})) {",
+      "const m=JSON.parse(line);",
+      "if(m.method==='initialize') write({id:m.id,result:{}});",
+      "if(m.method==='account/read') write({id:m.id,result:{account:{type:'chatgpt'}}});",
+      "if(m.method==='config/read') write({id:m.id,result:{config:{approval_policy:'never',sandbox_mode:'workspace-write'}}});",
+      "if(m.method==='thread/resume') write({id:m.id,error:{code:-32600,message:'session '+m.params.threadId+' is archived. Run `codex unarchive '+m.params.threadId+'` to unarchive it first.'}});",
+      "}",
+    ].join("\n"),
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable, {
+    captureProcessIdentity: async () => ({
+      processId: "synthetic-123",
+      processStartedAt: "synthetic-birth",
+      bootId: "synthetic-boot",
+    }),
+  });
+  try {
+    await runtime.start();
+    await assert.rejects(
+      runtime.resumeThread("archived-thread"),
+      (error: unknown) => {
+        const rejection = (
+          error as {
+            rejection?: {
+              method: string;
+              requestId: number;
+              threadId: string;
+              processIdentity: unknown;
+            };
+          }
+        ).rejection;
+        assert.ok(
+          rejection,
+          "positive rejection must retain structured RPC correlation",
+        );
+        assert.equal(rejection.method, "thread/resume");
+        assert.equal(rejection.threadId, "archived-thread");
+        assert.ok(Number.isSafeInteger(rejection.requestId));
+        assert.deepEqual(rejection.processIdentity, runtime.processIdentity());
+        return true;
+      },
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("archived RPC text cannot qualify wrong methods, identities or malformed responses", async (t) => {
+  for (const mode of [
+    "wrong-code",
+    "wrong-thread",
+    "malformed",
+    "result-and-error",
+    "method-empty",
+    "params-present",
+    "method-and-params",
+    "string-id",
+    "wrong-method",
+    "no-response",
+  ] as const)
+    await t.test(mode, async () => {
+      const root = mkdtempSync(join(tmpdir(), "ensemble-archived-negative-"));
+      const executable = join(root, "fake-codex.mjs");
+      const error = {
+        code: mode === "wrong-code" ? -32000 : -32600,
+        message: `session ${mode === "wrong-thread" ? "other-thread" : "archived-thread"} is archived. Run \`codex unarchive ${mode === "wrong-thread" ? "other-thread" : "archived-thread"}\` to unarchive it first.`,
+      };
+      writeFileSync(
+        executable,
+        [
+          `#!${process.execPath}`,
+          "import {createInterface} from 'node:readline';",
+          "const write=m=>process.stdout.write(JSON.stringify(m)+'\\n');",
+          "for await(const line of createInterface({input:process.stdin})){const m=JSON.parse(line);",
+          "if(m.method==='initialize')write({id:m.id,result:{}});",
+          "if(m.method==='account/read')write({id:m.id,result:{account:{type:'chatgpt'}}});",
+          "if(m.method==='config/read')write({id:m.id,result:{config:{approval_policy:'never',sandbox_mode:'workspace-write'}}});",
+          `if(m.method==='${mode === "wrong-method" ? "thread/start" : "thread/resume"}' && '${mode}'!=='no-response')write({id:${mode === "string-id" ? "String(m.id)" : "m.id"},error:${JSON.stringify(mode === "malformed" ? { ...error, code: "-32600" } : error)},${mode === "result-and-error" ? "result:{}," : ""}${mode === "method-empty" || mode === "method-and-params" ? "method:''," : ""}${mode === "params-present" || mode === "method-and-params" ? "params:{malformed:true}," : ""}});`,
+          "}",
+        ].join("\n"),
+      );
+      chmodSync(executable, 0o700);
+      const runtime = new CodexRuntime(executable, {
+        captureProcessIdentity: async () => ({
+          processId: "synthetic-123",
+          processStartedAt: "synthetic-birth",
+          bootId: "synthetic-boot",
+        }),
+      });
+      try {
+        await runtime.start();
+        const call =
+          mode === "wrong-method"
+            ? runtime.startThread(root)
+            : runtime.resumeThread("archived-thread");
+        await assert.rejects(
+          mode === "no-response"
+            ? bounded(
+                call.then(() => undefined),
+                30,
+              )
+            : call,
+          (error: unknown) => {
+            assert.equal(
+              (error as { rejection?: unknown }).rejection,
+              undefined,
+            );
+            return true;
+          },
+        );
+      } finally {
+        await runtime.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+});

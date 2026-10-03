@@ -286,6 +286,21 @@ export function AssignmentRecovery(
                 {r.receiptRecorded ? "recorded" : "not recorded"}; workspace{" "}
                 {r.workspace}.
               </p>
+              {r.noTurnSubmission && (
+                <p className="body">
+                  Historical no-turn submission witness {r.noTurnSubmission.id}.
+                  Operator-adopted evidence; an unobserved idle thread may
+                  exist. This records evidence, not recovery or permission to
+                  dispatch.
+                </p>
+              )}
+              {r.preTurnRejection && (
+                <p className="body">
+                  Before-turn archived resume witness {r.preTurnRejection.id}.
+                  Source {r.preTurnRejection.source}. This records rejection
+                  evidence, not recovery or permission to dispatch.
+                </p>
+              )}
               <p className="metadata">
                 Stop {r.holds.stop ? "active" : "inactive"}; writer{" "}
                 {r.holds.writer ? "held" : "not recorded"}; capacity{" "}

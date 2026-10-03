@@ -238,6 +238,90 @@ Operator messages may target only pending or running assignments. Held or comple
 assignments are not implicitly revived; resolve the hold or create explicit follow-up/
 recovery first. Legacy inbox events do not dispatch a completed assignment.
 
+A retained canonical initial assignment request positively refused for captured task or
+assignment revision mismatch before runtime admission can be continued by posting a
+fresh operator message through the existing task inbox. The original held request,
+intent and refusal remain immutable history; no replacement initial request is created
+automatically. The fresh inbox work captures the current task revision and includes its
+current title/outcome alongside the preserved assignment brief and instruction/profile
+snapshots. Current admission, permissions, dependency, Stop and execution/effect holds
+still apply. Runtime identity, writer admission, capacity reservation, recovery
+identity, pending effects or a Stop target disqualify the historical refusal exemption.
+Any initial inbox batch stays bound unless the existing narrow stale-delivery withdrawal
+proves it safe to withdraw; continuation never orphans or replays that batch.
+
+After exact-generation operator recovery, the old intent remains `reconciled` and
+its turn request remains held; the validated recovery receipt alone does not dispatch
+work. A new operator message to the same task/assignment can explicitly authorize a
+fresh inbox continuation. The message transaction retains an immutable audit linking
+the recovered work, receipt, message key/event and old batch. It processes the old
+batch without replaying its events; task and assignment message views identify this
+as `operator-reconciled`, distinct from successful runtime delivery. Message replay,
+provider feedback and settlement cannot create or retarget that authority. Every
+admission, completion and external completion action rechecks the audit and exact
+recovered-generation proof, while current project/profile/dependency/permission and
+Stop gates remain in force. Late callbacks or known survivors after a recorded
+continuation persist an uncertainty hold and retract admitted successors; ending the
+callback or restarting does not clear that hold. The recovery receipt, old intent and
+continuation audit remain historical evidence, not a successful result or a force
+unlock. Existing callbacks before any recorded continuation retain their previous
+recovery behaviour.
+
+A positively rejected archived `thread/resume` before turn submission has a
+separate pre-turn recovery proof. The Codex adapter retains the exact correlated
+RPC request, predecessor thread, `-32600` archived-session response and runtime
+process identity. The service persists that witness against the admitted request
+sequence, work revision and assignment binding before losing submission context.
+Missing thread/turn identities, a timeout, malformed response, another RPC error or
+a lost turn-start response cannot qualify. The never-admitted refusal and bound-turn
+recovery proofs remain distinct.
+
+A historical generation lacking that typed witness requires explicit authenticated
+operator adoption. Its immutable command receipt binds the exact held generation,
+predecessor, process and persisted response to operator attestations and reviewed
+source/harness/evidence/approval references. The host operator verifies those
+artifacts and the independently reviewed no-turn evidence; valid metadata syntax or
+an error string alone does not establish proof. Model tools cannot adopt evidence.
+Command replay returns the same result and rejects altered material or retargeting.
+Adoption and recovery are authenticated advanced operator routes; they grant no
+new model tool authority or automatic recovery control.
+
+A keyed pre-turn recovery receipt requires the persisted witness, truthful null
+thread/turn identities, independent exact-process termination verification and
+settled workspace/effects. Recovery reconciles only that generation's ownership;
+it leaves the old request held and does not dispatch a successor. An explicit
+conversation replacement and a NEW operator message are then both required. The
+replacement command checks captured assignment/conversation revisions, persists
+its result and prevents duplicate revision increments on replay. The new work starts
+a fresh thread. Existing receipts and continuation audits retain their identities
+and material unchanged; the old batch is processed as `operator-reconciled` without
+replay. Admission, completion and external actions revalidate the pre-turn witness,
+receipt and continuation audit at use time. Independent holds, current admission
+gates and persistent late-callback/survivor holds remain enforced.
+
+A distinct historical no-turn-submission proof covers an admitted generation
+with a captured known-null predecessor and unbound thread/turn identities. It is
+operator-only adoption of independently reviewed frozen source, harness and a
+complete synchronous write-ahead invocation ledger establishing that `startTurn`
+was never called for the exact generation. A generic stop error, missing identities,
+process absence or metadata syntax alone cannot establish this proof. An initial
+`thread/start` may have created an unobserved idle thread; this contract does not
+claim thread noncreation, a positive archived-resume rejection or successful work.
+The existing archived-resume predicate and bound-turn proofs remain unchanged.
+
+The separate no-turn witness and receipt discriminator bind request/work,
+conversation/writer revisions, assignment snapshots, process and immutable operator
+command material. Recovery independently verifies exact-process termination and
+requires settled current workspace/effects, preserving null identities and all
+older receipt/audit material. It leaves the request held and produces no successful
+assignment result or automatic dispatch. Existing keyed conversation replacement
+and a NEW authenticated operator message are both required for continuation. The
+old batch records `operator-reconciled` processing without replay. Admission,
+completion and actions recheck the distinct witness/receipt/audit and current gates;
+late callbacks or known survivors persist a hold and retract successors across
+restart. The advanced authenticated host routes expose bounded acknowledgement,
+with no new model tool authority or forms in the curated operator UI.
+
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No
 queued turn, follow-up, delegation or replacement may gain admission while Ensemble

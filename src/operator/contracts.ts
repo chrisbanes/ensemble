@@ -274,7 +274,12 @@ const message = z
     eventId: uuid,
     eventType: z.string(),
     recipientAssignmentId: uuid,
-    deliveryState: z.enum(["pending", "queued", "delivered"]),
+    deliveryState: z.enum([
+      "pending",
+      "queued",
+      "delivered",
+      "operator-reconciled",
+    ]),
     createdAt: time,
     text: safeText.optional(),
     decision: z.enum(["approved", "denied"]).optional(),
@@ -931,6 +936,22 @@ export const assignmentRecoverySchema = envelope(
               holds: recoveryHolds,
               observations: z.array(recoveryObservationSchema).max(12),
               pendingEffectCount: time,
+              noTurnSubmission: z
+                .object({
+                  id: uuid,
+                  source: z.literal("operator-adopted"),
+                  idleThreadMayExist: z.literal(true),
+                })
+                .strict()
+                .optional(),
+              preTurnRejection: z
+                .object({
+                  id: uuid,
+                  source: z.enum(["runtime", "operator-adopted"]),
+                  predecessorThreadId: safeText,
+                })
+                .strict()
+                .optional(),
               receiptRecorded: z.boolean(),
               workspace: z.enum(["preserved", "reconciled", "unknown"]),
             })

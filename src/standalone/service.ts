@@ -1,3 +1,14 @@
+import { z } from "zod";
+import {
+  ArchivedResumeRejectedError,
+  preTurnRecoveryCommandSchema,
+  noTurnRecoveryCommandSchema,
+  type HistoricalNoTurnAdoption,
+  type NoTurnRecoveryCommand,
+  type HistoricalPreTurnAdoption,
+  type PreTurnRecoveryCommand,
+  type ReplaceConversationCommand,
+} from "./pre-turn-recovery.js";
 import {
   DeliveryStore,
   canonicalMaterial,
@@ -291,8 +302,14 @@ export class StandaloneService {
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
-      const coordination = new CoordinationStore(db, domain, (workId) =>
-        state.isNeverAdmittedRefusedInboxWork(workId),
+      const coordination = new CoordinationStore(
+        db,
+        domain,
+        (workId) => state.isNeverAdmittedRefusedAssignmentWork(workId),
+        (workId) =>
+          (this.callbacks.get(workId)?.size ?? 0) === 0
+            ? state.reconciledAssignmentProof(workId)
+            : undefined,
       );
       coordination.migrate();
       coordination.invalidateRuntimeQuestions(
@@ -692,6 +709,50 @@ export class StandaloneService {
   resolveHeldExecution(receipt: RecoveryReceipt) {
     return this.requireSupervisor().resolveHeldExecution(receipt);
   }
+  adoptHistoricalPreTurnRejection(command: HistoricalPreTurnAdoption) {
+    return this.requireState().adoptHistoricalPreTurnRejection(command);
+  }
+  recoverPreTurnExecution(command: PreTurnRecoveryCommand) {
+    const value = preTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay("recover", value);
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  adoptHistoricalNoTurnSubmission(command: HistoricalNoTurnAdoption) {
+    return this.requireState().adoptHistoricalNoTurnSubmission(command);
+  }
+  recoverNoTurnExecution(command: NoTurnRecoveryCommand) {
+    const value = noTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay(
+      "recover-no-turn",
+      value,
+    );
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  replaceConversationCommand(command: ReplaceConversationCommand) {
+    return this.requireState().replaceConversationCommand(command);
+  }
 
   turnRequests(): TurnRequest[] {
     if (!this.schedulerStore) throw new Error("Service is not started");
@@ -1049,6 +1110,13 @@ export class StandaloneService {
       throw new Error("No active execution to hold");
     const holdReason = `Known unfinished execution: ${reason}`;
     this.supervisor?.noteSurvivor(workId);
+    if (
+      intent.state === "reconciled" &&
+      this.coordination?.recoveryDispositionForWork(workId) ===
+        "operator-reconciled"
+    ) {
+      state.holdReconciledContinuationSurvivor(workId, holdReason);
+    }
     this.retractWriterAndSuccessors(intent, holdReason);
   }
 
@@ -1067,7 +1135,13 @@ export class StandaloneService {
   }
 
   registerExecutionCallback(workId: string, callback: Promise<unknown>): void {
-    if (this.requireState().byWorkId(workId)?.state === "completed")
+    const state = this.requireState().byWorkId(workId)?.state;
+    if (
+      state === "completed" ||
+      (state === "reconciled" &&
+        this.coordination?.recoveryDispositionForWork(workId) ===
+          "operator-reconciled")
+    )
       this.holdKnownSurvivor(workId, "late Ensemble callback");
     const set = this.callbacks.get(workId) ?? new Set<Promise<unknown>>();
     set.add(callback);
@@ -1954,7 +2028,7 @@ export class StandaloneService {
               (item.state === "queued" ||
                 item.state === "active" ||
                 item.state === "held") &&
-              !state.isNeverAdmittedRefusedInboxWork(item.workId),
+              !coordination.isHistoricalWorkResolved(item.workId),
           )
       )
         continue;
@@ -1978,7 +2052,19 @@ export class StandaloneService {
           assignmentVersion: version,
           instructionsRevision: Number(assignment.instructionsRevision),
           profileRevision: Number(assignment.profileRevision),
-          prompt: this.assignmentPrompt(String(assignment.brief), delivery),
+          prompt: this.assignmentPrompt(
+            String(assignment.brief),
+            delivery,
+            state.isNeverAdmittedRefusedAssignmentWork(
+              `assignment:${recipientAssignmentId}:initial`,
+            )
+              ? {
+                  version: Number(task.version),
+                  title: String(task.title),
+                  outcome: String(task.outcome),
+                }
+              : undefined,
+          ),
           previousWorkId:
             state.latestCompletedAssignmentWork(recipientAssignmentId) ?? null,
         },
@@ -2028,12 +2114,19 @@ export class StandaloneService {
       await this.wakeScheduler(1);
   }
 
-  private assignmentPrompt(brief: string, delivery?: InboxDelivery): string {
+  private assignmentPrompt(
+    brief: string,
+    delivery?: InboxDelivery,
+    currentTask?: { version: number; title: string; outcome: string },
+  ): string {
     if (!delivery) return brief;
     const events = delivery.events.map(
       (event) => `- ${event.eventType}: ${event.payload}`,
     );
-    return `${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
+    const context = currentTask
+      ? `Current task (revision ${currentTask.version}): ${currentTask.title}\nCurrent outcome: ${currentTask.outcome}\n\nPreserved assignment brief:\n`
+      : "";
+    return `${context}${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
   }
 
   private executionPrompt(request: TurnRequest): string {
@@ -2142,6 +2235,21 @@ export class StandaloneService {
             instructionsRevision,
             profileRevision,
           }).reasons;
+          if (
+            this.requireSchedulerStore()
+              .list()
+              .some(
+                (older) =>
+                  older.assignmentId === assignmentId &&
+                  older.workId !== request.workId &&
+                  older.state === "held" &&
+                  this.coordination?.recoveryDispositionForWork(
+                    older.workId,
+                  ) === "operator-reconciled" &&
+                  !this.coordination.hasRecoveryContinuation(older.workId),
+              )
+          )
+            reasons.push("recovery-continuation-unresolved");
           if (domain.importedTask(binding.taskId)) {
             const task = domain.task(binding.taskId);
             const linked = domain.githubConfiguration(
@@ -2308,6 +2416,7 @@ export class StandaloneService {
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
+    let submissionStage: "resume" | "thread" | "bound" | "turn" = "thread";
     let captureThreadId: string | undefined;
     let conversationCapture: ConversationHistoryCapture | undefined;
     try {
@@ -2319,6 +2428,7 @@ export class StandaloneService {
       if (previous?.threadId) {
         if (state.get(intent.id).state !== "submitting")
           throw new Error("Execution admission was held");
+        submissionStage = "resume";
         await runtime.resumeThread(previous.threadId, tools);
         threadId = previous.threadId;
       } else {
@@ -2326,6 +2436,7 @@ export class StandaloneService {
           throw new Error("Execution admission was held");
         threadId = await runtime.startThread(workspace, tools);
       }
+      submissionStage = "bound";
       const threadBound = state.bindThread(intent.id, threadId);
       this.requireSupervisor().threadBound(request.workId, threadId);
       if (!threadBound) throw new Error("Thread binding was held or changed");
@@ -2337,6 +2448,7 @@ export class StandaloneService {
         workspace,
         threadId,
       );
+      submissionStage = "turn";
       const turnId = await runtime.startTurn(
         threadId,
         workspace,
@@ -2474,6 +2586,13 @@ export class StandaloneService {
         }
       }
     } catch (error) {
+      if (
+        submissionStage === "resume" &&
+        error instanceof ArchivedResumeRejectedError &&
+        previous?.threadId === error.rejection.threadId &&
+        state.get(intent.id).state === "submitting"
+      )
+        state.capturePreTurnRejection(request.workId, error.rejection);
       if (state.get(intent.id).state !== "held")
         state.hold(
           intent.id,

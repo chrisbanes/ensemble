@@ -1,3 +1,4 @@
+import { recoveryReceiptSchema } from "./pre-turn-recovery.js";
 import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -85,20 +86,6 @@ const executionInspectionSchema = z.discriminatedUnion("kind", [
     reason: z.string().max(2000),
   }),
 ]);
-
-const recoveryReceiptSchema = z
-  .object({
-    workId: z.string().min(1),
-    workRevision: z.number().int().positive().nullable(),
-    requestSequence: z.number().int().positive(),
-    threadId: z.string().min(1),
-    turnId: z.string().min(1),
-    processIdentity: processIdentitySchema,
-    termination: z.object({ kind: z.literal("process-exit") }).strict(),
-    effects: z.literal("settled"),
-    workspace: z.enum(["preserved", "reconciled"]),
-  })
-  .strict();
 
 function exactProcessIdentity(
   left: RuntimeProcessIdentity | null,
@@ -218,7 +205,10 @@ export class ExecutionSupervisor {
     this.state.recordRecoveryObservation(workId, kind, terminalStatus);
   }
 
-  async resolveHeldExecution(receipt: RecoveryReceipt) {
+  async resolveHeldExecution(
+    receipt: RecoveryReceipt,
+    command?: { key: string; receipt: RecoveryReceipt },
+  ) {
     const value = recoveryReceiptSchema.parse(receipt);
     const stored = this.state.recoveryIdentity(value.workId);
     if (
@@ -267,7 +257,7 @@ export class ExecutionSupervisor {
       );
     }
     this.recordObservation(value.workId, "termination-verified");
-    return this.state.resolveHeldExecution(value, verification);
+    return this.state.resolveHeldExecution(value, verification, command);
   }
 
   observeStop(
