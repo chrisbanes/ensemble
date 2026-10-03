@@ -1,16 +1,14 @@
 # S07a GitHub delivery evidence
 
-Status: **implementation qualification failed; recovery pending**. On 2 October
-2026 Chris approved publication of the synthetic fixture, at most 12 existing-login
-Codex turns, one fixture squash merge and bounded recorded cleanup. Provider
-readback confirmed the fixture repository public, its Project private, and real
-required `s07a-ci` protection with administrator enforcement. This resolves the
-earlier private-repository protection gate; it does not qualify either journey.
-Three turns ran, two with successful terminal evidence. The interrupted third
-turn remains held. The subsequent through-merge continuation started no additional
-turn and retained a request refused for stale captured revisions. No recovery hold
-was released, fixture merge performed or final local Done claimed. See the
-[live outcome report](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5952402402).
+Status: **handback failed / unqualified; admitted pre-turn recovery pending**.
+The 3 October 2026 continuation exercised exact-generation recovery and fresh
+operator continuation on the retained handback fixture, then held its newly
+admitted request when Codex rejected resume of an archived session before thread
+binding or turn submission. It started zero new turns;
+the original three of the approved 12 remain counted. Through-merge completion
+and remote cleanup remain unproved. See the
+[durable live checkpoint](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5966459064)
+and [draft repair PR #760](https://github.com/chrisbanes/ensemble/pull/760).
 
 The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
 against `46e9fc8de5ab0a527732d9c24d2f9c6d7b20fac6`. This inventory records
@@ -21,9 +19,60 @@ implementation evidence, not a parallel delivery plan.
 | 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
 | 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
 | 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; retained partial live evidence | **Failed / unqualified; recovery and final completion required** |
-| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair check 484/484 passed; **final live qualification remains pending** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair candidate 369f5ca: full check 725/725, focused 62/62, preflight 3/3; **final live qualification remains pending** |
+
+## 3 October retained-fixture recovery repair and continuation
+
+The repair candidate `369f5cad931d627c07911c348b6fd6ffc5671152` passed
+`npm ci` and the pinned Node `24.21.0` / npm `12.2.0` full
+`npm run check`: type checking, lint, formatting, build and 725/725 tests.
+Focused refused-initial, recovery-continuation and original recovery tests passed
+62/62; the preflight passed 3/3. Independent review returned `ship` for all three
+repair contracts. These checks qualify the bounded source repair, not successful
+completion of either real delivery journey.
+
+R1 allows a fresh operator message to continue after a positively proved
+never-admitted canonical initial refusal. Current task material is supplied while
+the assignment brief and instruction/profile snapshots remain immutable. R2
+allows a new operator message to authorise continuation after exact-generation
+recovery has independently verified process termination and settled workspace and
+effects. Its durable audit retains the receipt, message and old batch identities;
+the public `operator-reconciled` disposition distinguishes retirement of delivery
+processing from successful runtime delivery. Both paths retain ordinary admission,
+completion and independent hold checks. R1 is covered by deterministic tests;
+the through-merge journey's retained refusal received no fresh operator message
+during this live attempt.
+
+The live continuation recovered the original exact admitted generation, recorded
+a new operator continuation audit and retired its old batch without replay. The
+fresh request was then admitted, but `thread/resume` returned JSON-RPC `-32600`
+for the archived predecessor session. The failure occurred before the new intent
+bound a thread or submitted a turn. Its writer/capacity ownership and pending
+assignment result remain held. The service stopped gracefully, and exact-identity
+cleanup independently verified termination of its new App Server process
+`28577`. No new turn reservation or turn was recorded; the original three turns
+remain counted against the 12-turn ceiling.
+
+This newly admitted pre-turn hold does not meet the existing nonnull thread/turn
+recovery receipt contract. Missing identities, process cleanup or unused turn
+allowance do not release it. The archived session was not unarchived, and no
+replacement conversation, fixture reset or blind retry was performed. Handback
+completion remains failed/unqualified; through-merge completion and remote
+cleanup remain unproved. A different recovery proof requires a concrete reviewed
+decision under the existing recovery boundary.
 
 ## 2 October qualification and checkpoint repair
+
+On 2 October 2026 Chris approved publication of the synthetic fixture, at most 12
+existing-login Codex turns, one fixture squash merge and bounded recorded cleanup. Provider
+readback confirmed the fixture repository public, its Project private, and real
+required `s07a-ci` protection with administrator enforcement. This resolves the
+earlier private-repository protection gate; it does not qualify either journey.
+Three turns ran, two with successful terminal evidence. The interrupted third
+turn remains held. The subsequent through-merge continuation started no additional
+turn and retained a request refused for stale captured revisions. No recovery hold
+was released, fixture merge performed or final local Done claimed. See the
+[live outcome report](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5952402402).
 
 The first real journey confirmed scoped progress, label and Project-field writes,
 PR readiness, denied handback merge authority, rejection of wrong approval material,
@@ -60,7 +109,7 @@ dependencies remain gated.
 The remaining paragraphs preserve the original preparation and repair evidence.
 Their unrun journeys, pending publication/visibility authority, earlier test counts
 and pending CI describe that historical candidate. They do not describe the
-2 October live attempts or the current repair PR; the current dispositions are
+2 and 3 October live attempts or the current repair PR; the current dispositions are
 recorded above.
 
 The first policy/store cycle failed for absent new modules and then passed. The
