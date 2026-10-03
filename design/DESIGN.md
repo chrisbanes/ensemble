@@ -22,6 +22,46 @@ are not evidence that this amendment has been designed or approved visually.
 After review, update the relevant screen/state references and interaction handoff
 here, and link the reviewed design from the specification and delivery issues.
 
+## Approved refinement brief — 3 October 2026
+
+This section records approved direction awaiting Pen revision and implementation.
+The tokens, components and frame map below remain the previous extracted snapshot;
+they are not evidence that these refinements have been drawn or delivered. Refresh
+that snapshot through Pen MCP after inspecting the revised renders.
+
+Make the next decision obvious, and keep its evidence close:
+
+- **Attention:** show the specific decision/intervention, requester when known,
+  reason the operator is needed and available response. Keep relevant evidence
+  close. Use consistent meaning across Overview, Inbox, List/Board and task detail.
+- **Work views:** distinguish work state, next actor and attention without changing
+  the existing board mapping. A running agent alone is insufficient evidence of a
+  repair. Show unknown responsibility honestly. Keep readiness, completed work,
+  cancellation and provider closure without delivery distinguishable.
+- **Task workspace:** prioritise outcome, current situation/next actor, unresolved
+  decisions and evidence. Disclose assignments and captured history underneath,
+  retaining the task's accountable lead and assignment/conversation identities.
+  Use recorded facts and attributed excerpts; add no invented summary capability.
+- **Composer:** keep project, title and outcome prominent; disclose optional
+  context, references, assignee and dependencies with a summary of supplied values.
+  Preserve validation, drafts and truthful creation/admission feedback.
+- **Readability:** give task meaning and the immediate next step more space than
+  repeated navigation metadata. Keep titles distinguishable and supporting text
+  readable. Retain the existing semantic palette and fixed typography roles.
+
+Revise shared components and representative desktop/phone frames using fixtures for
+agent-owned check repair, an operator question, approval with an independent
+dependency hold, completion without a decision, uncertain execution and capacity
+waiting. Also show unknown responsibility and distinguish cancelled/undelivered
+work from success. Demonstrate evidence inspection, response, confirmation and
+return to the prior context, including stale reads and failed submissions.
+
+These changes preserve exact approval material, source ownership, Stop/Resume
+limits and command-outcome semantics. They add no agent/provider selection,
+attachments, terminal, browser, runtime or remote-write capabilities. GitHub issues
+remain authoritative for delivery scope and sequencing; this is a presentation
+brief, not a parallel delivery plan.
+
 ## Visual direction
 
 The named palette describes a calm, light operator workspace: pale blue-grey canvas, white content

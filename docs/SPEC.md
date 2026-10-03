@@ -384,6 +384,10 @@ without trusting agent-supplied project or assignment IDs.
 
 ## Operator interface and human requests
 
+Make the next decision obvious, and keep its evidence close. The presentation
+refinements below were approved on 3 October 2026; implementation and visual
+qualification remain separate from this product contract.
+
 Provide project/task lists, task detail, conversations and execution history,
 configuration and a shared attention inbox. Show capacity, source health, the lead, assignees,
 results and artifacts. Distinguish empty, loading, stale, failed, paused, waiting,
@@ -407,6 +411,19 @@ urgency, then age: execution uncertainty and problems requiring intervention fir
 then questions and approvals oldest first. Show project and task context on each
 item. Unresolved questions, pending approvals and failures remain visible even
 when related history is collapsed.
+
+Each attention item explains the decision or intervention needed, its requester
+when known, why the operator is needed, and the available response. Keep relevant
+evidence beside the response or directly accessible within the task context.
+Use the same meaning and action wording in Overview, Inbox, List/Board and task
+detail. Returning from a request preserves the previous filters and position.
+
+Distinguish work progress, the next actor and operator attention. Derive them from
+recorded facts, showing unknown responsibility explicitly. Running activity alone
+does not establish that an agent owns or is repairing a particular failure. A
+failed check with an agent-owned repair does not itself create operator attention;
+an independent question, approval or recovery problem remains visible. Capacity
+waiting is normal progress unless a separate intervention is required.
 
 ### Task overview and evidence — design direction, 3 October 2026
 
@@ -467,6 +484,14 @@ uncertain and stopping work visible rather than implying completion. Cards open
 the same task detail as list rows; the attention inbox remains available in either
 view. Provide readable narrow-screen navigation between columns.
 
+Attention appears alongside work state rather than replacing it. Keep actionable
+readiness, successful completion, cancellation and provider closure without
+delivery visibly distinguishable. Provider closure alone does not establish task
+completion. Prioritise the task's meaning, current situation and next actor;
+supporting identifiers and timestamps must remain readable and accessible without
+competing with that information. These refinements do not change the existing
+board state mapping.
+
 Board columns describe Ensemble work, not GitHub issue state or Project fields.
 The board does not grant arbitrary status changes or require drag-and-drop for the
 MVP. Any offered transition must use an existing permitted command and preserve
@@ -475,10 +500,12 @@ bypass a hold or silently write to GitHub.
 
 ### Task creation and project setup
 
-Provide a substantial task composer with project selection, desired outcome and
-detailed brief, optional reference links, permitted explicit assignee selection
-and task dependencies. Use Create and start as the primary action and Save draft
-as the secondary action. Explain before submission that starting is subject to
+Provide a simple initial task composer that supports a substantial brief. Keep
+project selection, title and desired outcome prominent. Progressively disclose
+optional context, reference links, permitted explicit assignee selection and task
+dependencies; show a summary of supplied optional settings when collapsed. Keep
+entered values and field errors accessible through disclosure. Use Create and start
+as the primary action and Save draft as the secondary action. Explain before submission that starting is subject to
 project state, dependencies, capacity and execution holds. Show the persisted
 state and reason for any wait after submission; creation does not imply running.
 These controls must preserve existing readiness and admission rules.
@@ -514,6 +541,22 @@ Show remote writes as pending until their outcome is known, then as confirmed
 success, confirmed failure or uncertain. Do not present local or optimistic state
 as a confirmed GitHub update. Refreshing or retrying must preserve the existing
 remote-write reconciliation and permission rules.
+
+### Task workspace
+
+The initial task view presents the outcome, current situation and next actor,
+unresolved decisions, and relevant results or evidence before detailed history.
+Keep delivery observations, artifacts, dependencies, assignments and captured
+conversations accessible within the task workspace. Understanding current work
+must not require reading raw runtime output.
+
+Preserve the task, assignment and conversation hierarchy: the task retains the
+outcome and accountable lead, assignments identify delegated responsibility, and
+conversations supply supporting history. Use recorded facts and attributed,
+source-faithful excerpts for the overview. Do not invent narrative summaries,
+recommendations or ownership when the evidence is absent. Unavailable or stale
+evidence remains explicit. This presentation adds no terminal, embedded browser
+or complete-transcript capability.
 
 ### Readable task histories
 
