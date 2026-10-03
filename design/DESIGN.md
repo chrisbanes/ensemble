@@ -1,8 +1,8 @@
 # Ensemble UI design handoff
 
 This is a portable reference for planning and implementing the reviewed Ensemble
-web UI without opening Pen. It was extracted through Pen MCP on 1 October 2026
-and refreshed from the latest semantic-colour and fixed-type-role system. The editable visual source is
+web UI without opening Pen. It was refreshed through Pen MCP on 3 October 2026
+after revising and inspecting the approved operator UX refinements. The editable visual source is
 [design.pen](design.pen); this document is a handoff snapshot, not a native Pen
 Markdown export or evidence of implemented behaviour.
 
@@ -24,10 +24,11 @@ here, and link the reviewed design from the specification and delivery issues.
 
 ## Approved refinement brief — 3 October 2026
 
-This section records approved direction awaiting Pen revision and implementation.
-The tokens, components and frame map below remain the previous extracted snapshot;
-they are not evidence that these refinements have been drawn or delivered. Refresh
-that snapshot through Pen MCP after inspecting the revised renders.
+The approved direction is now represented in the existing editable Pen document.
+Shared components, representative existing screens and the supplementary fixtures
+below were inspected through Pen MCP. This records **designed behaviour**, not
+implemented, browser-tested or runtime-qualified behaviour. The palette and fixed
+typography roles are unchanged. No competing canvas was created.
 
 Make the next decision obvious, and keep its evidence close:
 
@@ -119,7 +120,12 @@ text. `color/surface-container` is the workspace and muted/input background;
 `color/surface-container-low` is navigation. Pair primary with on-primary, and
 primary/warning/error/success containers with their corresponding on-container
 foregrounds. Keep status words visible. Avatar fills remain local examples.
-The palette does not establish tested contrast or focus compliance.
+Calculated token-pair contrast is 14.24:1 for body text on white, 5.74:1 for
+supporting text on white, 5.34:1 for supporting text on the workspace canvas,
+5.39:1 for primary on white, and 5.42–5.76:1 for warning/error/success container
+pairs. These are calculations from the named colours, not rendered browser
+accessibility or focus-compliance results. The focused specimens use a 2px primary
+outline; radio selection is independently shown by a filled dot.
 
 ### Typography
 
@@ -179,9 +185,10 @@ uses the fixed roles above; do not add per-instance typography overrides.
 | Navigation / projects | `vV9lW` | 216px desktop sidebar; workspace selector, Overview, Inbox count, projects and profile; 24px vertical / 16px horizontal padding |
 | Button / primary | `gFnEM` | Primary/on-primary colour pair; 8px corners, 12px vertical / 16px horizontal padding, 14px semibold control type |
 | Button / secondary | `QXGhI` | White surface with outline border and on-surface text. Same base sizing and 14px semibold type as primary |
-| Inbox / request row | `LKh5F` | Request type, project/task context, requester and age; selection identifies the open detail |
+| Inbox / request row | `LKh5F` | Specific decision/intervention, project/task, reason the operator is needed, available response, requester and time; 12px padding and 4px gaps; selection identifies the open detail |
 | Source / GitHub issue identity | `GD5ht` | Neutral source identity and link, separate from urgency |
-| Task / board card | `tR6lF` | White bordered surface, 10px corners, 12px padding and 8px gaps; project/source, outcome, state/reason and lead |
+| Task / board card | `tR6lF` | Title first; source, work state, situation, next actor and attention are separate fields; white surface, 10px corners, 12px padding, 4px gaps; accountable lead retained |
+| Request / recorded response | `pDmEe` | Confirmed recorded outcome, exact request/value/time and remaining delivery or execution hold; reusable in response and creation confirmations |
 | Execution / unresolved GitHub blocker | `g6phYl` | Warning with source link and explicit explanation that approval does not clear the dependency |
 | Question / choice with description | `tzNkV` | Selection indicator beside label/description; 12px padding, 8px gap, 8px corners; recommendation only when supplied |
 | Question / free-text answer | `ADuk1` | White bordered input, 12px padding, 8px corners; 14px body type at 1.5 line height |
@@ -197,8 +204,9 @@ for radio buttons, checkboxes and inputs; the canvas glyphs illustrate appearanc
 
 ## Layout and responsive composition
 
-Laptop reference frames use 1366 × 820; other desktop frames use 1440 × 900 or
-1440 × 960. Phone references use 390 × 844. These are review viewports, not fixed
+The collapsed laptop composer uses 1366 × 820. Revised task, approval and work
+views use 1366 × 900; other desktop frames use 1440 × 900 or 1440 × 960.
+Phone references use 390 × 844. These are review viewports, not fixed
 application dimensions. Main laptop content has 24px vertical / 28px horizontal
 padding and 16px gaps; Inbox and board workspaces use 24px padding and 16px gaps.
 The imported desktop workspace uses 28px padding and 20px gaps.
@@ -208,14 +216,19 @@ The imported desktop workspace uses 28px padding and 20px gaps.
 - **Inbox:** sidebar, heading and filters remain available. Queue and detail scroll
   independently; request header and response/decision controls remain visible.
   Phone uses queue → detail → queue navigation with restored selection and position.
-- **Composer:** scroll the brief and optional context; reserve space for the action
-  bar so Create and start / Save draft never obscure inputs. Distinguish proposed
-  on-device unfinished-input recovery from a confirmed Ensemble draft task.
-- **Task detail:** retain unresolved requests outside collapsible history. History
-  scrolls independently with reserved reply space. Keep dependency holds visible
-  beside approvals. Opening an assignment shows a bounded recent preview and
-  result; earlier content remains available through disclosure. The illustrated
-  three-message preview is not a fixed acceptance requirement.
+- **Composer:** project, title and desired outcome lead. Optional context,
+  references, permitted assignee and dependencies disclose below them; collapsed
+  summaries retain supplied values and visible error counts. Reserve space for
+  Create and start / Save draft. Unfinished on-device input is distinct from a
+  confirmed Ensemble draft or Ready task, and confirmed creation is distinct from
+  admission. The old attachment hint has been removed.
+- **Task detail:** outcome, current situation and next actor, unresolved decisions,
+  then attributed evidence precede assignment history. Requests remain outside
+  disclosure; independent holds remain beside approvals. Preserve task → assignment
+  → conversation identities and accountable lead. Opening an assignment shows its
+  bounded recent preview and result; earlier content and omission notices remain
+  accessible. The illustrated three-message preview is not a fixed acceptance
+  requirement. History updates preserve position, disclosures and replies.
 - **Imported task:** source content and Ensemble execution are visually separate.
   Desktop has source/execution panes; phone has GitHub source and Ensemble tabs,
   each preserving its position. External state is never implied by local activity.
@@ -256,6 +269,43 @@ details that the reviewed frames illustrate:
   question. The interaction notes specify radio arrow-key navigation, Space for
   selection, and focus on the first invalid field after submission.
 
+## Refinement fixtures and interaction coverage
+
+The following are illustrative design records, not observations of real tasks or
+claims of newly implemented summarisation. Existing excerpts were retained with
+attribution. Added records explicitly illustrate assignment ownership, creation
+receipts and lifecycle states. No recommendation is inferred from running activity.
+
+| Fixture / journey | Desktop references | Phone references |
+| --- | --- | --- |
+| Failed check with recorded repair owner, no attention | Overview `N9G11A`; List `nD0nh`; cross-project/project boards `E7qC9`, `MUFPD`; task `oipj4` | `zs53F` |
+| Running with unknown repair responsibility | Overview `N9G11A`; List `nD0nh`; boards `E7qC9`, `MUFPD`; task `kiPK9` | `zs53F` |
+| Specific audience question, requester, reason and evidence | Inbox `cGjau`; Overview and paused task row/card | Queue `U3RAH`; request `pmu7r`; evidence `YjRad` |
+| Failed submission, stale read, confirmation and return | Existing lifecycle reference `jKzRk`, shared receipt `pDmEe`, interaction contract `BvX5O` | Failed `uJVe2`; stale `e1kkI`; recorded `o6O3M`; anchored return `q2vYE` |
+| Exact approval and independent dependency hold | Review `DAeiN`; recorded approval `US7Kv`; imported task `biA7p` | Task `K045bl`; review `ZWQIU` |
+| Completed result and retained evidence, no decision | Task `Q24BPH`; outcomes `zeoGi`; Overview recent results | `Thy1i` |
+| Cancellation and provider closure without delivery | Outcomes `zeoGi` | Cancelled `rn49D`; provider-closed/Ensemble-paused `ALMfc` |
+| Uncertain execution and honest recovery | Overview/List; later board `x9cPnW`; outcomes `zeoGi` | `CTUzI` |
+| Confirmed creation waiting for capacity | Outcomes `zeoGi`; composer semantics `s34356` | Receipt `Z6U3T4` |
+| Optional values, collapsed error count and expanded invalid dependency | Composer `Z315o`; full-content `MhM7z` | Composer `i3glx`; collapsed error `JX4dm`; expanded error `wXiWx` |
+
+The question journey is queue → request → recorded evidence → request with
+retained selection → submit → recorded confirmation → anchored queue. Failure
+retains the choice; stale evidence retains the last read and requires checking the
+current request. Exact unknown command outcomes require reconciliation, not a
+blind retry. Confirmation does not automatically open another item.
+
+The approval receipt authorises AP-17 revision 2 only. It explicitly says no
+execution started and retains the source-owned GitHub dependency. It does not
+claim PR creation or successful delivery. Existing source refresh/comment outcome
+references remain in place; this refinement adds no remote-write capabilities.
+
+Static frames cannot execute focus restoration, scrolling, keyboard operation,
+safe-area handling, persistence or command reconciliation. Frame `BvX5O` annotates
+those interactions and the review checklist. Existing expanded-history and grouped
+question references remain the disclosure/state inventory; representative initial
+screens now prioritise evidence above history.
+
 ## Screen reference map
 
 Use the viewport frames for composition. Full-content frames show content inventory
@@ -281,6 +331,12 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 | Phone Ready and Uncertain columns | 25 `GWXOi`, 25b `CTUzI` |
 | Full-content composer and task detail | 02 `MhM7z`, 03 `QGdAx` |
 | Expanded captured history and state references | 05 `nfqO8`, 04 `wLhJT` |
+| Refinement section and evidence/response journey | Section `uhRIV`; 27 `YjRad`, 28 `uJVe2`, 29 `e1kkI`, 30 `o6O3M`, 31 `q2vYE` |
+| Approval confirmation and phone review | 32 `US7Kv`, 33 `ZWQIU` |
+| Phone composer and validation disclosure | 34 `i3glx`, 35 `wXiWx`, 35b `JX4dm` |
+| Repair, completed and unknown-responsibility task workspaces | 36 `oipj4`, 37 `Q24BPH`, 45 `kiPK9` |
+| Phone repair, capacity, completion, cancellation and closure | 38 `zs53F`, 39 `Z6U3T4`, 40 `Thy1i`, 41 `rn49D`, 42 `ALMfc` |
+| Desktop lifecycle comparison and interaction checklist | 43 `zeoGi`, 44 `BvX5O` |
 
 ## Worktree handoff and limits
 
@@ -294,8 +350,24 @@ guided setup or every configuration/recovery screen. Those remaining product
 obligations stay in the spec and issue. Fictional names, repositories, dates and
 counts illustrate states rather than defining production defaults.
 
+The 3 October review inspected the revised desktop and phone renders, checked
+resolved visible-node bounds including component instances, and repaired queue,
+card, history and phone-control overflow. Settled visible-node readbacks reported
+no clipping; root-frame overlap checks also passed. Colour-pair calculations are recorded
+above. This is a bounded canvas review, not a full accessibility audit.
+
 Static design review does not establish responsive implementation, font availability,
-contrast compliance, keyboard behaviour, runtime question support or persistence.
-Validate those against the acceptance plan. The current token and component
-definitions, including the repaired colour bindings, are reflected here. This
-extraction is not a new full visual audit or release acceptance.
+keyboard behaviour, runtime question support or persistence. Validate those against
+the acceptance plan. No application code, GitHub issues or implementation evidence
+were changed. The design does not cover every fixture at every viewport and entry
+point; the matrix names the representative coverage and interaction annotations.
+
+### Open mapping handoff question
+
+The pre-existing Pen board places Ready-but-blocked work in its Ready column. The
+current [UI03 implementation record](../docs/design/ui03-tasks.md#attention-and-board)
+places the same work in Waiting while retaining its Ready readiness. This revision
+preserves the existing Pen mapping as requested, pending clarification, and adds
+no new board grouping rule. Resolve that discrepancy before implementing these
+screens. Done, Cancelled and provider-closed fixtures are shown in All tasks and
+task views without redefining the existing active-board mapping.
