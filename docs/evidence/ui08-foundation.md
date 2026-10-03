@@ -181,5 +181,5 @@ token references. These test counts and artifact paths are also captured in
 
 After the R3/R4 link and button-wrap repairs, the pinned full check passed on
 the integrated candidate with **809 tests** (809 pass, 0 fail, 0 skipped);
-output is `/tmp/ui08-review-r3r4-check.log`. The final affected browser suite
-passed 25/25 at `/tmp/ui08-review-r3r4-browser-final.log`.
+output is `/tmp/ui08-review-r3r4-check-final.log`. The final affected browser
+suite passed 34/34 at `/tmp/ui08-review-r3r4-browser-final.log`.
