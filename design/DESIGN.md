@@ -12,6 +12,16 @@ evidence, and [#736](https://github.com/chrisbanes/ensemble/issues/736) owns del
 scope and sequencing. Resolve conflicts in favour of those contracts. This file
 records presentation and design references, without choosing a frontend stack.
 
+## Pending task overview design — 3 October 2026
+
+The [task overview specification amendment](../docs/SPEC.md#task-overview-and-evidence--design-direction-3-october-2026)
+and [design-review criteria](../docs/acceptance.md#task-overview-and-evidence-design-review--3-october-2026)
+add shared brief, delegation, evidence and compact progress requirements. Design
+and review these in Pen before implementation. The existing canvas and handoff
+are not evidence that this amendment has been designed or approved visually.
+After review, update the relevant screen/state references and interaction handoff
+here, and link the reviewed design from the specification and delivery issues.
+
 ## Visual direction
 
 The named palette describes a calm, light operator workspace: pale blue-grey canvas, white content
