@@ -112,8 +112,10 @@ After removing the three unused Space Grotesk, Instrument Sans and IBM Plex
 Mono packages, pinned `npm ci` passed with 80 packages added, 81 audited and no
 vulnerabilities. The pinned integrated `npm run check` passed: TypeScript
 typecheck, Biome lint, formatting, build, and all **808 tests** (808 pass, 0
-fail, 0 skipped). Full output is retained at `/tmp/ui08-check.log`; clean
-install output is `/tmp/ui08-npm-ci.log`. The complete T4 suite passed 24/24 at
+fail, 0 skipped). Full output is retained at `/tmp/ui08-check-final.log`; clean
+install output is `/tmp/ui08-npm-ci.log`. The renewed UI03 and retained-HTML
+browser check passed 15/15 at `/tmp/ui08-final-browser.log`; its build output is
+`/tmp/ui08-final-build.log`. The complete T4 suite passed 24/24 at
 `/tmp/ui08-t4-tests.log`; its build output is `/tmp/ui08-build.log`. `git diff
 --check` passed, and the active source/package grep found no old font package or
 token references. These test counts and artifact paths are also captured in
