@@ -117,6 +117,14 @@ behaviour or delivery. GitHub issues retain delivery scope and sequencing under
 [#742](https://github.com/chrisbanes/ensemble/issues/742) and assembled UI acceptance
 in [#745](https://github.com/chrisbanes/ensemble/issues/745).
 
+The [Pen source](../design/design.pen) and
+[interaction/state handoff](../design/DESIGN.md) record the reviewed design.
+Chris agreed the extended requirements and issue ownership on 3 October 2026:
+**design reviewed; implementation deferred**. Final integrated visual/usability
+acceptance remains open. The handoff also records unverified comparison-image
+loading after source-asset relocation; resolve that before claiming those images
+have passed saved-design visual review.
+
 - **Brief provenance:** local and imported examples show the desired outcome,
   supplied criteria and recorded decisions without inventing missing content.
   GitHub requirements stay source-owned; agent plans and decisions are distinct.
@@ -135,6 +143,48 @@ in [#745](https://github.com/chrisbanes/ensemble/issues/745).
   long briefs, parallel work, pending requests, failed refresh and unavailable
   evidence. Expanded detail, reading position and unfinished replies survive
   updates; routine progress does not interrupt the operator's reading.
+
+Qualify the reviewed extension against the real UI/service with attributable
+records. Use deterministic browser/service/persistence coverage for these cases;
+static Pen fixtures do not pass them:
+
+- **Criteria and comparison:** supplied criteria with supported, failed,
+  unverified and stale evidence keep their result/assignment/revision attribution
+  and imply no overall pass. Correctly paired before/after captures, missing sides,
+  unavailable/redacted material and revision mismatch remain distinguishable on
+  desktop and phone; earlier evidence stays reachable.
+- **Feedback:** opening from a result, criterion or artifact preserves its exact
+  context. The editable draft names the local lead destination. Confirmed sends
+  show a receipt; confirmed failures retain input for retry; uncertain outcomes
+  reconcile before resending without duplicate messages. No feedback action
+  grants approval, changes task state or posts to GitHub.
+- **Viewing reference:** new results, superseded evidence and changed source
+  requirements are distinguishable from the viewed revision. No baseline,
+  unknown comparison and failed refresh are explicit. Viewing alone never
+  records approval or clears an independent hold.
+- **Assignment context:** captured supplier/brief/instruction/profile/source
+  references are distinct from current requirements, with omissions visible.
+  Available references are not labelled read without evidence; secrets and
+  unavailable runtime history are not exposed.
+- **Changes and delivery:** recorded diff/commit/PR/check/finding relationships
+  identify the checked revision and known repair owner. No PR, changed head,
+  stale provider data and merged-but-incomplete task states remain truthful.
+  Refresh performs no write, and exact approvals and independent holds persist.
+- **Search and return:** search is reachable through shared desktop and phone
+  navigation. Similar cross-project matches each retain project/task/type
+  attribution; opening a historical match reaches its exact section/revision.
+  Query, filters, selection and reading position survive opening and returning,
+  including the originating workspace view. Empty results, partial retained
+  coverage, failure and inaccessible material never imply complete capture.
+  Review-only state specimens are absent from product navigation. Verify keyboard
+  access and preservation of disclosures/drafts on the connected journeys.
+
+#742 owns these task/review/search behaviours and required shared navigation.
+#745 checks their integration with Overview, Inbox, project/cross-project
+List/Board and task detail wherever exposed, using the shared #745/#697 evidence
+inventory. Reuse unaffected evidence and limit live checks to changed integration
+boundaries or demonstrated gaps under the existing finite acceptance amendment.
+#736 retains Chris's final integrated UI acceptance; #741 is not reopened.
 
 Link the reviewed Pen design from the specification and relevant delivery issues
 before implementation, including its interaction and state handoff. No routes,
