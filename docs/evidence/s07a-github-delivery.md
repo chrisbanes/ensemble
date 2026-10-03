@@ -22,7 +22,7 @@ implementation evidence, not a parallel delivery plan.
 | 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
 | 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
 | 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; reviewed private retained-fixture continuation | **Handback passed; through-merge unqualified with a new admitted hold; remote cleanup unproved** |
-| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair source 38c4738: full check 765/765, preflight 3/3 and independent `ship` for all three contracts; **remaining live qualification pending** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair source 38c4738: full check 765/765, preflight 3/3 and independent `ship` for all three review contracts; **remaining live qualification pending** |
 
 ## 3 October retained-fixture recovery repair and continuation
 
@@ -31,7 +31,7 @@ The repair candidate `369f5cad931d627c07911c348b6fd6ffc5671152` passed
 `npm run check`: type checking, lint, formatting, build and 725/725 tests.
 Focused refused-initial, recovery-continuation and original recovery tests passed
 62/62; the preflight passed 3/3. Independent review returned `ship` for all three
-repair contracts. These checks qualify the bounded source repair, not successful
+review contracts (correctness/standards, reuse/clarity/efficiency, overengineering). These checks qualify the bounded source repair, not successful
 completion of either real delivery journey.
 
 R1 allows a fresh operator message to continue after a positively proved
@@ -86,8 +86,9 @@ cleanup claim. The following continuation records the subsequent live outcome.
 The frozen runtime source `38c4738b931dc56d86c00f3d2a90d197152ebd77` passed
 `npm ci`, the pinned Node `24.21.0` / npm `12.2.0` full `npm run check`
 with 765/765 tests, and fixture preflight 3/3. Independent source review returned
-`ship` for all three recovery contracts. The reviewed private continuation harness
-was frozen at SHA-256
+`ship` for all three review contracts (correctness/standards,
+reuse/clarity/efficiency, overengineering). The reviewed private continuation
+harness was frozen at SHA-256
 `339b9726cff5d45b98aa876c5cc78d6438f06de275c413477d100248912e119f`.
 
 The live attempt adopted the approved historical pre-turn evidence and recovered
@@ -105,13 +106,18 @@ action existed and failed with `Unknown delivery action`. Its failure handler
 stopped the service gracefully. The service retained the newly admitted merge
 request at sequence 8, work revision 1, with null thread/turn identities and
 `Runtime stopped` in its recorded reason. Writer and capacity ownership and one
-pending assignment result remain held. This is a qualification harness failure; the source retained ownership conservatively.
+pending assignment result remain held. This is a qualification harness failure;
+the source retained ownership conservatively.
 
 The original R1 refusal, R2 recovery proof and R3 recovery proof remain preserved.
 Five turns total are charged against the 12-turn ceiling, with four successful
 terminal reports. No fixture merge was performed, remote cleanup remains unproved,
-and the fixture is retained. Eligibility to recover the new hold is under read-only
-investigation; no release, retry or additional live run is recorded. Handback
+and the fixture is retained. Read-only investigation concluded that none of the
+existing R1, R2 or R3 proofs qualifies the new hold. An unobserved `thread/start`
+response may have followed creation of an idle thread; the no-turn ledger does
+not prove that no thread was created. A distinct no-turn-submission recovery
+contract requires a material decision and explicit approval before implementation
+or use. No release, retry or additional live run is recorded. Handback
 qualification does not complete #737 or qualify the through-merge journey.
 
 ## 2 October qualification and checkpoint repair
