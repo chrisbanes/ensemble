@@ -39,7 +39,7 @@ Make the next decision obvious, and keep its evidence close:
   the existing board mapping. A running agent alone is insufficient evidence of a
   repair. Show unknown responsibility honestly. Keep readiness, completed work,
   cancellation and provider closure without delivery distinguishable.
-- **Task workspace:** prioritise outcome, current situation/next actor, unresolved
+- **Task detail:** prioritise outcome, current situation/next actor, unresolved
   decisions and evidence. Disclose assignments and captured history underneath,
   retaining the task's accountable lead and assignment/conversation identities.
   Use recorded facts and attributed excerpts; add no invented summary capability.
@@ -288,7 +288,7 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 | Refinement section and evidence/response journey | Section `uhRIV`; 27 `YjRad`, 28 `uJVe2`, 29 `e1kkI`, 30 `o6O3M`, 31 `q2vYE` |
 | Approval confirmation and phone review | 32 `US7Kv`, 33 `ZWQIU` |
 | Phone composer and validation disclosure | 34 `i3glx`, 35 `wXiWx`, 35b `JX4dm` |
-| Repair, completed and unknown-responsibility task workspaces | 36 `oipj4`, 37 `Q24BPH`, 45 `kiPK9` |
+| Repair, completed and unknown-responsibility task details | 36 `oipj4`, 37 `Q24BPH`, 45 `kiPK9` |
 | Phone repair, capacity, completion, cancellation and closure | 38 `zs53F`, 39 `Z6U3T4`, 40 `Thy1i`, 41 `rn49D`, 42 `ALMfc` |
 | Desktop lifecycle comparison and interaction checklist | 43 `zeoGi`, 44 `BvX5O` |
 
@@ -337,7 +337,7 @@ additional standalone fields, tabs, history disclosures, alerts and task rows.
 Domain content remains editable in slots; no competing canvas was created.
 
 Representative reviewed frames include Overview `N9G11A`, composer `Z315o`,
-task workspace `RyH7J`, Inbox `cGjau`, approval `DAeiN`, List `nD0nh`, boards
+task detail `RyH7J`, Inbox `cGjau`, approval `DAeiN`, List `nD0nh`, boards
 `E7qC9` / `MUFPD`, phone composer `i3glx`, phone Waiting `GWXOi`, phone approval
 `ZWQIU`, failed/stale response fixtures `uJVe2` / `e1kkI`, repair `oipj4` and
 completed work `Q24BPH`. Remaining existing fixtures share the same imported
@@ -389,7 +389,7 @@ the relevant requirements. No application code or implementation evidence change
 ### Review repairs — 3 October 2026
 
 Overview now orders execution uncertainty first, then the 09:14 question before
-the 10:52 approval, matching Inbox. Task workspace `RyH7J` and full-content reference
+the 10:52 approval, matching Inbox. Task detail `RyH7J` and full-content reference
 `QGdAx` identify AT-142 as imported from `acme/atlas#142` and retain the open
 `acme/design-system#87` dependency independently of AP-17 approval, consistent with
 the board, imported detail and approval screens. Composer `Z315o` now uses 12px

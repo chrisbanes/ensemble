@@ -3746,7 +3746,7 @@
       "id": "RyH7J",
       "x": 3080,
       "y": 1140,
-      "name": "03a · Task workspace / evidence before history · laptop",
+      "name": "03a · Task detail / evidence before history · laptop",
       "theme": {
         "X:Mode": "Dark",
         "X:Base": "Neutral",
@@ -4364,7 +4364,7 @@
             {
               "type": "frame",
               "id": "G4kIbG",
-              "name": "Task workspace",
+              "name": "Task detail",
               "width": "fill_container",
               "height": "fill_container",
               "gap": 24,
@@ -5238,7 +5238,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "The initial task workspace shows outcome, current situation and next actor, unresolved decisions, then attributed results and evidence. Assignments and captured conversations open through disclosure; no raw output is required to understand the task.",
+              "content": "The initial task detail shows outcome, current situation and next actor, unresolved decisions, then attributed results and evidence. Assignments and captured conversations open through disclosure; no raw output is required to understand the task.",
               "lineHeight": 1.5,
               "fontFamily": "Inter",
               "fontSize": 14,
@@ -11774,7 +11774,7 @@
         {
           "type": "frame",
           "id": "F4HD4",
-          "name": "Imported task workspace",
+          "name": "Imported task detail",
           "width": "fill_container",
           "height": "fill_container",
           "layout": "vertical",
@@ -32270,7 +32270,7 @@
             {
               "type": "frame",
               "id": "WjjWP",
-              "name": "Task workspace",
+              "name": "Task detail",
               "width": "fill_container",
               "gap": 32,
               "children": [
@@ -44771,7 +44771,7 @@
       "id": "oipj4",
       "x": 0,
       "y": 15651,
-      "name": "36 · Task workspace / recorded repair, no operator decision",
+      "name": "36 · Task detail / recorded repair, no operator decision",
       "theme": {
         "X:Mode": "Dark",
         "X:Base": "Neutral",
@@ -45386,7 +45386,7 @@
             {
               "type": "frame",
               "id": "MamKr",
-              "name": "Task workspace",
+              "name": "Task detail",
               "width": "fill_container",
               "height": "fill_container",
               "gap": 24,
@@ -46004,7 +46004,7 @@
       "id": "Q24BPH",
       "x": 1466,
       "y": 15651,
-      "name": "37 · Task workspace / completed result with evidence",
+      "name": "37 · Task detail / completed result with evidence",
       "theme": {
         "X:Mode": "Dark",
         "X:Base": "Neutral",
@@ -46625,7 +46625,7 @@
             {
               "type": "frame",
               "id": "w1ptcm",
-              "name": "Task workspace",
+              "name": "Task detail",
               "width": "fill_container",
               "height": "fill_container",
               "gap": 24,
@@ -47118,7 +47118,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Your message will reach Mira on her next eligible turn. Sending does not bypass pause or stop.",
+                              "content": "Your message will reach Jonas on his next eligible turn. Sending does not bypass pause or stop.",
                               "lineHeight": 1.25,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -51269,11 +51269,11 @@
         {
           "type": "text",
           "id": "Z71FC",
-          "name": "Task workspace and history heading",
+          "name": "Task detail and history heading",
           "fill": "$X:--foreground",
           "textGrowth": "fixed-width",
           "width": "fill_container",
-          "content": "Task workspace and history",
+          "content": "Task detail and history",
           "lineHeight": 1.5,
           "fontFamily": "Inter",
           "fontSize": 18,
@@ -51282,7 +51282,7 @@
         {
           "type": "text",
           "id": "oOsaC",
-          "name": "Task workspace and history detail",
+          "name": "Task detail and history detail",
           "fill": "$X:--foreground",
           "textGrowth": "fixed-width",
           "width": "fill_container",
@@ -52197,7 +52197,7 @@
       "id": "kiPK9",
       "x": 2932,
       "y": 16651,
-      "name": "45 · Task workspace / running, repair responsibility unknown",
+      "name": "45 · Task detail / running, repair responsibility unknown",
       "theme": {
         "X:Mode": "Dark",
         "X:Base": "Neutral",
@@ -52812,7 +52812,7 @@
             {
               "type": "frame",
               "id": "t6Hb8",
-              "name": "Task workspace",
+              "name": "Task detail",
               "width": "fill_container",
               "height": "fill_container",
               "gap": 24,

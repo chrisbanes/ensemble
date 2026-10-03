@@ -542,12 +542,12 @@ success, confirmed failure or uncertain. Do not present local or optimistic stat
 as a confirmed GitHub update. Refreshing or retrying must preserve the existing
 remote-write reconciliation and permission rules.
 
-### Task workspace
+### Task detail
 
 The initial task view presents the outcome, current situation and next actor,
 unresolved decisions, and relevant results or evidence before detailed history.
 Keep delivery observations, artifacts, dependencies, assignments and captured
-conversations accessible within the task workspace. Understanding current work
+conversations accessible within task detail. Understanding current work
 must not require reading raw runtime output.
 
 Preserve the task, assignment and conversation hierarchy: the task retains the
