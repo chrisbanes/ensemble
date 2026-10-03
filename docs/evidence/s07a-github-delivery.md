@@ -1,14 +1,17 @@
 # S07a GitHub delivery evidence
 
-Status: **handback failed / unqualified; admitted pre-turn recovery pending**.
-The 3 October 2026 continuation exercised exact-generation recovery and fresh
-operator continuation on the retained handback fixture, then held its newly
-admitted request when Codex rejected resume of an archived session before thread
-binding or turn submission. It started zero new turns;
-the original three of the approved 12 remain counted. Through-merge completion
-and remote cleanup remain unproved. See the
+Status: **handback qualified; through-merge and remote cleanup unqualified**.
+The latest 3 October 2026 continuation exercised approved pre-turn evidence
+adoption and recovery, explicit conversation replacement and a fresh operator
+message. Handback completed with a new settlement and finalized current completion.
+A later private qualification harness error stopped the through-merge attempt and
+left a newly admitted request held before thread binding or turn submission.
+Five of the approved 12 turns are counted, with four successful terminals; the
+original interrupted third turn is not recorded as successful. No fixture merge
+or remote cleanup is proved. The earlier
 [durable live checkpoint](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5966459064)
-and [draft repair PR #760](https://github.com/chrisbanes/ensemble/pull/760).
+and [draft repair PR #760](https://github.com/chrisbanes/ensemble/pull/760)
+retain the prior recovery context.
 
 The approved issue plan is [#737 revision 1](https://github.com/chrisbanes/ensemble/issues/737#issuecomment-5939939084),
 against `46e9fc8de5ab0a527732d9c24d2f9c6d7b20fac6`. This inventory records
@@ -18,8 +21,8 @@ implementation evidence, not a parallel delivery plan.
 | --- | --- | --- |
 | 1. Deterministic faults and real SQLite | Policy/store/service/provider tests; real file-backed intent/retry/feedback restart fixtures | Targeted and full pinned checks passed |
 | 2. Both modes, project authority, feedback/CI, stale material, child/effect gates | Bound service mode tests, exact approval continuation/consumption, existing shared coordination gates, fresh settlement/completion tests, authenticated Chromium | Targeted and full pinned checks passed |
-| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; retained partial live evidence | **Failed / unqualified; recovery and final completion required** |
-| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair candidate 369f5ca: full check 725/725, focused 62/62, preflight 3/3; **final live qualification remains pending** |
+| 3. Designated real handback and through-merge journeys | `test/s07a/live-delivery.mjs`, strict manifest/grant guard; reviewed private retained-fixture continuation | **Handback passed; through-merge unqualified with a new admitted hold; remote cleanup unproved** |
+| 4. Identities, dispositions, limits and delivery review | This inventory, full pinned checks and independent repair review | Repair source 38c4738: full check 765/765, preflight 3/3 and independent `ship` for all three contracts; **remaining live qualification pending** |
 
 ## 3 October retained-fixture recovery repair and continuation
 
@@ -54,9 +57,8 @@ cleanup independently verified termination of its new App Server process
 remain counted against the 12-turn ceiling.
 
 At that checkpoint, the newly admitted pre-turn hold did not meet the existing
-nonnull thread/turn
-recovery receipt contract. Missing identities, process cleanup or unused turn
-allowance do not release it. The archived session was not unarchived, and no
+nonnull thread/turn recovery receipt contract. Missing identities, process cleanup
+or unused turn allowance do not release it. The archived session was not unarchived, and no
 replacement conversation, fixture reset or blind retry was performed. Handback
 completion remains failed/unqualified; through-merge completion and remote
 cleanup remain unproved. A different recovery proof requires a concrete reviewed
@@ -74,11 +76,43 @@ and audit material are preserved through the transactional nullability migration
 An explicit conversation replacement and a new operator message remain necessary
 before a fresh thread can run; receipt or message replay cannot supply new authority.
 
-The new historical adoption and real continuation have not been qualified live.
-The retained newly admitted generation and fixture remain held; this preparation
-adds no runtime turn, remote effect, fixture reset, unarchive or cleanup claim.
-Handback and through-merge completion remain unqualified pending the remaining
-finite real journeys and recorded cleanup.
+At the preparation checkpoint, historical adoption and real continuation had not
+been qualified live. The retained newly admitted generation and fixture remained
+held; preparation added no runtime turn, remote effect, fixture reset, unarchive or
+cleanup claim. The following continuation records the subsequent live outcome.
+
+## Pre-turn recovery continuation and handback qualification (3 October 2026)
+
+The frozen runtime source `38c4738b931dc56d86c00f3d2a90d197152ebd77` passed
+`npm ci`, the pinned Node `24.21.0` / npm `12.2.0` full `npm run check`
+with 765/765 tests, and fixture preflight 3/3. Independent source review returned
+`ship` for all three recovery contracts. The reviewed private continuation harness
+was frozen at SHA-256
+`339b9726cff5d45b98aa876c5cc78d6438f06de275c413477d100248912e119f`.
+
+The live attempt adopted the approved historical pre-turn evidence and recovered
+that exact generation through the authenticated operator routes. Explicit
+conversation replacement advanced the conversation to revision 2; a new operator
+message then authorised a fresh thread. Turns four and five completed successfully.
+The designated handback journey passed after a new settlement and a current
+completion request finalized, with local Done recorded. Earlier recovery receipts,
+continuation audits and their retained history remained unchanged; old inbox work
+was not replayed or reclassified as a successful terminal.
+
+The through-merge attempt remained unqualified. The private harness called the
+throwing `DeliveryStore.action` accessor from its wait predicate before the target
+action existed and failed with `Unknown delivery action`. Its failure handler
+stopped the service gracefully. The service retained the newly admitted merge
+request at sequence 8, work revision 1, with null thread/turn identities and
+`Runtime stopped` in its recorded reason. Writer and capacity ownership and one
+pending assignment result remain held. This is a qualification harness failure; the source retained ownership conservatively.
+
+The original R1 refusal, R2 recovery proof and R3 recovery proof remain preserved.
+Five turns total are charged against the 12-turn ceiling, with four successful
+terminal reports. No fixture merge was performed, remote cleanup remains unproved,
+and the fixture is retained. Eligibility to recover the new hold is under read-only
+investigation; no release, retry or additional live run is recorded. Handback
+qualification does not complete #737 or qualify the through-merge journey.
 
 ## 2 October qualification and checkpoint repair
 
