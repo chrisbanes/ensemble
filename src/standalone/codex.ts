@@ -1432,7 +1432,10 @@ export class CodexRuntime implements Runtime {
           error: message.error,
         });
         pending.reject(
-          rejection.success && message.result === undefined
+          rejection.success &&
+            message.method === undefined &&
+            message.params === undefined &&
+            message.result === undefined
             ? new ArchivedResumeRejectedError(rejection.data)
             : new Error(JSON.stringify(message.error)),
         );

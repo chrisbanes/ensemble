@@ -2236,6 +2236,9 @@ test("archived RPC text cannot qualify wrong methods, identities or malformed re
     "wrong-thread",
     "malformed",
     "result-and-error",
+    "method-empty",
+    "params-present",
+    "method-and-params",
     "string-id",
     "wrong-method",
     "no-response",
@@ -2257,7 +2260,7 @@ test("archived RPC text cannot qualify wrong methods, identities or malformed re
           "if(m.method==='initialize')write({id:m.id,result:{}});",
           "if(m.method==='account/read')write({id:m.id,result:{account:{type:'chatgpt'}}});",
           "if(m.method==='config/read')write({id:m.id,result:{config:{approval_policy:'never',sandbox_mode:'workspace-write'}}});",
-          `if(m.method==='${mode === "wrong-method" ? "thread/start" : "thread/resume"}' && '${mode}'!=='no-response')write({id:${mode === "string-id" ? "String(m.id)" : "m.id"},error:${JSON.stringify(mode === "malformed" ? { ...error, code: "-32600" } : error)},${mode === "result-and-error" ? "result:{}," : ""}});`,
+          `if(m.method==='${mode === "wrong-method" ? "thread/start" : "thread/resume"}' && '${mode}'!=='no-response')write({id:${mode === "string-id" ? "String(m.id)" : "m.id"},error:${JSON.stringify(mode === "malformed" ? { ...error, code: "-32600" } : error)},${mode === "result-and-error" ? "result:{}," : ""}${mode === "method-empty" || mode === "method-and-params" ? "method:''," : ""}${mode === "params-present" || mode === "method-and-params" ? "params:{malformed:true}," : ""}});`,
           "}",
         ].join("\n"),
       );
