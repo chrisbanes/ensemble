@@ -183,7 +183,11 @@ created fresh installation. Track the intended path out-of-band and never
 start it until restore succeeds and the snapshot is verified.
 
 S08a is backup/restore preparation, not release-candidate recovery or cutover.
-S08b (#698) retains final-schema and external-effect reconciliation, safe
-disposition of old work, host-restart qualification, production deployment and
-the reviewed Haze cutover gate. Do not migrate old work or enable competing
-production work based only on this snapshot.
+S08b (#698) retains final-schema and external-effect recovery qualification,
+including a separately authorised host-restart test if needed, and a reviewed,
+executable cutover proposal. It may complete before deployment. S08c (#761) owns
+the separately authorised production deployment and actual cutover, including
+safe disposition of old work, preservation/rollback and verification that no
+competing scheduler or writer remains. Physical sleep/wake proof (#732) remains
+required before operational use on the Mac. Do not migrate old work or enable
+competing production work based only on this snapshot or completion of S08b.
