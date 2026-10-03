@@ -2,7 +2,7 @@
 
 This is a portable reference for planning and implementing the reviewed Ensemble
 web UI without opening Pen. It was refreshed through Pen MCP on 3 October 2026
-after revising and inspecting the approved operator UX refinements. The editable visual source is
+after revising the operator UX and migrating the canvas to the installed shadcn Pen library. The editable visual source is
 [design.pen](design.pen); this document is a handoff snapshot, not a native Pen
 Markdown export or evidence of implemented behaviour.
 
@@ -10,7 +10,7 @@ Markdown export or evidence of implemented behaviour.
 behaviour, [acceptance.md](../docs/acceptance.md#operator-ui-additions) owns required
 evidence, and [#736](https://github.com/chrisbanes/ensemble/issues/736) owns delivery
 scope and sequencing. Resolve conflicts in favour of those contracts. This file
-records presentation and design references, without choosing a frontend stack.
+records presentation and design references. The user approved shadcn as the component foundation; this canvas migration does not install or implement the application frontend.
 
 ## Pending task overview design — 3 October 2026
 
@@ -27,8 +27,8 @@ here, and link the reviewed design from the specification and delivery issues.
 The approved direction is now represented in the existing editable Pen document.
 Shared components, representative existing screens and the supplementary fixtures
 below were inspected through Pen MCP. This records **designed behaviour**, not
-implemented, browser-tested or runtime-qualified behaviour. The palette and fixed
-typography roles are unchanged. No competing canvas was created.
+implemented, browser-tested or runtime-qualified behaviour. The shadcn migration supersedes the earlier bespoke light and charcoal styling passes;
+the approved product behaviour is unchanged. No competing canvas was created.
 
 Make the next decision obvious, and keep its evidence close:
 
@@ -48,7 +48,7 @@ Make the next decision obvious, and keep its evidence close:
   Preserve validation, drafts and truthful creation/admission feedback.
 - **Readability:** give task meaning and the immediate next step more space than
   repeated navigation metadata. Keep titles distinguishable and supporting text
-  readable. Retain the existing semantic palette and fixed typography roles.
+  readable. Retain semantic state meanings and readable typography; shadcn supplies their visual foundation.
 
 Revise shared components and representative desktop/phone frames using fixtures for
 agent-owned check repair, an operator question, approval with an independent
@@ -65,150 +65,100 @@ brief, not a parallel delivery plan.
 
 ## Visual direction
 
-The named palette describes a calm, light operator workspace: pale blue-grey canvas, white content
-surfaces, dark blue-grey text and a clear blue action colour. Reserve amber, red
-and green for meaningful states. Keep hierarchy visible through typography,
-spacing and alignment; avoid decorative dashboard metrics and unnecessary cards.
-Cards have a purpose in boards, decisions and selectable options. Lists and
-history use compact rows and disclosure instead of a box around every message.
+Use the installed shadcn Pen library (`X`) with Mode **Dark**, Base **Neutral**,
+and Accent **Default**. Screens now reference the library components directly.
+Domain-specific request, task, evidence and history content occupies component
+slots. These compositions preserve Ensemble's spec-owned behaviour.
 
-Overview is attention-first. The dedicated Inbox is the complete action queue.
-Projects remain accessible from the desktop sidebar. Source identity, execution
-state and requests for action are distinct pieces of information.
-
-### Colour bindings
-
-The canvas colour bindings were repaired after a token rename converted fills and
-strokes to literal black. Components and instance overrides now use the semantic
-roles below. Desktop, phone, navigation and control-library renders were checked
-against the light palette.
+Keep the compact workspace: 224px desktop sidebar, 20px main content padding,
+12px workspace gaps, 18px screen titles and 14–16px section headings. Task and
+request titles remain 14px semibold. Supporting text remains 12–14px rather than
+shrinking to accommodate the migration. Desktop buttons use the library's compact
+36px treatment; phone actions retain 44px targets. The outcome editor retains
+260px height on the representative desktop and 180px on phone.
 
 ## Tokens
 
-Names and values below are from Pen's named variables. Pen references them with a
-`$` prefix, for example `$color/primary`; retain a traceable mapping if the code uses
-another naming convention. Only a light presentation is represented in this file.
+All active colour references now use installed library tokens directly. The
+former Ensemble colour aliases and custom warning/error/success palette have
+been removed, along with the unused local typography, radius and spacing
+variables. The document's variable registry now contains only imported `X`
+colour tokens. All screen roots select Dark / Neutral / Default; a user-facing
+theme switch is not designed.
 
-### Colour
-
-| Token | Value |
+| Purpose | Installed token |
 | --- | --- |
-| `color/surface` | `#FFFFFF` |
-| `color/scroll-thumb` | `#B8BFCB` |
-| `color/on-surface` | `#202B3D` |
-| `color/on-surface-variant` | `#59677D` |
-| `color/surface-container` | `#F4F7FC` |
-| `color/surface-container-low` | `#F8FAFD` |
-| `color/outline` | `#DFE6F0` |
-| `color/primary` | `#2864D7` |
-| `color/primary-container` | `#EEF0FC` |
-| `color/on-warning-container` | `#865F18` |
-| `color/warning-container` | `#FFF8E8` |
-| `color/on-error-container` | `#A53C38` |
-| `color/error-container` | `#FCF1F0` |
-| `color/on-success-container` | `#286A53` |
-| `color/success-container` | `#ECF5F0` |
-| `color/scroll-track` | `#EEF0F4` |
-| `color/outline-selected` | `#D3D3EE` |
-| `color/outline-focus` | `#BCCDEE` |
-| `color/outline-error` | `#EED6D3` |
-| `color/on-primary` | `#FFFFFF` |
-| `color/on-primary-container` | `#202B3D` |
+| Page and text | `X:--background`, `X:--foreground` |
+| Supporting text | `X:--muted-foreground` |
+| Cards and alerts | `X:--card`, `X:--card-foreground` |
+| Neutral state surfaces | `X:--muted`, `X:--secondary` |
+| Navigation | `X:--sidebar` and sidebar component tokens |
+| Borders and input outlines | `X:--border`, `X:--input` |
+| Primary actions | `X:--primary`, `X:--primary-foreground` |
+| Selection | `X:--accent`, `X:--accent-foreground` |
+| Focus | `X:--ring` |
+| Error panel borders | `X:--destructive` |
 
-Use `color/on-surface` and `color/on-surface-variant` for main and supporting
-text. `color/surface-container` is the workspace and muted/input background;
-`color/surface-container-low` is navigation. Pair primary with on-primary, and
-primary/warning/error/success containers with their corresponding on-container
-foregrounds. Keep status words visible. Avatar fills remain local examples.
-Calculated token-pair contrast is 14.24:1 for body text on white, 5.74:1 for
-supporting text on white, 5.34:1 for supporting text on the workspace canvas,
-5.39:1 for primary on white, and 5.42–5.76:1 for warning/error/success container
-pairs. These are calculations from the named colours, not rendered browser
-accessibility or focus-compliance results. The focused specimens use a 2px primary
-outline; radio selection is independently shown by a filled dot.
+Routine waiting, success and dependency states use neutral library treatments.
+Visible labels, symbols, explanations and available actions distinguish their
+meaning. Error text remains high-contrast foreground; error panels use destructive
+borders. Colour never establishes repair ownership, delivery or operator attention.
 
-### Typography
+### Typography, spacing and shape
 
-| Token | Family | Use |
-| --- | --- | --- |
-| `font/heading` | Space Grotesk | Wordmark, page and section headings |
-| `font/body` | Instrument Sans | Body, controls and supporting context |
-| `font/mono` | IBM Plex Mono | Identifiers and provenance |
+Inter supplies interface text; JetBrains Mono identifies IDs and provenance.
+Use 12px metadata, 14px body/control text, 14px semibold task/request titles,
+14–16px section headings and 18px screen titles. Library controls use their
+500 weight; custom headings retain 600. Larger type sizes are reserved for canvas documentation, not product screen headings.
 
-The foundations now define fixed roles. Use only these roles; do not introduce
-custom sizes or override typography on component instances. Content and semantic
-colour may vary.
-
-| Role | Family | Size token | Weight | Line height |
-| --- | --- | --- | --- | --- |
-| Metadata | Body | `type/xs` · 12px | Regular or semibold | 1.25 |
-| Identifier | Mono | `type/xs` · 12px | Regular | 1.25 |
-| Control | Body | `type/sm` · 14px | Regular or semibold | 1.25 |
-| Body | Body | `type/sm` · 14px | Regular | 1.5 |
-| Introduction | Body | `type/md` · 16px | Regular or semibold | 1.5 |
-| Callout | Body | `type/lg` · 18px | Regular | 1.5 |
-| Small heading | Heading | `type/md` · 16px | Semibold | 1.25 |
-| Card heading | Heading | `type/lg` · 18px | Semibold | 1.25 |
-| Section heading | Heading | `type/xl` · 22px | Semibold | 1.25 |
-| Feature heading | Heading | `type/2xl` · 26px | Semibold | 1.25 |
-| Page heading | Heading | `type/3xl` · 32px | Semibold | 1.12 |
-| Display heading | Heading | `type/4xl` · 40px | Semibold | 1.1 |
-
-Weights are `weight/regular` (`normal`) and `weight/semibold` (`600`). The medium
-weight and numeric `type/N` tokens have been removed. Available line-height tokens
-are `leading/1-1`, `leading/1-12`, `leading/1-25` and `leading/1-5`.
-The current board-card source uses the 16px small-heading role; the wordmark uses
-26px semibold. These are observed component choices, rather than extra type sizes.
-
-### Spacing and shape
-
-Prefer `space/4`, `space/8`, `space/12`, `space/16`, `space/24` and `space/32`.
-Each suffix is its pixel value. All gaps and padding use the 4px grid. The complete
-spacing scale is 0, 4, 8, 12, 16, 20, 24, 28, 32 and 40. Use intermediate values
-where denser controls or larger layouts need them.
-
-Prefer 6px corners on small controls and 8px on controls and cards. Existing
-board cards use 10px. Available `radius/N` values are 2, 6, 8, 10, 12, 14 and 15.
-Standard component borders are 1px; selected mobile column tabs use a 2px action
-border. Frame dimensions and one-off offsets stay local rather than becoming
-global tokens.
+Use library control geometry, 6px control corners and 8px card corners, with
+local layout overrides only where content or the 44px phone targets require them.
+Composition uses the same 4px spacing rhythm as the installed controls. Custom
+semantic fields and prose are not forced into unnecessary cards.
 
 ## Shared components
 
-These are connected reusable sources in the tidied Pen file. Node IDs are included
-for future MCP inspection; implementation worktrees do not need Pen to read this
-document. Labels, content, semantic state colours and local sizing are overrides. Typography
-uses the fixed roles above; do not add per-instance typography overrides.
+These local reusable specimens now connect to the installed library. Screen
+instances reference imported components directly, rather than the old bespoke
+sources. Content, visibility, semantic colour and responsive size overrides are
+intentional; the library remains the shared primitive foundation.
 
-| Component | Pen node | Presentation contract |
+| Ensemble specimen | Local node | Installed component |
 | --- | --- | --- |
-| Navigation / projects | `vV9lW` | 216px desktop sidebar; workspace selector, Overview, Inbox count, projects and profile; 24px vertical / 16px horizontal padding |
-| Button / primary | `gFnEM` | Primary/on-primary colour pair; 8px corners, 12px vertical / 16px horizontal padding, 14px semibold control type |
-| Button / secondary | `QXGhI` | White surface with outline border and on-surface text. Same base sizing and 14px semibold type as primary |
-| Inbox / request row | `LKh5F` | Specific decision/intervention, project/task, reason the operator is needed, available response, requester and time; 12px padding and 4px gaps; selection identifies the open detail |
-| Source / GitHub issue identity | `GD5ht` | Neutral source identity and link, separate from urgency |
-| Task / board card | `tR6lF` | Title first; source, work state, situation, next actor and attention are separate fields; white surface, 10px corners, 12px padding, 4px gaps; accountable lead retained |
-| Request / recorded response | `pDmEe` | Confirmed recorded outcome, exact request/value/time and remaining delivery or execution hold; reusable in response and creation confirmations |
-| Execution / unresolved GitHub blocker | `g6phYl` | Warning with source link and explicit explanation that approval does not clear the dependency |
-| Question / choice with description | `tzNkV` | Selection indicator beside label/description; 12px padding, 8px gap, 8px corners; recommendation only when supplied |
-| Question / free-text answer | `ADuk1` | White bordered input, 12px padding, 8px corners; 14px body type at 1.5 line height |
-| Status / badge | `i5qvLV` | Semantic foreground/background, visible label, 12px semibold type, 4px vertical / 8px horizontal padding |
-| Navigation / segmented item | `EbZ9i` | List/Board control; 6px corners, 8px vertical / 12px horizontal padding; selected surface/border/action label |
-| Input / text field | `RuvSD` | Standard border, 8px corners, 12px padding, 16px introduction value at 1.5 line height; height follows content |
-| Navigation / board column link | `qv8FM` | Named desktop column and count; selection surface, 14px semibold label |
-| Navigation / mobile column tab | `tNyAS` | 44px height, centred 12px semibold label; selected action border |
+| Navigation / projects | `eifyp` | Sidebar `X:PV1ln`, Sidebar items |
+| Button / primary | `VWlEO` | Button/Default `X:VSnC2` |
+| Button / secondary | `K7cX7` | Button/Outline `X:C10zH` |
+| Inbox / request row | `V8fnr` | Card `X:pcGlv`, request content slot |
+| Source / GitHub issue identity | `vCXTp` | Badge/Outline `X:3IiAS` |
+| Task / board card | `cjNBk` | Card `X:pcGlv`, task content slot |
+| Request / recorded response | `w5VRs` | Alert/Default `X:QyzNg` |
+| Execution / unresolved GitHub blocker | `Ra7pQ` | Alert/Default `X:QyzNg` |
+| Question / choice with description | `NNq5u` | Card plus selected/unselected Radio |
+| Question / free-text answer | `qdM95` | Textarea Group/Filled `X:CrS3L` |
+| Status / badge | `j3TsL` | Badge/Secondary `X:WuUMk` |
+| Navigation / segmented item | `B8KRB` | Tab Item, active/inactive |
+| Input / text field | `tQvAL` | Input/Filled `X:AfQIN` |
+| Navigation / board column link | `Q5GVK` | Tab Item, active/inactive |
+| Navigation / mobile column tab | `kZTPH` | Tab Item with 44px height |
 
-Desktop and compact buttons use 12px vertical padding on the same button source. Do not
-reintroduce separate compact component families. Use actual accessible controls
-for radio buttons, checkboxes and inputs; the canvas glyphs illustrate appearance.
+Project and permitted-assignee fields use Select Group/Default `X:w5c1O`.
+Task lists use Table/Row/Cell components; assignments use Accordion. Agent and
+operator initials use Avatar/Text. Grouped multi-select questions use Checkbox,
+while single-choice questions use Radio. Labels, descriptions, selected values,
+validation messages and response controls remain explicit.
+
+Status icons supplement visible state words. Running does not imply repair
+ownership; provider closure does not imply delivery. In implementation, treat
+these icons as decorative when adjacent text already conveys their meaning.
+Task lead names and accountability remain visible alongside avatars.
 
 ## Layout and responsive composition
 
 The collapsed laptop composer uses 1366 × 820. Revised task, approval and work
 views use 1366 × 900; other desktop frames use 1440 × 900 or 1440 × 960.
 Phone references use 390 × 844. These are review viewports, not fixed
-application dimensions. Main laptop content has 24px vertical / 28px horizontal
-padding and 16px gaps; Inbox and board workspaces use 24px padding and 16px gaps.
+application dimensions. Main desktop content and board workspaces use 20px padding and 12px gaps;
+the Inbox retains 24px padding and 16px gaps.
 The imported desktop workspace uses 28px padding and 20px gaps.
 
 - **Overview:** attention preview above the work list or board, with a route to the
@@ -357,8 +307,7 @@ counts illustrate states rather than defining production defaults.
 The 3 October review inspected the revised desktop and phone renders, checked
 resolved visible-node bounds including component instances, and repaired queue,
 card, history and phone-control overflow. Settled visible-node readbacks reported
-no clipping; root-frame overlap checks also passed. Colour-pair calculations are recorded
-above. This is a bounded canvas review, not a full accessibility audit.
+no clipping; root-frame overlap checks also passed. The current library theme was visually reviewed. This is a bounded canvas review, not a full accessibility audit.
 
 Static design review does not establish responsive implementation, font availability,
 keyboard behaviour, runtime question support or persistence. Validate those against
@@ -378,3 +327,72 @@ dependency or admission rules. The mapping question is resolved.
 
 Done, Cancelled and provider-closed fixtures remain in All tasks and task views
 without redefining the existing active-board mapping.
+
+## shadcn migration review — 3 October 2026
+
+The migration covers the existing 68 top-level frames, including component
+specimens, desktop/phone screens and annotations. It replaces the bespoke
+primitive references with connected installed-library components, and migrates
+additional standalone fields, tabs, history disclosures, alerts and task rows.
+Domain content remains editable in slots; no competing canvas was created.
+
+Representative reviewed frames include Overview `N9G11A`, composer `Z315o`,
+task workspace `RyH7J`, Inbox `cGjau`, approval `DAeiN`, List `nD0nh`, boards
+`E7qC9` / `MUFPD`, phone composer `i3glx`, phone Waiting `GWXOi`, phone approval
+`ZWQIU`, failed/stale response fixtures `uJVe2` / `e1kkI`, repair `oipj4` and
+completed work `Q24BPH`. Remaining existing fixtures share the same imported
+controls and direct library colour tokens. The screen reference map above remains valid.
+
+The final settled resolved-node audit reported zero visible clipping problems
+and zero visible default library placeholder labels. Renders were inspected for
+wrapping, contrast, selected states and visible controls. Repairs included source
+identity sizing, horizontal uncertainty alerts, inactive phone tabs and grouped
+multi-select checkbox semantics. All root placeholders were cleared after review.
+
+The migration preserves exact approval material and the independent dependency
+hold, Ready-in-Waiting mapping, unknown repair responsibility, source ownership,
+Stop/Resume, retained response drafts and truthful command outcomes. It introduces
+no new product question or runtime capability.
+
+Remaining coverage gaps are real resizing/zoom, keyboard and focus restoration,
+virtual keyboard overlays, scrolling, persistence and command reconciliation.
+These are designed/annotated behaviours, not implemented or tested behaviours.
+Not every fixture is shown at every viewport or entry point. No application code,
+GitHub issue or implementation evidence was changed.
+
+The corrected canvas was saved through Pen's native Save command after the review
+repairs below. The Edited indicator cleared and the on-disk file changed. Reopening
+the saved document has not been tested.
+
+### Library reconciliation — 3 October 2026
+
+The follow-up reconciliation updates 3,110 nodes/overrides across the existing
+68 frames, replaces local styling-variable references with direct library colour
+tokens and matching literal type/spacing values, and normalises 45 corner-radius
+overrides. The unused local variable definitions were removed. The installed Pen
+library exposes colour variables only: claiming imported typography or spacing
+tokens would be inaccurate.
+
+Retained adaptations are explicit: compact task/request content, 18px screen
+headings, 14–16px sections, 44px phone controls, identifier monospace, and Ensemble
+content/layout in library slots. These are still custom compositions; the design
+is not an untouched library demo. Component connections and product semantics
+remain unchanged.
+
+Reviewed foundations, desktop List/composer, phone Waiting, and failed/stale
+response renders. The settled visible-node audit across all 68 roots found zero
+clipping and zero remaining legacy styling-variable references. Static renders
+do not test keyboard behaviour, persistence or runtime interactions. Wiki access
+was unavailable during this pass; current SPEC.md and the live canvas supplied
+the relevant requirements. No application code or implementation evidence changed.
+
+### Review repairs — 3 October 2026
+
+Overview now orders execution uncertainty first, then the 09:14 question before
+the 10:52 approval, matching Inbox. Task workspace `RyH7J` and full-content reference
+`QGdAx` identify AT-142 as imported from `acme/atlas#142` and retain the open
+`acme/design-system#87` dependency independently of AP-17 approval, consistent with
+the board, imported detail and approval screens. Composer `Z315o` now uses 12px
+for the shared sidebar workspace label. The four affected renders were inspected;
+resolved-node checks found no clipping. These are canvas checks, not application
+or runtime validation.
