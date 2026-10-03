@@ -274,7 +274,12 @@ const message = z
     eventId: uuid,
     eventType: z.string(),
     recipientAssignmentId: uuid,
-    deliveryState: z.enum(["pending", "queued", "delivered"]),
+    deliveryState: z.enum([
+      "pending",
+      "queued",
+      "delivered",
+      "operator-reconciled",
+    ]),
     createdAt: time,
     text: safeText.optional(),
     decision: z.enum(["approved", "denied"]).optional(),

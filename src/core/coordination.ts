@@ -291,6 +291,16 @@ export interface UnresolvedResultDestination {
   revision: number;
 }
 
+/** Snapshot of a validated reconciled assignment generation; not continuation authority. */
+export interface ReconciledAssignmentProof {
+  workId: string;
+  receiptId: string;
+  taskId: string;
+  assignmentId: string;
+  assignmentVersion: number;
+  material: string;
+}
+
 export interface InboxEvent {
   sequence: number;
   eventId: string;
@@ -398,17 +408,21 @@ export interface ReportingRepair {
 /** Durable result, receipt, inbox, and delivery state over the service SQLite DB. */
 export class CoordinationStore {
   private readonly domain: DomainStore;
-  private readonly isNeverAdmittedRefusedInboxWork:
+  private readonly isNeverAdmittedRefusedAssignmentWork:
     | ((workId: string) => boolean)
     | undefined;
 
   constructor(
     private readonly db: Database,
     domain?: DomainStore,
-    isNeverAdmittedRefusedInboxWork?: (workId: string) => boolean,
+    isNeverAdmittedRefusedAssignmentWork?: (workId: string) => boolean,
+    private readonly reconciledAssignmentProof?: (
+      workId: string,
+    ) => ReconciledAssignmentProof | undefined,
   ) {
     this.domain = domain ?? new DomainStore(db);
-    this.isNeverAdmittedRefusedInboxWork = isNeverAdmittedRefusedInboxWork;
+    this.isNeverAdmittedRefusedAssignmentWork =
+      isNeverAdmittedRefusedAssignmentWork;
   }
 
   migrate(): void {
@@ -566,6 +580,20 @@ export class CoordinationStore {
       CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_queued_delivery
         ON coordination_delivery_batches(recipientAssignmentId)
         WHERE state = 'queued';
+      CREATE TABLE IF NOT EXISTS coordination_recovery_continuations (
+        workId TEXT PRIMARY KEY REFERENCES execution_intents(workId),
+        receiptId TEXT NOT NULL UNIQUE REFERENCES execution_recovery_receipts(id),
+        taskId TEXT NOT NULL REFERENCES domain_tasks(id),
+        assignmentId TEXT NOT NULL,
+        proofMaterial TEXT NOT NULL,
+        operatorCommandKey TEXT NOT NULL,
+        operatorPayloadHash TEXT NOT NULL,
+        operatorEventId TEXT NOT NULL REFERENCES coordination_inbox_events(eventId),
+        operatorEventPayload TEXT NOT NULL,
+        batchId TEXT UNIQUE REFERENCES coordination_delivery_batches(batchId),
+        batchMaterial TEXT,
+        createdAt INTEGER NOT NULL DEFAULT (unixepoch())
+      );
       CREATE TABLE IF NOT EXISTS coordination_delivery_events (
         eventId TEXT PRIMARY KEY REFERENCES coordination_inbox_events(eventId),
         batchId TEXT NOT NULL REFERENCES coordination_delivery_batches(batchId),
@@ -1569,6 +1597,7 @@ export class CoordinationStore {
         payload,
         event.eventId,
       );
+      this.recordRecoveryContinuation(event, command.key, payloadHash(payload));
       this.db.exec("COMMIT");
       return event;
     } catch (error) {
@@ -2679,6 +2708,152 @@ export class CoordinationStore {
     }
   }
 
+  /** Historical exceptions never bypass the current generation's independent gates. */
+  isHistoricalWorkResolved(workId: string): boolean {
+    return Boolean(
+      this.isNeverAdmittedRefusedAssignmentWork?.(workId) ||
+        this.hasRecoveryContinuation(workId),
+    );
+  }
+
+  hasRecoveryContinuation(workId: string): boolean {
+    const audit = this.one(
+      "SELECT * FROM coordination_recovery_continuations WHERE workId = ?",
+      workId,
+    );
+    if (!audit) return false;
+    const proof = this.reconciledAssignmentProof?.(workId);
+    if (
+      !proof ||
+      proof.receiptId !== audit.receiptId ||
+      proof.taskId !== audit.taskId ||
+      proof.assignmentId !== audit.assignmentId ||
+      proof.material !== audit.proofMaterial
+    )
+      return false;
+    const event = this.one(
+      `SELECT taskId, recipientAssignmentId, eventType, payload
+      FROM coordination_inbox_events WHERE eventId = ?`,
+      String(audit.operatorEventId),
+    );
+    const receipt = this.one(
+      `SELECT payloadHash, result FROM coordination_operator_receipts
+      WHERE scope = 'operator-message' AND commandKey = ?`,
+      String(audit.operatorCommandKey),
+    );
+    if (
+      !event ||
+      !receipt ||
+      event.eventType !== "operator-message" ||
+      event.taskId !== proof.taskId ||
+      event.recipientAssignmentId !== proof.assignmentId ||
+      event.payload !== audit.operatorEventPayload ||
+      receipt.payloadHash !== audit.operatorPayloadHash ||
+      receipt.result !== JSON.stringify({ eventId: audit.operatorEventId })
+    )
+      return false;
+    const batch = this.deliveryForWork(workId);
+    if (audit.batchId === null) return batch === undefined;
+    return Boolean(
+      batch &&
+        batch.state === "completed" &&
+        batch.batchId === audit.batchId &&
+        this.recoveryBatchMaterial(batch) === audit.batchMaterial,
+    );
+  }
+
+  /** Delivery processing by an operator never claims a successful runtime turn. */
+  recoveryDispositionForEvent(
+    eventId: string,
+  ): "operator-reconciled" | undefined {
+    return this.one(
+      `SELECT 1 AS reconciled FROM coordination_delivery_events event
+      JOIN coordination_recovery_continuations audit ON audit.batchId = event.batchId
+      WHERE event.eventId = ?`,
+      eventId,
+    )
+      ? "operator-reconciled"
+      : undefined;
+  }
+
+  recoveryDispositionForWork(
+    workId: string,
+  ): "operator-reconciled" | undefined {
+    return this.one(
+      "SELECT 1 AS reconciled FROM coordination_recovery_continuations WHERE workId = ?",
+      workId,
+    )
+      ? "operator-reconciled"
+      : undefined;
+  }
+
+  private recoveryBatchMaterial(batch: InboxDelivery): string {
+    const { state: _state, ...material } = batch;
+    return JSON.stringify(material);
+  }
+
+  private recordRecoveryContinuation(
+    event: InboxEvent,
+    commandKey: string,
+    commandHash: string,
+  ): void {
+    if (!this.reconciledAssignmentProof) return;
+    const requests = this.db
+      .prepare(`SELECT workId FROM turn_requests
+      WHERE taskId = ? AND assignmentId = ? AND state = 'held' ORDER BY sequence`)
+      .all(event.taskId, event.recipientAssignmentId) as Array<{
+      workId: string;
+    }>;
+    for (const { workId } of requests) {
+      if (
+        this.one(
+          "SELECT 1 AS recorded FROM coordination_recovery_continuations WHERE workId = ?",
+          workId,
+        )
+      )
+        continue;
+      const proof = this.reconciledAssignmentProof(workId);
+      if (
+        !proof ||
+        proof.taskId !== event.taskId ||
+        proof.assignmentId !== event.recipientAssignmentId
+      )
+        continue;
+      const batch = this.deliveryForWork(workId);
+      if (
+        batch &&
+        (batch.state !== "queued" ||
+          batch.taskId !== proof.taskId ||
+          batch.recipientAssignmentId !== proof.assignmentId ||
+          batch.assignmentVersion !== proof.assignmentVersion)
+      )
+        continue;
+      this.db
+        .prepare(`INSERT INTO coordination_recovery_continuations
+        (workId, receiptId, taskId, assignmentId, proofMaterial, operatorCommandKey, operatorPayloadHash,
+          operatorEventId, operatorEventPayload, batchId, batchMaterial)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          workId,
+          proof.receiptId,
+          proof.taskId,
+          proof.assignmentId,
+          proof.material,
+          commandKey,
+          commandHash,
+          event.eventId,
+          event.payload,
+          batch?.batchId ?? null,
+          batch ? this.recoveryBatchMaterial(batch) : null,
+        );
+      if (batch)
+        this.db
+          .prepare(`UPDATE coordination_delivery_batches SET state = 'completed',
+        completedAt = unixepoch() WHERE batchId = ? AND state = 'queued'`)
+          .run(batch.batchId);
+    }
+  }
+
   /** Withdraw only a queued inbox batch whose exact request was safely refused
    * before admission and whose assignment has since been explicitly applied
    * to the current project/profile instruction revisions. */
@@ -2763,7 +2938,7 @@ export class CoordinationStore {
         batch.instructionsRevision !== batch.currentInstructionsRevision ||
         batch.profileRevision !== batch.currentProfileRevision ||
         batch.revoked !== 0 ||
-        !this.isNeverAdmittedRefusedInboxWork?.(workId)
+        !this.isNeverAdmittedRefusedAssignmentWork?.(workId)
       ) {
         this.db.exec("COMMIT");
         return false;
@@ -3474,7 +3649,7 @@ export class CoordinationStore {
       unfinishedWork.some(
         (item) =>
           !(externalAction && item.workId === request.leadWorkId) &&
-          !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
+          !this.isHistoricalWorkResolved(item.workId),
       )
     )
       reasons.push("unfinished-execution");
@@ -3532,7 +3707,7 @@ export class CoordinationStore {
         unfinishedRequests.some(
           (item) =>
             !(externalAction && item.workId === request.leadWorkId) &&
-            !this.isNeverAdmittedRefusedInboxWork?.(item.workId),
+            !this.isHistoricalWorkResolved(item.workId),
         )
       )
         reasons.push("unfinished-turn-request");

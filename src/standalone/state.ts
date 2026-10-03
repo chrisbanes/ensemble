@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "../core/store.js";
+import type { ReconciledAssignmentProof } from "../core/coordination.js";
 import type {
   RecoveryRecord,
   RecoveryReceipt,
@@ -518,7 +519,7 @@ export class ExecutionState {
           'Assignment result has not been committed')`,
       );
       for (const { workId } of unresolvedAssignments)
-        if (!this.isNeverAdmittedRefusedInboxWork(workId))
+        if (!this.isNeverAdmittedRefusedAssignmentWork(workId))
           recordPendingAssignmentResult.run(workId);
     }
   }
@@ -1134,12 +1135,12 @@ export class ExecutionState {
 
   /**
    * A revision refusal is ignorable only when the exact held request and
-   * intent still match their immutable refusal, identify a durable inbox
-   * event, and have no evidence of runtime admission or effects. Current
-   * assignment eligibility is deliberately checked by delivery withdrawal,
+   * intent still match their immutable refusal, identify canonical initial work
+   * or a durable inbox event, and have no evidence of runtime admission or effects.
+   * Current assignment eligibility is checked by admission/delivery withdrawal,
    * not here, so this historical proof remains stable after later completion.
    */
-  isNeverAdmittedRefusedInboxWork(workId: string): boolean {
+  isNeverAdmittedRefusedAssignmentWork(workId: string): boolean {
     const id = z.string().min(1).max(512).parse(workId);
     if (
       !this.hasTurnRequests ||
@@ -1242,18 +1243,27 @@ export class ExecutionState {
     )
       return false;
 
+    const initial = id === `assignment:${row.assignmentId}:initial`;
     const refusal = row.refusalReason;
     if (!refusal.startsWith(refusedRevisionPrefix) || !refusal.endsWith(")"))
       return false;
     const reasons = refusal.slice(refusedRevisionPrefix.length, -1).split(", ");
     if (
       reasons.length === 0 ||
-      !reasons.some((reason) => refusedAssignmentRevisionReasons.has(reason)) ||
+      !reasons.some(
+        (reason) =>
+          refusedAssignmentRevisionReasons.has(reason) ||
+          (initial && reason === "task-revision-changed"),
+      ) ||
       reasons.some(
-        (reason) => !safeRefusedAssignmentRevisionReasons.has(reason),
+        (reason) =>
+          !safeRefusedAssignmentRevisionReasons.has(reason) &&
+          !(initial && reason === "task-revision-changed"),
       )
     )
       return false;
+
+    if (initial) return true;
 
     const eventPrefix = `assignment:${row.assignmentId}:v${row.assignmentVersion}:inbox:`;
     if (!id.startsWith(eventPrefix)) return false;
@@ -1266,6 +1276,91 @@ export class ExecutionState {
             AND event.recipientAssignmentId = ? LIMIT 1`)
         .get(eventId, row.taskId, row.assignmentId) !== undefined
     );
+  }
+
+  /** Recheck retained receipt and the exact recovered generation on every use. */
+  reconciledAssignmentProof(
+    workId: string,
+  ): ReconciledAssignmentProof | undefined {
+    if (!this.hasTurnRequests) return undefined;
+    const row = this.db
+      .prepare(`SELECT receipt.*, request.taskId, request.projectId,
+        request.assignmentId, request.taskVersion, request.assignmentVersion,
+        request.instructionsRevision, request.profileRevision,
+        binding.conversationRevision, intent.workspace, admission.sequence AS writerSequence
+      FROM execution_recovery_receipts receipt
+      JOIN execution_intents intent ON intent.workId = receipt.workId
+      JOIN turn_requests request ON request.workId = receipt.workId
+      JOIN execution_recovery_identities identity ON identity.workId = receipt.workId
+      JOIN task_execution_bindings binding ON binding.workId = receipt.workId
+      JOIN task_work_revisions revision ON revision.workId = receipt.workId
+      JOIN task_writer_admissions admission ON admission.workId = receipt.workId
+      JOIN domain_tasks task ON task.id = request.taskId AND task.projectId = request.projectId
+      JOIN domain_assignments assignment ON assignment.id = request.assignmentId
+        AND assignment.taskId = request.taskId AND assignment.projectId = request.projectId
+      WHERE receipt.workId = ? AND intent.state = 'reconciled'
+        AND request.kind = 'assignment' AND request.state = 'held'
+        AND request.reason = 'Execution reconciled; no automatic successor'
+        AND request.sequence = receipt.requestSequence
+        AND identity.requestSequence = receipt.requestSequence
+        AND revision.workRevision = receipt.workRevision
+        AND identity.workRevision = receipt.workRevision
+        AND revision.assignmentId = request.assignmentId
+        AND revision.conversationRevision = binding.conversationRevision
+        AND binding.taskId = request.taskId AND binding.assignmentId = request.assignmentId
+        AND binding.assignmentVersion = request.assignmentVersion
+        AND binding.instructionsRevision = request.instructionsRevision
+        AND binding.profileRevision = request.profileRevision
+        AND intent.threadId = receipt.threadId AND identity.threadId = receipt.threadId
+        AND intent.turnId = receipt.turnId AND identity.turnId = receipt.turnId
+        AND identity.processId = receipt.processId
+        AND identity.processStartedAt = receipt.processStartedAt
+        AND identity.bootId = receipt.bootId
+        AND admission.workspace = intent.workspace
+        AND receipt.effectsState = 'settled'
+        AND receipt.workspaceDisposition IN ('preserved','reconciled')
+        AND receipt.terminationMethod = 'mac-pid-absent-same-boot'
+        AND NOT EXISTS (SELECT 1 FROM execution_capacity_reservations WHERE workId = receipt.workId)
+        AND NOT EXISTS (SELECT 1 FROM execution_pending_effects WHERE workId = receipt.workId AND state = 'pending')
+        AND NOT EXISTS (SELECT 1 FROM execution_stop_targets WHERE taskId = request.taskId AND terminalState != 'completed')
+        AND NOT EXISTS (SELECT 1 FROM task_writer_holds WHERE taskId = request.taskId)
+        AND NOT EXISTS (SELECT 1 FROM task_writer_ambiguity_holds WHERE taskId = request.taskId)
+        AND NOT EXISTS (SELECT 1 FROM task_archival_holds WHERE taskId = request.taskId)
+        AND NOT EXISTS (SELECT 1 FROM task_work_revision_ambiguities WHERE assignmentId = request.assignmentId)
+        AND NOT EXISTS (SELECT 1 FROM execution_request_refusals WHERE workId = receipt.workId)`)
+      .get(z.string().min(1).max(512).parse(workId)) as
+      | Record<string, string | number | null>
+      | undefined;
+    if (
+      !row ||
+      !z
+        .string()
+        .datetime({ offset: true })
+        .safeParse(row.terminationVerifiedAt).success
+    )
+      return undefined;
+    return {
+      workId,
+      receiptId: String(row.id),
+      taskId: String(row.taskId),
+      assignmentId: String(row.assignmentId),
+      assignmentVersion: Number(row.assignmentVersion),
+      material: JSON.stringify(row),
+    };
+  }
+
+  /** A post-continuation survivor invalidates recovery without rewriting its history. */
+  holdReconciledContinuationSurvivor(workId: string, reason: string): void {
+    this.db
+      .prepare(`INSERT OR IGNORE INTO task_writer_ambiguity_holds (taskId, reason)
+      SELECT binding.taskId, ? FROM task_execution_bindings binding
+      JOIN execution_intents intent ON intent.workId = binding.workId
+      JOIN coordination_recovery_continuations audit ON audit.workId = binding.workId
+      WHERE binding.workId = ? AND intent.state = 'reconciled'`)
+      .run(
+        z.string().min(1).max(1000).parse(reason),
+        z.string().min(1).max(512).parse(workId),
+      );
   }
 
   replaceConversation(assignmentId: string): number {

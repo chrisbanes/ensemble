@@ -526,6 +526,12 @@ test("routed candidate result materializes and wakes the task lead at capacity o
       }),
     );
 
+    assert.ok(
+      runtime.prompts.every(
+        (prompt) => !prompt.includes("Current task (revision"),
+      ),
+      "ordinary inbox prompts retain their existing material",
+    );
     assert.equal(routingClient.requests.length, 1);
     assert.equal(runtime.turns, 2);
     assert.equal(runtime.maxActiveTurns, 1);

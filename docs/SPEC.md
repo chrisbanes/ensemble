@@ -238,6 +238,35 @@ Operator messages may target only pending or running assignments. Held or comple
 assignments are not implicitly revived; resolve the hold or create explicit follow-up/
 recovery first. Legacy inbox events do not dispatch a completed assignment.
 
+A retained canonical initial assignment request positively refused for captured task or
+assignment revision mismatch before runtime admission can be continued by posting a
+fresh operator message through the existing task inbox. The original held request,
+intent and refusal remain immutable history; no replacement initial request is created
+automatically. The fresh inbox work captures the current task revision and includes its
+current title/outcome alongside the preserved assignment brief and instruction/profile
+snapshots. Current admission, permissions, dependency, Stop and execution/effect holds
+still apply. Runtime identity, writer admission, capacity reservation, recovery
+identity, pending effects or a Stop target disqualify the historical refusal exemption.
+Any initial inbox batch stays bound unless the existing narrow stale-delivery withdrawal
+proves it safe to withdraw; continuation never orphans or replays that batch.
+
+After exact-generation operator recovery, the old intent remains `reconciled` and
+its turn request remains held; the validated recovery receipt alone does not dispatch
+work. A new operator message to the same task/assignment can explicitly authorize a
+fresh inbox continuation. The message transaction retains an immutable audit linking
+the recovered work, receipt, message key/event and old batch. It processes the old
+batch without replaying its events; task and assignment message views identify this
+as `operator-reconciled`, distinct from successful runtime delivery. Message replay,
+provider feedback and settlement cannot create or retarget that authority. Every
+admission, completion and external completion action rechecks the audit and exact
+recovered-generation proof, while current project/profile/dependency/permission and
+Stop gates remain in force. Late callbacks or known survivors after a recorded
+continuation persist an uncertainty hold and retract admitted successors; ending the
+callback or restarting does not clear that hold. The recovery receipt, old intent and
+continuation audit remain historical evidence, not a successful result or a force
+unlock. Existing callbacks before any recorded continuation retain their previous
+recovery behaviour.
+
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No
 queued turn, follow-up, delegation or replacement may gain admission while Ensemble

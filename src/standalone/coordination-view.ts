@@ -83,6 +83,7 @@ export interface CoordinationWorkHistoryEntry {
   assignmentVersion: number;
   conversationRevision: number;
   state: ExecutionIntent["state"];
+  recoveryDisposition?: "operator-reconciled";
   threadId: string | null;
   turnId: string | null;
 }
@@ -91,7 +92,7 @@ export interface CoordinationViewMessage {
   eventId: string;
   eventType: string;
   recipientAssignmentId: string;
-  deliveryState: "pending" | "queued" | "delivered";
+  deliveryState: "pending" | "queued" | "delivered" | "operator-reconciled";
   createdAt: number;
   text?: string;
   decision?: "approved" | "denied";
@@ -349,6 +350,9 @@ export class CoordinationView {
             assignmentVersion: binding.assignmentVersion,
             conversationRevision: binding.conversationRevision,
             state: intent.state,
+            ...(this.coordination.recoveryDispositionForWork(intent.workId)
+              ? { recoveryDisposition: "operator-reconciled" as const }
+              : {}),
             threadId: intent.threadId,
             turnId: intent.turnId,
           },
@@ -660,11 +664,13 @@ export class CoordinationView {
       eventId: event.eventId,
       eventType: event.eventType,
       recipientAssignmentId: event.recipientAssignmentId,
-      deliveryState: pending.has(event.eventId)
-        ? "pending"
-        : queued.has(event.eventId)
-          ? "queued"
-          : "delivered",
+      deliveryState:
+        this.coordination.recoveryDispositionForEvent(event.eventId) ??
+        (pending.has(event.eventId)
+          ? "pending"
+          : queued.has(event.eventId)
+            ? "queued"
+            : "delivered"),
       createdAt: event.createdAt,
     };
     switch (event.eventType) {
