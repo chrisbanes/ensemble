@@ -63,6 +63,8 @@ export class OperatorWebBoundary {
       path === "/app/tasks" ||
       path === "/app/tasks/new" ||
       path === "/app/inbox" ||
+      path === "/app/search" ||
+      /^\/app\/tasks\/[a-f0-9-]{36}$/.test(path) ||
       path === "/app/settings" ||
       /^\/app\/assignments\/[a-f0-9-]{36}\/recovery$/.test(path) ||
       /^\/app\/settings\/(?:projects\/new|profiles\/new|runtime)$/.test(path) ||
@@ -81,8 +83,21 @@ export class OperatorWebBoundary {
     );
   }
   async read(path: string, query = new URLSearchParams()) {
+    if (path === "/api/operator/search") return this.api.readSearch(query);
     if (path === "/api/operator/task-list")
       return this.api.readTaskListPage(query);
+    const history = path.match(
+      /^\/api\/operator\/assignments\/([^/]+)\/history$/,
+    );
+    if (history) {
+      if ([...query.keys()].some((k) => k !== "beforeSequence"))
+        throw new OperatorApiError(400, "invalid-input");
+      const value = query.get("beforeSequence");
+      const before = value === null ? undefined : Number(value);
+      if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
+        throw new OperatorApiError(400, "invalid-input");
+      return this.api.readAssignmentHistory(history[1] ?? "", before);
+    }
     if ([...query].length) throw new OperatorApiError(400, "invalid-input");
     if (path === "/api/operator/runtime") return this.api.readRuntimeSettings();
     const recovery = path.match(
@@ -106,6 +121,8 @@ export class OperatorWebBoundary {
     if (match) return this.api.readProject(match[1] ?? "");
     match = path.match(/^\/api\/operator\/tasks\/([^/]+)$/);
     if (match) return this.api.readTask(match[1] ?? "");
+    const review = path.match(/^\/api\/operator\/tasks\/([^/]+)\/review$/);
+    if (review) return this.api.readReview(review[1] ?? "");
     match = path.match(/^\/api\/operator\/assignments\/([^/]+)\/history$/);
     if (match) return this.api.readAssignmentHistory(match[1] ?? "");
     return undefined;
@@ -119,6 +136,7 @@ export class OperatorWebBoundary {
         "/api/operator/logout",
         "/api/operator/workspace",
         "/api/operator/task-list",
+        "/api/operator/search",
         "/api/operator/commands",
         "/api/operator/source-refresh",
         "/api/operator/source-observations",
@@ -127,6 +145,9 @@ export class OperatorWebBoundary {
         path,
       ) ||
       /^\/api\/operator\/(?:projects|tasks)\/[^/]+$/.test(path) ||
+      /^\/api\/operator\/tasks\/[^/]+\/(?:review|artifacts\/[^/]+)$/.test(
+        path,
+      ) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
       /^\/api\/operator\/assignments\/[^/]+\/(?:history|recovery)$/.test(path)
     );

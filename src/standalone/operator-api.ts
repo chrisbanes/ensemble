@@ -1,3 +1,5 @@
+import { previewRecordedArtifact, ArtifactUnavailable } from "./task-review.js";
+import { taskReviewReadSchema } from "../core/task-review.js";
 import type { CoordinationView } from "./coordination-view.js";
 import { z } from "zod";
 import { createHash } from "node:crypto";
@@ -27,6 +29,10 @@ import {
   operatorCommandSchema,
   projectSchema,
   taskSchema,
+  reviewReadSchema,
+  searchQuerySchema,
+  searchReadSchema,
+  deliveryReadSchema,
   uuid,
   workspaceSchema,
   type Execution,
@@ -83,6 +89,29 @@ export class OperatorApi {
       new GitHubHttpSourceReader(process.env[ref.slice(4)]),
   ) {
     this.commands = new DomainCommands(service.domain());
+  }
+  private visibilityToken() {
+    const d = this.domain();
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          profiles: d.profiles().map((p) => [p.id, p.version, p.revoked]),
+          projects: d
+            .projects()
+            .map((p) => [
+              p.id,
+              p.version,
+              p.instructionsRevision,
+              d.githubConfiguration(String(p.id)).version,
+              d.routing(String(p.id)).version,
+              this.service.delivery().configuration(String(p.id)).version,
+            ]),
+          credentials: Object.entries(process.env).filter(([key]) =>
+            /TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/.test(key),
+          ),
+        }),
+      )
+      .digest("hex");
   }
   private domain() {
     return this.service.domain();
@@ -694,6 +723,7 @@ export class OperatorApi {
     };
   }
   async readTask(taskId: string) {
+    const visibility = this.visibilityToken();
     const t = this.requireTask(taskId),
       projectId = String(t.projectId),
       d = this.domain(),
@@ -873,6 +903,8 @@ export class OperatorApi {
           createdAt: f.createdAt,
         })),
       },
+      review: await this.reviewProjection(taskId, excluded),
+      delivery: this.deliveryProjection(taskId, excluded),
       contentUnavailable:
         excluded === undefined ||
         [
@@ -889,6 +921,11 @@ export class OperatorApi {
             v !== null && v !== undefined && this.safe(v, excluded) === null,
         ),
     };
+    if (
+      visibility !== this.visibilityToken() ||
+      this.requireTask(taskId).version !== t.version
+    )
+      throw new OperatorApiError(503, "unavailable");
     return taskSchema.parse({ data, observedAt: Date.now() });
   }
   private source(
@@ -983,7 +1020,8 @@ export class OperatorApi {
         : null,
     };
   }
-  async readAssignmentHistory(assignmentId: string) {
+  async readAssignmentHistory(assignmentId: string, beforeSequence?: number) {
+    const visibility = this.visibilityToken();
     uuid.parse(assignmentId);
     for (const p of this.domain().projects())
       for (const task of this.domain().tasks(String(p.id)))
@@ -992,13 +1030,20 @@ export class OperatorApi {
             .assignments(String(task.id))
             .some((a) => a.id === assignmentId)
         ) {
-          const history =
-            this.coordination().readAssignmentHistory(assignmentId);
+          const history = this.coordination().readAssignmentHistory(
+            assignmentId,
+            beforeSequence,
+          );
           const excluded = await this.exclusions(
             String(p.id),
             String(task.id),
             [...history.items, ...history.turnOmissions],
           );
+          if (
+            visibility !== this.visibilityToken() ||
+            this.requireTask(String(task.id)).version !== task.version
+          )
+            throw new OperatorApiError(503, "unavailable");
           return assignmentHistorySchema.parse({
             data: {
               ...history,
@@ -1022,6 +1067,247 @@ export class OperatorApi {
           });
         }
     throw new OperatorApiError(404, "not-found");
+  }
+  private async reviewProjection(
+    taskId: string,
+    excluded: readonly string[] | undefined,
+  ) {
+    const read = this.service.taskReview().read(taskId);
+    const clean = (value: unknown): unknown =>
+      typeof value === "string"
+        ? (this.safe(value, excluded) ?? "[Content unavailable]")
+        : Array.isArray(value)
+          ? value.map(clean)
+          : value && typeof value === "object"
+            ? Object.fromEntries(
+                Object.entries(value).map(([key, v]) => [key, clean(v)]),
+              )
+            : value;
+    return taskReviewReadSchema.parse({
+      ...read,
+      sources: read.sources.map((source) => ({
+        ...source,
+        title: this.safe(source.title, excluded),
+        body: this.safe(source.body, excluded),
+        criteria: source.criteria.map((c) => ({
+          ...c,
+          text: this.safe(c.text, excluded) ?? "[Content unavailable]",
+        })),
+      })),
+      contexts: read.contexts.map((c) => ({
+        ...c,
+        brief: this.safe(c.brief, excluded),
+      })),
+      results: read.results.map((result) => ({
+        ...result,
+        metadata: {
+          ...(clean(result.metadata) as typeof result.metadata),
+          artifacts: result.metadata.artifacts.map((artifact) => {
+            const { file: _file, url, ...rest } = artifact;
+            return {
+              ...rest,
+              label:
+                this.safe(artifact.label, excluded) ?? "Content unavailable",
+              availability:
+                excluded === undefined ||
+                this.safe(artifact.label, excluded) !== artifact.label
+                  ? "redacted"
+                  : artifact.availability,
+              ...(url && this.safe(url, excluded) === url ? { url } : {}),
+            };
+          }),
+        },
+      })),
+    });
+  }
+  private deliveryProjection(
+    taskId: string,
+    excluded: readonly string[] | undefined,
+  ) {
+    const v = this.service.delivery().publicTask(taskId),
+      b = v.binding;
+    return deliveryReadSchema.parse({
+      mode: v.mode,
+      policyVersion: v.policyVersion,
+      blockers: v.blockers.slice(0, 128),
+      binding: b
+        ? {
+            revision: b.revision,
+            number: b.observation.number,
+            repositoryName:
+              this.sourceSummary(taskId, excluded)?.repositoryName ??
+              b.observation.repositoryId,
+            headSha: b.observation.headSha,
+            state: b.observation.state,
+            observedAt: b.observedAt,
+            readError: this.safe(b.readError, excluded),
+            checks: b.observation.checks.slice(0, 128).map((c) => ({
+              name: this.safe(c.name, excluded),
+              sha: c.sha,
+              status: c.status,
+            })),
+            feedback: (b.observation.feedback ?? []).slice(0, 128).map((f) => ({
+              ...f,
+              author: this.safe(f.author, excluded),
+              body: this.safe(f.body, excluded),
+              commitSha: f.commitSha,
+            })),
+          }
+        : null,
+      actions: v.actions.slice(-128).map((a) => ({
+        operationId: a.operationId,
+        kind: a.kind,
+        state: a.state,
+        reason: this.safe(a.reason, excluded),
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+      })),
+    });
+  }
+  async readReview(taskId: string) {
+    const visibility = this.visibilityToken();
+    const t = this.requireTask(taskId),
+      excluded = await this.exclusions(String(t.projectId), taskId);
+    const data = await this.reviewProjection(taskId, excluded);
+    if (
+      visibility !== this.visibilityToken() ||
+      this.requireTask(taskId).version !== t.version
+    )
+      throw new OperatorApiError(503, "unavailable");
+    return reviewReadSchema.parse({
+      data,
+      observedAt: Date.now(),
+    });
+  }
+  async readSearch(params: URLSearchParams) {
+    const visibility = this.visibilityToken();
+    const query = searchQuerySchema.parse(Object.fromEntries(params));
+    if (query.projectId) this.requireProject(query.projectId);
+    const rows = this.service.taskReview().search(query),
+      page = rows.slice(0, query.limit),
+      matches = [];
+    let omittedCount = 0;
+    for (const row of page) {
+      try {
+        const taskId = String(row.taskId),
+          t = this.requireTask(taskId),
+          p = this.requireProject(String(t.projectId)),
+          excluded = await this.exclusions(String(t.projectId), taskId),
+          review = this.service.taskReview().read(taskId),
+          view = this.coordination().readTask(taskId),
+          resultId = row.resultId === null ? null : String(row.resultId),
+          sourceId = row.sourceId === null ? null : String(row.sourceId),
+          retained = resultId
+            ? view.results.some((r) => r.resultId === resultId)
+            : review.sources.some((r) => r.sourceId === sourceId);
+        const excerpt = this.safe(row.excerpt, excluded);
+        if (!retained || excerpt === null || excerpt !== row.excerpt) {
+          omittedCount++;
+          continue;
+        }
+        const historical = resultId
+          ? view.results.at(-1)?.resultId !== resultId
+          : review.sources.at(-1)?.sourceId !== sourceId;
+        matches.push({
+          recordId: row.recordId,
+          type: row.type,
+          taskId,
+          projectId: String(t.projectId),
+          projectName: this.safe(p.name, excluded),
+          taskTitle: this.safe(t.title, excluded),
+          sourceId,
+          resultId,
+          excerpt,
+          createdAt: Number(row.createdAt),
+          historical,
+          href: `/app/tasks/${taskId}?section=${row.type === "task" ? "brief" : "review"}&record=${encodeURIComponent(String(row.recordId))}${resultId ? `&result=${resultId}` : ""}${sourceId ? `&source=${sourceId}` : ""}`,
+        });
+      } catch (error) {
+        if (error instanceof OperatorApiError) {
+          omittedCount++;
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (visibility !== this.visibilityToken())
+      throw new OperatorApiError(503, "unavailable");
+    const permitted = matches.filter((m) => {
+      try {
+        this.requireTask(m.taskId);
+        this.requireProject(m.projectId);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return searchReadSchema.parse({
+      data: {
+        matches: permitted,
+        nextCursor:
+          rows.length > query.limit ? String(page.at(-1)?.recordId) : null,
+        coverage: "retained-records-only",
+        omittedCount: omittedCount + matches.length - permitted.length,
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readArtifact(taskId: string, artifactId: string) {
+    uuid.parse(artifactId);
+    this.requireTask(taskId);
+    try {
+      return await previewRecordedArtifact(async () => {
+        const visibility = this.visibilityToken();
+        const t = this.requireTask(taskId),
+          excluded = await this.exclusions(String(t.projectId), taskId),
+          workspace = await this.service.taskWorkspace(taskId);
+        const current = this.requireTask(taskId),
+          record = this.service
+            .taskReview()
+            .read(taskId)
+            .results.find((r) =>
+              r.metadata.artifacts.some((a) => a.artifactId === artifactId),
+            ),
+          artifact = record?.metadata.artifacts.find(
+            (a) => a.artifactId === artifactId,
+          );
+        if (
+          visibility !== this.visibilityToken() ||
+          !workspace ||
+          workspace.state !== "ready" ||
+          !record ||
+          !artifact ||
+          excluded === undefined ||
+          this.safe(artifact.label, excluded) !== artifact.label
+        )
+          return undefined;
+        return {
+          artifact,
+          workspace: workspace.path,
+          identity: JSON.stringify({
+            taskId,
+            taskVersion: current.version,
+            workspaceId: workspace.workspaceId,
+            workspaceState: workspace.state,
+            resultId: record.resultId,
+            workId: record.workId,
+            workRevision: record.workRevision,
+            artifact,
+            excluded,
+          }),
+        };
+      });
+    } catch (error) {
+      if (error instanceof OperatorApiError) throw error;
+      throw new OperatorApiError(
+        error instanceof ArtifactUnavailable && error.reason === "mismatch"
+          ? 409
+          : 404,
+        error instanceof ArtifactUnavailable && error.reason === "mismatch"
+          ? "conflict"
+          : "not-found",
+      );
+    }
   }
   async readProfileConfiguration(profileId: string) {
     uuid.parse(profileId);
@@ -1406,6 +1692,38 @@ export class OperatorApi {
   async execute(input: unknown) {
     const c = operatorCommandSchema.parse(input);
     try {
+      if (c.type === "review.view") {
+        this.requireTask(c.taskId);
+        const excluded = await this.exclusions(
+          String(this.requireTask(c.taskId).projectId),
+          c.taskId,
+        );
+        if (excluded === undefined)
+          throw new OperatorApiError(503, "unavailable");
+        this.requireTask(c.taskId);
+        this.service
+          .taskReview()
+          .recordViewed(c.taskId, c.key, c.sourceId, c.resultIds);
+        return commandReceiptSchema.parse({
+          kind: "review",
+          key: c.key,
+          recorded: true,
+          taskId: c.taskId,
+          operation: c.type,
+        });
+      }
+      if (c.type === "delivery.refresh") {
+        this.requireTask(c.taskId);
+        await this.coordination().refreshDelivery(c.taskId);
+        this.requireTask(c.taskId);
+        return commandReceiptSchema.parse({
+          kind: "review",
+          key: c.key,
+          recorded: true,
+          taskId: c.taskId,
+          operation: c.type,
+        });
+      }
       if (c.type === "capacity.configure") {
         const command = { ...c, actor: "operator" as const };
         let raw = this.domain().recordedCommand(command);

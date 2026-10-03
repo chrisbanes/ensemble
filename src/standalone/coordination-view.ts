@@ -305,6 +305,7 @@ export class CoordinationView {
     private readonly readConversationHistory?: (
       taskId: string,
       assignmentId: string,
+      beforeSequence?: number,
     ) => ConversationHistoryAssignmentRead,
     private readonly deliveryApi?: {
       readTask: (taskId: string) => TaskDeliveryView;
@@ -316,10 +317,15 @@ export class CoordinationView {
   /** Assignment identity determines its task; history never authorizes execution. */
   readAssignmentHistory(
     assignmentId: string,
+    beforeSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const assignment = this.domain.assignment(uuid.parse(assignmentId));
     const taskId = String(assignment.taskId);
-    const history = this.readConversationHistory?.(taskId, assignmentId) ?? {
+    const history = this.readConversationHistory?.(
+      taskId,
+      assignmentId,
+      beforeSequence,
+    ) ?? {
       items: [],
       turnOmissions: [],
       omittedItemCount: 0,

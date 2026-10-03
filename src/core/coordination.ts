@@ -2391,7 +2391,7 @@ export class CoordinationStore {
       "assignmentVersion, summary, recipientAssignmentId, destinationDisposition, createdAt " +
       "FROM coordination_results" +
       (taskId ? " WHERE taskId = ?" : "") +
-      " ORDER BY createdAt, resultId";
+      " ORDER BY createdAt, rowid";
     const rows = (
       taskId
         ? this.db.prepare(sql).all(uuid.parse(taskId))

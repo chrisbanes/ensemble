@@ -1334,6 +1334,24 @@ export class LocalOperatorHttp {
         json(200, await web.api.execute(body));
         return true;
       }
+      const artifact = path.match(
+        /^\/api\/operator\/tasks\/([^/]+)\/artifacts\/([^/]+)$/,
+      );
+      if (artifact) {
+        if ([...url.searchParams].length)
+          throw new OperatorApiError(400, "invalid-input");
+        const data = await web.api.readArtifact(
+          artifact[1] ?? "",
+          artifact[2] ?? "",
+        );
+        response.writeHead(200, {
+          ...headers,
+          "content-type": data.type,
+          "x-content-type-options": "nosniff",
+        });
+        response.end(data.body);
+        return true;
+      }
       const data = await web.read(path, url.searchParams);
       if (data === undefined) deny(404, "not-found");
       else json(200, data);
