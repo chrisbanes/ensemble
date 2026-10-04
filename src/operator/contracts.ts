@@ -293,6 +293,7 @@ const message = z
     routingOperationId: uuid.optional(),
     routingReason: safeText.optional(),
     interactionId: uuid.optional(),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const result = z
@@ -622,6 +623,14 @@ export const taskSchema = envelope(
         .strict(),
       review: taskReviewReadSchema.optional(),
       delivery: deliveryReadSchema.optional(),
+      commentPolicy: z
+        .object({
+          available: z.boolean(),
+          mode: z.enum(["allow", "approval"]).nullable(),
+          reason: safeText,
+        })
+        .strict()
+        .optional(),
       contentUnavailable: z.boolean(),
     })
     .strict(),
@@ -886,6 +895,37 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({ ...base, type: z.literal("delivery.refresh"), taskId: uuid })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.review"),
+      taskId: uuid,
+      operationId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.confirm"),
+      taskId: uuid,
+      reviewId: uuid,
+      expectedRevision: revision,
+      materialHash: hash,
+      decision: z.enum(["approved", "denied"]),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.send"),
+      taskId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+      reviewId: uuid.optional(),
+    })
     .strict(),
 ]);
 export const configurationReceiptSchema = z
@@ -1229,6 +1269,46 @@ export const commandReceiptSchema = z.discriminatedUnion("kind", [
       recipientAssignmentId: uuid,
       eventType: z.string(),
       createdAt: time,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("comment-review"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      reviewId: uuid,
+      operationId: uuid,
+      revision,
+      materialHash: hash,
+      decision: z.enum(["pending", "approved", "denied"]),
+      body: safeText,
+      target: z
+        .object({ repositoryId: text, nodeId: text, number: revision })
+        .strict(),
+      taskVersion: revision,
+      sourceId: uuid,
+      sourceRevision: revision,
+      sourceDigest: hash,
+      policyVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("delivery"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      operationId: uuid,
+      state: z.enum([
+        "prepared",
+        "attempting",
+        "uncertain",
+        "confirmed-success",
+        "confirmed-failure",
+        "denied",
+      ]),
+      reason: safeText,
     })
     .strict(),
 ]);

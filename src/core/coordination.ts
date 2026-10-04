@@ -24,7 +24,7 @@ import {
   DeliveryStore,
   externalActionSchema,
   actionKinds,
-  type DeliveryCaller,
+  type RuntimeDeliveryCaller,
 } from "./delivery.js";
 import type { Database } from "./store.js";
 
@@ -670,7 +670,7 @@ export class CoordinationStore {
       .run(taskId, identity, event.eventId);
   }
   deliveryActionBlockers(
-    caller: DeliveryCaller,
+    caller: RuntimeDeliveryCaller,
     reviewedResultIds: string[],
     exceptOperationId: string,
   ): string[] {
@@ -701,7 +701,7 @@ export class CoordinationStore {
       ]),
     ];
   }
-  deliveryCaller(call: CoordinationCall): DeliveryCaller {
+  deliveryCaller(call: CoordinationCall): RuntimeDeliveryCaller {
     const parsed = generalCallSchema.parse(call),
       row = this.currentBinding(parsed.threadId, parsed.turnId);
     if (!row) throw new Error("Delivery call is not bound to current work");
@@ -718,7 +718,7 @@ export class CoordinationStore {
   }
   recordAsyncReceipt(
     call: CoordinationCall,
-    caller: DeliveryCaller,
+    caller: RuntimeDeliveryCaller,
     response: CoordinationToolResponse,
   ): CoordinationToolResponse {
     this.db.exec("BEGIN IMMEDIATE");
@@ -1618,6 +1618,14 @@ export class CoordinationStore {
         throw new Error("Message recipient assignment version conflict");
       if (assignment.state !== "pending" && assignment.state !== "running")
         throw new Error("Message recipient must be pending or running");
+      if (command.reference) {
+        const lead = this.one(
+          "SELECT assignmentId FROM task_lead_bindings WHERE taskId=?",
+          command.taskId,
+        );
+        if (lead?.assignmentId !== command.recipientAssignmentId)
+          throw Error("Contextual feedback must target the accountable lead");
+      }
       if (command.reference)
         new TaskReviewStore(this.db).validateReference(
           command.taskId,

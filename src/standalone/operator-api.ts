@@ -1,3 +1,4 @@
+import type { OperatorCommentReview } from "../core/delivery.js";
 import { previewRecordedArtifact, ArtifactUnavailable } from "./task-review.js";
 import { taskReviewReadSchema } from "../core/task-review.js";
 import type { CoordinationView } from "./coordination-view.js";
@@ -760,6 +761,7 @@ export class OperatorApi {
       ...(m.routingReason === undefined
         ? {}
         : { routingReason: this.safe(m.routingReason, excluded) }),
+      ...(m.reference ? { reference: m.reference } : {}),
       ...(m.interactionId === undefined
         ? {}
         : { interactionId: m.interactionId }),
@@ -905,6 +907,7 @@ export class OperatorApi {
       },
       review: await this.reviewProjection(taskId, excluded),
       delivery: this.deliveryProjection(taskId, excluded),
+      commentPolicy: this.commentPolicy(taskId),
       contentUnavailable:
         excluded === undefined ||
         [
@@ -1067,6 +1070,59 @@ export class OperatorApi {
           });
         }
     throw new OperatorApiError(404, "not-found");
+  }
+  private commentPolicy(taskId: string) {
+    const task = this.requireTask(taskId),
+      source = this.identity(taskId),
+      policy = this.service.delivery().configuration(String(task.projectId)),
+      grant = source
+        ? policy.grants.find(
+            (g) =>
+              g.action === "issue.comment" &&
+              g.repositoryId === source.repositoryId,
+          )
+        : undefined,
+      held =
+        this.service.taskHold(taskId) ||
+        !this.domain().admission(taskId).eligible ||
+        this.service.delivery().actionBlockers(taskId).length;
+    return {
+      available: Boolean(source && grant && !held),
+      mode: grant?.mode ?? null,
+      reason: !source
+        ? "Task has no bound GitHub issue"
+        : !grant
+          ? "No project grant for issue comments"
+          : held
+            ? "Task admission or delivery is held"
+            : null,
+    };
+  }
+  private commentReviewReceipt(
+    key: string,
+    review: OperatorCommentReview,
+    excluded: readonly string[] | undefined,
+  ) {
+    if (review.action.kind !== "issue.comment")
+      throw new OperatorApiError(403, "forbidden");
+    return commandReceiptSchema.parse({
+      kind: "comment-review",
+      key,
+      recorded: true,
+      taskId: review.taskId,
+      reviewId: review.reviewId,
+      operationId: review.operationId,
+      revision: review.revision,
+      materialHash: review.materialHash,
+      decision: review.decision,
+      body: this.safe(review.action.body, excluded),
+      target: review.action.target,
+      taskVersion: review.caller.taskVersion,
+      sourceId: review.caller.sourceId,
+      sourceRevision: review.caller.sourceRevision,
+      sourceDigest: review.caller.sourceDigest,
+      policyVersion: review.caller.policyVersion,
+    });
   }
   private async reviewProjection(
     taskId: string,
@@ -1676,6 +1732,13 @@ export class OperatorApi {
     try {
       return await this.commands.execute(c);
     } catch (error) {
+      if (
+        error instanceof Error &&
+        /Operator (?:review|confirmation|delivery|task)|Operation key used|Feedback (?:source|result|work|criterion|artifact)|Imported task source unavailable/.test(
+          error.message,
+        )
+      )
+        throw new OperatorApiError(409, "conflict");
       if (error instanceof DomainPolicyError)
         throw new OperatorApiError(
           error.code === "forbidden" ? 403 : 400,
@@ -1692,6 +1755,57 @@ export class OperatorApi {
   async execute(input: unknown) {
     const c = operatorCommandSchema.parse(input);
     try {
+      if (
+        c.type === "comment.review" ||
+        c.type === "comment.confirm" ||
+        c.type === "comment.send"
+      ) {
+        const task = this.requireTask(c.taskId),
+          visibility = this.visibilityToken(),
+          excluded = await this.exclusions(String(task.projectId), c.taskId);
+        if (
+          visibility !== this.visibilityToken() ||
+          this.requireTask(c.taskId).version !== task.version
+        )
+          throw new OperatorApiError(409, "conflict");
+        if ("body" in c && this.safe(c.body, excluded) !== c.body)
+          throw new OperatorApiError(403, "forbidden");
+        if (c.type === "comment.review")
+          return this.commentReviewReceipt(
+            c.key,
+            this.service.reviewOperatorComment(c),
+            excluded,
+          );
+        if (c.type === "comment.confirm") {
+          const r = this.service.delivery().operatorReview(c.reviewId);
+          if (
+            !r ||
+            r.taskId !== c.taskId ||
+            r.action.kind !== "issue.comment" ||
+            this.safe(r.action.body, excluded) !== r.action.body
+          )
+            throw new OperatorApiError(403, "forbidden");
+          return this.commentReviewReceipt(
+            c.key,
+            this.service.confirmOperatorComment(c),
+            excluded,
+          );
+        }
+        const saved = await this.service.postOperatorComment(c);
+        this.requireTask(c.taskId);
+        return commandReceiptSchema.parse({
+          kind: "delivery",
+          key: c.key,
+          recorded: true,
+          taskId: c.taskId,
+          operationId: saved.operationId,
+          state: saved.state,
+          reason: this.safe(
+            saved.observation?.reason,
+            await this.exclusions(String(task.projectId), c.taskId),
+          ),
+        });
+      }
       if (c.type === "review.view") {
         this.requireTask(c.taskId);
         const excluded = await this.exclusions(
@@ -1948,6 +2062,7 @@ export class OperatorApi {
           "Question is not in this task",
           "Approval is not in this task",
           "Result is not in this task",
+          "Contextual feedback must target the accountable lead",
         ].includes(error.message)
       )
         throw new OperatorApiError(403, "forbidden");

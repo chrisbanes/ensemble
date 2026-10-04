@@ -108,6 +108,7 @@ export interface CoordinationViewMessage {
   routingOperationId?: string;
   routingReason?: string;
   interactionId?: string;
+  reference?: z.infer<typeof feedbackReferenceSchema>;
 }
 
 export interface CoordinationInteractionAttention {
@@ -211,6 +212,7 @@ export interface CoordinationCommandReceipt {
 }
 
 export interface OperatorMessageCommand {
+  reference?: z.infer<typeof feedbackReferenceSchema>;
   taskId: string;
   key: string;
   recipientAssignmentId: string;
@@ -695,12 +697,16 @@ export class CoordinationView {
             .strict()
             .parse(JSON.parse(event.payload)).reason,
         };
-      case "operator-message":
+      case "operator-message": {
+        const payload = assignmentMessageSchema.parse(
+          JSON.parse(event.payload),
+        );
         return {
           ...base,
-          text: assignmentMessageSchema.parse(JSON.parse(event.payload))
-            .message,
+          text: payload.message,
+          ...(payload.reference ? { reference: payload.reference } : {}),
         };
+      }
       case "question-answer": {
         const payload = answerEventSchema.parse(JSON.parse(event.payload));
         return {
