@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-849 deterministic tests with zero skips. Existing lint warnings remain warnings.
+850 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -64,10 +64,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title-first bounded excerpts and clip-boundary exclusions |
-| 15 | current full npm check 849/849; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions |
+| 15 | current full npm check 850/850; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-source-excerpt-check.log` (849/849).
+The current repaired full-check log is `/tmp/ui04-decision-excerpt-check.log` (850/850).
+`/tmp/ui04-source-excerpt-check.log` (849/849) retains the preceding source excerpt evidence.
 `/tmp/ui04-observation-inbox-check.log` (847/847) retains prior source/Inbox repair evidence.
 `/tmp/ui04-ci2-check.log` and `/tmp/ui04-ci-check.log` (845/845) retain prior CI repair evidence.
 `/tmp/ui04-r3-check.log` (843/843) records the earlier focus-repair candidate.
@@ -497,3 +498,38 @@ sidebar/phone/deep-link routes use this same projection and coverage text; no ne
 entry point or control was introduced. All 15 acceptance rows retain their earlier
 proof, with rows 14/15 gaining this bounded-coverage evidence. Runtime/harness,
 original transport-only live proof, consumed grant and released resource are unchanged.
+
+## Bounded retained decision excerpt follow-up
+
+The related decision-index finding from the independent review is repaired by code
+`c1da4fdba486cb168dc9d8ebfd3671ede70ba74e`, tree
+`03aafa118635fe9a14fe825d4c2bcefabbe781c5`. Combining individually valid attribution
+and decision text could exceed the API's excerpt bound and hide a valid decision.
+The index now preserves attribution first and caps the combined excerpt at 16,000
+characters. Full retained decision fields and all source/result/assignment identities
+remain unchanged. Long decision coverage is partial, consistent with the Search
+page's existing bounded-excerpt disclosure; the unindexed tail is not searchable.
+
+The API binds a decision record ID to its exact retained result and array position,
+checks that indexed material equals that decision's bounded projection, and checks
+full attribution/text against current exclusions before exposing any clipped text.
+Unknown positions or unrelated index material fail closed. An actual service report
+callback regression proves a valid 16,000-character decision remains searchable,
+its full retained metadata remains unchanged, the excerpt is exactly bounded,
+unindexed tail text is absent, and a later private phrase crossing the boundary
+omits the row. Corrupt position/material fixture cases also omit rather than guessing.
+Existing source excerpt, source identity, eligibility, move/history and privacy proofs
+remain in the affected tests.
+
+`/tmp/ui04-decision-excerpt-focused.log` passes 21/21 with zero skips.
+`/tmp/ui04-decision-excerpt-check.log` passes the required complete check, 850/850
+with zero skips. There were no focused or full-check failures for this repair.
+Frontend source and production bundle are unchanged: SHA256
+`b27fe881c7f8bb30e399daa6091219a9ad4d4e61e5588497c7f474b77141e9e9`.
+The inspected desktop/phone Search images in
+`/tmp/ui04-source-excerpt-screenshots.json` therefore retain their actual earlier
+source attribution and unchanged frontend evidence. All 15 acceptance rows retain
+prior proof, with rows 14/15 gaining this decision projection evidence. No schema or
+index migration is claimed for unshipped intermediate oversized rows. Runtime,
+harness, historical transport-only live proof, consumed grant and released resource
+remain unchanged; no new live invocation occurred.
