@@ -418,3 +418,199 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
     fullPage: false,
   });
 });
+
+test("collision-shaped literal IDs keep unique DOM controls, label activation and shared restored focus", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const formSchema = {
+    version: 1 as const,
+    questions: [
+      {
+        id: "x",
+        kind: "single-choice" as const,
+        label: "Choice x",
+        required: true,
+        customAllowed: true,
+        options: [
+          { id: "a", label: "First option" },
+          { id: "b", label: "Second option" },
+        ],
+      },
+      ...["x-0", "x-custom", "x-error"].map((id) => ({
+        id,
+        kind: "free-text" as const,
+        label: `Literal ${id}`,
+        required: true,
+      })),
+    ],
+  };
+  const a = await seedOwnQuestion(f, formSchema),
+    web = await f.startWeb();
+  browser = await chromium.launch();
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(
+    `${web.origin}/app/tasks/${a.taskId}?request=${a.interactionId}`,
+  );
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const form = page.getByRole("region", { name: "Exact question response" });
+  await form
+    .getByRole("button", { name: "Submit answer", exact: true })
+    .waitFor();
+  await form
+    .getByRole("button", { name: "Submit answer", exact: true })
+    .click();
+  const uniqueIds = async () => {
+    const ids = await form
+      .locator("[id]")
+      .evaluateAll((elements) => elements.map((el) => el.id));
+    assert.equal(
+      ids.length,
+      new Set(ids).size,
+      "All control/group/error DOM IDs are unique for literal collision-shaped IDs",
+    );
+  };
+  await uniqueIds();
+  const errorField = form.locator('[data-question-id="x-error"]');
+  await errorField.locator("label").click();
+  assert.equal(
+    await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-question-id]")
+        ?.getAttribute("data-question-id"),
+    ),
+    "x-error",
+  );
+  await errorField.getByRole("textbox").fill("Retained x-error value");
+  const focusedId = await errorField.getByRole("textbox").getAttribute("id");
+  assert.ok(focusedId);
+  await page.getByRole("link", { name: "Inbox", exact: true }).click();
+  await page.locator(".inbox-row").click();
+  await form
+    .getByRole("textbox", { name: "Literal x-error", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    focusedId,
+  );
+  assert.equal(
+    await form
+      .getByRole("textbox", { name: "Literal x-error", exact: true })
+      .inputValue(),
+    "Retained x-error value",
+  );
+  await uniqueIds();
+  await page.getByRole("link", { name: "Task evidence", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Answer question", exact: true })
+    .click();
+  await form
+    .getByRole("textbox", { name: "Literal x-error", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    focusedId,
+  );
+  await uniqueIds();
+  await form.getByText("First option", { exact: true }).click();
+  assert.equal(
+    await form
+      .getByRole("radio", { name: "First option", exact: true })
+      .isChecked(),
+    true,
+  );
+  const ordinary = form.locator('[data-question-id="x-0"]');
+  await ordinary.locator("label").click();
+  assert.equal(
+    await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-question-id]")
+        ?.getAttribute("data-question-id"),
+    ),
+    "x-0",
+  );
+  await ordinary.getByRole("textbox").fill("Independent x-0");
+  assert.equal(
+    await form
+      .getByRole("radio", { name: "First option", exact: true })
+      .isChecked(),
+    true,
+  );
+  const literalCustom = form.locator('[data-question-id="x-custom"]');
+  await literalCustom.locator("label").click();
+  assert.equal(
+    await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-question-id]")
+        ?.getAttribute("data-question-id"),
+    ),
+    "x-custom",
+  );
+  await literalCustom.getByRole("textbox").fill("Independent x-custom");
+  assert.equal(
+    await form
+      .getByRole("textbox", { name: "Custom answer: Choice x", exact: true })
+      .inputValue(),
+    "",
+  );
+  await form.getByText("Custom answer: Choice x", { exact: true }).click();
+  assert.equal(
+    await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-question-id]")
+        ?.getAttribute("data-question-id"),
+    ),
+    "x",
+  );
+  await form
+    .getByRole("textbox", { name: "Custom answer: Choice x", exact: true })
+    .fill("Custom x");
+  assert.equal(
+    await literalCustom.getByRole("textbox").inputValue(),
+    "Independent x-custom",
+  );
+  await form.getByText("Second option", { exact: true }).click();
+  assert.equal(
+    await form
+      .getByRole("radio", { name: "Second option", exact: true })
+      .isChecked(),
+    true,
+  );
+  assert.equal(
+    await form
+      .getByRole("textbox", { name: "Custom answer: Choice x", exact: true })
+      .inputValue(),
+    "",
+  );
+  await captureBrowserEvidence(page, "1366-collision-ids", { fullPage: false });
+  await form
+    .getByRole("button", { name: "Submit answer", exact: true })
+    .click();
+  await form
+    .getByText(/Answer recorded/)
+    .first()
+    .waitFor();
+  const saved = f.service
+    .coordinationView()
+    .questionForm(a.interactionId)?.answers;
+  assert.deepEqual(
+    saved,
+    Object.fromEntries([
+      ["x", { optionIds: ["b"], text: "" }],
+      ["x-0", { optionIds: [], text: "Independent x-0" }],
+      ["x-custom", { optionIds: [], text: "Independent x-custom" }],
+      ["x-error", { optionIds: [], text: "Retained x-error value" }],
+    ]),
+  );
+});

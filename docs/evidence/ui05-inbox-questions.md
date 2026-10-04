@@ -18,9 +18,9 @@ Generated assets and disposable fixture databases are not committed.
 
 The final integrated validation is `npm run check` (type checking, lint,
 formatting, service/web builds and the complete deterministic test suite), followed
-by `git diff --check`. Final validation: 911/911 tests passed, zero failures/cancellations/skips; all
+by `git diff --check`. Final validation: 912/912 tests passed, zero failures/cancellations/skips; all
 required type/lint/format/build stages passed. Final complete log:
-`/tmp/ui05-prototype-full-check.log` (47.598 seconds for tests).
+`/tmp/ui05-dom-id-full-check.log` (48.503 seconds for tests).
 No App Server/model/live/paid attempt was added by UI05. Browser evidence uses the
 production Vite bundle, real disposable SQLite and deterministic runtime doubles.
 
@@ -31,9 +31,9 @@ production Vite bundle, real disposable SQLite and deterministic runtime doubles
 | `src/standalone/operator-api.ts` | `553f8ec918046b20891d5b8e5ef1f0a3972d8b40db32644ecb15f491dd71d440` |
 | `src/standalone/operator.ts` | `48de0dede752441d0c2d78aa000773d09be5e981ac2d86cebb6c88df8779bc3e` |
 | `web/src/inbox.tsx` | `c33d94f0fff3f543c0799733426561bfd53218ab6caad25ed563827a050e375f` |
-| `web/src/question-response.tsx` | `83991c811c8e2f39b10df776b1a652d6086b1926f592a4a8deaf809ffcf60135` |
+| `web/src/question-response.tsx` | `c6f8a0335a7c34d33b2f888af325359241a21d8f8ba660f69c6dce47170ff9fe` |
 | `web/src/question-response-state.ts` | `572cab75387e5b5a11c2c12e23cde29961970f8497efd29b668a284cc343545a` |
-| Generated `index-Ddymzjxa.js` | `1332a1bd0dd2ef8418e9e3ce542b1c364429a1daa416228a49b298c2424dc02e` |
+| Generated `index-CsF3lIED.js` | `b424a9ee46bb490a73abec949c83102014f310bc04fcfb8dd479d4251eda7c01` |
 
 ## Acceptance evidence
 
@@ -68,6 +68,19 @@ answer decoder, so its existing generated input schema remains supported. Native
 codec/adapter/delivery source remains unchanged. Original candidate
 `2a33f6019e6d08d6c73a6fd9f901c516c26476c9` and its 908-test check remain historical
 attribution in the delivery record; the repaired complete check is authoritative.
+
+## Presentation identity repair
+
+Independent review found valid question IDs `x`, `x-0`, `x-custom` and `x-error`
+could collide with literal-derived DOM control/error IDs. Presentation identities
+now use stable form question ordinals and explicit control roles, preserving the
+original domain IDs, answer dictionaries and `data-question-id`. The production
+browser regression checks unique group/control/error IDs, actual label activation,
+independent values, restored focus across task → Inbox → task, and exact SQLite
+answers. Successful fail-fast build and affected browser check passed 3/3; the
+renewed integrated check passed 912/912 without timeout changes. Candidate
+`6bc18e691894ea2faec48c1134728fb520d1c388` and its 911-test source/capture attribution
+remain historical in the delivery record. Root final acceptance remains pending.
 
 ## Entry points and recovery
 
@@ -145,7 +158,8 @@ proof; the separate early recorded capture remains inconsistent paint evidence.
 
 | Capture | Viewport / observed state | SHA-256 |
 | --- | --- | --- |
-| `1366-inbox-draft.png` | 1366×900; populated summary queue, styled filters, exact draft | `2de5b29544d3400c28d5123ff7b7b101b6056380c4233b718b3167bd74e3807b` |
-| `390x480-inbox-draft.png` | 390×480; phone detail, draft and visible actions | `5e0392d3490bfa9cfdfe1e961761e410270d8d981c00efd1f2bc95b2f6c2cfb0` |
+| `1366-inbox-draft.png` | 1366×900; populated summary queue, styled filters, exact draft | `05f7b16f47c9fec705434a5466ad7a085fea4748067425fc4bcac96c481422eb` |
+| `390x480-inbox-draft.png` | 390×480; phone detail, draft and visible actions | `8cc436c4964baec3a23fcbb6cf187d2349735d2bc294735c1359ceb20c4ae1fc` |
 | `390x480-last-field.png` | 390×480; recorded task, full last field above readable actions | `e720ff1a424747c0f0fe1a09427eebb5fcfb225dcc17fd9c4c4423afbb3ff05b` |
-| `390x844-last-field.png` | 390×844; task field/actions | `939f8348dbfe4d47f3c1672316e93dce97c3cb803514564ac1300ee7d05357c7` |
+| `390x844-last-field.png` | 390×844; task field/actions | `899f7f601dc59450f6b26fb88ab0fb334805bb6c0d0294a25bfd79f69054f9fa` |
+| `1366-collision-ids.png` | 1366×900; independent choice and literal-ID fields after label activation | `7656f639bd1c4fe646b7593be17268e74fe9ff90dbb7dbc826b20b6fef1f7b0d` |

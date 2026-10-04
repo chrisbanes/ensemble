@@ -203,12 +203,12 @@ export function QuestionResponse({
                   state.scrollTop = e.currentTarget.scrollTop;
                 }}
               >
-                {state.form.questions.map((q) => {
+                {state.form.questions.map((q, questionIndex) => {
                   const answer = (data.status === "recorded" && data.answers
                       ? data.answers
                       : state.answers)[q.id] ?? { optionIds: [], text: "" },
                     error = state.errors[q.id],
-                    qid = `question-${interactionId}-${q.id}`;
+                    qid = `question-${interactionId}-q${questionIndex}`;
                   const update = (optionIds: string[], text: string) => {
                     state.setAnswer(q.id, { optionIds, text });
                     states.changed();
@@ -217,6 +217,7 @@ export function QuestionResponse({
                     <fieldset
                       key={q.id}
                       tabIndex={-1}
+                      id={`${qid}-group`}
                       data-question-id={q.id}
                       className="question-field"
                       aria-describedby={error ? `${qid}-error` : undefined}
@@ -232,10 +233,10 @@ export function QuestionResponse({
                         <p className="literal">{q.description}</p>
                       )}
                       {q.kind === "free-text" ? (
-                        <label htmlFor={qid}>
+                        <label htmlFor={`${qid}-text`}>
                           {q.label}
                           <Textarea
-                            id={qid}
+                            id={`${qid}-text`}
                             value={answer.text}
                             disabled={!canEdit}
                             maxLength={q.maxLength ?? 16000}
@@ -248,16 +249,16 @@ export function QuestionResponse({
                             <label
                               className="question-option"
                               key={option.id}
-                              htmlFor={`${qid}-${i}`}
+                              htmlFor={`${qid}-option-${i}`}
                             >
                               <input
-                                id={`${qid}-${i}`}
+                                id={`${qid}-option-${i}`}
                                 type={
                                   q.kind === "single-choice"
                                     ? "radio"
                                     : "checkbox"
                                 }
-                                name={qid}
+                                name={`${qid}-options`}
                                 disabled={!canEdit}
                                 checked={answer.optionIds.includes(option.id)}
                                 onChange={(e) => {
