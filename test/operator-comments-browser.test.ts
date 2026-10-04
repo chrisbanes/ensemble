@@ -835,7 +835,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
       .catch(() => ({ unavailable: true }));
     const errorCategory =
       error instanceof Error && error.name === "TimeoutError"
-        ? "request-or-response-timeout"
+        ? "timeout"
         : error instanceof Error && error.name === "AssertionError"
           ? "assertion-failed"
           : "unexpected-segment-error";
