@@ -1444,13 +1444,12 @@ export class OperatorApi {
         )
           return false;
         this.requireProject(m.projectId);
-        return (
-          eligibleRecords.has(m.recordId) &&
-          (query.historical ||
-            this.service
-              .taskReview()
-              .isCurrentSearchRecord(m.taskId, m.sourceId, m.resultId))
-        );
+        if (!eligibleRecords.has(m.recordId)) return false;
+        const currentRecord = this.service
+          .taskReview()
+          .isCurrentSearchRecord(m.taskId, m.sourceId, m.resultId);
+        m.historical = !currentRecord;
+        return query.historical || currentRecord;
       } catch {
         return false;
       }

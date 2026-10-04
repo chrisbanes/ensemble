@@ -761,6 +761,35 @@ test("second yielding search revalidates visibility and task revisions before re
   assert.equal(f.service.domain().task(c.taskId).version, version);
   assert.equal(superseded.data.matches.length, 0);
   assert.equal(searches, 2);
+
+  const h = await seedReviewTask(
+    f,
+    "Historical label after await",
+    "Historical label phrase",
+  );
+  const old = h.result("Historical label phrase");
+  const historicalVersion = f.service.domain().task(h.taskId).version;
+  searches = 0;
+  store.search = async (input) => {
+    const rows = await original(input);
+    if (++searches === 2) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      h.result("Newer unrelated historical result");
+    }
+    return rows;
+  };
+  const retained = await api.readSearch(
+    new URLSearchParams({
+      query: "Historical label phrase",
+      type: "result",
+      historical: "true",
+    }),
+  );
+  assert.equal(f.service.domain().task(h.taskId).version, historicalVersion);
+  assert.equal(retained.data.matches.length, 1);
+  assert.equal(retained.data.matches[0]?.resultId, old.resultId);
+  assert.equal(retained.data.matches[0]?.historical, true);
+  assert.equal(searches, 2);
 });
 
 test("held actual Search GET rechecks its exact session after logout and emits no retained payload", async (t) => {
