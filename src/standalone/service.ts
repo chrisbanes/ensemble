@@ -585,6 +585,9 @@ export class StandaloneService {
       }, githubInterval);
       this.githubPollTimer.unref();
     } catch (error) {
+      const scheduler = this.scheduler;
+      scheduler?.stop();
+      this.scheduler = undefined;
       try {
         if (this.state)
           for (const item of this.state.list())
@@ -605,6 +608,12 @@ export class StandaloneService {
           await this.githubSynchronizer?.stop().catch(() => {});
           await this.deliveryCoordinator?.stop().catch(() => {});
           await this.runtime?.stop().catch(() => {});
+          try {
+            await scheduler?.settle();
+          } catch (cleanupError) {
+            if (error instanceof Error && error.cause === undefined)
+              error.cause = cleanupError;
+          }
           await this.supervisor?.settle();
         } finally {
           this.runtime = undefined;
@@ -639,7 +648,8 @@ export class StandaloneService {
   }
 
   async stop(): Promise<void> {
-    this.scheduler?.stop();
+    const scheduler = this.scheduler;
+    scheduler?.stop();
     this.scheduler = undefined;
     if (this.githubPollTimer) clearInterval(this.githubPollTimer);
     this.githubPollTimer = undefined;
@@ -663,6 +673,11 @@ export class StandaloneService {
     this.clearConversationCaptures();
     try {
       if (runtime) await runtime.stop();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+    }
+    try {
+      await scheduler?.settle();
     } catch (error) {
       if (failure === undefined) failure = error;
     }
@@ -2385,6 +2400,15 @@ export class StandaloneService {
     let validateAssignment: (() => string[]) | undefined;
     try {
       if (request.taskId && request.assignmentId && request.projectId) {
+        // Initial local tasks need no repository grant. Existing bindings,
+        // including held/missing workspaces, remain the recovery authority.
+        if (
+          !this.workspaceBindings?.get(request.taskId) &&
+          !this.domain().importedTask(request.taskId) &&
+          !state.taskHold(request.taskId) &&
+          !state.hasTaskWorkspaceEvidence(request.taskId)
+        )
+          await this.requireWorkspaces().provision(request.taskId, []);
         const binding = await this.requireWorkspaces().forExecution(
           request.taskId,
         );

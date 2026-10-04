@@ -262,6 +262,10 @@ export class TurnScheduler {
     this.timer = undefined;
   }
 
+  async settle(): Promise<void> {
+    await this.draining;
+  }
+
   async wake(): Promise<void> {
     if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);

@@ -675,7 +675,12 @@ async function seedCatalog(
       expectedVersion: 1,
       ready: true,
     });
-    await until(() => f.runtime.turns === before + 1);
+    await until(() =>
+      f.service
+        .turnRequests()
+        .some((r) => r.taskId === id && r.state === "active"),
+    );
+    assert.ok(f.runtime.turns >= before + 1);
     const request = f.service
       .turnRequests()
       .find((r) => r.taskId === id && r.state === "active");
@@ -684,8 +689,7 @@ async function seedCatalog(
   };
   const blocker = task("Open dependency"),
     draft = task("Literal <script>malicious()</script>");
-  const waiting = task("Ready but dependent", true, [blocker]),
-    ready = task("Ready selected", true);
+  const waiting = task("Ready but dependent", true, [blocker]);
   const done = task("Completed result"),
     cancelled = task("Cancelled work");
   for (const [taskId, state] of [
@@ -706,6 +710,30 @@ async function seedCatalog(
     uncertainStop = await active("Stop with uncertain ownership"),
     uncertain = await active("Uncertain execution"),
     running = await active("Work running normally");
+  const occupied = d.capacityLimits([projectId]).currentUsage.projects[
+    projectId
+  ];
+  assert.equal(occupied, 5);
+  d.execute({
+    type: "capacity.configure",
+    actor: "operator",
+    key: randomUUID(),
+    globalLimit: 10,
+    projectOverrides: { [projectId]: occupied },
+  });
+  const ready = task("Ready selected", true);
+  await until(() =>
+    f.service
+      .turnRequests()
+      .some((r) => r.taskId === ready && r.state === "queued"),
+  );
+  assert.equal(d.admission(ready).eligible, true);
+  assert.equal(
+    f.service
+      .turnRequests()
+      .filter((r) => r.taskId === ready && r.state === "active").length,
+    0,
+  );
   const work = f.service
     .list()
     .find((w) => w.workId === question.request.workId);
@@ -945,8 +973,8 @@ for (const viewport of [
         .locator(`[data-task-id="${ids.running.id}"]`)
         .getByText(/Capacity currently full/)
         .count(),
-      0,
-      "override ten does not falsely report five reservations as full",
+      1,
+      "occupied project limit preserves eligible Ready work in its real capacity queue",
     );
     await screenshot(page, `${viewport.width}-overview-attention-work`);
     let commandPosts = 0;
@@ -1074,6 +1102,10 @@ for (const viewport of [
     await page
       .getByRole("button", { name: "Refresh tasks", exact: true })
       .click();
+    await page
+      .locator(`[data-task-id="${ids.running.id}"]`)
+      .getByText(/Capacity currently full/)
+      .waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "Board", exact: true }).click();
     await page.getByRole("button", { name: /^Ready \(/ }).click();
     if (viewport.width < 760) {
