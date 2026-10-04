@@ -65,9 +65,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions |
-| 15 | current full npm check 851/851; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 853/853; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-retention-metadata-check.log` (851/851).
+The current repaired full-check log is `/tmp/ui04-source-history-check.log` (853/853).
+`/tmp/ui04-retention-metadata-check.log` (851/851) retains historical source-retention/metadata evidence.
 `/tmp/ui04-decision-excerpt-check.log` (850/850) retains prior decision excerpt evidence.
 `/tmp/ui04-source-excerpt-check.log` (849/849) retains the preceding source excerpt evidence.
 `/tmp/ui04-observation-inbox-check.log` (847/847) retains prior source/Inbox repair evidence.
