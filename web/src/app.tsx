@@ -302,12 +302,16 @@ export function App() {
   );
   const taskRefresh = useRef(tasks.refresh);
   taskRefresh.current = tasks.refresh;
+  const inboxScope =
+    session?.authenticated && path.split("?")[0] === "/app/inbox"
+      ? session.csrfToken
+      : null;
   useEffect(() => {
-    if (!session?.authenticated || path.split("?")[0] !== "/app/inbox") return;
+    if (!inboxScope) return;
     taskRefresh.current();
     const timer = setInterval(() => taskRefresh.current(), 15000);
     return () => clearInterval(timer);
-  }, [path, session?.csrfToken, session?.authenticated]);
+  }, [inboxScope]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: restore the previous entry focus after its route and asynchronous task content render.
   useEffect(() => {
     const href = restoreFocus.current;
