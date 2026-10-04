@@ -93,6 +93,7 @@ export function TaskWorkspace({
     bottom = useRef(false),
     first = useRef(true),
     restoreReadingFocus = useRef(true),
+    capturedFocus = useRef<HTMLElement | null>(null),
     material = useRef<string | null>(null);
   const loader = useCallback(
     (signal: AbortSignal) =>
@@ -121,12 +122,14 @@ export function TaskWorkspace({
       : null;
     state.scrollY = scrollY;
     state.historyAnchor = anchor.current;
+    capturedFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     state.focusRecord =
-      (
-        document.activeElement?.closest(
-          "[data-record-id]",
-        ) as HTMLElement | null
-      )?.dataset.recordId ?? state.focusRecord;
+      (capturedFocus.current?.closest("[data-record-id]") as HTMLElement | null)
+        ?.dataset.recordId ?? null;
+    restoreReadingFocus.current = Boolean(state.focusRecord);
     history.replaceState(
       {
         ...history.state,
@@ -154,14 +157,27 @@ export function TaskWorkspace({
       if ((event.target as Element | null)?.closest('a[href^="/app"]'))
         captureRef.current();
     };
+    const intentionalFocus = (event: FocusEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== capturedFocus.current &&
+        target !== document.body &&
+        (target.closest("[data-record-id]") as HTMLElement | null)?.dataset
+          .recordId !== state.focusRecord
+      )
+        restoreReadingFocus.current = false;
+    };
     document.addEventListener("click", leave, true);
+    document.addEventListener("focusin", intentionalFocus);
     const timer = setInterval(() => refreshRef.current(), 15000);
     return () => {
       scope.current = false;
       clearInterval(timer);
       document.removeEventListener("click", leave, true);
+      document.removeEventListener("focusin", intentionalFocus);
     };
-  }, []);
+  }, [state]);
   const layoutPath = useRef(path);
   // biome-ignore lint/correctness/useExhaustiveDependencies: history DOM insertion must restore the previously captured reading anchor.
   useLayoutEffect(() => {
@@ -197,6 +213,8 @@ export function TaskWorkspace({
         }
       }
     }
+    if (restoreReadingFocus.current && capturedFocus.current?.isConnected)
+      restoreReadingFocus.current = false;
     if (restoreReadingFocus.current) {
       const target = state.focusRecord
         ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")]

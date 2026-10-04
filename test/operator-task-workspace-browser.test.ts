@@ -64,6 +64,7 @@ test("production workspace retains literal history, pending request, focused rep
   });
   j.observe(page);
   page.setDefaultTimeout(5000);
+  await page.clock.install();
   await page.goto(`${web.origin}/app/tasks/${a.taskId}?result=${r.resultId}`);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -116,7 +117,76 @@ test("production workspace retains literal history, pending request, focused rep
       scroll: await page.evaluate(() => scrollY),
     }),
   );
+  assert.equal(
+    await reading
+      .locator("summary")
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  // Exercise the production 15-second polling callback without waiting wall-clock time.
+  const timerHistory = page.waitForResponse((response) =>
+    response
+      .url()
+      .includes(`/assignments/${r.assignmentId}/history?beforeSequence=`),
+  );
+  await page.clock.runFor(15000);
+  await timerHistory;
+  await reading.waitFor({ state: "attached" });
+  assert.equal(
+    await reading
+      .locator("summary")
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  const explicitRefresh = page.getByRole("button", {
+    name: "Refresh task",
+    exact: true,
+  });
+  const explicitHistory = page.waitForResponse((response) =>
+    response
+      .url()
+      .includes(`/assignments/${r.assignmentId}/history?beforeSequence=`),
+  );
+  await explicitRefresh.click();
+  await explicitHistory;
+  await reading.waitFor({ state: "attached" });
+  assert.equal(
+    await explicitRefresh.evaluate((el) => el === document.activeElement),
+    true,
+  );
   await reading.locator("summary").focus();
+  let releaseFocus!: () => void, enterFocus!: () => void;
+  const focusBarrier = new Promise<void>((r) => (releaseFocus = r)),
+    focusEntry = new Promise<void>((r) => (enterFocus = r));
+  let focusHeld = false;
+  const focusRoute = `**/api/operator/assignments/${r.assignmentId}/history*`;
+  await page.route(focusRoute, async (route) => {
+    const response = await route.fetch();
+    if (!focusHeld) {
+      focusHeld = true;
+      enterFocus();
+      await focusBarrier;
+    }
+    await route.fulfill({ response });
+  });
+  await explicitRefresh.evaluate((el) => (el as HTMLElement).click());
+  await focusEntry;
+  await reading.waitFor({ state: "detached" });
+  await page.getByLabel("Editable reply").focus();
+  releaseFocus();
+  await reading.waitFor({ state: "attached" });
+  assert.equal(
+    await page
+      .getByLabel("Editable reply")
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await page.unroute(focusRoute);
+  await reading.scrollIntoViewIfNeeded();
+  await reading.locator("summary").focus();
+  const navigationReadingY = await reading.evaluate(
+    (el) => el.getBoundingClientRect().top,
+  );
   await page
     .getByRole("link", { name: "Search", exact: true })
     .evaluate((el) => (el as HTMLElement).click());
@@ -129,10 +199,10 @@ test("production workspace retains literal history, pending request, focused rep
   assert.ok(
     Math.abs(
       (await reading.evaluate((el) => el.getBoundingClientRect().top)) -
-        readingY,
+        navigationReadingY,
     ) < 4,
     JSON.stringify({
-      readingY,
+      readingY: navigationReadingY,
       actualY: await reading.evaluate((el) => el.getBoundingClientRect().top),
       scroll: await page.evaluate(() => scrollY),
     }),
