@@ -206,9 +206,24 @@ test("shared Search preserves exact historical target, dates, selected focus and
     "",
   );
   assert.equal(await page.locator("[data-search-record]").count(), 0);
-  for (let i = 0; i < 3; i++) {
-    await page.goBack();
-    if (new URL(page.url()).pathname === "/app/search") {
+  const traversePrivateHistory = async (direction: "back" | "forward") => {
+    // Observe the browser's actual traversal, including document replacement,
+    // rather than depending on CDP history-command cancellation error strings.
+    await Promise.all([
+      page.waitForEvent("framenavigated", {
+        predicate: (frame) => frame === page.mainFrame(),
+        timeout: 5000,
+      }),
+      page.evaluate((next) => history[next](), direction),
+    ]);
+    const pathname = new URL(page.url()).pathname;
+    assert.ok(
+      ["/app/search", "/app/tasks", `/app/projects/${b.projectId}`].includes(
+        pathname,
+      ),
+      `Unexpected history destination: ${pathname}`,
+    );
+    if (pathname === "/app/search") {
       await page
         .getByLabel("Search retained task, decision and result records")
         .waitFor();
@@ -219,13 +234,22 @@ test("shared Search preserves exact historical target, dates, selected focus and
           .inputValue(),
         "",
       );
+      assert.equal(await page.locator("[data-search-record]").count(), 0);
+    } else {
+      await page
+        .getByRole("heading", {
+          name: pathname === "/app/tasks" ? "All tasks" : "Beta",
+          exact: true,
+        })
+        .waitFor();
     }
-  }
-  await page
-    .goForward({ waitUntil: "commit" })
-    .catch((error) => assert.match(String(error), /ERR_ABORTED/));
-  if (new URL(page.url()).pathname === "/app/search")
-    assert.equal(new URL(page.url()).search, "");
+    return pathname;
+  };
+  const privateHistory = [];
+  for (let i = 0; i < 3; i++)
+    privateHistory.push(await traversePrivateHistory("back"));
+  const forwardDestination = await traversePrivateHistory("forward");
+  assert.equal(forwardDestination, privateHistory[1]);
   for (const unknown of [false, true]) {
     await page
       .getByRole("link", { name: "Search", exact: true })
