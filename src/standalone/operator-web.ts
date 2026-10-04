@@ -1,5 +1,6 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { OperatorApiError, type OperatorApi } from "./operator-api.js";
 const mime: Record<string, string> = {
   js: "text/javascript; charset=utf-8",
@@ -90,13 +91,52 @@ export class OperatorWebBoundary {
       /^\/api\/operator\/assignments\/([^/]+)\/history$/,
     );
     if (history) {
-      if ([...query.keys()].some((k) => k !== "beforeSequence"))
+      if (
+        [...query.keys()].some(
+          (k) => k !== "beforeSequence" && k !== "beforeOmissionSequence",
+        )
+      )
         throw new OperatorApiError(400, "invalid-input");
       const value = query.get("beforeSequence");
       const before = value === null ? undefined : Number(value);
       if (before !== undefined && (!Number.isSafeInteger(before) || before < 1))
         throw new OperatorApiError(400, "invalid-input");
-      return this.api.readAssignmentHistory(history[1] ?? "", before);
+      const omissionValue = query.get("beforeOmissionSequence");
+      const beforeOmission =
+        omissionValue === null ? undefined : Number(omissionValue);
+      if (
+        beforeOmission !== undefined &&
+        (!Number.isSafeInteger(beforeOmission) || beforeOmission < 1)
+      )
+        throw new OperatorApiError(400, "invalid-input");
+      return this.api.readAssignmentHistory(
+        history[1] ?? "",
+        before,
+        beforeOmission,
+      );
+    }
+    const selectedReview = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)(\/review)?$/,
+    );
+    if (selectedReview) {
+      if ([...query.keys()].some((k) => k !== "resultId" && k !== "sourceId"))
+        throw new OperatorApiError(400, "invalid-input");
+      const parsed = z
+        .object({
+          resultId: z.uuid().optional(),
+          sourceId: z.uuid().optional(),
+        })
+        .strict()
+        .safeParse(Object.fromEntries(query));
+      if (
+        !parsed.success ||
+        [...query.keys()].some((k) => query.getAll(k).length !== 1)
+      )
+        throw new OperatorApiError(400, "invalid-input");
+      const selection = parsed.data;
+      return selectedReview[2]
+        ? this.api.readReview(selectedReview[1] ?? "", selection)
+        : this.api.readTask(selectedReview[1] ?? "", selection);
     }
     if ([...query].length) throw new OperatorApiError(400, "invalid-input");
     if (path === "/api/operator/runtime") return this.api.readRuntimeSettings();
@@ -119,10 +159,6 @@ export class OperatorWebBoundary {
     if (path === "/api/operator/workspace") return this.api.readWorkspace();
     let match = path.match(/^\/api\/operator\/projects\/([^/]+)$/);
     if (match) return this.api.readProject(match[1] ?? "");
-    match = path.match(/^\/api\/operator\/tasks\/([^/]+)$/);
-    if (match) return this.api.readTask(match[1] ?? "");
-    const review = path.match(/^\/api\/operator\/tasks\/([^/]+)\/review$/);
-    if (review) return this.api.readReview(review[1] ?? "");
     match = path.match(/^\/api\/operator\/assignments\/([^/]+)\/history$/);
     if (match) return this.api.readAssignmentHistory(match[1] ?? "");
     return undefined;

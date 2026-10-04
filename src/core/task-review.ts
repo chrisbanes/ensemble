@@ -476,7 +476,56 @@ export class TaskReviewStore {
       .map((r) => sourceSnapshotSchema.parse(JSON.parse(String(r.recordJson))));
   }
   source(taskId: string, id: string) {
-    return this.sources(taskId).find((r) => r.sourceId === id);
+    const row = this.db
+      .prepare(
+        "SELECT recordJson FROM task_review_sources WHERE taskId=? AND sourceId=?",
+      )
+      .get(taskId, id) as Row | undefined;
+    if (!row) return undefined;
+    const source = sourceSnapshotSchema.parse(
+      JSON.parse(String(row.recordJson)),
+    );
+    if (source.taskId !== taskId || source.sourceId !== id)
+      throw Error("Review source identity mismatch");
+    return source;
+  }
+  result(taskId: string, resultId: string) {
+    const row = this.db
+      .prepare(
+        "SELECT recordJson FROM task_review_results WHERE taskId=? AND resultId=?",
+      )
+      .get(taskId, resultId) as Row | undefined;
+    if (!row) return undefined;
+    const record = resultReviewSchema.parse(JSON.parse(String(row.recordJson)));
+    const actual = this.db
+      .prepare(
+        "SELECT taskId,assignmentId,workId,workRevision FROM coordination_results WHERE resultId=?",
+      )
+      .get(resultId) as Row | undefined;
+    if (
+      !actual ||
+      actual.taskId !== taskId ||
+      record.taskId !== taskId ||
+      record.resultId !== resultId ||
+      record.assignmentId !== actual.assignmentId ||
+      record.workId !== actual.workId ||
+      record.workRevision !== actual.workRevision
+    )
+      throw Error("Review result identity mismatch");
+    return record;
+  }
+  artifactOwner(taskId: string, artifactId: string) {
+    const rows = this.db
+      .prepare(
+        "SELECT DISTINCT r.resultId FROM task_review_results r, json_each(r.recordJson,'$.metadata.artifacts') a WHERE r.taskId=? AND json_extract(a.value,'$.artifactId')=? LIMIT 2",
+      )
+      .all(taskId, artifactId) as Row[];
+    if (rows.length !== 1) return undefined;
+    const record = this.result(taskId, String(rows[0]?.resultId));
+    return record?.metadata.artifacts.filter((a) => a.artifactId === artifactId)
+      .length === 1
+      ? record
+      : undefined;
   }
   recordResult(
     result: {
@@ -600,29 +649,89 @@ export class TaskReviewStore {
         );
     });
   }
-  read(taskId: string) {
+  read(
+    taskId: string,
+    selection: {
+      resultId?: string | undefined;
+      sourceId?: string | undefined;
+    } = {},
+  ) {
+    for (const [field, table] of [
+      ["resultId", "coordination_results"],
+      ["sourceId", "task_review_sources"],
+    ] as const) {
+      const id = selection[field];
+      if (!id) continue;
+      uuid.parse(id);
+      const actual = this.db
+        .prepare(`SELECT taskId FROM ${table} WHERE ${field}=?`)
+        .get(id) as Row | undefined;
+      if (actual && actual.taskId !== taskId)
+        throw Error("Review selected anchor belongs to another task");
+    }
+    const result = selection.resultId
+      ? this.result(taskId, selection.resultId)
+      : undefined;
+    const context = result
+      ? this.contextForWork(taskId, result.assignmentId, result.workId)
+      : undefined;
+    if (
+      result?.metadata.sourceId &&
+      context &&
+      context.sourceId !== result.metadata.sourceId
+    )
+      throw Error("Review captured source identity mismatch");
+    const sourceIds = [
+      ...new Set(
+        [
+          selection.sourceId,
+          result?.metadata.sourceId,
+          context?.sourceId,
+        ].filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const sourcePins = sourceIds.flatMap((id) => {
+      const source = this.source(taskId, id);
+      return source ? [source.sourceId] : [];
+    });
+    const rows = (
+      table: string,
+      key: string,
+      limit: number,
+      ids: string[],
+      order = "rowid",
+    ) =>
+      (
+        this.db
+          .prepare(
+            `SELECT ${order} AS ordering,recordJson FROM ${table} WHERE taskId=? ORDER BY CASE WHEN ${key} IN (${ids.map(() => "?").join(",") || "NULL"}) THEN 1 ELSE 0 END DESC,${order} DESC LIMIT ?`,
+          )
+          .all(taskId, ...ids, limit) as Row[]
+      ).sort((a, b) => Number(a.ordering) - Number(b.ordering));
     return taskReviewReadSchema.parse({
-      sources: this.sources(taskId),
-      contexts: (
-        this.db
-          .prepare(
-            "SELECT recordJson FROM task_review_contexts WHERE taskId=? ORDER BY rowid DESC LIMIT 256",
-          )
-          .all(taskId) as Row[]
-      )
-        .reverse()
-        .map((r) =>
-          contextCaptureSchema.parse(JSON.parse(String(r.recordJson))),
-        ),
-      results: (
-        this.db
-          .prepare(
-            "SELECT recordJson FROM task_review_results WHERE taskId=? ORDER BY rowid DESC LIMIT 128",
-          )
-          .all(taskId) as Row[]
-      )
-        .reverse()
-        .map((r) => resultReviewSchema.parse(JSON.parse(String(r.recordJson)))),
+      sources: rows(
+        "task_review_sources",
+        "sourceId",
+        128,
+        sourcePins,
+        "revision",
+      ).map((r) =>
+        sourceSnapshotSchema.parse(JSON.parse(String(r.recordJson))),
+      ),
+      contexts: rows(
+        "task_review_contexts",
+        "captureId",
+        256,
+        context ? [context.captureId] : [],
+      ).map((r) =>
+        contextCaptureSchema.parse(JSON.parse(String(r.recordJson))),
+      ),
+      results: rows(
+        "task_review_results",
+        "resultId",
+        128,
+        result ? [result.resultId] : [],
+      ).map((r) => resultReviewSchema.parse(JSON.parse(String(r.recordJson)))),
       viewed: (() => {
         const r = this.db
           .prepare("SELECT recordJson FROM task_review_viewed WHERE taskId=?")
@@ -633,64 +742,54 @@ export class TaskReviewStore {
     });
   }
   validateReference(taskId: string, input: unknown) {
-    const ref = feedbackReferenceSchema.parse(input),
-      read = this.read(taskId);
-    if (ref.sourceId && !read.sources.some((s) => s.sourceId === ref.sourceId))
+    const ref = feedbackReferenceSchema.parse(input);
+    if (ref.sourceId && !this.source(taskId, ref.sourceId))
       throw Error("Feedback source unavailable");
-    const artifactOwners = ref.artifactId
-      ? read.results.filter((r) =>
-          r.metadata.artifacts.some((a) => a.artifactId === ref.artifactId),
-        )
-      : [];
-    if (ref.artifactId && artifactOwners.length !== 1)
+    const artifactOwner = ref.artifactId
+      ? this.artifactOwner(taskId, ref.artifactId)
+      : undefined;
+    if (ref.artifactId && !artifactOwner)
       throw Error("Feedback artifact unavailable");
-    const ownerId = ref.resultId ?? artifactOwners[0]?.resultId;
     if (
       ref.resultId &&
-      artifactOwners.length &&
-      artifactOwners[0]?.resultId !== ref.resultId
+      artifactOwner &&
+      artifactOwner.resultId !== ref.resultId
     )
       throw Error("Feedback artifact does not match result");
-    const r = ownerId
+    const ownerId = ref.resultId ?? artifactOwner?.resultId;
+    const actual = ownerId
       ? (this.db
           .prepare(
             "SELECT taskId,workId FROM coordination_results WHERE resultId=?",
           )
           .get(ownerId) as Row | undefined)
       : undefined;
-    if (ref.resultId && r?.taskId !== taskId)
+    if (ownerId && actual?.taskId !== taskId)
       throw Error("Feedback result unavailable");
-    const linked = read.results.find((x) => x.resultId === ownerId);
+    const linked = ownerId ? this.result(taskId, ownerId) : undefined;
     if (ownerId && ref.sourceId && linked?.metadata.sourceId !== ref.sourceId)
       throw Error("Feedback source does not match result");
-    if (
-      ownerId &&
-      ref.criterionId &&
-      !this.source(taskId, linked?.metadata.sourceId ?? "")?.criteria.some(
-        (x) => x.criterionId === ref.criterionId,
-      )
-    )
-      throw Error("Feedback criterion does not match result");
-    if (ref.workId && (!r || r.workId !== ref.workId))
+    if (ref.workId && (!actual || actual.workId !== ref.workId))
       throw Error("Feedback work unavailable");
-    if (
-      ref.criterionId &&
-      !read.sources.some(
-        (s) =>
-          (!ref.sourceId || s.sourceId === ref.sourceId) &&
-          s.criteria.some((c) => c.criterionId === ref.criterionId),
+    if (ref.criterionId) {
+      const sources = this.db
+        .prepare(
+          "SELECT DISTINCT s.sourceId FROM task_review_sources s, json_each(s.recordJson,'$.criteria') c WHERE s.taskId=? AND json_extract(c.value,'$.criterionId')=? LIMIT 2",
+        )
+        .all(taskId, ref.criterionId) as Row[];
+      if (sources.length !== 1) throw Error("Feedback criterion unavailable");
+      const criterionSourceId = String(sources[0]?.sourceId);
+      if (ref.sourceId && criterionSourceId !== ref.sourceId)
+        throw Error("Feedback criterion unavailable");
+      if (ownerId && criterionSourceId !== linked?.metadata.sourceId)
+        throw Error("Feedback criterion does not match result");
+      if (
+        !this.source(taskId, criterionSourceId)?.criteria.some(
+          (c) => c.criterionId === ref.criterionId,
+        )
       )
-    )
-      throw Error("Feedback criterion unavailable");
-    if (
-      ref.artifactId &&
-      !read.results.some(
-        (r) =>
-          (!ref.resultId || r.resultId === ref.resultId) &&
-          r.metadata.artifacts.some((a) => a.artifactId === ref.artifactId),
-      )
-    )
-      throw Error("Feedback artifact unavailable");
+        throw Error("Feedback criterion unavailable");
+    }
     return ref;
   }
   recordViewed(
@@ -700,8 +799,7 @@ export class TaskReviewStore {
     resultIds: string[],
   ) {
     uuid.parse(key);
-    const read = this.read(taskId);
-    if (sourceId && !read.sources.some((s) => s.sourceId === sourceId))
+    if (sourceId && !this.source(taskId, sourceId))
       throw Error("Viewed source unavailable");
     for (const id of resultIds) {
       const r = this.db

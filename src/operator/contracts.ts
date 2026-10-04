@@ -693,6 +693,7 @@ export const assignmentHistorySchema = envelope(
           .strict(),
       ),
       omittedItemCount: time,
+      omittedTurnCount: z.number().int().nonnegative(),
     })
     .strict(),
 );

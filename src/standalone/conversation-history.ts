@@ -19,6 +19,7 @@ export interface ConversationHistoryAssignmentRead {
   turnOmissions: ConversationHistoryTurnOmission[];
   /** Number of older item rows omitted because the returned view is bounded. */
   omittedItemCount: number;
+  omittedTurnCount: number;
 }
 
 const maxHistoryTextBytes = 64 * 1024;
@@ -256,12 +257,17 @@ export class ConversationHistoryStore {
     limit = 200,
     currentExclusions?: readonly string[],
     beforeSequence?: number,
+    beforeOmissionSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const boundedLimit = z.number().int().positive().max(200).parse(limit);
     const before =
       beforeSequence === undefined
         ? null
         : z.number().int().positive().parse(beforeSequence);
+    const beforeOmission =
+      beforeOmissionSequence === undefined
+        ? null
+        : z.number().int().positive().parse(beforeOmissionSequence);
     const task = z.string().min(1).parse(taskId);
     const assignment = z.string().min(1).parse(assignmentId);
     const rawItems = this.db
@@ -280,7 +286,7 @@ export class ConversationHistoryStore {
           workRevision, threadId, turnId, reason, createdAt
         FROM conversation_history_turn_omissions WHERE taskId = ? AND assignmentId = ? AND (? IS NULL OR sequence < ?)
         ORDER BY sequence DESC LIMIT ?`)
-      .all(task, assignment, before, before, boundedLimit)
+      .all(task, assignment, beforeOmission, beforeOmission, boundedLimit)
       .reverse()
       .map((row) => turnOmissionSchema.parse(row));
     const itemCount = (
@@ -288,6 +294,15 @@ export class ConversationHistoryStore {
         .prepare(`SELECT COUNT(*) AS count FROM conversation_history_items
           WHERE taskId = ? AND assignmentId = ? AND (? IS NULL OR sequence < ?)`)
         .get(task, assignment, before, before) as { count: number }
+    ).count;
+    const omissionCount = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM conversation_history_turn_omissions WHERE taskId=? AND assignmentId=? AND (? IS NULL OR sequence < ?)",
+        )
+        .get(task, assignment, beforeOmission, beforeOmission) as {
+        count: number;
+      }
     ).count;
     const items: ConversationHistoryEntry[] = rawItems.map((item) => {
       if (item.lifecycle !== "completed") return item;
@@ -308,6 +323,7 @@ export class ConversationHistoryStore {
       items,
       turnOmissions: rawOmissions,
       omittedItemCount: Math.max(0, itemCount - items.length),
+      omittedTurnCount: Math.max(0, omissionCount - rawOmissions.length),
     };
   }
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { CoordinationStore } from "../../src/core/coordination.js";
+import { ConversationHistoryStore } from "../../src/standalone/conversation-history.js";
 import { ExecutionState } from "../../src/standalone/state.js";
 import type { ReviewMetadata } from "../../src/core/task-review.js";
 import type { createOperatorFixture } from "./operator-web.js";
@@ -125,4 +126,67 @@ export async function seedReviewTask(
     result,
     delegatedResult,
   };
+}
+
+export async function seedRetainedReviewWindow(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  artifacts: ReviewMetadata["artifacts"] = [],
+) {
+  const a = await seedReviewTask(
+    f,
+    "Historical evidence",
+    "Original retained brief",
+    "- [ ] Ancient criterion",
+  );
+  const old = a.result("Ancient review result", {
+    sourceId: a.source.sourceId,
+    criteria: [
+      {
+        criterionId: a.source.criteria[0]!.criterionId,
+        outcome: "supported",
+        scope: "Ancient literal scope",
+        provenance: "Recorded original check",
+      },
+    ],
+    decisions: [
+      { text: "Ancient decision evidence", attribution: "Task lead" },
+    ],
+    artifacts,
+  });
+  const results = [old];
+  for (let i = 1; i <= 270; i++) {
+    const d = f.service.domain();
+    d.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: a.projectId,
+      taskId: a.taskId,
+      expectedVersion: Number(d.task(a.taskId).version),
+      outcome: `- [ ] Recent criterion ${i}`,
+    });
+    const source = f.service.taskReview().sources(a.taskId).at(-1)!;
+    results.push(
+      a.result(`Recent review result ${i}`, { sourceId: source.sourceId }),
+    );
+  }
+  f.seedPersistedState((db) => {
+    const capture = new ConversationHistoryStore(db);
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]!;
+      capture.recordEarlyBufferLimit({
+        taskId: a.taskId,
+        assignmentId: a.assignmentId,
+        workId: r.workId,
+        assignmentVersion: 1,
+        instructionsRevision: 1,
+        profileRevision: 1,
+        conversationRevision: 1,
+        workRevision: i + 1,
+        threadId: r.workId,
+        turnId: r.workId,
+      });
+    }
+  });
+  return { ...a, old, results };
 }

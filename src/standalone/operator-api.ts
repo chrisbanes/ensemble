@@ -723,7 +723,13 @@ export class OperatorApi {
       finalizedAt: c.finalizedAt,
     };
   }
-  async readTask(taskId: string) {
+  async readTask(
+    taskId: string,
+    selection: {
+      resultId?: string | undefined;
+      sourceId?: string | undefined;
+    } = {},
+  ) {
     const visibility = this.visibilityToken();
     const t = this.requireTask(taskId),
       projectId = String(t.projectId),
@@ -926,7 +932,7 @@ export class OperatorApi {
           createdAt: f.createdAt,
         })),
       },
-      review: await this.reviewProjection(taskId, excluded),
+      review: await this.reviewProjection(taskId, excluded, selection),
       delivery: this.deliveryProjection(taskId, excluded),
       commentPolicy: this.commentPolicy(taskId),
       contentUnavailable:
@@ -1044,7 +1050,11 @@ export class OperatorApi {
         : null,
     };
   }
-  async readAssignmentHistory(assignmentId: string, beforeSequence?: number) {
+  async readAssignmentHistory(
+    assignmentId: string,
+    beforeSequence?: number,
+    beforeOmissionSequence?: number,
+  ) {
     const visibility = this.visibilityToken();
     uuid.parse(assignmentId);
     for (const p of this.domain().projects())
@@ -1057,6 +1067,7 @@ export class OperatorApi {
           const history = this.coordination().readAssignmentHistory(
             assignmentId,
             beforeSequence,
+            beforeOmissionSequence,
           );
           const excluded = await this.exclusions(
             String(p.id),
@@ -1151,8 +1162,18 @@ export class OperatorApi {
   private async reviewProjection(
     taskId: string,
     excluded: readonly string[] | undefined,
+    selection: {
+      resultId?: string | undefined;
+      sourceId?: string | undefined;
+    } = {},
   ) {
-    const read = this.service.taskReview().read(taskId);
+    const read = (() => {
+      try {
+        return this.service.taskReview().read(taskId, selection);
+      } catch {
+        throw new OperatorApiError(404, "not-found");
+      }
+    })();
     return taskReviewReadSchema.parse({
       ...read,
       sources: read.sources.map((source) => ({
@@ -1281,11 +1302,17 @@ export class OperatorApi {
       })),
     });
   }
-  async readReview(taskId: string) {
+  async readReview(
+    taskId: string,
+    selection: {
+      resultId?: string | undefined;
+      sourceId?: string | undefined;
+    } = {},
+  ) {
     const visibility = this.visibilityToken();
     const t = this.requireTask(taskId),
       excluded = await this.exclusions(String(t.projectId), taskId);
-    const data = await this.reviewProjection(taskId, excluded);
+    const data = await this.reviewProjection(taskId, excluded, selection);
     if (
       visibility !== this.visibilityToken() ||
       this.requireTask(taskId).version !== t.version
@@ -1311,17 +1338,14 @@ export class OperatorApi {
           t = this.requireTask(taskId),
           p = this.requireProject(String(t.projectId)),
           excluded = await this.exclusions(String(t.projectId), taskId),
-          review = this.service.taskReview().read(taskId),
           view = this.coordination().readTask(taskId),
           resultId = row.resultId === null ? null : String(row.resultId),
           sourceId = row.sourceId === null ? null : String(row.sourceId),
           source = sourceId
-            ? review.sources.find((r) => r.sourceId === sourceId)
+            ? this.service.taskReview().source(taskId, sourceId)
             : undefined,
           reviewResult = resultId
-            ? review.results.find(
-                (r) => r.resultId === resultId && r.taskId === taskId,
-              )
+            ? this.service.taskReview().result(taskId, resultId)
             : undefined,
           decision =
             row.type === "decision"
@@ -1363,7 +1387,8 @@ export class OperatorApi {
         }
         const historical = resultId
           ? view.results.at(-1)?.resultId !== resultId
-          : review.sources.at(-1)?.sourceId !== sourceId;
+          : this.service.taskReview().sources(taskId).at(-1)?.sourceId !==
+            sourceId;
         versions.set(taskId, Number(t.version));
         matches.push({
           recordId: row.recordId,
@@ -1431,12 +1456,7 @@ export class OperatorApi {
           excluded = await this.exclusions(String(t.projectId), taskId),
           workspace = await this.service.taskWorkspace(taskId);
         const current = this.requireTask(taskId),
-          record = this.service
-            .taskReview()
-            .read(taskId)
-            .results.find((r) =>
-              r.metadata.artifacts.some((a) => a.artifactId === artifactId),
-            ),
+          record = this.service.taskReview().artifactOwner(taskId, artifactId),
           artifact = record?.metadata.artifacts.find(
             (a) => a.artifactId === artifactId,
           );

@@ -147,10 +147,29 @@ export function TaskWorkspace({
     restoreReadingFocus = useRef(true),
     capturedFocus = useRef<HTMLElement | null>(null),
     material = useRef<string | null>(null);
+  const params = new URLSearchParams(path.split("?")[1] ?? "");
+  const selectedPath = useRef<string | null>(null);
+  if (selectedPath.current !== path) {
+    selectedPath.current = path;
+    if (params.has("result")) state.selectedResult = params.get("result");
+    if (params.has("source")) state.selectedSource = params.get("source");
+    if (params.has("assignment"))
+      state.expanded.add(params.get("assignment") ?? "");
+  }
+  const selectionQuery = new URLSearchParams();
+  if (state.selectedResult)
+    selectionQuery.set("resultId", state.selectedResult);
+  if (state.selectedSource)
+    selectionQuery.set("sourceId", state.selectedSource);
+  const selection = selectionQuery.toString();
   const loader = useCallback(
     (signal: AbortSignal) =>
-      client.read(`/api/operator/tasks/${taskId}`, taskSchema, signal),
-    [client, taskId],
+      client.read(
+        `/api/operator/tasks/${taskId}${selection ? `?${selection}` : ""}`,
+        taskSchema,
+        signal,
+      ),
+    [client, taskId, selection],
   );
   const resource = useOperatorResource(
       `${session.csrfToken}:${taskId}`,
@@ -362,17 +381,8 @@ export function TaskWorkspace({
       if (newMaterial) setUpdates(true);
     }
   }, [data, histories, state, path]);
-  const params = new URLSearchParams(path.split("?")[1] ?? "");
-  const selectedPath = useRef<string | null>(null);
-  if (selectedPath.current !== path) {
-    selectedPath.current = path;
-    if (params.has("result")) state.selectedResult = params.get("result");
-    if (params.has("source")) state.selectedSource = params.get("source");
-    if (params.has("assignment"))
-      state.expanded.add(params.get("assignment") ?? "");
-  }
   const loadHistory = useCallback(
-    async (id: string, before?: number) => {
+    async (id: string, before?: number, beforeOmission?: number) => {
       const current = client.captureAuthenticationScope();
       const revision = (historyRequests.current.get(id) ?? 0) + 1;
       historyRequests.current.set(id, revision);
@@ -386,25 +396,58 @@ export function TaskWorkspace({
         return next;
       });
       try {
-        const depth = (state.historyPages[id]?.length ?? 0) + (before ? 1 : 0);
+        const itemDepth =
+          (state.historyPages[id]?.length ?? 0) + (before ? 1 : 0);
+        const omissionDepth =
+          (state.omissionHistoryPages[id]?.length ?? 0) +
+          (beforeOmission ? 1 : 0);
         const pages: number[] = [],
-          values: History[] = [];
-        let boundary: number | undefined;
-        for (let page = 0; page <= depth; page++) {
+          omissionPages: number[] = [],
+          values: History[] = [],
+          itemValues: History[] = [],
+          omissionValues: History[] = [];
+        let boundary: number | undefined, omissionBoundary: number | undefined;
+        let itemActive = true,
+          omissionActive = true;
+        for (let page = 0; page <= Math.max(itemDepth, omissionDepth); page++) {
+          const query = new URLSearchParams();
+          if (boundary !== undefined)
+            query.set("beforeSequence", String(boundary));
+          if (omissionBoundary !== undefined)
+            query.set("beforeOmissionSequence", String(omissionBoundary));
           const value = (
             await client.read(
-              `/api/operator/assignments/${id}/history${boundary ? `?beforeSequence=${boundary}` : ""}`,
+              `/api/operator/assignments/${id}/history${query.size ? `?${query}` : ""}`,
               assignmentHistorySchema,
             )
           ).data;
           values.push(value);
-          if (!value.omittedItemCount || !value.items.length) break;
-          boundary = value.items[0]?.sequence;
-          if (boundary === undefined) break;
-          pages.push(boundary);
+          boundary = undefined;
+          omissionBoundary = undefined;
+          if (itemActive && page <= itemDepth) {
+            itemValues.push(value);
+            if (
+              page < itemDepth &&
+              value.omittedItemCount &&
+              value.items.length
+            ) {
+              boundary = value.items[0]!.sequence;
+              pages.push(boundary);
+            } else itemActive = false;
+          }
+          if (omissionActive && page <= omissionDepth) {
+            omissionValues.push(value);
+            if (
+              page < omissionDepth &&
+              value.omittedTurnCount &&
+              value.turnOmissions.length
+            ) {
+              omissionBoundary = value.turnOmissions[0]!.sequence;
+              omissionPages.push(omissionBoundary);
+            } else omissionActive = false;
+          }
+          if (!itemActive && !omissionActive) break;
         }
-        // Retain loaded depth, not a stale recent-window cursor.
-        if (pages.length >= values.length) pages.pop();
         if (!owned()) return;
         const recent = values[0];
         if (!recent) return;
@@ -423,7 +466,7 @@ export function TaskWorkspace({
             "History visibility changed while loading retained pages",
           );
         }
-        const items = values
+        const items = itemValues
           .flatMap((value) => value.items)
           .filter(
             (item, i, all) =>
@@ -434,6 +477,7 @@ export function TaskWorkspace({
           )
           .sort((a, b) => a.sequence - b.sequence);
         state.historyPages[id] = pages;
+        state.omissionHistoryPages[id] = omissionPages;
         setHistory((old) =>
           owned()
             ? {
@@ -441,7 +485,7 @@ export function TaskWorkspace({
                 [id]: {
                   ...recent,
                   items,
-                  turnOmissions: values
+                  turnOmissions: omissionValues
                     .flatMap((value) => value.turnOmissions)
                     .filter(
                       (item, i, all) =>
@@ -457,7 +501,11 @@ export function TaskWorkspace({
                         a.createdAt - b.createdAt || a.sequence - b.sequence,
                     ),
                   omittedItemCount:
-                    values.at(-1)?.omittedItemCount ?? recent.omittedItemCount,
+                    itemValues.at(-1)?.omittedItemCount ??
+                    recent.omittedItemCount,
+                  omittedTurnCount:
+                    omissionValues.at(-1)?.omittedTurnCount ??
+                    recent.omittedTurnCount,
                 },
               }
             : old,
@@ -1089,9 +1137,17 @@ export function TaskWorkspace({
           <div>
             {Object.values(histories)
               .flatMap((h) => [...h.items, ...h.turnOmissions])
-              .sort(
-                (a, b) => a.createdAt - b.createdAt || a.sequence - b.sequence,
-              )
+              .sort((a, b) => {
+                const time = a.createdAt - b.createdAt;
+                if (time) return time;
+                const aOmission = "reason" in a,
+                  bOmission = "reason" in b;
+                return aOmission === bOmission
+                  ? a.sequence - b.sequence
+                  : aOmission
+                    ? 1
+                    : -1;
+              })
               .map((i) =>
                 "reason" in i ? (
                   <TurnOmission
@@ -1184,6 +1240,22 @@ export function TaskWorkspace({
                 >
                   Load earlier retained history (
                   {histories[a.assignmentId]?.omittedItemCount})
+                </Button>
+              ) : null}
+              {histories[a.assignmentId]?.omittedTurnCount ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    capture();
+                    void loadHistory(
+                      a.assignmentId,
+                      undefined,
+                      histories[a.assignmentId]?.turnOmissions[0]?.sequence,
+                    );
+                  }}
+                >
+                  Load earlier retained turn omissions (
+                  {histories[a.assignmentId]?.omittedTurnCount})
                 </Button>
               ) : null}
               {histories[a.assignmentId]?.items.map((i) => (

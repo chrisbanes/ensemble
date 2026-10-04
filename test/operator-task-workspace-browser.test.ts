@@ -348,13 +348,33 @@ test("production workspace retains literal history, pending request, focused rep
   await page
     .getByText("Exact responsibility review result", { exact: true })
     .waitFor();
+  const returnedTask = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === `/api/operator/tasks/${a.taskId}` &&
+      url.searchParams.get("resultId") === r.resultId
+    );
+  });
+  const returnedHistory = page.waitForResponse((response) =>
+    response
+      .url()
+      .includes(`/assignments/${r.assignmentId}/history?beforeSequence=`),
+  );
   await page.goBack();
+  await returnedTask;
+  await returnedHistory;
   await reading.waitFor({ state: "attached" });
   assert.ok(
     Math.abs(
       (await exactLink.evaluate((el) => el.getBoundingClientRect().top)) -
         exactY,
     ) < 4,
+    JSON.stringify({
+      expected: exactY,
+      actual: await exactLink.evaluate((el) => el.getBoundingClientRect().top),
+      path: page.url(),
+      focus: await page.evaluate(() => document.activeElement?.outerHTML),
+    }),
   );
   assert.equal(
     await exactLink.evaluate((el) => el === document.activeElement),
