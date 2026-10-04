@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-850 deterministic tests with zero skips. Existing lint warnings remain warnings.
+851 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -55,19 +55,20 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
-| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates |
+| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
-| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview |
+| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions |
-| 15 | current full npm check 850/850; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 851/851; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-decision-excerpt-check.log` (850/850).
+The current repaired full-check log is `/tmp/ui04-retention-metadata-check.log` (851/851).
+`/tmp/ui04-decision-excerpt-check.log` (850/850) retains prior decision excerpt evidence.
 `/tmp/ui04-source-excerpt-check.log` (849/849) retains the preceding source excerpt evidence.
 `/tmp/ui04-observation-inbox-check.log` (847/847) retains prior source/Inbox repair evidence.
 `/tmp/ui04-ci2-check.log` and `/tmp/ui04-ci-check.log` (845/845) retain prior CI repair evidence.
@@ -533,3 +534,43 @@ prior proof, with rows 14/15 gaining this decision projection evidence. No schem
 index migration is claimed for unshipped intermediate oversized rows. Runtime,
 harness, historical transport-only live proof, consumed grant and released resource
 remain unchanged; no new live invocation occurred.
+
+## Source retention completeness and metadata structural validation follow-up
+
+The two subsequent confirmed ingestion findings are repaired by code
+`e75199cd84fe318a0b722903c07deb279f7ed9ec`, tree
+`5f33e68f8980d3f73df2a9df184911b175fb5b15`:
+
+| Comment | Repair and evidence |
+| --- | --- |
+| 4176138498 | Original source title/body over 16,000 characters are omitted as null before sanitization, rather than retaining a silent prefix. Full original-input fingerprints still determine source identity/revision, so a tail-only change advances identity even when both bodies are omitted. No prefix or fabricated tail checklist is retained. The ordinary GitHub producer/API/browser journey verifies searchable safe title, unavailable body/checklist coverage, both collapsed and expanded Brief, retained external-source/ask-lead controls and the latest revision after a raw-tail change. |
+| 4176138500 | Report privacy validation enumerates supplied prose and URL/path fields. Structural outcomes, identities, digests, MIME and commit fields remain subject to existing schema/semantic checks rather than recursive prose sanitization. Actual runtime callback regression with private instruction `failed` successfully records failed criterion/validation outcomes once, replays that same result and completes its original work. Private scope/label/decision/credential prose, artifact URL/file paths and changes file/reference cases still reject atomically before result persistence or execution completion. |
+
+Brief and supplied criteria views explicitly disclose unavailable retained body and
+checklist coverage for omitted/private/missing material. They explain the 16,000
+character retention limit without attributing an unknown individual cause. An empty
+parsed list from an unavailable body is not represented as complete requirements.
+Oversized original bodies have no retained checklist prefix. Prior individually
+bounded long-source index fixtures remain valid and title-first search still works.
+
+`/tmp/ui04-retention-metadata-callback.log` passes 9/9;
+`/tmp/ui04-retention-metadata-browser.log` passes the new journey 1/1.
+The initial browser assertion expected a different unavailable-text label; its
+corrected fixture expectation and original failure remain at
+`/tmp/ui04-retention-metadata-browser-first-failure.log`. Final affected checks pass
+25/25 in `/tmp/ui04-retention-metadata-focused.log`. The required complete check
+passes 851/851 with zero skips in `/tmp/ui04-retention-metadata-check.log`.
+Current bundle SHA256 is
+`952af783e4763add9dda93df3e176357c33ae290ff78209c1cb5c64bb46d990e`.
+Current desktop/phone omitted-source images and completed cleanup are bound to that
+code in `/tmp/ui04-retention-metadata-screenshots.json`; both were inspected. All
+shared task workspace entry points use this Brief/review presentation. Existing
+unaffected UI evidence retains its original source attribution. All 15 acceptance
+rows retain prior proof, with rows 5/9/15 gaining these ingestion/coverage proofs.
+
+Previously silently clipped snapshots exist only in unshipped intermediate
+qualification/fixture candidates; their original completeness is unknown. No raw
+reconstruction or migration guarantee is made for them. The historical `a21e6046`
+transport-only live proof, consumed grant, released resource and unchanged harness
+retain their original attribution. No new live runtime invocation or provider probe
+occurred.
