@@ -155,3 +155,53 @@ test("exact review and paginated history fail closed when visibility/material re
     f.service.taskWorkspace = original;
   }
 });
+
+test("review projection redacts supplied prose while preserving outcome enums and immutable structural identities", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f);
+  const r = task.result("Result", {
+    sourceId: task.source.sourceId,
+    criteria: [
+      {
+        criterionId: task.source.criteria[0]!.criterionId,
+        outcome: "failed",
+        scope: "failed private scope",
+        provenance: "failed supplied evidence",
+      },
+    ],
+    validations: [
+      {
+        label: "failed check",
+        outcome: "failed",
+        scope: "failed scope",
+        provenance: "failed evidence",
+        checkedHead: "f".repeat(40),
+      },
+    ],
+  });
+  f.service.domain().execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: task.profileId,
+    expectedVersion: Number(f.service.domain().profile(task.profileId).version),
+    instructions: "failed",
+  });
+  const read = await new OperatorApi(f.service, [f.directory]).readTask(
+    task.taskId,
+  );
+  const record = read.data.review?.results.find(
+    (v) => v.resultId === r.resultId,
+  );
+  assert.equal(record?.metadata.sourceId, task.source.sourceId);
+  assert.equal(
+    record?.metadata.criteria[0]?.criterionId,
+    task.source.criteria[0]!.criterionId,
+  );
+  assert.equal(record?.metadata.criteria[0]?.outcome, "failed");
+  assert.equal(record?.metadata.validations[0]?.outcome, "failed");
+  assert.equal(record?.metadata.validations[0]?.checkedHead, "f".repeat(40));
+  assert.ok(!record?.metadata.criteria[0]?.scope.includes("failed"));
+  assert.ok(!record?.metadata.validations[0]?.label.includes("failed"));
+});

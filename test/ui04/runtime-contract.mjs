@@ -67,6 +67,42 @@ export function consumeGrantMarker(grant, startedAt) {
     closeSync(fd);
   }
 }
+/** Deterministic fixture lifecycle evidence, never an OS birth/boot identity. */
+export function observeFixtureChild(child) {
+  const identity = {
+    launchId: randomUUID(),
+    processId: child.pid,
+    executable: child.spawnfile,
+  };
+  let exit = null;
+  child.once("exit", (code, signal) => {
+    exit = { code, signal };
+  });
+  return {
+    verify() {
+      if (
+        !identity.processId ||
+        child.pid !== identity.processId ||
+        !exit ||
+        (child.exitCode === null && child.signalCode === null)
+      )
+        return {
+          kind: "unknown",
+          method: "fixture-owned-child-exit",
+          reason: "Owned fixture child exit not observed",
+          identity,
+        };
+      return {
+        kind: "verified",
+        method: "fixture-owned-child-exit",
+        identity,
+        exit,
+        verifiedAt: new Date().toISOString(),
+      };
+    },
+  };
+}
+
 export async function runQualification(options = {}) {
   const fixture = options.fixture;
   const totalMs = fixture ? 5000 : 240000,
@@ -177,6 +213,7 @@ export async function runQualification(options = {}) {
   };
   let service,
     runtime,
+    fixtureChild,
     browser,
     http,
     auth,
@@ -253,6 +290,19 @@ export async function runQualification(options = {}) {
           ...(fixture
             ? {
                 qualifiedExecutableHash: hash(readFileSync(executable)),
+                captureProcessIdentity: async (pid) => {
+                  assert.ok(
+                    Number.isSafeInteger(pid) && pid > 0,
+                    "fixture-child-pid",
+                  );
+                  assert.equal(
+                    runtime.child?.pid,
+                    pid,
+                    "exact-fixture-child-binding",
+                  );
+                  fixtureChild = observeFixtureChild(runtime.child);
+                  return null;
+                },
                 spawnEnvironment: () => ({
                   ...context.spawnEnvironment(),
                   UI04_FIXTURE_DELAY: "50",
@@ -604,13 +654,20 @@ export async function runQualification(options = {}) {
     if (auth) await clean("auth-close", () => auth.close());
     if (service) await clean("service-close", () => service.stop());
     try {
-      evidence.cleanup.verification = evidence.process
-        ? await bounded(
-            () => new MacProcessTerminationVerifier().verify(evidence.process),
-            cleanupDeadline,
-            "exact-process-verification",
-          )
-        : { kind: "unknown", reason: "no-process-identity" };
+      evidence.cleanup.verification = fixture
+        ? (fixtureChild?.verify() ?? {
+            kind: "unknown",
+            reason: "no-owned-fixture-child",
+            method: "fixture-owned-child-exit",
+          })
+        : evidence.process
+          ? await bounded(
+              () =>
+                new MacProcessTerminationVerifier().verify(evidence.process),
+              cleanupDeadline,
+              "exact-process-verification",
+            )
+          : { kind: "unknown", reason: "no-process-identity" };
     } catch {
       evidence.cleanup.verification = {
         kind: "unknown",

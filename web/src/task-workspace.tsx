@@ -76,6 +76,11 @@ export function TaskWorkspace({
   state: TaskWorkspaceState;
 }) {
   const [auxNotice, setAuxNotice] = useState("");
+  const sourceObservation = state.sourceObservation;
+  const setSourceObservation = (value: "known" | "pending" | "unknown") => {
+    state.sourceObservation = value;
+    changed();
+  };
   const [, render] = useState(0),
     changed = () => render((n) => n + 1);
   const [histories, setHistory] = useState<Record<string, History>>({}),
@@ -105,6 +110,26 @@ export function TaskWorkspace({
       loader,
     ),
     data = resource.state.data?.data;
+  const sourceRead = useRef<typeof resource.state.data>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only a requested source refresh followed by current task read can settle its comparison.
+  useEffect(() => {
+    if (!sourceRead.current) return;
+    if (resource.state.error) {
+      sourceRead.current = null;
+      setSourceObservation("unknown");
+    } else if (
+      resource.state.status === "fresh" &&
+      resource.state.data !== sourceRead.current
+    ) {
+      sourceRead.current = null;
+      setSourceObservation(
+        data?.source?.memberships.some((m) => m.sync.complete !== true)
+          ? "unknown"
+          : "known",
+      );
+    }
+  }, [resource.state.data, resource.state.error, resource.state.status]);
+
   const capture = () => {
     bottom.current =
       innerHeight + scrollY >= document.documentElement.scrollHeight - 64;
@@ -173,6 +198,8 @@ export function TaskWorkspace({
     const timer = setInterval(() => refreshRef.current(), 15000);
     return () => {
       scope.current = false;
+      if (state.sourceObservation === "pending")
+        state.sourceObservation = "unknown";
       clearInterval(timer);
       document.removeEventListener("click", leave, true);
       document.removeEventListener("focusin", intentionalFocus);
@@ -302,19 +329,25 @@ export function TaskWorkspace({
         return next;
       });
       try {
-        const pages = [...(state.historyPages[id] ?? [])];
-        if (before && !pages.includes(before)) pages.push(before);
-        const values: History[] = [];
-        for (const boundary of [undefined, ...pages]) {
-          values.push(
-            (
-              await client.read(
-                `/api/operator/assignments/${id}/history${boundary ? `?beforeSequence=${boundary}` : ""}`,
-                assignmentHistorySchema,
-              )
-            ).data,
-          );
+        const depth = (state.historyPages[id]?.length ?? 0) + (before ? 1 : 0);
+        const pages: number[] = [],
+          values: History[] = [];
+        let boundary: number | undefined;
+        for (let page = 0; page <= depth; page++) {
+          const value = (
+            await client.read(
+              `/api/operator/assignments/${id}/history${boundary ? `?beforeSequence=${boundary}` : ""}`,
+              assignmentHistorySchema,
+            )
+          ).data;
+          values.push(value);
+          if (!value.omittedItemCount || !value.items.length) break;
+          boundary = value.items[0]?.sequence;
+          if (boundary === undefined) break;
+          pages.push(boundary);
         }
+        // Retain loaded depth, not a stale recent-window cursor.
+        if (pages.length >= values.length) pages.pop();
         if (!owned()) return;
         const recent = values[0];
         if (!recent) return;
@@ -539,7 +572,7 @@ export function TaskWorkspace({
     ) ?? [];
   const newestViewed = Math.max(-1, ...viewedIndexes);
   const changes = review?.viewed
-    ? `${newestViewed >= 0 ? `${data.results.length - newestViewed - 1} new result(s)` : "Newer results unknown; no retained viewed result ordering"}; ${review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
+    ? `${newestViewed >= 0 ? `${data.results.length - newestViewed - 1} new result(s)` : "Newer results unknown; no retained viewed result ordering"}; ${sourceObservation === "pending" ? "source comparison pending" : sourceObservation === "unknown" ? "source comparison unknown; refresh failed" : review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
     : "No viewing baseline. Comparison with previously viewed material is unknown.";
   return (
     <article className="task-workspace" aria-label="Task workspace">
@@ -721,10 +754,26 @@ export function TaskWorkspace({
             <Button
               variant="secondary"
               onClick={async () => {
+                setSourceObservation("pending");
+                const current = client.captureAuthenticationScope();
                 try {
-                  await client.refreshSources(session.csrfToken);
+                  const observation = await client.refreshSources(
+                    session.csrfToken,
+                  );
+                  if (!scope.current || !current()) return;
+                  const selections = observation.data.projects.find(
+                    (p) => p.projectId === data.task.projectId,
+                  )?.selections;
+                  if (
+                    !selections?.length ||
+                    selections.some((s) => s.state !== "complete")
+                  )
+                    setSourceObservation("unknown");
+                  else sourceRead.current = resource.state.data;
                   refresh();
                 } catch {
+                  if (!scope.current || !current()) return;
+                  setSourceObservation("unknown");
                   state.notice =
                     "Source refresh failed. Last successful source retained.";
                   changed();
@@ -1271,9 +1320,10 @@ function ReviewEvidence({
         </p>
       )}
       {s?.criteria.map((c) => {
-        const outcome = metadata.criteria.find(
+        const outcomes = metadata.criteria.filter(
           (x) => x.criterionId === c.criterionId,
         );
+        const outcome = outcomes.length === 1 ? outcomes[0] : undefined;
         return (
           <div key={c.criterionId} data-record-id={c.criterionId}>
             <p>
@@ -1285,6 +1335,19 @@ function ReviewEvidence({
               {outcome?.scope ?? "No supporting scope supplied"} · provenance{" "}
               {outcome?.provenance ?? "Unavailable"}
             </p>
+            {outcomes.length > 1 && (
+              <div>
+                <p>Duplicate criterion identity; overall outcome unknown.</p>
+                <Literal
+                  text={outcomes
+                    .map(
+                      (record) =>
+                        `${record.outcome} · ${record.scope} · provenance ${record.provenance}`,
+                    )
+                    .join("\n")}
+                />
+              </div>
+            )}
             <Button
               variant="secondary"
               onClick={() =>

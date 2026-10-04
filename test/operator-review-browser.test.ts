@@ -32,7 +32,17 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     missing = randomUUID();
   await writeFile(join(workspace.path, "before.png"), png);
   await writeFile(join(workspace.path, "after.png"), png);
-  const r1 = a.delegatedResult("R1 initial");
+  const r1 = a.delegatedResult("R1 initial", {
+    sourceId: a.source.sourceId,
+    criteria: [
+      {
+        criterionId: a.source.criteria[0]!.criterionId,
+        outcome: "supported",
+        scope: "Legacy supporting scope",
+        provenance: "Legacy supported evidence",
+      },
+    ],
+  });
   const r2 = a.delegatedResult("R2 original scope", {
     sourceId: a.source.sourceId,
     criteria: [
@@ -166,6 +176,24 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     db.prepare(
       "UPDATE task_review_results SET recordJson=? WHERE resultId=?",
     ).run(JSON.stringify(record), r2.resultId);
+    const legacy = JSON.parse(
+      (
+        db
+          .prepare(
+            "SELECT recordJson FROM task_review_results WHERE resultId=?",
+          )
+          .get(r1.resultId) as { recordJson: string }
+      ).recordJson,
+    );
+    legacy.metadata.criteria.push({
+      ...legacy.metadata.criteria[0],
+      outcome: "failed",
+      scope: "Legacy contradictory failed scope",
+      provenance: "Legacy failed evidence",
+    });
+    db.prepare(
+      "UPDATE task_review_results SET recordJson=? WHERE resultId=?",
+    ).run(JSON.stringify(legacy), r1.resultId);
   });
   const web = await j.start("fixture.web", () => f.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
@@ -206,6 +234,18 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   );
   await page.getByLabel("Result revision").selectOption(r1.resultId);
   await page.getByText("R1 initial", { exact: true }).waitFor();
+  await page
+    .getByText("Duplicate criterion identity; overall outcome unknown.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.ok(
+    await page.getByText(/supported · Legacy supporting scope/).count(),
+  );
+  assert.ok(
+    await page.getByText(/failed · Legacy contradictory failed scope/).count(),
+  );
+
   await page.getByLabel("Result revision").selectOption(r2.resultId);
   await page.getByText("R2 original scope", { exact: true }).waitFor();
   const pair = page.locator('[data-artifact-pair="focus-pair"]');

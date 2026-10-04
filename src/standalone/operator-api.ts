@@ -1153,16 +1153,6 @@ export class OperatorApi {
     excluded: readonly string[] | undefined,
   ) {
     const read = this.service.taskReview().read(taskId);
-    const clean = (value: unknown): unknown =>
-      typeof value === "string"
-        ? (this.safe(value, excluded) ?? "[Content unavailable]")
-        : Array.isArray(value)
-          ? value.map(clean)
-          : value && typeof value === "object"
-            ? Object.fromEntries(
-                Object.entries(value).map(([key, v]) => [key, clean(v)]),
-              )
-            : value;
     return taskReviewReadSchema.parse({
       ...read,
       sources: read.sources.map((source) => ({
@@ -1181,7 +1171,54 @@ export class OperatorApi {
       results: read.results.map((result) => ({
         ...result,
         metadata: {
-          ...(clean(result.metadata) as typeof result.metadata),
+          ...result.metadata,
+          criteria: result.metadata.criteria.map((c) => ({
+            ...c,
+            scope: this.safe(c.scope, excluded) ?? "[Content unavailable]",
+            provenance:
+              this.safe(c.provenance, excluded) ?? "[Content unavailable]",
+          })),
+          validations: result.metadata.validations.map((v) => ({
+            ...v,
+            label: this.safe(v.label, excluded) ?? "[Content unavailable]",
+            scope: this.safe(v.scope, excluded) ?? "[Content unavailable]",
+            provenance:
+              this.safe(v.provenance, excluded) ?? "[Content unavailable]",
+          })),
+          decisions: result.metadata.decisions.map((d) => ({
+            text: this.safe(d.text, excluded) ?? "[Content unavailable]",
+            attribution:
+              this.safe(d.attribution, excluded) ?? "[Content unavailable]",
+          })),
+          ...(result.metadata.changes
+            ? {
+                changes: {
+                  ...result.metadata.changes,
+                  files: result.metadata.changes.files.map(
+                    (file) =>
+                      this.safe(file, excluded) ?? "[Content unavailable]",
+                  ),
+                  ...(result.metadata.changes.diff
+                    ? {
+                        diff:
+                          this.safe(result.metadata.changes.diff, excluded) ??
+                          "[Content unavailable]",
+                      }
+                    : {}),
+                  reference:
+                    result.metadata.changes.reference &&
+                    this.safe(result.metadata.changes.reference, excluded) ===
+                      result.metadata.changes.reference
+                      ? result.metadata.changes.reference
+                      : undefined,
+                  findings: result.metadata.changes.findings.map((f) => ({
+                    ...f,
+                    finding:
+                      this.safe(f.finding, excluded) ?? "[Content unavailable]",
+                  })),
+                },
+              }
+            : {}),
           artifacts: result.metadata.artifacts.map((artifact) => {
             const { file: _file, url, ...rest } = artifact;
             return {

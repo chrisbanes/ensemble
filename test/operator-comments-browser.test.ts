@@ -220,4 +220,111 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     operation.operationId,
   );
   assert.equal(await page.getByLabel("Editable reply").inputValue(), "");
+  assert.ok(await page.getByText(/source unchanged/).count());
+  let releaseSource!: () => void, enterSource!: () => void;
+  const sourceBarrier = new Promise<void>((r) => (releaseSource = r)),
+    sourceEntry = new Promise<void>((r) => (enterSource = r));
+  await page.route("**/api/operator/source-refresh", async (route) => {
+    enterSource();
+    await sourceBarrier;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await sourceEntry;
+  await page
+    .getByText(/source comparison pending/)
+    .waitFor({ state: "attached" });
+  assert.equal(
+    await page
+      .getByText(/source unchanged|source requirements changed/)
+      .count(),
+    0,
+  );
+  releaseSource();
+  await page
+    .getByText(/source comparison unknown; refresh failed/)
+    .waitFor({ state: "attached" });
+  assert.equal(
+    await page
+      .getByText(/source unchanged|source requirements changed/)
+      .count(),
+    0,
+  );
+  assert.ok(
+    await page.getByText("Supplied GitHub brief", { exact: true }).count(),
+  );
+  await page
+    .getByRole("link", { name: "Search", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByRole("button", { name: "Back to originating workspace", exact: true })
+    .click();
+  await page
+    .getByText(/source comparison unknown; refresh failed/)
+    .waitFor({ state: "attached" });
+  await page.unroute("**/api/operator/source-refresh");
+  await page.route("**/api/operator/tasks/*", (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    }),
+  );
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByText(/source comparison unknown; refresh failed/)
+    .waitFor({ state: "attached" });
+  await page
+    .getByText("Refresh failed. Showing the last fetched data.", {
+      exact: true,
+    })
+    .waitFor({ state: "attached" });
+  assert.equal(
+    await page
+      .getByText(/source unchanged|source requirements changed/)
+      .count(),
+    0,
+  );
+  await page.unroute("**/api/operator/tasks/*");
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.getByText(/source unchanged/).waitFor({ state: "attached" });
+  let releaseLateSource!: () => void, enterLateSource!: () => void;
+  const lateSourceBarrier = new Promise<void>((r) => (releaseLateSource = r)),
+    lateSourceEntry = new Promise<void>((r) => (enterLateSource = r));
+  await page.route("**/api/operator/source-refresh", async (route) => {
+    const response = await route.fetch();
+    enterLateSource();
+    await lateSourceBarrier;
+    await route
+      .fulfill({ response })
+      .catch((error) =>
+        assert.match(String(error), /already handled|Target.*closed/),
+      );
+  });
+  await page
+    .getByLabel("Editable reply")
+    .fill("Private old-session source draft");
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await lateSourceEntry;
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByLabel("Password").waitFor();
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByLabel("Editable reply").waitFor({ state: "attached" });
+  releaseLateSource();
+  await page.unroute("**/api/operator/source-refresh");
+  assert.equal(await page.getByLabel("Editable reply").inputValue(), "");
+  assert.equal(await page.getByText(/source comparison pending/).count(), 0);
 });

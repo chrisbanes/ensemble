@@ -457,6 +457,11 @@ export class TaskReviewStore {
     input: unknown,
   ) {
     const metadata = reviewMetadataSchema.parse(input);
+    if (
+      new Set(metadata.criteria.map((c) => c.criterionId)).size !==
+      metadata.criteria.length
+    )
+      throw Error("Duplicate criterion identity");
     if (metadata.sourceId && !this.source(result.taskId, metadata.sourceId))
       throw Error("Review source belongs to another task or is unavailable");
     const criteria =

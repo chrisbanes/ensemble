@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readFileSync, mkdtempSync, statSync } from "node:fs";
@@ -17,6 +19,13 @@ test("UI04 changed callback fake App Server waits for delayed callback, persists
   assert.equal(r.callbackEnded, true);
   assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
   assert.equal(r.screenshots.length, 1);
+  assert.equal(r.process, null);
+  assert.equal(r.cleanup.verification.method, "fixture-owned-child-exit");
+  assert.ok(r.cleanup.verification.identity.processId > 0);
+  assert.ok(
+    r.cleanup.verification.exit.signal ||
+      r.cleanup.verification.exit.code !== null,
+  );
   assert.equal(
     JSON.parse(readFileSync(r.evidencePath, "utf8")).sourceId,
     r.sourceId,
@@ -124,4 +133,30 @@ test("UI04 malformed callback material promptly ends the one attempt, preserves 
   assert.deepEqual(r.counts, { threads: 1, turns: 1, reports: 1 });
   assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
   assert.ok(r.callbackFailure);
+});
+
+test("UI04 portable fixture proof requires observed exit of its exact owned child and rejects still-present or previously-unobserved exit", async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  const proof = module.observeFixtureChild(child);
+  try {
+    await once(child, "spawn");
+    assert.equal(proof.verify().kind, "unknown");
+    const exited = once(child, "exit");
+    assert.equal(child.kill("SIGTERM"), true);
+    await exited;
+    const verified = proof.verify();
+    assert.equal(verified.kind, "verified");
+    assert.equal(verified.method, "fixture-owned-child-exit");
+    assert.equal(verified.identity.processId, child.pid);
+    assert.equal(verified.exit.signal, "SIGTERM");
+    assert.equal(module.observeFixtureChild(child).verify().kind, "unknown");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGTERM");
+      await exited;
+    }
+  }
 });

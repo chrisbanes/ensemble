@@ -132,6 +132,20 @@ test("production service creates source, assignment and work captures, and real 
       },
     },
   };
+  const duplicate = structuredClone(call);
+  duplicate.callId = randomUUID();
+  duplicate.arguments.review.criteria.push({
+    ...duplicate.arguments.review.criteria[0]!,
+    outcome: "failed",
+  });
+  const rejected = await f.runtime.callTool(duplicate);
+  assert.equal(rejected.success, false);
+  assert.equal(f.service.coordinationView().readTask(taskId).results.length, 0);
+  assert.equal(f.service.taskReview().read(taskId).results.length, 0);
+  assert.equal(
+    f.service.list().find((entry) => entry.workId === w.workId)?.state,
+    "running",
+  );
   const result = await f.runtime.callTool(call);
   assert.equal(result.success, true, result.text);
   assert.equal((await f.runtime.callTool(call)).success, true);

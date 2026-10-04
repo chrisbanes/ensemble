@@ -99,6 +99,22 @@ test("production workspace retains literal history, pending request, focused rep
   const readingY = await reading.evaluate(
     (el) => el.getBoundingClientRect().top,
   );
+  // Advance the actual retained window after its earlier page was loaded.
+  f.seedPersistedState((db) =>
+    db
+      .prepare(
+        "INSERT INTO conversation_history_items(workId,taskId,assignmentId,assignmentVersion,instructionsRevision,profileRevision,conversationRevision,workRevision,threadId,turnId,itemId,lifecycle,text,omissionReason,deltaBytes,createdAt,updatedAt) VALUES(?,?,?,1,1,1,1,1,?,?,?,'completed',?,NULL,0,1,1)",
+      )
+      .run(
+        r.workId,
+        a.taskId,
+        r.assignmentId,
+        r.workId,
+        r.workId,
+        "item-250",
+        "Literal update 250 newer retained item",
+      ),
+  );
   await reading.locator("summary").focus();
   await page
     .getByRole("button", { name: "Refresh task", exact: true })
@@ -123,6 +139,13 @@ test("production workspace retains literal history, pending request, focused rep
       .evaluate((el) => el === document.activeElement),
     true,
   );
+  const retainedIds = await page
+    .locator(`[data-record-id^="${r.workId}:item-"]`)
+    .evaluateAll((els) => els.map((el) => el.getAttribute("data-record-id")));
+  assert.equal(retainedIds.length, 251);
+  assert.equal(new Set(retainedIds).size, 251);
+  for (let item = 0; item <= 250; item++)
+    assert.ok(retainedIds.includes(`${r.workId}:item-${item}`));
   // Exercise the production 15-second polling callback without waiting wall-clock time.
   const timerHistory = page.waitForResponse((response) =>
     response
