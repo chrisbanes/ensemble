@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
 | 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci18-check.log` (883/883).
+The current repaired full-check log is `/tmp/ui04-ci19-check.log` (883/883).
+`/tmp/ui04-ci18-check.log` (883/883) retains historical Search replacement-document evidence.
 `/tmp/ui04-ci17-check.log` (883/883) retains historical Settings render-boundary evidence.
 `/tmp/ui04-codex16-check.log` (883/883) retains historical exact-intent/history ownership evidence.
 `/tmp/ui04-codex15-final-check.log` (883/883) retains historical source-batch/session evidence.
@@ -1522,3 +1523,78 @@ acceptance mappings remain current at 883 tests. Codex18's quota error remains a
 remote-review limitation, not a completed review or authority to retry/pay/reset.
 The sole historical live transport grant remains consumed and its resource
 released; no live or remote operation occurred.
+
+
+## Exact view/source fixture settlement (CI19 repair28)
+
+Required Linux CI19 on historical `fb31f338` failed the comments fixture's
+pathname-only partial-source task-read waiter. `/tmp/ui04-ci19-failure.log` retains
+882/883, one failure and zero cancellations/skips (150.075 seconds). Its comments
+execution failed after 9.693 seconds with complete cleanup and no evidence
+omissions; two console-error markers belong to intentional failure paths. It has
+no source POST/GET trace or final comparison snapshot, so the original timeout
+cause remains unknown. The completed Settings and retained-history tests are
+separate passing evidence. CI19 Search observed four traversals, two document
+replacements and one known lost evaluation response; that passed conditional-branch
+evidence does not make the failed full run green or retag the earlier local
+zero-lost-response proof.
+
+Only `test/operator-comments-browser.test.ts` changes. The restored-view segment
+now correlates the actual command POST request, exact recorded key/task/operation
+receipt, and a task GET started after that acknowledgement. It settles a restored
+view, then holds one repeat real server-committed view receipt with a fresh key.
+The old unchanged comparison is visibly present while no receipt acknowledgement
+has arrived; release in finally and registered cleanup leads to the exact receipt
+and completed follow-up task read before partial source refresh. Both receipts
+are validated and task/source identities remain unchanged. Old visible text is
+therefore not used as evidence of command settlement.
+
+Source refresh similarly owns its actual POST request/acknowledgement and subsequent
+current task request/response, excluding a previously started view GET. The
+modified partial acknowledgement keeps comparison unknown through an ordinary
+current task read; only the complete explicit source acknowledgement and current
+read restore unchanged. Existing baseline, partial-source, draft, review/confirm,
+replay, navigation, privacy and cleanup assertions remain. The affected actions use
+real button actionability and completed HTTP reads, with no arbitrary frame wait
+as settlement proof. Every local waiter and click is eagerly owned by allSettled;
+the repeat action has an immediate rejection handler. No product, shared harness,
+timeout, retry, sleep, clock or live authority changes were made.
+
+A local concrete milestone array is capped at 64 events and prints once at segment
+completion/failure. It contains only relative timestamps, allowlisted step/stage
+names, method, pathname and status; no raw bodies, queries, credentials or prose.
+Failure also records only comparison/notice-category booleans. Listener removal
+and held receipt release are owned in finally and fixture cleanup. The successful
+clean run records 26 events and zero omitted milestones; exact ordered
+stages are in `/tmp/ui04-ci19-screenshots.json` and its capture log.
+
+The first controlled proof `/tmp/ui04-ci19-focused.log` failed at an added,
+unrelated conditional composer-button assertion while the view receipt was held;
+its later waiter timeouts were initially unhandled. That extra assertion was
+removed without weakening any original assertion, and all waiters/repeat work
+were made rejection-safe. `/tmp/ui04-ci19-owned-build.log` preserves a subsequent
+test-only exact-optional diagnostic type error, corrected before execution. Neither
+failed run is credited as current validation or a product defect.
+The first failed-focus manifest is
+`/tmp/ui04-ci19-focused-evidence/ui04-comments-22794/661690e0faac1ca3/manifest.json`:
+failed execution 7.736 seconds, complete cleanup, zero diagnostic/screenshot/evidence
+omissions. Its log retains the original waiter-rejection activity; the corrected
+run owns those promises immediately.
+
+The valid focused `/tmp/ui04-ci19-valid-focused.log` passes 1/1, zero failures,
+cancellations/skips, in 3.849 seconds. The final pinned `/tmp/ui04-ci19-check.log`
+passes 883/883, zero failures/cancellations/skips, in 46.498 seconds.
+Test-only executable `e934a343c23d2534e2e698157f3eed5d9a468e9e`, tree `aa2970115f7f84903c2b6d9725e763e07121abd2`, was frozen before clean
+`/tmp/ui04-ci19-clean-capture.log` passed 1/1 in 3.787 seconds through all
+assertions. Its manifest records completed execution/overall and complete cleanup,
+with no omitted diagnostics, screenshots or evidence failures. Console-error markers
+remain attributed to the existing intentional lost-response/auth/failure paths.
+Exact affected desktop/phone images and manifest hashes are in
+`/tmp/ui04-ci19-screenshots.json`; prior images keep their original attribution.
+
+Product bundle `index-BexsLO1G.js` remains SHA256
+`68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
+All 15 acceptance rows and both current ledgers agree at 883 tests. Codex19's quota
+limit remains unavailable-review evidence, not a successful review or authority
+to retry/pay/reset. Historical `a21e6046` remains transport-only, with its sole
+grant consumed and resource released; no live or remote operation occurred.
