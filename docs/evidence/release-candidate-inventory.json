@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "issues": [745, 697],
+  "status": "offline qualification pending final check; sole live journey unqualified pending new root grant",
+  "baseline": {
+    "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
+    "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
+  },
+  "sourceInputs": {
+    "src/standalone/service.ts": "173314ddd6e2e2cacb71e4907c7adf174bd611eca746c412d318ccec37531060",
+    "src/standalone/state.ts": "208273acf13d2e1d657422f2bc5777dcabd8f538757404eb01e4d1fb3aa37d02",
+    "src/standalone/scheduler.ts": "9eea431599dd62523e9478b7a8522519750798b985d37cc0657412a9699a7361",
+    "src/standalone/operator-api.ts": "553f8ec918046b20891d5b8e5ef1f0a3972d8b40db32644ecb15f491dd71d440",
+    "src/standalone/codex.ts": "a1a10fac3c5c7e5abac315998ae1d2a0a2fcb3977149897866a4d06140e89434",
+    "test/operator-integrated-browser.test.ts": "eee39d6a7f7c43ce7688fb54fc11ed7b7a593e7f91525a5a4c9a3818beebdfa5",
+    "test/operator-task-browser.test.ts": "5692ce908fb14d7b412bf15bc307b6413c9c6b191fa2e613e54e2671975de990",
+    "test/operator-task-list.test.ts": "3ab02c2309b9265587bff12085e7bad296c9746d7f83a1dfe63bcf2cb124f1ed",
+    "test/task-writer.test.ts": "6558ac0d72e3e60c2bb305cbfe0f27dfb18e0b4ff2d0970b816641c07dbe654a",
+    "test/ui07-live-harness.test.ts": "f2e41fa0a6ea7574b4072e095004f0a62c5c2648092d9d20028f4a2772b2fc6c",
+    "test/ui07/runtime-contract.mjs": "13fca5e87c7154a2064e86f55bb6f453b137fc9ca04f785d936a41edccba09f7",
+    "test/ui07/fake-app-server.mjs": "0af45d8190bdd3be57148fdb368322337d3e38f826178d21d005bbf279d1c028",
+    "test/ui04/runtime-contract.mjs": "8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783"
+  },
+  "productionBundles": {
+    "dist/operator/assets/index-QXFEB72c.css": "c777e8ce1f418a17dbf4d51c1ca89b488b25b26df4c794cc9cdb8eef763b99a0",
+    "dist/operator/assets/index-CsF3lIED.js": "b424a9ee46bb490a73abec949c83102014f310bc04fcfb8dd479d4251eda7c01"
+  },
+  "validation": {
+    "node": "24.21.0",
+    "npm": "12.2.0",
+    "installation": "passed",
+    "fullCheck": "pending",
+    "fullCheckScope": "type checking, lint, formatting, service/web build, fixture preflight and complete deterministic suite",
+    "failuresPreservedInPrivateDeliveryRecord": true
+  },
+  "criteria": [
+    {
+      "id": "AC1",
+      "scope": "Pinned validation and evidence reuse",
+      "tests": [
+        "test/operator-integrated-browser.test.ts",
+        "test/ui07-live-harness.test.ts"
+      ],
+      "disposition": "offline-final-check-pending"
+    },
+    {
+      "id": "AC2",
+      "scope": "Connected create/observe/answer/result; drafts, waits, independent holds",
+      "tests": [
+        "test/ui07-live-harness.test.ts",
+        "test/operator-integrated-browser.test.ts",
+        "test/runtime-question-service.test.ts",
+        "test/s05-runtime-integration.test.ts"
+      ],
+      "disposition": "live-pending"
+    },
+    {
+      "id": "AC3",
+      "scope": "Full forms, List/Board, imported source, histories and expiry",
+      "tests": [
+        "test/operator-question-browser.test.ts",
+        "test/structured-question-store.test.ts",
+        "test/structured-question-service.test.ts",
+        "test/operator-task-browser.test.ts",
+        "test/operator-task-workspace-browser.test.ts",
+        "test/operator-api.test.ts",
+        "test/operator-web-browser.test.ts"
+      ],
+      "disposition": "deterministic-proof"
+    },
+    {
+      "id": "AC4",
+      "scope": "Keyboard/focus/labels/constraints and realistic laptop/phone/reduced-height review",
+      "tests": [
+        "test/operator-question-browser.test.ts",
+        "test/operator-task-browser.test.ts",
+        "test/operator-review-browser.test.ts",
+        "test/operator-search-browser.test.ts",
+        "test/operator-foundation-browser.test.ts",
+        "test/operator-settings-browser.test.ts"
+      ],
+      "disposition": "deterministic-proof-human-review-pending"
+    },
+    {
+      "id": "AC5",
+      "scope": "Runtime identity, exact native continuation and accepted limitations",
+      "tests": [
+        "test/native-input.test.ts",
+        "test/runtime-question-service.test.ts",
+        "test/ui07-live-harness.test.ts"
+      ],
+      "disposition": "live-pending"
+    },
+    {
+      "id": "AC6",
+      "scope": "Observed defects, failure disposition and final human packet",
+      "tests": [
+        "test/operator-integrated-browser.test.ts",
+        "test/ui07-live-harness.test.ts"
+      ],
+      "disposition": "human-review-pending"
+    },
+    {
+      "id": "AC7",
+      "scope": "Attributable criteria/artifacts/context/feedback/recorded delivery",
+      "tests": [
+        "test/operator-review-browser.test.ts",
+        "test/task-review-store.test.ts",
+        "test/task-review-service.test.ts",
+        "test/delivery-operator.test.ts",
+        "test/delivery-service.test.ts"
+      ],
+      "disposition": "deterministic-proof-provider-integration-pending"
+    },
+    {
+      "id": "AC8",
+      "scope": "Shared search origins, exact historical destinations, filters/return/drafts/errors",
+      "tests": [
+        "test/operator-search-browser.test.ts",
+        "test/operator-task-workspace-browser.test.ts",
+        "test/operator-task-browser.test.ts"
+      ],
+      "disposition": "deterministic-proof"
+    },
+    {
+      "id": "AC9",
+      "scope": "Exact approval/independent holds/source ownership/destinations",
+      "tests": [
+        "test/operator-inbox.test.ts",
+        "test/operator-api.test.ts",
+        "test/runtime-question-service.test.ts",
+        "test/s05-runtime-integration.test.ts",
+        "test/delivery-operator.test.ts",
+        "test/delivery-service.test.ts"
+      ],
+      "disposition": "deterministic-proof"
+    },
+    {
+      "id": "AC10",
+      "scope": "Current Pen loading observation and one inventory/journey shared with697",
+      "tests": [
+        "test/operator-review-browser.test.ts",
+        "test/operator-search-browser.test.ts"
+      ],
+      "disposition": "design-loading-narrowed-human-review-pending"
+    },
+    {
+      "id": "AC11",
+      "scope": "UI08 shared foundation and applicable alternate/control surfaces",
+      "tests": [
+        "test/operator-foundation-browser.test.ts",
+        "test/operator-settings-browser.test.ts",
+        "test/operator-web-browser.test.ts",
+        "test/operator-control-inventory.test.ts"
+      ],
+      "disposition": "deterministic-proof"
+    }
+  ],
+  "amendments": {
+    "fullForms": "Deterministic complete Ensemble own-tool form schema/service/SQLite/production browser, including grouped/free/single/multiple/custom/optional/constraint cases",
+    "nativeLive": "One single-choice/custom-text native request with false/null continuation only; unsupported shapes remain unresolved",
+    "taskEvidence": "S1/R2/R3/S2 exact source/result/criterion/artifact relations, local PNG byte loads and previews, recorded provider state; selected review pictures visibly qualify unavailable/redacted states rather than actual previews",
+    "search": "Exact historical R2 destinations and return/filter/selection/focus/draft/scroll restored in tests; selected desktop picture has historical enabled and R2/R3 links; phone picture has current-only matches",
+    "foundation": "84 controls,15 destinations,42 forms,13 command discriminants,14 actions,23 extension routes; actual retained HTML/login/setup/recovery source scopes distinct",
+    "review": "One root independent integrated review before first push; no parent human acceptance inferred"
+  },
+  "reuse": [
+    {
+      "issue": 738,
+      "document": "ui01-runtime-input.md",
+      "source": "f0002f0a1b1dd899eb5423c8321565dafa324265",
+      "scope": "Unchanged bounded native codec/continuation evidence; does not qualify changed UI07 browser create/answer boundary"
+    },
+    {
+      "issue": 739,
+      "document": "ui04-task-workspace.md",
+      "source": "f2be0a1a172229a78616274e779aa42855a549b8",
+      "scope": "Task/evidence/search deterministic contracts; prior synthetic callback-only live not ordinary artifact producer proof; old grant consumed"
+    },
+    {
+      "issue": 743,
+      "document": "ui05-inbox-questions.md",
+      "source": "f0c17c201ded480bd95add6be52902a14b33e81e",
+      "scope": "Full Ensemble forms/literal IDs/transport/commit-before-effect deterministic proof; no additional live native shape"
+    },
+    {
+      "issue": 765,
+      "document": "ui08-foundation.md",
+      "source": "ab53e4a9b00ce4620bd6d5ce1102ac5ef40da5c7",
+      "scope": "Shared foundation/control/alternate routes,320/360/683 scaled scopes; emulation not physical-device acceptance"
+    }
+  ],
+  "captures": "ui07/captures.json",
+  "design": {
+    "blob": "49059c17efa78fe42b5b8df8c5fb6ce3650c9c8b",
+    "observedNodes": ["dKc4O", "mrRXI"],
+    "observedPlacements": 4,
+    "unverified": [
+      "fifth historical placement",
+      "OS save/reopen",
+      "whole canvas"
+    ],
+    "compositionGaps": [
+      "login",
+      "setup",
+      "recovery",
+      "retained minimal web-disabled HTML"
+    ]
+  },
+  "live": {
+    "status": "not-attempted",
+    "attempts": 0,
+    "reportBridgeScope": "Exact native answer map consumption and real ensemble_report_result persistence, not ordinary model-authored artifact production",
+    "limits": {
+      "appServers": 1,
+      "threads": 1,
+      "turns": 1,
+      "nativeRequests": 1,
+      "replies": 1,
+      "reports": 1,
+      "retries": 0,
+      "resume": 0,
+      "followup": 0,
+      "requestSeconds": 90,
+      "totalSeconds": 240,
+      "cleanupSeconds": 10,
+      "perActionSeconds": 10
+    },
+    "prompt": "Normal captured production executionPrompt with disposable profile/task outcome instructions; no override",
+    "completion": "Exact successful bound terminal, ended callback, no independent hold, exact counts through inspection and cleanup",
+    "persistence": "Ordinary project pause; independent read-only SQLite answer and command receipt commit before reply; ordinary unpause",
+    "cleanup": "Exact child process identity verification; no descendant containment claim"
+  },
+  "failures": [
+    {
+      "signature": "Initial local Ready missing workspace",
+      "disposition": "Shared service provisions initial repository-free LOCAL binding only; prior binding/execution/recovery authority preserved"
+    },
+    {
+      "signature": "SQLite closed before deferred scheduler admission settled",
+      "disposition": "Stop runtime and settle stopped scheduler before closing storage; preserve primary errors"
+    },
+    {
+      "signature": "Stopped runtime holding queued successor as storage failure",
+      "disposition": "Identity/availability recheck preserves never-admitted queued request for restart; active uncertainty and true storage failures remain held"
+    },
+    {
+      "signature": "UI03 historical scaled empty-project timeout",
+      "disposition": "Unclassified: retained manifest has console-error but no exact HTTP evidence"
+    },
+    {
+      "signature": "UI03 later phone empty-project catalog503",
+      "disposition": "Exact response demonstrated; paused initial binding unsettled at seed return is concrete race source; historical changing task not proven; await exact ordinary binding settlement"
+    },
+    {
+      "signature": "Assignee route natural result successor",
+      "disposition": "Supported default lead allocation chosen with routing disabled; one-operation proof renewed, no result wake suppression"
+    }
+  ],
+  "remainingGates": [
+    {
+      "issue": 736,
+      "status": "Chris final human visual/usability review pending"
+    },
+    {
+      "issue": 697,
+      "status": "Additional actual provider/delivery integration blocked by human review736; shares this single accepted journey"
+    },
+    {
+      "issues": [698, 704, 732, 761],
+      "status": "Operational/physical/cutover gates outside UI07"
+    },
+    {
+      "epic": 734,
+      "status": "X01-X08 paused/deferred; no reopening or dispatch"
+    }
+  ],
+  "releaseReady": false,
+  "privacy": "No public grant/credential/configuration/database/raw history/process identity; selected pictures synthetic"
+}

@@ -110,7 +110,22 @@ The current `design/design.pen` blob is
 inspection and OS save/reopen remain unverified. This narrows the historical
 loading gap without claiming saved-design visual acceptance.
 
-Selected captures will be linked here after hash and pixel inspection.
+The selected [populated Overview](ui07/1366-overview-attention-work.png),
+[phone empty/navigation view](ui07/390-empty.png),
+[desktop review](ui07/1366-original-review.png),
+[phone comparison](ui07/390-original-comparison.png),
+[historical desktop search](ui07/1366-cross-project-search.png),
+[current-only phone search](ui07/390-shared-search.png),
+[failed refresh with retained task data](ui07/1366-task-failed-refresh.png),
+[first invalid field](ui07/1366-field-error.png),
+[reduced-height Inbox draft](ui07/390x480-inbox-draft.png),
+[sign-in](ui07/1366-signin.png) and
+[retained runtime controls](ui07/390-retained-runtime-controls.png) have inspected
+pixels and exact hashes in the manifest. Review pictures visibly show unavailable
+or redacted previews. Tests separately assert real local PNG byte loads before
+capture; these pictures do not claim visible artifact previews. Desktop search
+shows historical R2 and current R3 links; the phone picture has historical search
+unchecked and shows current matches.
 
 ## Remaining gates
 

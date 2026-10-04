@@ -785,6 +785,7 @@ async function seedCatalog(
     outcome: "Work",
     ready: true,
   });
+  await f.service.provisionTask(paused);
   d.execute({
     type: "github.configure",
     key: randomUUID(),
