@@ -628,3 +628,35 @@ test("all curated task entry points reject same-version workspace binding change
     }
   }
 });
+
+test("runtime settings uses the exact task rows captured before its initial await", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(f);
+  const api = new OperatorApi(f.service, [f.directory]);
+  const pending = api.readRuntimeSettings();
+  const newId = randomUUID();
+  f.service.domain().execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    taskId: newId,
+    title: "New task after captured catalog",
+    outcome: "Retained new brief",
+    ready: false,
+  });
+  assert.deepEqual(
+    (await pending).data.projects
+      .find((p) => p.project.id === a.projectId)
+      ?.tasks.map((t) => t.taskId),
+    [a.taskId],
+  );
+  assert.deepEqual(
+    (await api.readRuntimeSettings()).data.projects
+      .find((p) => p.project.id === a.projectId)
+      ?.tasks.map((t) => t.taskId)
+      .sort(),
+    [a.taskId, newId].sort(),
+  );
+});

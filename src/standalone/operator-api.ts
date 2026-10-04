@@ -1655,8 +1655,11 @@ export class OperatorApi {
   async readRuntimeSettings() {
     const d = this.domain(),
       projects = d.projects(),
+      taskRows = new Map(
+        projects.map((p) => [String(p.id), d.tasks(String(p.id))]),
+      ),
       snapshot = this.workspaceSnapshot(
-        projects.flatMap((p) => d.tasks(String(p.id)).map((t) => String(t.id))),
+        [...taskRows.values()].flatMap((rows) => rows.map((t) => String(t.id))),
       ),
       excluded = await this.exclusions(),
       limits = this.service.capacityLimits(projects.map((p) => String(p.id)));
@@ -1674,7 +1677,7 @@ export class OperatorApi {
               usage: limits.currentUsage.projects[id] ?? 0,
               override: limits.projectOverrides[id] ?? null,
               tasks: await Promise.all(
-                d.tasks(id).map(async (t) => {
+                (taskRows.get(id) ?? []).map(async (t) => {
                   const taskId = String(t.id),
                     assignments = d.assignments(taskId),
                     known = new Set(assignments.map((a) => String(a.id))),
