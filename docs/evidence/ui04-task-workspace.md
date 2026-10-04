@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-861 deterministic tests with zero skips. Existing lint warnings remain warnings.
+863 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -53,10 +53,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
-| 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer |
+| 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer; navigation-entry view state returns manual overrides, disclosure/4px/focus while shared drafts remain per task |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison |
-| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference |
+| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference; in-flight reply disposal preserves the original key for reconciliation without duplication |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
@@ -64,10 +64,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
-| 15 | current full npm check 861/861; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries |
+| 15 | current full npm check 863/863; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-observation-check.log` (861/861).
+The current repaired full-check log is `/tmp/ui04-entry-artifact-check-final.log` (863/863).
+`/tmp/ui04-observation-check.log` (861/861) retains historical source-observation/coverage evidence.
 `/tmp/ui04-ci8-check.log` (859/859) retains historical overlap/source-boundary evidence.
 `/tmp/ui04-draft-preservation-check.log` (857/857) retains historical unfinished-draft evidence.
 `/tmp/ui04-ci7-check.log` (857/857) retains historical CI refresh/link/head evidence.
@@ -924,3 +925,100 @@ images keep original source attribution. All 15 rows retain previous evidence;
 rows 5/11/13/15 add these affected proofs. Historical a21/ca51 live qualification
 remains transport-only, grant consumed and canonical resource released. No remote,
 live, harness, runtime, global or configuration operation occurred.
+
+
+## Navigation-entry views and exact artifact identity
+
+Codex findings `4176639963` and `4176639967` are addressed. Existing authenticated
+navKey entries own source/result selectors, disclosure/chronological state, loaded
+item/omission depths and reading/focus/scroll. URL defaults initialize a new entry
+once; a return preserves manual overrides and manually collapsed URL assignments.
+New plain task links start at latest. Task reply state remains shared: both channel
+drafts, destination/reference, notices/receipts, review and frozen/uncertain intent.
+Source-observation ownership remains task/auth-scoped, and disposed pending source
+reads remain unresolved. Authentication purge clears entry views and shared replies.
+
+The production browser proves URL-A/manual-B -> Search old same-task A -> native
+Back/Forward restores B, exact source, disclosure, four-pixel reading position,
+summary focus and shared draft. A fresh All-tasks link uses latest and its own
+latest-origin historical round trip returns latest. Existing shared Overview/List/
+Board/Inbox destinations use that same plain entry contract. Exact assignment-result
+navigation retains initial heading focus and exact source-link focus on Back.
+
+A held actual persisted message receipt demonstrated the view-local pending flag
+was lost on entry disposal. Cleanup now marks the exact frozen in-flight reply
+unknown; the new entry locks text/destination/reference and offers original-key
+reconciliation. A late disposed receipt cannot settle another entry/channel. The
+actual browser reconciles the original key and proves exactly one persisted message.
+Existing remote unknown, failed/partial source observation, draft and privacy
+journeys remain covered; no lifecycle is reopened.
+
+Artifact uniqueness now enumerates only metadata.artifacts and compares the exact
+artifactId field globally. Ordinary runtime callback ingestion accepts an artifact
+UUID previously present only in an unrelated retained decision; a real retained
+artifact field duplicate still rejects atomically with no result, review, receipt
+or completion. Successful replay remains one result. Existing intra-list duplicates,
+file/work/source/privacy and exact artifact owner guards remain unchanged.
+
+The first two focused failure logs remain `/tmp/ui04-entry-artifact-focused.log`
+and `/tmp/ui04-entry-artifact-focused-final.log`: the new test originally stopped
+at an intermediate Search entry, and entry remount uncovered initial heading and
+exact history-link focus restoration gaps. Native history traversal and per-entry
+exact focused href resolved them without weakening bounds.
+`/tmp/ui04-entry-artifact-pending-proof.log` retains the in-flight reply gap before
+the minimal disposal-to-unknown correction.
+
+CI10 run `37186831900` on historical d620 failed its retained-access journey at
+45.001 seconds, then outer child exit124/cancelled module. Its artifact under
+`/tmp/ui04-ci10-evidence` proves header/timer material,272 unique omissions,draft,
+focus and zero position delta passed; no later stage timing/current snapshot is
+available. Cleanup was dependency-skipped/incomplete while execution was in flight.
+That original later-stage cause remains unknown and is not described as a repaired
+product defect. Current bounded Node monotonic stage diagnostics cover validation
+wait/scroll/capture, history expand/scroll/capture, chronological and phone entry,
+and the intentional-focus refresh path. Controlled local journey completes all
+those stages; it does not establish Linux performance or the original cause.
+The shared timeout harness's conservative in-flight cleanup boundary is unchanged.
+
+The controlled CI diagnostic journey `/tmp/ui04-entry-artifact-ci10-diagnosis.log`
+passes 1/1, with timer-settled at 10.567 seconds and all later stages complete at
+15.279 seconds. This does not identify the original Linux timeout stage. Bounded
+nonthrowing stage markers and a 44-second unref Node timer retain the current stage
+and cached last-known safe reading snapshot near the unchanged execution deadline;
+no live browser read is awaited there. Registered cleanup clears the diagnostic
+timer. The marker cannot settle an action or replace its primary failure.
+
+The historical controlled held-receipt reproduction in
+`/tmp/ui04-entry-artifact-pending-proof.log` also proves the exact five-second
+missing-label wait failure boundary: its action releases the held response in
+finally and settles, and the manifest records failed execution at 5.658 seconds
+with every cleanup step completed. Its manifest is
+`/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-test-evidence-ZplDgs/ui04-search-75936/9af42866498b8daa/manifest.json`.
+That retained failure is not credited as a passing current test or the original
+CI10 cause. Existing browser-diagnostics controlled-stall evidence separately
+proves conservative dependency-skipped cleanup while execution remains in flight;
+CI10's incomplete cleanup remains explicitly unresolved. No blanket retry, timer
+disabling, increased 45/95/600-second limits or skips were introduced. This is the
+approved diagnostic-only next required CI gate on genuine product repairs, not a
+claim that the original timeout is fixed or a reset of its causal history.
+
+Final `/tmp/ui04-entry-artifact-focused-final-current.log` passes 12/12, zero
+skipped, in 16.867 seconds. `/tmp/ui04-entry-artifact-receipt.log` passes 5/5
+including explicit absence of a rejected callback receipt. Required
+`/tmp/ui04-entry-artifact-check-final.log` passes 863/863, zero skipped, in 48.788
+seconds. The earlier `/tmp/ui04-entry-artifact-check.log` (863/863) precedes final
+diagnostic/test additions and remains historical. Executable source
+`154ae9467395fecf426aca0e1106d116df3833ba`, tree
+`3c372326b149acb93ec4edae82f90399fc4ffe47`, was frozen clean before capture.
+Exact current image/bundle hashes and completed cleanup manifests are in
+`/tmp/ui04-entry-artifact-screenshots.json`; prior images retain original source
+provenance. All 15 rows retain prior proof, with rows 3/6/14/15 extended. Historical
+a21/ca51 qualification remains transport-only, grant consumed and resource released.
+No remote/live, harness, runtime, global or configuration change occurred.
+
+Clean-code `/tmp/ui04-entry-artifact-capture.log` passes 4/4, zero skipped, in
+15.816 seconds. Three cited images were inspected: restored manual desktop entry,
+phone Search, and phone independent omission history. All four cleanup manifests
+completed with no omitted steps/screenshots or evidence failures. Expected Search
+failure/auth diagnostics and bounded history stage/reading diagnostics remain
+recorded, not described as an empty diagnostic set.
