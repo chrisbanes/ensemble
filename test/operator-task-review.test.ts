@@ -205,3 +205,143 @@ test("review projection redacts supplied prose while preserving outcome enums an
   assert.ok(!record?.metadata.criteria[0]?.scope.includes("failed"));
   assert.ok(!record?.metadata.validations[0]?.label.includes("failed"));
 });
+
+test("ordinary GitHub observation identity survives changed redaction exclusions while current prose stays private", async (t) => {
+  const issue = {
+    providerInstance: "github.com" as const,
+    nodeId: "I_STABLE",
+    repositoryId: "R1",
+    repositoryName: "org/repo",
+    number: 1,
+    title: "Stable source",
+    body: "- [ ] failed behavior\nsecret=private-credential",
+    state: "open" as const,
+    labels: ["ready"],
+    projectFields: [],
+  };
+  const f = await createOperatorFixture(null, () => ({
+    async readSelection() {
+      return { complete: true, issues: [issue], reason: null };
+    },
+    async readBlockers() {
+      return { complete: true, blockers: [], reason: null };
+    },
+    async readIssueStatus() {
+      return { status: "open" };
+    },
+  }));
+  t.after(() => f.close());
+  const a = await seedReviewTask(f),
+    d = f.service.domain();
+  d.execute({
+    type: "github.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    expectedVersion: 1,
+    credentialRef: "env:FIXTURE_SOURCE",
+    selections: [
+      {
+        id: "repo",
+        kind: "repository",
+        repositoryId: "R1",
+        owner: "org",
+        name: "repo",
+      },
+    ],
+    readiness: { mode: "any", conditions: [{ kind: "label", name: "ready" }] },
+    repositories: [],
+  });
+  d.execute({
+    type: "github.activate",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    selectionId: "repo",
+    expectedVersion: 2,
+  });
+  await f.service.refreshGitHub();
+  const taskId = String(f.service.githubSources().issue(issue.nodeId)?.taskId),
+    source = f.service.taskReview().sources(taskId).at(-1)!;
+  assert.ok(!source.body?.includes("private-credential"));
+  await f.service.provisionTask(taskId);
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    expectedVersion: Number(d.project(a.projectId).version),
+    paused: false,
+  });
+  for (
+    let n = 0;
+    n < 100 && !f.service.list().some((w) => w.state === "running");
+    n++
+  )
+    await new Promise((r) => setTimeout(r, 10));
+  const w = f.service.list().find((w) => w.state === "running");
+  assert.ok(w?.threadId && w.turnId);
+  assert.equal(
+    (
+      await f.runtime.callTool({
+        threadId: w.threadId,
+        turnId: w.turnId,
+        callId: randomUUID(),
+        tool: "ensemble_report_result",
+        arguments: {
+          summary: "Stable retained result",
+          review: {
+            sourceId: source.sourceId,
+            criteria: [
+              {
+                criterionId: source.criteria[0]!.criterionId,
+                outcome: "failed",
+                scope: "failed scope",
+                provenance: "Supplied evidence",
+              },
+            ],
+          },
+        },
+      })
+    ).success,
+    true,
+  );
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: a.profileId,
+    expectedVersion: Number(d.profile(a.profileId).version),
+    instructions: "failed",
+  });
+  await f.service.refreshGitHub();
+  assert.deepEqual(f.service.taskReview().sources(taskId), [source]);
+  const api = new OperatorApi(f.service, [f.directory]),
+    read = await api.readTask(taskId);
+  assert.equal(read.data.review?.sources[0]?.sourceId, source.sourceId);
+  assert.equal(
+    read.data.review?.sources[0]?.criteria[0]?.criterionId,
+    source.criteria[0]?.criterionId,
+  );
+  assert.ok(!JSON.stringify(read.data.review?.sources).includes("failed"));
+  assert.equal(
+    read.data.review?.results[0]?.metadata.sourceId,
+    source.sourceId,
+  );
+  assert.equal(
+    read.data.review?.results[0]?.metadata.criteria[0]?.outcome,
+    "failed",
+  );
+  issue.body += "\n- [ ] Actually changed";
+  await f.service.refreshGitHub();
+  assert.equal(f.service.taskReview().sources(taskId).length, 2);
+  assert.notEqual(
+    f.service.taskReview().sources(taskId).at(-1)?.sourceId,
+    source.sourceId,
+  );
+  assert.ok(
+    !JSON.stringify(f.service.taskReview().sources(taskId)).includes(
+      "private-credential",
+    ),
+  );
+});

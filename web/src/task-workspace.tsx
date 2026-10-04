@@ -1663,10 +1663,12 @@ export function TaskInbox({
   client,
   session,
   ids,
+  observation,
 }: {
   client: OperatorClient;
   session: Session;
   ids: string[];
+  observation: object | null;
 }) {
   return (
     <section>
@@ -1679,7 +1681,13 @@ export function TaskInbox({
       </p>
       {ids.length ? (
         ids.map((id) => (
-          <InboxTask key={id} client={client} session={session} taskId={id} />
+          <InboxTask
+            key={id}
+            client={client}
+            session={session}
+            taskId={id}
+            observation={observation}
+          />
         ))
       ) : (
         <p>No recorded task attention.</p>
@@ -1691,10 +1699,12 @@ function InboxTask({
   client,
   session,
   taskId,
+  observation,
 }: {
   client: OperatorClient;
   session: Session;
   taskId: string;
+  observation: object | null;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) =>
@@ -1703,6 +1713,14 @@ function InboxTask({
   );
   const r = useOperatorResource(`${session.csrfToken}:inbox:${taskId}`, loader),
     d = r.state.data?.data;
+  const refresh = useRef(r.refresh),
+    seen = useRef(observation);
+  refresh.current = r.refresh;
+  useEffect(() => {
+    if (seen.current === observation) return;
+    seen.current = observation;
+    if (observation) refresh.current();
+  }, [observation]);
   return (
     <div>
       <ResourceStatus state={r.state} retry={r.refresh} />

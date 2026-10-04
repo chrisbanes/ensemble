@@ -300,6 +300,14 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     taskLoader,
   );
+  const taskRefresh = useRef(tasks.refresh);
+  taskRefresh.current = tasks.refresh;
+  useEffect(() => {
+    if (!session?.authenticated || path.split("?")[0] !== "/app/inbox") return;
+    taskRefresh.current();
+    const timer = setInterval(() => taskRefresh.current(), 15000);
+    return () => clearInterval(timer);
+  }, [path, session?.csrfToken, session?.authenticated]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: restore the previous entry focus after its route and asynchronous task content render.
   useEffect(() => {
     const href = restoreFocus.current;
@@ -538,7 +546,10 @@ export function App() {
             <h1 className="page-heading">{title}</h1>
             <Button
               variant="secondary"
-              onClick={workspace.refresh}
+              onClick={() => {
+                workspace.refresh();
+                if (pathname === "/app/inbox") tasks.refresh();
+              }}
               disabled={workspace.state.pending}
             >
               Refresh
@@ -621,15 +632,21 @@ export function App() {
               onRecorded={tasks.refresh}
             />
           ) : pathname === "/app/inbox" ? (
-            <TaskInbox
-              client={client}
-              session={session}
-              ids={
-                tasks.state.data?.tasks
-                  .filter((t) => t.attention.count > 0)
-                  .map((t) => t.id) ?? []
-              }
-            />
+            <>
+              <ResourceStatus state={tasks.state} retry={tasks.refresh} />
+              {tasks.state.data && (
+                <TaskInbox
+                  client={client}
+                  session={session}
+                  observation={tasks.state.data}
+                  ids={
+                    tasks.state.data.tasks
+                      .filter((t) => t.attention.count > 0)
+                      .map((t) => t.id) ?? []
+                  }
+                />
+              )}
+            </>
           ) : pathname === "/app/search" ? (
             <Search
               key={`${session.csrfToken}:${entryKey}`}

@@ -281,10 +281,14 @@ export class TaskReviewStore {
       )
       .get(taskId) as Row | undefined;
     if (!t) throw Error("Review task unavailable");
-    const title = this.safe(supplied?.title ?? String(t.title)),
-      body = this.safe(supplied?.body ?? String(t.outcome));
+    const originalTitle = supplied?.title ?? String(t.title),
+      originalBody = supplied?.body ?? String(t.outcome),
+      title = this.safe(originalTitle),
+      body = this.safe(originalBody);
     const digest = createHash("sha256")
-      .update(JSON.stringify({ kind, title, body }))
+      .update(
+        JSON.stringify({ kind, title: originalTitle, body: originalBody }),
+      )
       .digest("hex");
     const latest = this.sources(taskId).at(-1);
     if (latest?.digest === digest) return latest;

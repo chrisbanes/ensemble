@@ -6,6 +6,8 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { CoordinationStore } from "../src/core/coordination.js";
+import { ExecutionState } from "../src/standalone/state.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-workspace");
 test("production workspace retains literal history, pending request, focused reply and exact result through updates and failed reads on desktop and phone", async (_t, j) => {
@@ -526,5 +528,202 @@ test("production workspace retains literal history, pending request, focused rep
       .getByText("Literal update 1 long supplied text ", { exact: true })
       .count(),
     0,
+  );
+});
+
+test("mounted Inbox discovers new requests and holds through timer and header refresh while retaining known detail focus", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f, "Inbox questions", "Question task"),
+    b = await seedReviewTask(f, "Inbox approvals", "Approval task"),
+    routine = await seedReviewTask(f, "Routine result", "Routine task");
+  routine.delegatedResult("Routine delivered result");
+  const d = f.service.domain();
+  for (const task of [a, b]) {
+    d.execute({
+      type: "project.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      expectedVersion: Number(d.project(task.projectId).version),
+      paused: false,
+    });
+    d.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      taskId: task.taskId,
+      expectedVersion: Number(d.task(task.taskId).version),
+      ready: true,
+    });
+  }
+  for (
+    let n = 0;
+    n < 100 && f.service.list().filter((w) => w.state === "running").length < 2;
+    n++
+  )
+    await new Promise((r) => setTimeout(r, 10));
+  const work = (taskId: string) => {
+    const request = f.service
+        .turnRequests()
+        .find((r) => r.taskId === taskId && r.state === "active"),
+      w = f.service.list().find((w) => w.workId === request?.workId);
+    assert.ok(w?.threadId && w.turnId);
+    return w;
+  };
+  const wa = work(a.taskId),
+    wb = work(b.taskId);
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.clock.install();
+  await page.goto(`${web.origin}/app/inbox`);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByText("No recorded task attention.", { exact: true })
+    .waitFor();
+  const question = async (prompt: string) => {
+    assert.equal(
+      (
+        await f.runtime.callTool({
+          threadId: wa.threadId!,
+          turnId: wa.turnId!,
+          callId: randomUUID(),
+          tool: "ensemble_ask_question",
+          arguments: { question: prompt },
+        })
+      ).success,
+      true,
+    );
+  };
+  await question("New timer-discovered question");
+  const catalogResponse = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === "/api/operator/task-list" && r.ok(),
+  );
+  await page.clock.runFor(15000);
+  await catalogResponse;
+  const firstLink = page.getByRole("link", {
+    name: "question: New timer-discovered question",
+    exact: true,
+  });
+  await firstLink.waitFor();
+  assert.ok(
+    (await firstLink.getAttribute("href"))?.includes(
+      `tasks/${a.taskId}?request=`,
+    ),
+  );
+  await firstLink.focus();
+  await question("Second question on known Inbox task");
+  await page
+    .getByRole("button", { name: "Refresh", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByRole("link", {
+      name: "question: Second question on known Inbox task",
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(
+    await firstLink.evaluate((el) => document.activeElement === el),
+    true,
+  );
+  assert.equal(
+    (
+      await f.runtime.callTool({
+        threadId: wb.threadId!,
+        turnId: wb.turnId!,
+        callId: randomUUID(),
+        tool: "ensemble_request_approval",
+        arguments: {
+          action: "Inspect retained material",
+          material: { scope: "fixture" },
+        },
+      })
+    ).success,
+    true,
+  );
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  const approvalLink = page.getByRole("link", {
+    name: "approval: Approval requested for Inspect retained material",
+    exact: true,
+  });
+  await approvalLink.waitFor();
+  assert.ok(
+    (await approvalLink.getAttribute("href"))?.includes(
+      `tasks/${b.taskId}?request=`,
+    ),
+  );
+  assert.equal(
+    await page.getByRole("link", { name: "Routine task", exact: true }).count(),
+    0,
+  );
+  f.seedPersistedState((db) => {
+    const c = new CoordinationStore(db, d);
+    for (const q of c
+      .interactions(a.taskId)
+      .filter((q) => q.kind === "question" && q.status === "open"))
+      c.answerQuestion({
+        actor: "operator",
+        key: randomUUID(),
+        interactionId: q.interactionId,
+        expectedRevision: q.revision,
+        answer: "Recorded answer",
+      });
+    for (const approval of c
+      .interactions(b.taskId)
+      .filter((q) => q.kind === "approval" && q.status === "open"))
+      c.decideApproval({
+        actor: "operator",
+        key: randomUUID(),
+        interactionId: approval.interactionId,
+        expectedRevision: approval.revision,
+        decision: "denied",
+        action: "Inspect retained material",
+        material: { scope: "fixture" },
+      });
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByText("No recorded task attention.", { exact: true })
+    .waitFor();
+  f.seedPersistedState((db) =>
+    new ExecutionState(db).hold(wa.id, "Fixture ownership unknown"),
+  );
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Question task", exact: true })
+    .waitFor();
+  await captureBrowserEvidence(page, "1366-inbox-new-attention");
+  await page.route("**/api/operator/task-list*", (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    }),
+  );
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByText("Refresh failed. Showing the last fetched data.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("link", { name: "Question task", exact: true })
+      .count(),
+    1,
   );
 });
