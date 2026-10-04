@@ -33,6 +33,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 }
 
 class ViewRuntime implements Runtime {
+  private readonly generation = randomUUID();
   starts = 0;
   turns = 0;
   readonly prompts: string[] = [];
@@ -66,7 +67,7 @@ class ViewRuntime implements Runtime {
   }
 
   async startTurn(_threadId: string, _workspace: string, prompt: string) {
-    const turnId = `turn-${++this.turns}`;
+    const turnId = `${this.generation}:turn-${++this.turns}`;
     this.prompts.push(prompt);
     this.outcomes.set(turnId, deferred());
     return turnId;
@@ -85,7 +86,7 @@ class ViewRuntime implements Runtime {
   }
 
   complete(turn: number) {
-    this.outcomes.get(`turn-${turn}`)?.resolve("completed");
+    this.outcomes.get(`${this.generation}:turn-${turn}`)?.resolve("completed");
   }
 
   callTool(call: RuntimeToolCall) {

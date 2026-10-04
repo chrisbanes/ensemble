@@ -6,6 +6,7 @@ export type OperatorRouteContext = {
   params: Readonly<Record<string, string>>;
   fields: Readonly<Record<string, string>>;
   csrfToken: string;
+  webEnabled?: boolean;
 };
 
 export type OperatorRouteHandler = (

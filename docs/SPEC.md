@@ -669,6 +669,26 @@ an answer or silently treating it as ordinary chat. Structured runtime bridging
 requires qualification; the existing plain-text question tool alone is not evidence
 of support for these interactions.
 
+UI05 #743 implements the action Inbox and shared exact request view at
+`/app/inbox` and `/app/tasks/:taskId?request=:interactionId`. Its summary queue
+uses 100-row fingerprinted pages over the bounded 10,000-task catalog. Selected
+forms are read independently of queue and history pages. Approval and recovery
+items retain their exact existing material/control destinations. Unknown ownership
+or age is labelled explicitly. Answers are durable decisions; correction requires
+a new agent request. Transport failures reconcile the original frozen command and
+key before editing can resume.
+
+The version-1 Ensemble form retains up to 32 questions, 100 options per question,
+512-character IDs/labels, 16,000-character text fields, and independent 256 KiB
+UTF-8 form/answer limits. Only the operator command JSON route allows the answer
+limit plus its mechanically derived strict command envelope; other commands retain
+their 64 KiB raw limit. Unsafe exact forms are withheld in full. Persisted answers
+retain original requester/work/version attribution, and fresh responses reject
+replaced, cancelled, completed-assignment or ambiguous identity. A successful
+requesting terminal or ordinary continuation alone does not supersede an own-tool
+question. Receipts replay before fresh eligibility checks. See
+[UI05 evidence](evidence/ui05-inbox-questions.md) for validation and retained limits.
+
 Questions and approvals are durable and scoped. Approval includes the action,
 target, requester and reviewed material; changed material invalidates approval.
 Answers do not grant unrelated permission. Denial persists. Replayed requests or

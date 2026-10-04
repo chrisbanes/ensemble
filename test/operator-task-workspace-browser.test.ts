@@ -707,7 +707,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
-    .getByText("No recorded task attention.", { exact: true })
+    .getByText("No matching requests need your action.", { exact: true })
     .waitFor();
   const question = async (prompt: string) => {
     assert.equal(
@@ -725,31 +725,32 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   };
   await question("New timer-discovered question");
   const catalogResponse = page.waitForResponse(
-    (r) => new URL(r.url()).pathname === "/api/operator/task-list" && r.ok(),
+    (r) => new URL(r.url()).pathname === "/api/operator/inbox" && r.ok(),
   );
   await page.clock.runFor(15000);
   await catalogResponse;
-  const firstLink = page.getByRole("link", {
-    name: "question: New timer-discovered question",
-    exact: true,
-  });
+  const firstQuestion = f.service.coordinationView().readTask(a.taskId)
+    .questions[0];
+  assert.ok(firstQuestion);
+  const firstLink = page.locator(
+    `.inbox-row[data-record-id="${firstQuestion.interactionId}"]`,
+  );
   await firstLink.waitFor();
-  assert.ok(
-    (await firstLink.getAttribute("href"))?.includes(
-      `tasks/${a.taskId}?request=`,
-    ),
+  assert.equal(
+    await page
+      .getByText("New timer-discovered question", { exact: true })
+      .count(),
+    0,
+    "Queue remains summary-only; exact prompt belongs to selected view",
   );
   await firstLink.focus();
   await question("Second question on known Inbox task");
   await page
     .getByRole("button", { name: "Refresh", exact: true })
     .evaluate((el) => (el as HTMLElement).click());
-  await page
-    .getByRole("link", {
-      name: "question: Second question on known Inbox task",
-      exact: true,
-    })
-    .waitFor();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".inbox-row").length === 2,
+  );
   assert.equal(
     await firstLink.evaluate((el) => document.activeElement === el),
     true,
@@ -770,18 +771,31 @@ test("mounted Inbox discovers new requests and holds through timer and header re
     true,
   );
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  const approvalLink = page.getByRole("link", {
-    name: "approval: Approval requested for Inspect retained material",
-    exact: true,
-  });
+  const approval = f.service.coordinationView().readTask(b.taskId).approvals[0];
+  assert.ok(approval);
+  const approvalLink = page.locator(
+    `.inbox-row[data-record-id="${approval.interactionId}"]`,
+  );
   await approvalLink.waitFor();
-  assert.ok(
-    (await approvalLink.getAttribute("href"))?.includes(
-      `tasks/${b.taskId}?request=`,
-    ),
+  await approvalLink.click();
+  assert.equal(
+    new URL(page.url()).searchParams.get("request"),
+    approval.interactionId,
   );
   assert.equal(
-    await page.getByRole("link", { name: "Routine task", exact: true }).count(),
+    await page
+      .getByRole("link", { name: "Open exact approval", exact: true })
+      .getAttribute("href"),
+    `/coordination/task/${b.taskId}#${approval.interactionId}`,
+  );
+  await page
+    .getByRole("button", { name: "Back to queue", exact: true })
+    .click();
+  assert.equal(
+    await page
+      .locator(".inbox-row")
+      .filter({ hasText: "Routine task" })
+      .count(),
     0,
   );
   f.seedPersistedState((db) => {
@@ -811,17 +825,18 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page
-    .getByText("No recorded task attention.", { exact: true })
+    .getByText("No matching requests need your action.", { exact: true })
     .waitFor();
   f.seedPersistedState((db) =>
     new ExecutionState(db).hold(wa.id, "Fixture ownership unknown"),
   );
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page
-    .getByRole("link", { name: "Question task", exact: true })
+    .locator(".inbox-row")
+    .filter({ hasText: "Question task" })
     .waitFor();
   await captureBrowserEvidence(page, "1366-inbox-new-attention");
-  await page.route("**/api/operator/task-list*", (route) =>
+  await page.route("**/api/operator/inbox*", (route) =>
     route.fulfill({
       status: 503,
       contentType: "application/json",
@@ -836,7 +851,8 @@ test("mounted Inbox discovers new requests and holds through timer and header re
     .waitFor();
   assert.equal(
     await page
-      .getByRole("link", { name: "Question task", exact: true })
+      .locator(".inbox-row")
+      .filter({ hasText: "Question task" })
       .count(),
     1,
   );

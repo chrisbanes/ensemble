@@ -85,6 +85,14 @@ and preserved return state. Legacy advanced controls remain reachable.
 [UI04 evidence](docs/evidence/ui04-task-workspace.md) records the deterministic
 browser checks, one bounded live callback and remaining qualification limits.
 
+The action Inbox now lists cross-project questions, approvals and recorded
+interventions by urgency and age. Exact own-tool forms support grouped text,
+single-choice and multiple-choice answers, with preserved drafts and durable
+submission receipts shared with task detail. Qualified native single-choice/custom
+requests use their existing runtime delivery path. [UI05 evidence](docs/evidence/ui05-inbox-questions.md)
+records deterministic browser, SQLite, recovery and transport checks and the
+reused native runtime qualification.
+
 The service now includes local GitHub discovery for selected repository issues,
 searches and Projects, with provider-owned readiness and dependency holds.
 Operators can inspect source state and refresh it in the authenticated UI.

@@ -1,3 +1,4 @@
+import { questionToolArgumentsSchema } from "../core/question-forms.js";
 import { reviewMetadataSchema } from "../core/task-review.js";
 import { z } from "zod";
 import { externalActionArgumentsSchema } from "../core/delivery.js";
@@ -62,7 +63,7 @@ export const coordinationTools: readonly RuntimeToolDefinition[] = [
     type: "function",
     name: "ensemble_ask_question",
     description: "Create a durable question for operator attention.",
-    inputSchema: object({ question: text }, ["question"]),
+    inputSchema: z.toJSONSchema(questionToolArgumentsSchema),
   },
   {
     type: "function",

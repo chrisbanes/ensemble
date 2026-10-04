@@ -1110,14 +1110,16 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     kind: "redirect",
     location: `/coordination/task/${otherTaskId}`,
   });
-  const leadReport = await runtime.callTool({
-    threadId: leadIntent.threadId,
-    turnId: leadIntent.turnId,
-    callId: "operator-lead-result",
-    tool: "ensemble_report_result",
-    arguments: { summary: "Lead reviewed the task scope." },
+  // Record while the requester remains current. Later completed-assignment
+  // acknowledgements below are historical same-key replay, never fresh input.
+  assert.deepEqual(await answerRoute.handler(answerContext), {
+    kind: "redirect",
+    location: `/coordination/task/${taskId}`,
   });
-  assert.equal(leadReport.success, true, leadReport.text);
+  assert.deepEqual(await approvalRoute.handler(approvalContext), {
+    kind: "redirect",
+    location: `/coordination/task/${taskId}`,
+  });
   runtime.complete(leadIntent.turnId);
   await waitUntil(() =>
     service
@@ -1145,6 +1147,54 @@ test("coordination histories and keyed controls stay scoped and durable", async 
     () =>
       service.coordinationView().readTask(taskId).unresolvedResults.length ===
       1,
+  );
+  await waitUntil(() =>
+    service
+      .list()
+      .some(
+        (intent) =>
+          service
+            .turnRequests()
+            .some(
+              (request) =>
+                request.assignmentId === leadAssignment.id &&
+                request.workId === intent.workId,
+            ) &&
+          intent.workId !== leadIntent.workId &&
+          intent.state === "running",
+      ),
+  );
+  const leadContinuation = service
+    .list()
+    .find(
+      (intent) =>
+        service
+          .turnRequests()
+          .some(
+            (request) =>
+              request.assignmentId === leadAssignment.id &&
+              request.workId === intent.workId,
+          ) &&
+        intent.workId !== leadIntent.workId &&
+        intent.state === "running",
+    );
+  assert.ok(leadContinuation?.threadId && leadContinuation.turnId);
+  const leadReport = await runtime.callTool({
+    threadId: leadContinuation.threadId,
+    turnId: leadContinuation.turnId,
+    callId: "operator-lead-result",
+    tool: "ensemble_report_result",
+    arguments: { summary: "Lead reviewed the task scope." },
+  });
+  assert.equal(leadReport.success, true, leadReport.text);
+  runtime.complete(leadContinuation.turnId);
+  await assert.rejects(
+    async () =>
+      answerRoute.handler({
+        ...answerContext,
+        fields: { ...answerContext.fields, key: randomUUID() },
+      }),
+    /stale, cancelled or ambiguous|not open/,
   );
   assert.deepEqual(await answerRoute.handler(answerContext), {
     kind: "redirect",

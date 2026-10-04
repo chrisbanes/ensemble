@@ -1,4 +1,9 @@
 import {
+  questionFormSchema,
+  questionAnswersSchema,
+  questionPayloadLimit,
+} from "../core/question-forms.js";
+import {
   taskReviewReadSchema,
   feedbackReferenceSchema,
 } from "../core/task-review.js";
@@ -298,6 +303,7 @@ const message = z
     resultId: uuid.optional(),
     routingOperationId: uuid.optional(),
     routingReason: safeText.optional(),
+    questionAnswers: questionAnswersSchema.optional(),
     interactionId: uuid.optional(),
     reference: feedbackReferenceSchema.optional(),
   })
@@ -778,7 +784,45 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       taskId: uuid,
       interactionId: uuid,
       expectedRevision: revision,
-      answer: z.string().trim().min(1).max(16000),
+      answer: z.string().min(1).max(16000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("question.form.answer"),
+      taskId: uuid,
+      interactionId: uuid,
+      expectedRevision: revision,
+      answers: questionAnswersSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("question.native.answer"),
+      taskId: uuid,
+      interactionId: uuid,
+      expectedRevision: revision,
+      answers: z
+        .record(
+          z.string().min(1).max(512),
+          z
+            .object({
+              answers: z.array(z.string().min(1).max(16000)).length(1),
+            })
+            .strict(),
+        )
+        .superRefine((value, ctx) => {
+          if (
+            new TextEncoder().encode(JSON.stringify(value)).byteLength >
+            questionPayloadLimit
+          )
+            ctx.addIssue({
+              code: "custom",
+              message: "Answer payload exceeds limit",
+            });
+        }),
     })
     .strict(),
   z
@@ -1233,7 +1277,96 @@ export const projectConfigurationSchema = envelope(
     })
     .strict(),
 );
+export const questionReadSchema = z
+  .object({
+    data: z
+      .object({
+        taskId: uuid,
+        interactionId: uuid,
+        requestingAssignmentId: uuid,
+        conversationRevision: revision,
+        revision,
+        source: z.enum(["plain", "ensemble", "native"]),
+        status: z.enum([
+          "pending",
+          "recorded",
+          "stale",
+          "cancelled",
+          "offline",
+          "unsupported",
+          "unavailable",
+        ]),
+        form: questionFormSchema.nullable(),
+        answers: questionAnswersSchema.nullable(),
+        reason: safeText,
+        deliveryState: safeText,
+      })
+      .strict(),
+    observedAt: time,
+  })
+  .strict();
+export type QuestionRead = z.infer<typeof questionReadSchema>;
+export const inboxItemSchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    kind: z.enum(["question", "approval", "intervention"]),
+    urgency: z.number().int().min(0).max(1),
+    createdAt: time.nullable(),
+    taskId: uuid,
+    projectId: uuid,
+    projectName: safeText,
+    taskTitle: safeText,
+    requestingAssignmentId: uuid.nullable(),
+    requesterName: safeText,
+    interactionId: uuid.nullable(),
+    revision: revision.nullable(),
+    reason: safeText,
+    destination: z.string().max(512),
+    evidence: z.string().max(512),
+    conversation: z.string().max(512).nullable(),
+  })
+  .strict();
+export const inboxReadSchema = z
+  .object({
+    data: z
+      .object({
+        items: z.array(inboxItemSchema).max(100),
+        nextCursor: z.string().max(256).nullable(),
+        complete: z.boolean(),
+        unavailable: z.boolean(),
+      })
+      .strict(),
+    observedAt: time,
+  })
+  .strict();
+export type InboxItem = z.infer<typeof inboxItemSchema>;
+// Fixed strict command envelope maxima; question JSON independently remains <=256 KiB.
+export const questionCommandRawLimit =
+  questionPayloadLimit +
+  new TextEncoder().encode(
+    JSON.stringify({
+      type: "question.native.answer",
+      key: "f".repeat(36),
+      taskId: "f".repeat(36),
+      interactionId: "f".repeat(36),
+      expectedRevision: Number.MAX_SAFE_INTEGER,
+      answers: {},
+    }),
+  ).byteLength -
+  2;
+
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("native-question"),
+      key: uuid,
+      taskId: uuid,
+      interactionId: uuid,
+      revision,
+      recorded: z.literal(true),
+      deliveryState: z.literal("recorded"),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("review"),
