@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
 | 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-codex16-check.log` (883/883).
+The current repaired full-check log is `/tmp/ui04-ci17-check.log` (883/883).
+`/tmp/ui04-codex16-check.log` (883/883) retains historical exact-intent/history ownership evidence.
 `/tmp/ui04-codex15-final-check.log` (883/883) retains historical source-batch/session evidence.
 `/tmp/ui04-codex14-row-check-final.log` (878/878) retains historical visibility/context evidence.
 `/tmp/ui04-context-version-check.log` (872/872) retains historical exact-version evidence.
@@ -1431,3 +1432,42 @@ images retain their original source attribution; no earlier bundle or screenshot
 is retagged. All 15 acceptance rows retain their mapping. Historical `a21e6046`
 live transport remains transport-only, with its sole grant consumed and resource
 released; no new runtime, provider, remote or live operation occurred.
+
+
+## Settings asynchronous render boundary (CI17 repair26)
+
+The required Linux check on historical `88bec8ec` failed only the Settings
+unique-control test: its shell-only sign-in helper completed while the independent
+project-configuration request had not yet rendered the credential fields.
+`/tmp/ui04-ci17-failure.log` retains 882/883, one failure and zero cancellations
+or skips (147.105 seconds). The verified artifact at `/tmp/ui04-ci17-evidence`
+records complete cleanup and no diagnostic or evidence omissions; it contains no
+screenshot before the failing count, so it does not establish any later UI state.
+Both original retained-history probes passed in that run.
+
+Only `test/operator-settings-browser.test.ts` changed: it holds the actual
+configuration response during login, proves the authenticated shell is ready while
+the two credential controls are absent, and releases in finally with an additional
+fixture cleanup release. It then awaits the second exact control's visibility
+before counting. All original exact-two-control, unique-ID, label association,
+independent per-input and placement selection, and zero-runtime-effect assertions
+remain. No product code, timers, retries, skips or 45/90/600-second budgets changed.
+
+The controlled focused test `/tmp/ui04-ci17-focused.log` passes 1/1, zero failures,
+cancellations or skips, in 1.348 seconds. The final pinned check
+`/tmp/ui04-ci17-check.log` passes 883/883, zero failures, cancellations or skips,
+in 52.028 seconds. Its test-only executable is `a91db2bd464c4d9268ef8098ba8d56505dfe7a12`, tree `1fe779d742255c6f762373220804b3811f81763e`.
+After that clean freeze, `/tmp/ui04-ci17-clean-capture.log` passes 1/1 in
+1.047 seconds; the captured unique controls and its completed execution,
+overall and cleanup manifest are bound to that source in
+`/tmp/ui04-ci17-screenshots.json`. No diagnostics, screenshots or evidence failures
+were omitted.
+
+The product bundle remains `index-BexsLO1G.js`, SHA256
+`68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
+Existing product screenshots retain their original source attribution; the new
+Settings fixture image does not retag them. All 15 acceptance mappings remain
+unchanged and current at 883 tests. The remote Codex17 quota error is retained as
+a remote review limitation, not a successful review or permission to retry/use a
+paid route. Historical `a21e6046` remains transport-only with its grant consumed
+and resource released; no live or remote operation occurred in this repair.
