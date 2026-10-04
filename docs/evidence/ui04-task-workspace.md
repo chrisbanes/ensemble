@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-878 deterministic tests with zero skips. Existing lint warnings remain warnings.
+883 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -54,8 +54,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer; navigation-entry view state returns manual overrides, disclosure/4px/focus while shared drafts remain per task |
-| 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview; atomic missing upgrade population, rollback/retry and repeated startup preserve retained bytes; same-version workspace/repository binding changes fail closed after all participating awaited reads |
-| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison |
+| 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview; atomic missing upgrade population, rollback/retry and repeated startup preserve retained bytes; same-version workspace/repository binding changes fail closed after all participating awaited reads; every private HTTP publication revalidates its exact authenticated session after awaits |
+| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison; synchronous source batches share one operation-local exclusion snapshot, with atomic rollback and idempotent replay |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference; in-flight reply disposal preserves the original key for reconciliation without duplication |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
@@ -65,9 +65,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures; legacy retained results get empty metadata with source/context still unavailable; supported never-admitted rebind retains provisional captures and resolves prompt/result context by exact captured assignmentVersion; bounded context displays exact omitted count while pinning an old selected result context |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
-| 15 | current full npm check 878/878; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-codex14-row-check-final.log` (878/878).
+The current repaired full-check log is `/tmp/ui04-codex15-final-check.log` (883/883).
+`/tmp/ui04-codex14-row-check-final.log` (878/878) retains historical visibility/context evidence.
 `/tmp/ui04-context-version-check.log` (872/872) retains historical exact-version evidence.
 `/tmp/ui04-upgrade-check.log` (871/871) retains historical upgrade/session evidence.
 `/tmp/ui04-search-label-check.log` (867/867) retains historical final-label evidence.
@@ -1283,3 +1284,72 @@ from the current response and present on the next read. The c16 source/capture a
 Original failure logs remain retained. No runtime, harness, source identity, provider
 or configuration authority changes were made. Historical `a21e6046`/`ca51dc12` live
 proof remains fixed-JSON transport-only; its grant remains consumed and resource released.
+
+
+## Source batches and exact-session publication repair (Codex 15)
+
+Executable `b8dfdbc5e2e22a93d1c8399fa463758a089b7d2f`, tree
+`153901181d0b7015eeadbd2b30e0abd2fc630add`, implements both confirmed findings
+4177161249 and 4177161250. Each synchronous source batch computes one fresh
+operation-local exclusion snapshot; ordinary GitHub selection reconciliation
+captures the batch inside its existing transaction. Real SQLite tests cover 50
+observations, duplicate/repeated input, changed exclusions, a late index-insert
+failure with complete rollback, and successful retry. Empty batches do no discovery;
+standalone capture takes its own fresh snapshot. Original source fingerprints,
+revision identity, privacy omissions and literal criteria remain unchanged.
+
+Private HTTP responses now re-read the exact authenticated session and require its
+original CSRF token immediately before publication. This covers shared curated GET
+reads, recorded artifact reads, legacy awaited GET routes, extension replies,
+legacy command redirects and curated command/source-refresh acknowledgements.
+Actual held HTTP tests exercise logout, expiry and valid sessions, including a
+revocation between legacy authorization and synchronous rendering. Already admitted
+effects and durable receipts remain committed: reauthentication and replay of the
+original operation key reconcile once, without exposing its private acknowledgement
+to the revoked session. Login/logout transitions and public assets retain their
+existing behavior.
+
+The final focused service/store/HTTP log `/tmp/ui04-codex15-current-focused.log`
+passes 43/43. The original two retained-history probes pass 2/2 in
+`/tmp/ui04-codex15-scoped-clock.log` (22.333 seconds), with completed cleanup.
+The final full log `/tmp/ui04-codex15-final-check.log` passes 883/883, zero failures,
+cancellations or skips, in 48.719 seconds. The initial test snapshot-envelope
+fixture omitted its required reason; `/tmp/ui04-codex15-focused-build.log` and
+`/tmp/ui04-codex15-focused.log` preserve that invalid-build failure and are not
+credited as current validation.
+
+CI15 on historical `172c9722` timed out in the counterpart's unique-summary scroll
+after its controlled head/history gap had settled; its cleanup was dependency-skipped
+and incomplete. The artifact establishes those stages, not a unique root cause or
+a product focus defect. Installing the clock alone lets wall-time timers advance;
+the counterpart now pauses a fixed clock before app loading while retaining every
+deliberate 15-second overlap and intentional-focus poll. The primary keeps its
+original naturally advancing installed clock. Native scroll/focus actions and all
+original 271/272 identity, draft, head, chronology, phone and primary/header
+four-pixel assertions remain, with unchanged 45/95/600-second limits.
+[Playwright clock documentation](https://playwright.dev/docs/clock) describes these
+clock behaviors.
+
+The first full attempt paused both probes and failed the primary reading-position
+assertion: `/tmp/ui04-codex15-check.log` retains 882/883 with complete cleanup.
+Its atomic diagnostic still showed 1 item, 272 unique omissions, exact draft and
+focus, but a large position delta. That broadened fixture change was rejected;
+restricting pause to the affected counterpart preserves the primary contract. It
+is not evidence of a production restoration defect under the original clock.
+
+The clean executable counterpart recapture passes 1/1 in
+`/tmp/ui04-codex15-clean-counterpart.log` (13.974 seconds overall). Its manifest is
+`/tmp/ui04-codex15-clean-evidence/ui04-retention-access-46860/12fc65a0945aa808/manifest.json`,
+SHA256 `70d97653c88041cb5ae49eba16e92c28dafac3eb03d223bb57e409e68fe273f5`.
+Execution completed in 13.636 seconds, with complete cleanup and no omitted
+steps, diagnostics, screenshots or evidence failures. Its native summary action
+completed at 12.480 seconds and journey at 13.610 seconds. Exact image identities
+are in `/tmp/ui04-codex15-screenshots.json`.
+
+No frontend code changed. Bundle `index-CZXIpckl.js` remains SHA256
+`45ed17bc9564efa2f26acdfcf5614b666a32b505fc1ae1541d8b7fa26773f3e6`.
+The five earlier visibility/context images retain their original `cc1d105c` source
+and tree attribution in `/tmp/ui04-codex14-screenshots.json`; they are reused, not
+retagged. All 15 acceptance rows remain mapped above. Historical live transport
+at `a21e6046`, its consumed grant and released resource are unchanged; no live
+operation, provider probe, harness, runtime or policy change was performed.
