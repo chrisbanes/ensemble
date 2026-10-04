@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
 | 15 | repaired full npm check 843/843; fake changed callback harness 6/6; historical one live callback transport passed at a21e6046 |
 
-The repaired full-check log is `/tmp/ui04-repair-check.log` (843/843). The earlier
+The current repaired full-check log is `/tmp/ui04-r2-check.log` (843/843).
+`/tmp/ui04-repair-check.log` (843/843) records the first repaired candidate. The earlier
 `/tmp/ui04-check-final.log` (842/842) belongs to the historical qualification source; proportional slice logs
 are `/tmp/ui04-t2.log` (36/36), `/tmp/ui04-t3.log` (38/38),
 `/tmp/ui04-t4.log` (32/32) and `/tmp/ui04-t5-t7.log` (22/22).
@@ -166,7 +167,7 @@ handoff ledger; the table records file identity without copying private runtime 
 
 ## Independent review repairs
 
-The repaired code candidate is `dc73e0e97e32a53f8b652d58c30ba12adfb7c9ca`,
+The first repaired code candidate was `dc73e0e97e32a53f8b652d58c30ba12adfb7c9ca`,
 tree `ebf347605ff192a4863c953eb4b005a54586fe74`. Documentation follows that
 code without changing the tested behavior. All ten confirmed findings from the
 fresh review of `2adc7c5f527c2347c1351cb295df50e976c249a8` were repaired:
@@ -201,9 +202,9 @@ did not prove ordinary runtime discovery of review references. R1's ordinary
 preparation discovery and newer-source behavior are now proved deterministically.
 No later live turn, retry or provider probe was run.
 
-## Repaired screenshot identities
+## First repair screenshot identities
 
-Fresh screenshots from the repaired full check use production bundle SHA256
+Screenshots from the first repaired full check use production bundle SHA256
 `6c1675f776f81f47c7730b3791bde50bdef6499fe2d4edea3f763442baee2b59`
 and code candidate `dc73e0e9` above. Desktop review, 390-pixel Search and the
 390×480 reply viewport were inspected. All three fixture manifests record
@@ -221,3 +222,50 @@ remains the one-pixel deterministic fixture proof described above.
 | 390-original-comparison.png | `d363324d4ac19d1ae11061969b070b19a3fd630c1144fba3f45a87d73fc04559` |
 | 390-shared-search.png | `7997d2d8ec66c90b91c4e9828732d7bb0ecd55945f265de4f77af21aad5634c8` |
 | 1366-cross-project-search.png | `f77ac958e148b847bab08654063536062475e93db0bb13c739925a39440e71be` |
+
+
+## Follow-up review repairs
+
+Scoped review of `2508cf7256ea8635a0c78a1caab6c5b332c18731` identified four
+remaining interactions. Code candidate `25a34357385f37d6408448ca2ac01a0cd9632a0e`,
+tree `0bbfc78469be7785f5129c481f10cbed2b069047`, repairs all four. The final
+`/tmp/ui04-r2-check.log` passes type checking, lint, formatting, builds and all
+843 tests with zero skips, including the six unchanged fake qualification cases.
+`/tmp/ui04-r2-focused.log` passes the three strengthened browser journeys.
+
+| Finding | Current behavior and evidence |
+| --- | --- |
+| History freshness | Each assignment's latest request owns both completion and React publication. Task refresh invalidates prior ownership and hides unvalidated history; current read failure keeps it hidden. A delayed complete old page batch cannot overwrite newer redacted text. The workspace browser changes exclusions, releases the old batch after the newer batch, then forces a current 503 and asserts private history is absent. Earlier-page position/focus and readable current history remain covered. |
+| Explicit logout | Sign-out rotates and purges the existing navigation scope before clearing accepted identity. Search browser proves successful and unknown sign-out, fresh login, old Back/Forward entries and late responses cannot restore private query/matches. |
+| Exact assignment result navigation | Explicit same-task result navigation scrolls to the review section and focuses its heading. The source entry retains its reading state; Back restores its disclosure link position within four pixels, focus and editable draft. Polling uses the current entry's reading anchor. |
+| Newer-result ordering | Durable chronological result order determines what is newer than the latest retained viewed result. Viewed R2 with R1/R2/R3 reports only R3 newer. The browser selects unopened historical R1 and returns to R2; absent legacy ordering is explicit unknown. |
+
+The first navigation geometry assertion expected heading Y below 100 pixels;
+recorded metrics established the existing 90-pixel section scroll margin plus
+heading margin (heading Y 110.67). The retained assertion now compares section
+Y to its computed scroll margin within four pixels after selected-result render,
+then checks heading focus and Back restoration. Its failed manifest is retained
+privately with the handoff. Sanitizer redaction is `[redacted]`, rather than an
+omission message; failed-read alerts remain inside collapsed assignment disclosures.
+These test expectation corrections are recorded without weakening production contracts.
+
+Latest fixture screenshots bind the code candidate above and production bundle
+SHA256 `227ae7481f254ae64fbc5cbe7ac25efbcf7c4547e734ca093b8a81252d291af9`.
+Desktop review (showing one newer result), phone Search and reduced-height reply
+were inspected. All three manifests record completed execution and cleanup.
+Previous screenshot tables remain attributed to their original sources. One-pixel
+preview and simulated keyboard limits remain unchanged. All 15 acceptance rows
+retain their earlier evidence with these stronger history/navigation/authentication
+regressions. The sole live grant remains consumed/released; no new live qualification
+or external provider operation occurred.
+
+| Current screenshot | SHA256 |
+| --- | --- |
+| 1366-task-failed-refresh.png | `b3a1dacaad3fb65ec6232e0f443129bb8a99d789b6b8e32422204837787093f2` |
+| 390-reply-with-anchor.png | `d4e406596cdaa96af70484daaeb8d9e1ad1365b0aedce527a974b43c0829f628` |
+| 390-keyboard-reply.png | `d5fd76c8a265cc9219ccec5284ed6c8a6ac86fc0fd814b208a086d39c62fd6bd` |
+| 390-uncertain-reply.png | `9372ecb60b0a9b6e19610a9eb0650916e28056fa6864ffcdce9c107590116ca4` |
+| 1366-original-review.png | `1d32ba06dd5c34db9c7f06282db331dd8a43c4c753e71c5e0b5c6e019f871609` |
+| 390-original-comparison.png | `e602364c6c75b8f4bdbec73fb09e148cba42e82c93deb802d88e8592e104faf3` |
+| 390-shared-search.png | `ee9a8b992522939a9893bdfff751fe60e07ccee293031d63b3e52716fbeed5ba` |
+| 1366-cross-project-search.png | `c3be83d40d69401324637f494b36301dcbceeba2ccdb80de0bb547762df32a96` |
