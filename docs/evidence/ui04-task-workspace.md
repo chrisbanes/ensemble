@@ -136,7 +136,9 @@ Private evidence and SQLite were retained at
 `/private/var/folders/k6/qdrr06ls5zv2cp7076j6qnmw0000gn/T/ensemble-ui04-qualification-6APTbI`;
 the adjacent JSON and `/tmp/ui04-live.log` retain the result. The immutable
 `/tmp/ui04-aa1969d6-bd90-49d4-9d36-19340f5732ac.consumed` marker remains
-consumed. Root independently verifies cleanup before releasing the matching lock.
+consumed. Root independently verified the same process absent on the same boot at
+`2026-10-04T01:16:41Z` and released only the matching canonical lock.
+`/tmp/ui04-independent-cleanup.json` retains that independent proof.
 There was no retry or replacement turn.
 
 ## Inspected screenshot identities
