@@ -55,7 +55,10 @@ test("production service creates source, assignment and work captures, and real 
     projectId,
     taskId,
     title: "Supplied requirement",
-    outcome: "- [ ] Restore keyboard focus",
+    outcome: Array.from(
+      { length: 130 },
+      (_, i) => `- [ ] Requirement ${i + 1}`,
+    ).join("\n"),
     ready: false,
   });
   await f.service.provisionTask(taskId);
@@ -81,6 +84,10 @@ test("production service creates source, assignment and work captures, and real 
   );
   const source = f.service.taskReview().source(taskId, references.sourceId);
   assert.ok(source);
+  assert.equal(source.criteria.length, 128);
+  assert.equal(source.criteriaOmittedCount, 2);
+  assert.equal(references.criteriaOmittedCount, 2);
+  assert.ok(source.body?.includes("Requirement 130"));
   assert.equal(
     references.criteria[0].criterionId,
     source.criteria[0]?.criterionId,
@@ -97,6 +104,23 @@ test("production service creates source, assignment and work captures, and real 
   assert.notEqual(
     f.service.taskReview().sources(taskId).at(-1)?.sourceId,
     references.sourceId,
+  );
+  const newer = f.service.taskReview().sources(taskId).at(-1)!;
+  const rejectedSource = await f.runtime.callTool({
+    threadId: w.threadId,
+    turnId: w.turnId,
+    callId: randomUUID(),
+    tool: "ensemble_report_result",
+    arguments: {
+      summary: "Wrong source",
+      review: { sourceId: newer.sourceId },
+    },
+  });
+  assert.equal(rejectedSource.success, false);
+  assert.equal(f.service.coordinationView().readTask(taskId).results.length, 0);
+  assert.equal(
+    f.service.list().find((item) => item.workId === w.workId)?.state,
+    "running",
   );
   const call = {
     threadId: w.threadId,

@@ -72,6 +72,13 @@ export async function seedReviewTask(
       db.prepare(
         "INSERT INTO task_work_revisions(workId,assignmentId,conversationRevision,workRevision) VALUES(?,?,1,?)",
       ).run(workId, producerAssignmentId, revision);
+      f.service
+        .taskReview()
+        .captureAssignment(
+          producerAssignmentId,
+          "Fixture work preparation",
+          workId,
+        );
       const batch = c.bindDeliveryBatch(producerAssignmentId, workId);
       if (batch) c.completeDeliveryBatch(workId);
       resultId = c.recordResult({

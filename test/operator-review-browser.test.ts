@@ -551,3 +551,77 @@ test("ordinary oversized GitHub body retains identity but shows unavailable brie
   await page.setViewportSize({ width: 390, height: 844 });
   await captureBrowserEvidence(page, "390-omitted-source-coverage");
 });
+
+test("partial literal checklist coverage remains explicit with collapsed and expanded source text", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const body = Array.from(
+    { length: 130 },
+    (_, i) => `- [ ] Literal requirement ${i + 1}`,
+  ).join("\n");
+  const a = await seedReviewTask(
+    f,
+    "Partial checklist",
+    "Full retained checklist",
+    body,
+  );
+  const result = a.delegatedResult("Literal subset only", {
+    sourceId: a.source.sourceId,
+  });
+  const read = await new OperatorApi(f.service, [f.directory]).readTask(
+    a.taskId,
+  );
+  assert.ok(read.data.review);
+  const source = read.data.review.sources[0]!;
+  assert.equal(source.criteria.length, 128);
+  assert.equal(source.criteriaOmittedCount, 2);
+  assert.equal(source.body, body);
+  assert.equal(source.criteria.at(-1)?.position, 127);
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(
+    `${web.origin}/app/tasks/${a.taskId}?result=${result.resultId}`,
+  );
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const partial =
+    "Checklist coverage is partial: 128 literal checklist records retained; 2 additional records omitted. Consult the full retained brief.";
+  await page.locator("#brief").getByText(partial, { exact: true }).waitFor();
+  await page
+    .locator("#review")
+    .getByText(partial, { exact: true })
+    .waitFor({ state: "attached" });
+  assert.equal(await page.locator("#brief details").getAttribute("open"), null);
+  await page.locator("#brief details summary").click();
+  await page
+    .locator("#brief details pre")
+    .getByText(body, { exact: true })
+    .waitFor();
+  await page
+    .locator("#brief")
+    .getByText(partial, { exact: true })
+    .scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "1366-partial-checklist-coverage", {
+    fullPage: false,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page
+    .locator("#brief")
+    .getByText(partial, { exact: true })
+    .scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "390-partial-checklist-coverage", {
+    fullPage: false,
+  });
+});

@@ -7,6 +7,8 @@ import {
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { CoordinationStore } from "../src/core/coordination.js";
+import { ConversationHistoryStore } from "../src/standalone/conversation-history.js";
+import { OperatorApi } from "../src/standalone/operator-api.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-workspace");
@@ -59,6 +61,45 @@ test("production workspace retains literal history, pending request, focused rep
     undefined,
     responsibilityAssignmentId,
   );
+  f.seedPersistedState((db) => {
+    const capture = new ConversationHistoryStore(db);
+    for (const result of [
+      r,
+      { ...responsibilityResult, assignmentId: responsibilityAssignmentId },
+    ]) {
+      const binding = {
+        taskId: a.taskId,
+        assignmentId: result.assignmentId,
+        workId: result.workId,
+        assignmentVersion: 1,
+        instructionsRevision: 1,
+        profileRevision: 1,
+        conversationRevision: 1,
+        workRevision: result === r ? 1 : 2,
+        threadId: result.workId,
+        turnId: result.workId,
+      };
+      capture.recordEarlyBufferLimit(binding);
+      capture.recordEarlyBufferLimit(binding);
+    }
+  });
+  const omissionApi = new OperatorApi(f.service, [f.directory]);
+  const omissionOnly = await omissionApi.readAssignmentHistory(
+    responsibilityAssignmentId,
+  );
+  assert.equal(omissionOnly.data.items.length, 0);
+  assert.equal(omissionOnly.data.turnOmissions.length, 1);
+  assert.equal(
+    omissionOnly.data.turnOmissions[0]?.reason,
+    "early-buffer-limit",
+  );
+  const mixed = await omissionApi.readAssignmentHistory(r.assignmentId);
+  assert.equal(mixed.data.turnOmissions.length, 1);
+  const earlierMixed = await omissionApi.readAssignmentHistory(
+    r.assignmentId,
+    mixed.data.items[0]!.sequence,
+  );
+  assert.equal(earlierMixed.data.turnOmissions.length, 1);
   const web = await j.start("fixture.web", () => f.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
@@ -96,6 +137,36 @@ test("production workspace retains literal history, pending request, focused rep
   await page
     .getByRole("button", { name: "Expand all history", exact: true })
     .click();
+  assert.equal(
+    await page.locator('[data-record-id^="turn-omission:"]').count(),
+    2,
+  );
+  await page
+    .getByRole("button", { name: "Chronological view", exact: true })
+    .click();
+  assert.equal(
+    await page.locator('[data-record-id^="turn-omission:"]').count(),
+    2,
+  );
+  await page
+    .getByRole("button", { name: "Chronological view", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Expand all history", exact: true })
+    .click();
+  const omission = page.locator(
+    `[data-record-id="turn-omission:${r.workId}:${r.workId}:${r.workId}"]`,
+  );
+  await omission
+    .getByText(
+      `Early buffer limit (early-buffer-limit). Work ${r.workId}; assignment ${r.assignmentId}; thread ${r.workId}; turn ${r.workId}. Captured turn content is unavailable.`,
+      { exact: true },
+    )
+    .waitFor();
+  await omission.scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "1366-retained-turn-omissions", {
+    fullPage: false,
+  });
   const reading = page.locator(`[data-record-id="${r.workId}:item-0"]`);
   await reading.scrollIntoViewIfNeeded();
   const readingY = await reading.evaluate(
@@ -146,6 +217,10 @@ test("production workspace retains literal history, pending request, focused rep
     .evaluateAll((els) => els.map((el) => el.getAttribute("data-record-id")));
   assert.equal(retainedIds.length, 251);
   assert.equal(new Set(retainedIds).size, 251);
+  assert.equal(
+    await page.locator('[data-record-id^="turn-omission:"]').count(),
+    2,
+  );
   for (let item = 0; item <= 250; item++)
     assert.ok(retainedIds.includes(`${r.workId}:item-${item}`));
   // Exercise the production 15-second polling callback without waiting wall-clock time.

@@ -127,6 +127,12 @@ export const sourceSnapshotSchema = z
           .strict(),
       )
       .max(128),
+    criteriaOmittedCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .nullable()
+      .default(null),
     coverage: z.literal("literal-checklists-only"),
   })
   .strict();
@@ -294,6 +300,7 @@ export class TaskReviewStore {
     if (latest?.digest === digest) return latest;
     const sourceId = randomUUID(),
       criteria: z.infer<typeof sourceSnapshotSchema>["criteria"] = [];
+    let criteriaOmittedCount = body === null ? null : 0;
     (body ?? "").split("\n").forEach((line, position) => {
       const m = line.match(/^\s*[-*+]\s+\[[ xX]\]\s+(.+)$/);
       if (m && criteria.length < 128)
@@ -302,6 +309,7 @@ export class TaskReviewStore {
           position,
           text: m[1] ?? "",
         });
+      else if (m && criteriaOmittedCount !== null) criteriaOmittedCount++;
     });
     const record = sourceSnapshotSchema.parse({
       sourceId,
@@ -314,6 +322,7 @@ export class TaskReviewStore {
       digest,
       createdAt: Date.now(),
       criteria,
+      criteriaOmittedCount,
       coverage: "literal-checklists-only",
     });
     this.db
@@ -380,6 +389,25 @@ export class TaskReviewStore {
         JSON.stringify(record),
       );
     return record;
+  }
+  contextForWork(taskId: string, assignmentId: string, workId: string) {
+    const rows = this.db
+      .prepare(
+        "SELECT recordJson FROM task_review_contexts WHERE taskId=? AND assignmentId=? AND workId=? LIMIT 2",
+      )
+      .all(taskId, assignmentId, workId) as Row[];
+    if (rows.length > 1) throw Error("Review work context is ambiguous");
+    if (!rows[0]) return undefined;
+    const context = contextCaptureSchema.parse(
+      JSON.parse(String(rows[0].recordJson)),
+    );
+    if (
+      context.taskId !== taskId ||
+      context.assignmentId !== assignmentId ||
+      context.workId !== workId
+    )
+      throw Error("Review work context identity mismatch");
+    return context;
   }
   indexResult(
     resultId: string,
@@ -468,6 +496,15 @@ export class TaskReviewStore {
       throw Error("Duplicate criterion identity");
     if (metadata.sourceId && !this.source(result.taskId, metadata.sourceId))
       throw Error("Review source belongs to another task or is unavailable");
+    if (metadata.sourceId) {
+      const context = this.contextForWork(
+        result.taskId,
+        result.assignmentId,
+        result.workId,
+      );
+      if (!context?.sourceId || context.sourceId !== metadata.sourceId)
+        throw Error("Review source does not match captured work context");
+    }
     const criteria =
       this.source(result.taskId, metadata.sourceId ?? "")?.criteria ?? [];
     if (

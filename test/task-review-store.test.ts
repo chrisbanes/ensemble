@@ -8,7 +8,10 @@ import { test } from "node:test";
 import { Store } from "../src/core/store.js";
 import { DomainStore, type DomainCommand } from "../src/core/domain.js";
 import { CoordinationStore } from "../src/core/coordination.js";
-import { TaskReviewStore } from "../src/core/task-review.js";
+import {
+  sourceSnapshotSchema,
+  TaskReviewStore,
+} from "../src/core/task-review.js";
 import { ExecutionState } from "../src/standalone/state.js";
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "ui04-review-")),
@@ -75,6 +78,11 @@ function fixture() {
     ).run(workId, assignmentId, stores.c.results(taskId).length + 1);
     db.prepare("UPDATE domain_assignments SET state='running' WHERE id=?").run(
       assignmentId,
+    );
+    stores.review.captureAssignment(
+      assignmentId,
+      "Fixture work preparation",
+      workId,
     );
     return { workId, threadId, turnId };
   }
@@ -315,6 +323,88 @@ test("legacy result has absent optional metadata and first visit has no viewing 
     f.reopen();
     assert.deepEqual(f.stores.review.read(f.taskId).viewed, viewed);
     assert.equal(f.stores.d.task(f.taskId).state, "open");
+  } finally {
+    f.close();
+  }
+});
+
+test("claimed result sources require one exact retained work context; absent claims stay unknown", () => {
+  const f = fixture();
+  try {
+    const source = f.stores.review.sources(f.taskId)[0]!;
+    const w = f.work();
+    const result = {
+      resultId: randomUUID(),
+      taskId: f.taskId,
+      assignmentId: f.assignmentId,
+      workId: w.workId,
+      workRevision: 1,
+    };
+    const context = f.stores.review.contextForWork(
+      f.taskId,
+      f.assignmentId,
+      w.workId,
+    )!;
+    f.db
+      .prepare("DELETE FROM task_review_contexts WHERE captureId=?")
+      .run(context.captureId);
+    assert.throws(
+      () => f.stores.review.recordResult(result, { sourceId: source.sourceId }),
+      /captured work context/,
+    );
+    const insert = (record: typeof context, taskId = f.taskId) =>
+      f.db
+        .prepare("INSERT INTO task_review_contexts VALUES(?,?,?,?,?,?)")
+        .run(
+          record.captureId,
+          taskId,
+          record.assignmentId,
+          record.assignmentVersion,
+          record.workId,
+          JSON.stringify(record),
+        );
+    insert({ ...context, sourceId: null });
+    assert.throws(
+      () => f.stores.review.recordResult(result, { sourceId: source.sourceId }),
+      /captured work context/,
+    );
+    f.db
+      .prepare("DELETE FROM task_review_contexts WHERE captureId=?")
+      .run(context.captureId);
+    insert({ ...context, taskId: randomUUID() });
+    assert.throws(
+      () => f.stores.review.recordResult(result, { sourceId: source.sourceId }),
+      /identity mismatch/,
+    );
+    f.db
+      .prepare("DELETE FROM task_review_contexts WHERE captureId=?")
+      .run(context.captureId);
+    insert(context);
+    insert({ ...context, captureId: randomUUID(), assignmentVersion: 2 });
+    assert.throws(
+      () => f.stores.review.recordResult(result, { sourceId: source.sourceId }),
+      /ambiguous/,
+    );
+    assert.equal(f.stores.review.read(f.taskId).results.length, 0);
+    f.db
+      .prepare("DELETE FROM task_review_contexts WHERE workId=?")
+      .run(w.workId);
+    f.stores.c.recordResult({
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "No claimed source", review: {} },
+    });
+    assert.equal(
+      f.stores.review.read(f.taskId).results[0]?.metadata.sourceId,
+      undefined,
+    );
+    const { criteriaOmittedCount: _count, ...historical } = source;
+    assert.equal(
+      sourceSnapshotSchema.parse(historical).criteriaOmittedCount,
+      null,
+    );
   } finally {
     f.close();
   }

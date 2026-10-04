@@ -31,6 +31,50 @@ type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
 const sourceGap =
   "Retained source body and checklist coverage are unavailable. Source fields are retained only up to 16,000 characters; private or missing material may also be unavailable. Consult the external source or ask the lead.";
+function ChecklistCoverage({
+  source,
+}: {
+  source:
+    | NonNullable<TaskRead["data"]["review"]>["sources"][number]
+    | undefined;
+}) {
+  if (!source || source.body === null) return <p>{sourceGap}</p>;
+  if (source.criteriaOmittedCount === null)
+    return (
+      <p>
+        Additional literal checklist coverage is unknown for this retained
+        source.
+      </p>
+    );
+  if (source.criteriaOmittedCount > 0)
+    return (
+      <p>
+        Checklist coverage is partial: {source.criteria.length} literal
+        checklist records retained; {source.criteriaOmittedCount} additional
+        records omitted. Consult the full retained brief.
+      </p>
+    );
+  return null;
+}
+function TurnOmission({
+  omission,
+  state,
+  changed,
+}: {
+  omission: History["turnOmissions"][number];
+  state: TaskWorkspaceState;
+  changed: () => void;
+}) {
+  return (
+    <Disclosure
+      id={`turn-omission:${omission.workId}:${omission.threadId}:${omission.turnId}`}
+      title={`${date(omission.createdAt)} · retained turn omission · ${omission.assignmentId} · ${omission.turnId}`}
+      text={`Early buffer limit (early-buffer-limit). Work ${omission.workId}; assignment ${omission.assignmentId}; thread ${omission.threadId}; turn ${omission.turnId}. Captured turn content is unavailable.`}
+      state={state}
+      changed={changed}
+    />
+  );
+}
 const date = (n: number) => new Date(n < 1e12 ? n * 1000 : n).toLocaleString();
 function Literal({ text }: { text: string | null | undefined }) {
   return (
@@ -397,6 +441,21 @@ export function TaskWorkspace({
                 [id]: {
                   ...recent,
                   items,
+                  turnOmissions: values
+                    .flatMap((value) => value.turnOmissions)
+                    .filter(
+                      (item, i, all) =>
+                        all.findIndex(
+                          (other) =>
+                            other.workId === item.workId &&
+                            other.threadId === item.threadId &&
+                            other.turnId === item.turnId,
+                        ) === i,
+                    )
+                    .sort(
+                      (a, b) =>
+                        a.createdAt - b.createdAt || a.sequence - b.sequence,
+                    ),
                   omittedItemCount:
                     values.at(-1)?.omittedItemCount ?? recent.omittedItemCount,
                 },
@@ -717,9 +776,8 @@ export function TaskWorkspace({
               state={state}
               changed={changed}
             />
-            {source.body === null ? (
-              <p>{sourceGap}</p>
-            ) : (
+            <ChecklistCoverage source={source} />
+            {source.body !== null && (
               <p className="literal-preview">{source.body.slice(0, 500)}</p>
             )}
             <Button
@@ -990,9 +1048,14 @@ export function TaskWorkspace({
             onClick={() => {
               for (const a of data.assignments)
                 state.expanded.add(a.assignmentId);
-              for (const h of Object.values(histories))
+              for (const h of Object.values(histories)) {
                 for (const i of h.items)
                   state.expanded.add(`${i.workId}:${i.itemId}`);
+                for (const i of h.turnOmissions)
+                  state.expanded.add(
+                    `turn-omission:${i.workId}:${i.threadId}:${i.turnId}`,
+                  );
+              }
               changed();
             }}
           >
@@ -1025,22 +1088,31 @@ export function TaskWorkspace({
         {state.chronological ? (
           <div>
             {Object.values(histories)
-              .flatMap((h) => h.items)
+              .flatMap((h) => [...h.items, ...h.turnOmissions])
               .sort(
                 (a, b) => a.createdAt - b.createdAt || a.sequence - b.sequence,
               )
-              .map((i) => (
-                <Disclosure
-                  key={`${i.workId}:${i.itemId}`}
-                  id={`${i.workId}:${i.itemId}`}
-                  title={`${date(i.createdAt)} · ${i.assignmentId} · ${i.lifecycle}`}
-                  text={
-                    i.text ?? `Omitted: ${i.omissionReason ?? "unavailable"}`
-                  }
-                  state={state}
-                  changed={changed}
-                />
-              ))}
+              .map((i) =>
+                "reason" in i ? (
+                  <TurnOmission
+                    key={`turn-omission:${i.workId}:${i.threadId}:${i.turnId}`}
+                    omission={i}
+                    state={state}
+                    changed={changed}
+                  />
+                ) : (
+                  <Disclosure
+                    key={`${i.workId}:${i.itemId}`}
+                    id={`${i.workId}:${i.itemId}`}
+                    title={`${date(i.createdAt)} · ${i.assignmentId} · ${i.lifecycle}`}
+                    text={
+                      i.text ?? `Omitted: ${i.omissionReason ?? "unavailable"}`
+                    }
+                    state={state}
+                    changed={changed}
+                  />
+                ),
+              )}
           </div>
         ) : (
           data.assignments.map((a) => (
@@ -1122,6 +1194,14 @@ export function TaskWorkspace({
                   text={
                     i.text ?? `Omitted: ${i.omissionReason ?? "unavailable"}`
                   }
+                  state={state}
+                  changed={changed}
+                />
+              ))}
+              {histories[a.assignmentId]?.turnOmissions.map((i) => (
+                <TurnOmission
+                  key={`turn-omission:${i.workId}:${i.threadId}:${i.turnId}`}
+                  omission={i}
                   state={state}
                   changed={changed}
                 />
@@ -1343,15 +1423,12 @@ function ReviewEvidence({
           ? "Supplied criteria — coverage unavailable"
           : "Supplied criteria"}
       </h4>
-      {!s || s.body === null ? (
-        <p>{sourceGap}</p>
-      ) : (
-        !s.criteria.length && (
-          <p>
-            No literal checklist records. Consult the supplied brief prose for
-            requirements.
-          </p>
-        )
+      <ChecklistCoverage source={s} />
+      {s && s.body !== null && !s.criteria.length && (
+        <p>
+          No literal checklist records. Consult the supplied brief prose for
+          requirements.
+        </p>
       )}
       {s?.criteria.map((c) => {
         const outcomes = metadata.criteria.filter(
