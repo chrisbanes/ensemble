@@ -256,9 +256,10 @@ export class OperatorApi {
     if (value === null || value === undefined) return null;
     const prose = String(value);
     if (prose.length > 16000) return null;
-    return excluded
-      ? (sanitizeConversationText(prose, excluded) ?? null)
+    const sanitized = excluded
+      ? sanitizeConversationText(prose, excluded)
       : null;
+    return sanitized && sanitized.length > 16000 ? null : (sanitized ?? null);
   }
   private exact(value: unknown, excluded: readonly string[] | undefined) {
     const safe = this.safe(value, excluded);

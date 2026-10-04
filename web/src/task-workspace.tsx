@@ -146,6 +146,7 @@ export function TaskWorkspace({
     first = useRef(true),
     restoreReadingFocus = useRef(true),
     capturedFocus = useRef<HTMLElement | null>(null),
+    capturedHistoryFocus = useRef(false),
     material = useRef<string | null>(null);
   const params = new URLSearchParams(path.split("?")[1] ?? "");
   const selectedPath = useRef<string | null>(null);
@@ -205,6 +206,15 @@ export function TaskWorkspace({
   }, [resource.state.data, resource.state.error, resource.state.status]);
 
   const capture = () => {
+    if (
+      restoreReadingFocus.current &&
+      state.focusRecord &&
+      capturedHistoryFocus.current &&
+      capturedFocus.current &&
+      !capturedFocus.current.isConnected &&
+      document.activeElement === document.body
+    )
+      return;
     bottom.current =
       innerHeight + scrollY >= document.documentElement.scrollHeight - 64;
     const visible = [
@@ -225,6 +235,9 @@ export function TaskWorkspace({
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
+    capturedHistoryFocus.current = Boolean(
+      capturedFocus.current?.closest("#history"),
+    );
     state.focusRecord =
       (capturedFocus.current?.closest("[data-record-id]") as HTMLElement | null)
         ?.dataset.recordId ?? null;

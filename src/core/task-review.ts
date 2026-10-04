@@ -263,7 +263,7 @@ export class TaskReviewStore {
       if (/TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/.test(key) && v)
         excluded.push(v);
     if (excluded.some((v) => value.includes(v))) return null;
-    return value
+    const sanitized = value
       .replace(
         /((?:password|token|api[_-]?key|secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
         "$1[redacted]",
@@ -273,8 +273,8 @@ export class TaskReviewStore {
       .filter(
         (c) => c.charCodeAt(0) >= 32 || [9, 10, 13].includes(c.charCodeAt(0)),
       )
-      .join("")
-      .slice(0, 16000);
+      .join("");
+    return sanitized.length > 16000 ? null : sanitized;
   }
   captureSource(
     taskId: string,

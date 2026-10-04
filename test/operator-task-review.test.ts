@@ -396,3 +396,43 @@ test("recorded change references preserve supported web links and keep legacy un
     }
   }
 });
+
+test("ordinary source retention bounds sanitized representation without clipping complete checklist coverage", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const prefix = "token=x\n".repeat(900),
+    tail = "\n- [ ] Complete boundary tail";
+  const sanitizedPrefix = prefix.replaceAll("token=x", "token=[redacted]");
+  const body =
+    prefix + "a".repeat(16000 - sanitizedPrefix.length - tail.length) + tail;
+  assert.ok(body.length < 16000);
+  const a = await seedReviewTask(
+    f,
+    "Sanitized boundary",
+    "Boundary title",
+    body,
+  );
+  assert.equal(a.source.body?.length, 16000);
+  assert.ok(a.source.body?.endsWith(tail));
+  assert.equal(a.source.criteriaOmittedCount, 0);
+  assert.equal(a.source.criteria[0]?.text, "Complete boundary tail");
+  const api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(
+    (await api.readTask(a.taskId)).data.review?.sources[0]?.criteria.length,
+    1,
+  );
+  f.service.domain().execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    taskId: a.taskId,
+    projectId: a.projectId,
+    expectedVersion: Number(f.service.domain().task(a.taskId).version),
+    outcome: body + "x",
+  });
+  const unavailable = f.service.taskReview().sources(a.taskId).at(-1)!;
+  assert.equal(unavailable.body, null);
+  assert.equal(unavailable.criteriaOmittedCount, null);
+  assert.deepEqual(unavailable.criteria, []);
+  assert.notEqual(unavailable.sourceId, a.source.sourceId);
+});

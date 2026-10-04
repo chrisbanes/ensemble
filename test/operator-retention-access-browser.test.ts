@@ -110,6 +110,28 @@ test("historical Search opens exact old evidence and independently pages all ret
     viewport: { width: 1366, height: 900 },
   });
   j.observe(page);
+  const readingRequests: { event: string; stream: string; status?: number }[] =
+    [];
+  const trace = (entry: { event: string; stream: string; status?: number }) => {
+    if (readingRequests.length === 32) readingRequests.shift();
+    readingRequests.push(entry);
+  };
+  const readingStream = (url: string) => {
+    const u = new URL(url);
+    return u.pathname === `/api/operator/tasks/${a.taskId}`
+      ? "task"
+      : u.pathname === `/api/operator/assignments/${a.assignmentId}/history`
+        ? `history:item=${u.searchParams.get("beforeSequence") ?? "recent"}:omission=${u.searchParams.get("beforeOmissionSequence") ?? "recent"}`
+        : null;
+  };
+  page.on("request", (request) => {
+    const stream = readingStream(request.url());
+    if (stream) trace({ event: "request", stream });
+  });
+  page.on("response", (response) => {
+    const stream = readingStream(response.url());
+    if (stream) trace({ event: "response", stream, status: response.status() });
+  });
   await page.clock.install();
   page.setDefaultTimeout(5000);
   await page.goto(`${web.origin}/app/search`);
@@ -228,6 +250,93 @@ test("historical Search opens exact old evidence and independently pages all ret
   await oldRecord.scrollIntoViewIfNeeded();
   await oldRecord.locator("summary").focus();
   const y = await oldRecord.evaluate((el) => el.getBoundingClientRect().top);
+  const inspectReading = ({
+    itemId,
+    oldId,
+    expectedY,
+  }: {
+    itemId: string;
+    oldId: string;
+    expectedY: number;
+  }) => {
+    const items = document.querySelectorAll(`[data-record-id="${itemId}"]`);
+    const omissions = [
+      ...document.querySelectorAll('[data-record-id^="turn-omission:"]'),
+    ];
+    const old = document.querySelector(`[data-record-id="${oldId}"]`);
+    const draft = (
+      document.querySelector("#workspace-reply") as HTMLTextAreaElement | null
+    )?.value;
+    const top = old?.getBoundingClientRect().top;
+    const focused = old?.querySelector("summary") === document.activeElement;
+    const snapshot = {
+      items: items.length,
+      omissions: omissions.length,
+      uniqueOmissions: new Set(
+        omissions.map((el) => el.getAttribute("data-record-id")),
+      ).size,
+      draft,
+      top,
+      focused,
+    };
+    return {
+      ...snapshot,
+      expectedY,
+      delta: top === undefined ? null : top - expectedY,
+      activeId: document.activeElement?.id ?? null,
+      activeRecord:
+        document.activeElement
+          ?.closest("[data-record-id]")
+          ?.getAttribute("data-record-id") ?? null,
+      reading: history.state?.taskWorkspaceReading ?? null,
+    };
+  };
+  const readingArgs = {
+    itemId: `${a.old.workId}:single-item`,
+    oldId: `turn-omission:${a.old.workId}:${a.old.workId}:${a.old.workId}`,
+    expectedY: y,
+  };
+  const readingDiagnostic = async (phase: string) => {
+    j.diagnostics.push(
+      JSON.stringify({
+        phase,
+        snapshot: await page.evaluate(inspectReading, readingArgs),
+        requests: [...readingRequests],
+      }),
+    );
+  };
+  const waitReading = async (phase: string) => {
+    try {
+      await page.waitForFunction(({ itemId, oldId, expectedY }) => {
+        const items = document.querySelectorAll(`[data-record-id="${itemId}"]`);
+        const omissions = [
+          ...document.querySelectorAll('[data-record-id^="turn-omission:"]'),
+        ];
+        const old = document.querySelector(`[data-record-id="${oldId}"]`);
+        const draft = (
+          document.querySelector(
+            "#workspace-reply",
+          ) as HTMLTextAreaElement | null
+        )?.value;
+        const top = old?.getBoundingClientRect().top;
+        return (
+          items.length === 1 &&
+          omissions.length === 272 &&
+          new Set(omissions.map((el) => el.getAttribute("data-record-id")))
+            .size === 272 &&
+          draft === "Retained exact old draft" &&
+          top !== undefined &&
+          Math.abs(top - expectedY) < 4 &&
+          old?.querySelector("summary") === document.activeElement
+        );
+      }, readingArgs);
+    } catch (error) {
+      await readingDiagnostic(`${phase}-failed`);
+      throw error;
+    }
+    await readingDiagnostic(phase);
+    return page.evaluate(inspectReading, readingArgs);
+  };
   const next = a.result("Newest retained result", {
     sourceId: f.service.taskReview().sources(a.taskId).at(-1)!.sourceId,
   });
@@ -268,6 +377,7 @@ test("historical Search opens exact old evidence and independently pages all ret
   f.service
     .delivery()
     .observePrWithinTransaction(a.taskId, { ...observation, headSha: headB });
+  await readingDiagnostic("before-header");
   await page
     .getByRole("button", { name: "Refresh task", exact: true })
     .evaluate((el) => (el as HTMLButtonElement).click());
@@ -275,6 +385,8 @@ test("historical Search opens exact old evidence and independently pages all ret
     `[data-record-id="${a.old.workId}:single-item"]`,
   );
   await singleItem.waitFor({ state: "attached" });
+  await readingDiagnostic("header-attached");
+  await waitReading("header-settled");
   // Drive the real production timer through its pending visibility boundary.
   let releaseTask!: () => void;
   const heldTask = new Promise<void>((resolve) => {
@@ -292,6 +404,23 @@ test("historical Search opens exact old evidence and independently pages all ret
     },
     { times: 1 },
   );
+  let releaseHistory!: () => void;
+  const heldHistory = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  const historyEntered = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname ===
+      `/api/operator/assignments/${a.assignmentId}/history`,
+  );
+  await page.route(
+    `**/api/operator/assignments/${a.assignmentId}/history**`,
+    async (route) => {
+      await heldHistory;
+      await route.continue();
+    },
+    { times: 1 },
+  );
   try {
     await page.clock.fastForward(15000);
     await taskEntered;
@@ -301,48 +430,20 @@ test("historical Search opens exact old evidence and independently pages all ret
       0,
       "pending refresh hides unvalidated history",
     );
+    await readingDiagnostic("timer-pending");
   } finally {
     releaseTask();
   }
-  const settled = await page.waitForFunction(
-    ({ itemId, oldId, expectedY }) => {
-      const items = document.querySelectorAll(`[data-record-id="${itemId}"]`);
-      const omissions = [
-        ...document.querySelectorAll('[data-record-id^="turn-omission:"]'),
-      ];
-      const old = document.querySelector(`[data-record-id="${oldId}"]`);
-      const draft = (
-        document.querySelector("#workspace-reply") as HTMLTextAreaElement | null
-      )?.value;
-      const top = old?.getBoundingClientRect().top;
-      const focused = old?.querySelector("summary") === document.activeElement;
-      const snapshot = {
-        items: items.length,
-        omissions: omissions.length,
-        uniqueOmissions: new Set(
-          omissions.map((el) => el.getAttribute("data-record-id")),
-        ).size,
-        draft,
-        top,
-        focused,
-      };
-      return items.length === 1 &&
-        omissions.length === 272 &&
-        snapshot.uniqueOmissions === 272 &&
-        draft === "Retained exact old draft" &&
-        top !== undefined &&
-        Math.abs(top - expectedY) < 4 &&
-        focused
-        ? snapshot
-        : false;
-    },
-    {
-      itemId: `${a.old.workId}:single-item`,
-      oldId: `turn-omission:${a.old.workId}:${a.old.workId}:${a.old.workId}`,
-      expectedY: y,
-    },
-  );
-  const snapshot = await settled.jsonValue();
+  {
+    try {
+      await historyEntered;
+      await readingDiagnostic("overlap-history-pending");
+      await page.clock.fastForward(15000);
+    } finally {
+      releaseHistory();
+    }
+  }
+  const snapshot = await waitReading("timer-settled");
   assert.ok(snapshot);
   await page
     .getByText(
@@ -410,5 +511,54 @@ test("historical Search opens exact old evidence and independently pages all ret
   assert.equal(
     await page.getByLabel("Editable reply").inputValue(),
     "Retained exact old draft",
+  ); // An intentional new focus during the same pending gap must disarm restoration.
+  await oldRecord.scrollIntoViewIfNeeded();
+  await oldRecord.locator("summary").focus();
+  let releaseIntentionalHistory!: () => void;
+  const intentionalHistory = new Promise<void>((resolve) => {
+    releaseIntentionalHistory = resolve;
+  });
+  const intentionalEntered = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname ===
+      `/api/operator/assignments/${a.assignmentId}/history`,
   );
+  await page.route(
+    `**/api/operator/assignments/${a.assignmentId}/history**`,
+    async (route) => {
+      await intentionalHistory;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  try {
+    await page.clock.fastForward(15000);
+    await intentionalEntered;
+    await singleItem.waitFor({ state: "detached" });
+    await page.getByLabel("Editable reply").focus();
+    await readingDiagnostic("intentional-control-focus-pending");
+    await page.clock.fastForward(15000);
+  } finally {
+    releaseIntentionalHistory();
+  }
+  try {
+    await page.waitForFunction(
+      ({ itemId }) =>
+        document.activeElement?.id === "workspace-reply" &&
+        document.querySelectorAll(`[data-record-id="${itemId}"]`).length ===
+          1 &&
+        document.querySelectorAll('[data-record-id^="turn-omission:"]')
+          .length === 272 &&
+        (
+          document.querySelector(
+            "#workspace-reply",
+          ) as HTMLTextAreaElement | null
+        )?.value === "Retained exact old draft",
+      readingArgs,
+    );
+  } catch (error) {
+    await readingDiagnostic("intentional-control-focus-failed");
+    throw error;
+  }
+  await readingDiagnostic("intentional-control-focus-settled");
 });
