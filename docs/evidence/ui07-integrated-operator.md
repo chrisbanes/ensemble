@@ -24,9 +24,24 @@ process identities and grants are excluded from this packet.
 
 The qualified live source is `f455679ce62f6284fece21d6f8f454b2c4488db4`, tree
 `138c7271516d255f43ef4c4ede5d01acc8eea594`. Pinned Node `24.21.0` and npm
-`12.2.0` installation passed; the complete check passed **930/930 tests**, zero
-failures, cancellations or skips. The final packet only changes documentation
-from that candidate; its production/test/bundle input hashes remain unchanged.
+`12.2.0` installation passed; that candidate's complete check passed **930/930
+tests**, zero failures, cancellations or skips. The final source/test candidate
+`566528decc2cb380ebf08298253bd6f99320164a`, tree
+`47c7048b89d9d276b0853aaaedce16de0cb2ddc2`, passed **933/933 tests** with zero
+failures, cancellations or skips after the bounded recorded-question projection
+repair. The production browser bundle is unchanged. The final documentation
+packet reuses that exact deterministic check.
+
+The original live screenshot exposed an answered native request labelled
+unsupported after its successful terminal closed the endpoint. The final API
+keeps privacy integrity first, then shows an intact committed answer as recorded
+and read-only, with an explicit closed-request reason. Delivery confirmation and
+independent holds remain separate. Deterministic API coverage preserves confirmed
+and held answer evidence, blocks unanswered closed requests and redacts private
+answers. The production browser fixture reloads exact task and Inbox request
+links, retains the committed answer, disables submission and issues zero commands.
+This final display repair was not rerun live; the historical live screenshot is
+not evidence of corrected final pixels.
 
 [The sanitized live manifest](ui07/live-journey.json) records Codex App Server
 `0.159.0`, executable SHA-256

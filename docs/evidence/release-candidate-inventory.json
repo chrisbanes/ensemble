@@ -10,19 +10,20 @@
     "src/standalone/service.ts": "173314ddd6e2e2cacb71e4907c7adf174bd611eca746c412d318ccec37531060",
     "src/standalone/state.ts": "208273acf13d2e1d657422f2bc5777dcabd8f538757404eb01e4d1fb3aa37d02",
     "src/standalone/scheduler.ts": "9eea431599dd62523e9478b7a8522519750798b985d37cc0657412a9699a7361",
-    "src/standalone/operator-api.ts": "553f8ec918046b20891d5b8e5ef1f0a3972d8b40db32644ecb15f491dd71d440",
+    "src/standalone/operator-api.ts": "d29977e7da5d940fdb3ec40dd77c87a9e90c9337dec72b9cce38bfd0672c2dd6",
     "src/standalone/codex.ts": "a1a10fac3c5c7e5abac315998ae1d2a0a2fcb3977149897866a4d06140e89434",
     "test/operator-integrated-browser.test.ts": "eee39d6a7f7c43ce7688fb54fc11ed7b7a593e7f91525a5a4c9a3818beebdfa5",
     "test/operator-task-browser.test.ts": "5692ce908fb14d7b412bf15bc307b6413c9c6b191fa2e613e54e2671975de990",
     "test/operator-task-list.test.ts": "3ab02c2309b9265587bff12085e7bad296c9746d7f83a1dfe63bcf2cb124f1ed",
     "test/task-writer.test.ts": "6558ac0d72e3e60c2bb305cbfe0f27dfb18e0b4ff2d0970b816641c07dbe654a",
-    "test/ui07-live-harness.test.ts": "f2e41fa0a6ea7574b4072e095004f0a62c5c2648092d9d20028f4a2772b2fc6c",
-    "test/ui07/runtime-contract.mjs": "13fca5e87c7154a2064e86f55bb6f453b137fc9ca04f785d936a41edccba09f7",
+    "test/ui07-live-harness.test.ts": "cfe41a60302761b932393856a34b30dd6ac02c786fa1ced8dc5b3c626544f8f0",
+    "test/ui07/runtime-contract.mjs": "56327d46a4b88f8c454d37ea977b02b78e6e0e858230e78412147e5c3263abfc",
     "test/ui07/fake-app-server.mjs": "0af45d8190bdd3be57148fdb368322337d3e38f826178d21d005bbf279d1c028",
     "test/ui04/runtime-contract.mjs": "8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783",
     "test/operator-review-browser.test.ts": "363849a299e1160fb705f327eed5ab9ed610d63136ea4ca8753bb21f214a7939",
     "design/assets/command-menu-after.png": "ced77efa11396eb9ab2fcf4d3ee0e9e31cbe93c976699854add796340db7b4ab",
-    "design/assets/command-menu-before.png": "72a1f44bc131c5c454b3193f5450b1b9a468fefe3265cc58be1d6f82e16e5139"
+    "design/assets/command-menu-before.png": "72a1f44bc131c5c454b3193f5450b1b9a468fefe3265cc58be1d6f82e16e5139",
+    "test/runtime-question-service.test.ts": "daf430b0e84cf373a777cf9358ef872c8a2354c4351fa4d335d2040887163134"
   },
   "productionBundles": {
     "dist/operator/assets/index-QXFEB72c.css": "c777e8ce1f418a17dbf4d51c1ca89b488b25b26df4c794cc9cdb8eef763b99a0",
@@ -46,17 +47,28 @@
       "testDurationMs": 62812.016458,
       "scope": "Passing before distinct visible review fixture replacement; final affected review/full check renewal required"
     },
-    "sourceHead": "f455679ce62f6284fece21d6f8f454b2c4488db4",
-    "sourceTree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
-    "tests": 930,
-    "passed": 930,
+    "sourceHead": "566528decc2cb380ebf08298253bd6f99320164a",
+    "sourceTree": "47c7048b89d9d276b0853aaaedce16de0cb2ddc2",
+    "tests": 933,
+    "passed": 933,
     "failed": 0,
     "cancelled": 0,
     "skipped": 0,
-    "testDurationMs": 61853.36125,
-    "fullCheckLogSha256": "f22fdaff1dd70dff52e920edf15fea0a0302e5838901e81c4a7e95e5a773b2ec",
+    "testDurationMs": 62106.344,
+    "fullCheckLogSha256": "47231b263778ccce0bf00193d09cde1b483a5db92a964f95a72bb1e3d961e456",
     "ciLogSha256": "33ecd62e8b8cbfb33a3d91e71d64f8af0891aa63bf387c5add4ce4e5f8e886d7",
-    "reuse": "Final packet changes after this passing candidate are documentation only; source/test/bundle identities unchanged"
+    "reuse": "Final documentation changes reuse this exact passing source/test candidate. Actual live transport remains attributed to f455; final recorded/closed projection is qualified deterministically, without another native call.",
+    "liveTransportCandidate": {
+      "sourceHead": "f455679ce62f6284fece21d6f8f454b2c4488db4",
+      "sourceTree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
+      "tests": 930,
+      "passed": 930,
+      "failed": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "testDurationMs": 61853.36125,
+      "fullCheckLogSha256": "f22fdaff1dd70dff52e920edf15fea0a0302e5838901e81c4a7e95e5a773b2ec"
+    }
   },
   "criteria": [
     {
@@ -300,6 +312,10 @@
     {
       "signature": "Assignee route natural result successor",
       "disposition": "Supported default lead allocation chosen with routing disabled; one-operation proof renewed, no result wake suppression"
+    },
+    {
+      "signature": "Answered native request appeared unsupported after successful terminal invalidated endpoint",
+      "disposition": "API-only privacy-first committed-answer status precedence and explicit closed/read-only reason; native delivery semantics unchanged; final deterministic API and production task/Inbox reload proof"
     }
   ],
   "remainingGates": [
@@ -329,5 +345,20 @@
     "humanAcceptance": false,
     "providerIntegrationQualified": false,
     "cutoverQualified": false
+  },
+  "recordedQuestionProjection": {
+    "sourceHead": "566528decc2cb380ebf08298253bd6f99320164a",
+    "sourceTree": "47c7048b89d9d276b0853aaaedce16de0cb2ddc2",
+    "scope": "Privacy intact check first; committed answered interaction recorded/read-only before endpoint availability; delivery state and independent holds unchanged",
+    "proofs": [
+      "test/runtime-question-service.test.ts",
+      "test/ui07-live-harness.test.ts",
+      "test/ui07/runtime-contract.mjs"
+    ],
+    "focusedTests": 41,
+    "focusedPassed": 41,
+    "focusedLogSha256": "18c189b938c36618a98c94bd77a05c278bacbf1c344c6f7468e2eea66f38479b",
+    "browser": "Production task and Inbox exact request direct links, reload, retained exact committed answer, disabled Submit, zero commands after closure",
+    "limits": "Successful transport was run live only on the historical f455 candidate. The old live screenshot is not corrected final UI evidence."
   }
 }
