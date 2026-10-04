@@ -546,7 +546,7 @@ export class TaskReviewStore {
           "decision",
           metadata.sourceId ?? null,
           result.resultId,
-          `${decision.attribution}: ${decision.text}`,
+          `${decision.attribution}: ${decision.text}`.slice(0, 16000),
           Number(row.createdAt) * 1000,
         );
     });

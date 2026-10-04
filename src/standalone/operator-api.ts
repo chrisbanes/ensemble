@@ -1318,6 +1318,18 @@ export class OperatorApi {
           source = sourceId
             ? review.sources.find((r) => r.sourceId === sourceId)
             : undefined,
+          reviewResult = resultId
+            ? review.results.find(
+                (r) => r.resultId === resultId && r.taskId === taskId,
+              )
+            : undefined,
+          decision =
+            row.type === "decision"
+              ? reviewResult?.metadata.decisions.find(
+                  (_, position) =>
+                    row.recordId === `${resultId}:decision:${position}`,
+                )
+              : undefined,
           retained = resultId
             ? view.results.some((r) => r.resultId === resultId)
             : source !== undefined;
@@ -1333,6 +1345,14 @@ export class OperatorApi {
           !retained ||
           excerpt === null ||
           excerpt !== row.excerpt ||
+          (row.type === "decision" &&
+            (!decision ||
+              excerpt !==
+                `${decision.attribution}: ${decision.text}`.slice(0, 16000) ||
+              (reviewResult?.metadata.sourceId ?? null) !== sourceId ||
+              [decision.attribution, decision.text].some(
+                (value) => this.safe(value, excluded) !== value,
+              ))) ||
           (source &&
             [source.title, source.body].some(
               (value) => value !== null && this.safe(value, excluded) !== value,

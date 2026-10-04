@@ -324,3 +324,125 @@ test("source search revalidates full retained prose when a later exclusion cross
     omitted.source.sourceId,
   );
 });
+
+test("actual report callback retains long decisions while bounded search validates exact decision identity and full current privacy", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(f),
+    d = f.service.domain(),
+    prefix = "Long decision query marker ",
+    longText = prefix + "x".repeat(16000 - prefix.length - 3) + "ZZZ",
+    attribution = "Boundary attribution",
+    privateText = "PRIVATE DECISION BOUNDARY PHRASE",
+    boundaryText =
+      "x".repeat(16000 - attribution.length - 2 - 10) + privateText,
+    decisions = [
+      { attribution: "A", text: longText },
+      { attribution, text: boundaryText },
+    ];
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    expectedVersion: Number(d.project(a.projectId).version),
+    paused: false,
+  });
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    taskId: a.taskId,
+    expectedVersion: Number(d.task(a.taskId).version),
+    ready: true,
+  });
+  for (
+    let n = 0;
+    n < 100 && !f.service.list().some((w) => w.state === "running");
+    n++
+  )
+    await new Promise((r) => setTimeout(r, 10));
+  const w = f.service.list().find((w) => w.state === "running");
+  assert.ok(w?.threadId && w.turnId);
+  assert.equal(
+    (
+      await f.runtime.callTool({
+        threadId: w.threadId,
+        turnId: w.turnId,
+        callId: randomUUID(),
+        tool: "ensemble_report_result",
+        arguments: {
+          summary: "Supplied decision result",
+          review: { sourceId: a.source.sourceId, decisions },
+        },
+      })
+    ).success,
+    true,
+  );
+  const retained = f.service.taskReview().read(a.taskId).results[0];
+  assert.ok(retained);
+  assert.deepEqual(retained.metadata.decisions, decisions);
+  const api = new OperatorApi(f.service, [f.directory]),
+    params = new URLSearchParams({
+      query: "Long decision query marker",
+      type: "decision",
+    });
+  const read = await api.readSearch(params),
+    match = read.data.matches[0];
+  assert.equal(read.data.matches.length, 1);
+  assert.equal(match?.recordId, `${retained.resultId}:decision:0`);
+  assert.equal(match?.resultId, retained.resultId);
+  assert.equal(match?.excerpt?.length, 16000);
+  assert.ok(match?.excerpt?.startsWith("A: Long decision query marker"));
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({ query: "ZZZ", type: "decision" }),
+      )
+    ).data.matches.length,
+    0,
+  );
+  const boundaryParams = new URLSearchParams({
+      query: attribution,
+      type: "decision",
+    }),
+    initial = await api.readSearch(boundaryParams),
+    excerpt = initial.data.matches[0]?.excerpt;
+  assert.ok(excerpt?.endsWith(privateText.slice(0, 10)));
+  assert.ok(!excerpt?.includes(privateText));
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: a.profileId,
+    expectedVersion: Number(d.profile(a.profileId).version),
+    instructions: privateText,
+  });
+  const current = await api.readSearch(boundaryParams);
+  assert.equal(current.data.matches.length, 0);
+  assert.equal(current.data.omittedCount, 1);
+  assert.deepEqual(f.service.taskReview().read(a.taskId).results[0], retained);
+  // Corrupt index association is untrusted; the exact retained position is required.
+  f.seedPersistedState((db) =>
+    db
+      .prepare("UPDATE task_review_search SET recordId=? WHERE recordId=?")
+      .run(
+        `${retained.resultId}:decision:999`,
+        `${retained.resultId}:decision:0`,
+      ),
+  );
+  assert.equal((await api.readSearch(params)).data.matches.length, 0);
+  f.seedPersistedState((db) =>
+    db
+      .prepare(
+        "UPDATE task_review_search SET recordId=?,excerpt=? WHERE recordId=?",
+      )
+      .run(
+        `${retained.resultId}:decision:0`,
+        "Long decision query marker unrelated indexed material",
+        `${retained.resultId}:decision:999`,
+      ),
+  );
+  assert.equal((await api.readSearch(params)).data.matches.length, 0);
+});
