@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-867 deterministic tests with zero skips. Existing lint warnings remain warnings.
+871 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -54,7 +54,7 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer; navigation-entry view state returns manual overrides, disclosure/4px/focus while shared drafts remain per task |
-| 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
+| 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview; atomic missing upgrade population, rollback/retry and repeated startup preserve retained bytes |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference; in-flight reply disposal preserves the original key for reconciliation without duplication |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
@@ -62,12 +62,13 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
-| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
+| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures; legacy retained results get empty metadata with source/context still unavailable |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback |
-| 15 | current full npm check 867/867; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation |
+| 15 | current full npm check 871/871; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-search-label-check.log` (867/867).
+The current repaired full-check log is `/tmp/ui04-upgrade-check.log` (871/871).
+`/tmp/ui04-search-label-check.log` (867/867) retains historical final-label evidence.
 `/tmp/ui04-search-liveness-check-final.log` (867/867) retains historical bounded-scan evidence.
 `/tmp/ui04-entry-artifact-check-final.log` (863/863) retains historical entry/artifact evidence.
 `/tmp/ui04-observation-check.log` (861/861) retains historical source-observation/coverage evidence.
@@ -1111,3 +1112,57 @@ source in `/tmp/ui04-search-liveness-screenshots.json`; prior Search images reta
 `154ae946` attribution. They were not retagged or recaptured. Historical live
 qualification stays transport-only, consumed and released; no remote/live,
 harness, runtime, global or configuration operation occurred.
+
+
+## Missing retained material upgrade and artifact session readback
+
+Executable `431d18052e20b5316d74ab27392704743f784fc6`, tree
+`9efc9dcd61a25a4c8063bb5e0a2857125f2498c6`, adds population only after the
+required domain/profile/delivery/source configuration and coordination schemas
+exist. `CoordinationStore.migrate` owns the surrounding transaction; rollback
+includes all source/review/index population. Ordinary keyset iteration uses
+64-row batches and existing indexes. Existing source snapshots, review metadata
+and index rows remain byte-for-byte unchanged. Missing supported source and
+recorded-decision indexes are rebuilt without rewriting their retained evidence.
+
+A missing local source captures current retained title/outcome with existing
+sanitization and the actual upgrade capture date. Imported tasks use retained
+`github_external_issues` observations; absent external schema/observation remains
+unavailable, never a local inferred fallback. Retained results preserve exact
+result/task/assignment/work/revision identity and original createdAt converted
+from seconds to milliseconds. A result lacking a review row receives empty
+metadata only: supplied source/context/criteria/validation/artifact/decision facts
+remain unavailable. Upgrade creates no callback, receipt, completion or work
+context. An existing review's decisions can rebuild their exact supported index
+entries; unsafe prose remains withheld.
+
+Real SQLite tests exercise missing index rows with retained metadata, byte
+preservation across repeated migration/reopen, imported actual observations and
+missing observation, original result timestamps, empty metadata and unsafe summary
+omission. An injected insert trigger proves source/review/index rollback before a
+successful duplicate-free retry. The ordinary production service starts from
+missing UI04 tables with pre-existing local tasks and results: current source
+Search, exact older/latest result identities and historical flags, exact old
+review navigation, absent context and second-startup preservation all pass.
+
+The actual artifact GET now rereads its exact authenticated session and CSRF
+binding immediately after the awaited image read and before any image headers or
+body. A real recorded PNG has a valid-session 200; holding its completed read,
+then logging out or expiring the fixture session, yields 401 without PNG bytes.
+Existing path/hash/workspace/privacy checks remain in force.
+
+`/tmp/ui04-upgrade-focused-settled.log` passes 26/26, zero skips, in 1.124 seconds.
+The initial callback fixture mistakenly included non-protocol workId; the initial
+service fixture supplied project/title/body in the wrong argument slots. These
+test-wiring failures remain in `/tmp/ui04-upgrade-focused.log` and
+`/tmp/ui04-upgrade-focused-final.log`; their corrections did not change the product
+contract. Pinned `/tmp/ui04-upgrade-check.log` passes 871/871, zero skipped or
+cancelled, in 46.342 seconds. All 15 rows retain evidence; rows 4/12/14/15 add the
+upgrade/session proof, and opening/current row/log agree.
+
+Frontend content is unchanged. The verified `index-DmKOA1jT.js` bundle SHA256 is
+`bbf8baf5554e973d1163b808cc703dd46250aab92048d03e6e594e4ffe548b07`.
+Adequate split-probe images/complete cleanup retain original `1c74bd4e` attribution
+in `/tmp/ui04-search-liveness-screenshots.json`; Search images retain `154ae946`.
+No recapture/retagging, remote/live operation, harness/runtime/config change or
+renewal of the consumed historical transport-only grant occurred.
