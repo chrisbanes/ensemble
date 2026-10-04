@@ -45,17 +45,17 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-845 deterministic tests with zero skips. Existing lint warnings remain warnings.
+847 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
 | Row | Concrete evidence |
 | --- | --- |
-| 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes |
+| 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
-| 5 | operator-comments-browser imported source identity/read-only GitHub refresh and failed sync |
+| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
@@ -65,9 +65,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
-| 15 | current full npm check 845/845; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 847/847; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci-check.log` (845/845).
+The current repaired full-check log is `/tmp/ui04-observation-inbox-check.log` (847/847).
+`/tmp/ui04-ci2-check.log` and `/tmp/ui04-ci-check.log` (845/845) retain prior CI repair evidence.
 `/tmp/ui04-r3-check.log` (843/843) records the earlier focus-repair candidate.
 `/tmp/ui04-r2-check.log` (843/843) records the four-interaction follow-up candidate.
 `/tmp/ui04-repair-check.log` (843/843) records the first repaired candidate. The earlier
@@ -420,3 +421,42 @@ handoff. Production source and bundle are unchanged from the preceding ordering
 repair, so its nine screenshot identities and all 15 acceptance mappings retain
 their original source attribution. No production/runtime/provider contract,
 qualification grant or historical live evidence changed.
+
+## Stable source identity and live Inbox catalog follow-up
+
+The final production repair is code `c95bf388bd537a3e5a9dcb8b46a282bb9e616658`,
+tree `2c0831430ced2e42227306d560e9a6704d8b8784`, after the separately validated
+Search CI settlement repair. It resolves both subsequent confirmed review comments:
+
+| Comment | Repair and evidence |
+| --- | --- |
+| 4175970455 | Source identity hashes the original kind/title/body independently of current exclusions. Stored prose stays sanitized and current reads still redact it. The ordinary GitHub producer regression changes profile instructions to `failed`, observes unchanged input again and retains source/revision/criterion identities and an actual callback result's source binding. It preserves failed outcome enums, redacts prose and credentials, then verifies genuinely changed source input advances revision. |
+| 4175970456 | Entering Inbox refreshes the existing task catalog; its mounted authenticated scope polls every 15 seconds, and header Refresh updates the same catalog. Each successful catalog object refreshes stable task-detail resources without timestamp identity or remounting. Existing status UI shows loading/failure/last-fetched data; initial unobserved data does not claim no attention. The production browser creates actual question/approval callbacks after Inbox opens, discovers exact request links, updates a known task without losing focused-link identity, removes resolved requests, excludes a routine delivered result, discovers a new ownership hold and retains the last catalog after failure. |
+
+Affected store/API/Search/workspace/Inbox checks pass 15/15 in
+`/tmp/ui04-observation-inbox-focused.log`. Source/API and new Inbox checks also pass
+in `/tmp/ui04-observation-inbox-core.log` (6/6) and
+`/tmp/ui04-observation-inbox-browser.log` (1/1). Preliminary fixture endpoint/material
+failures remain in the handoff. The first full check stopped before tests on a lint
+dependency error, retained at `/tmp/ui04-observation-inbox-check-lint-failure.log`;
+its explicit authenticated Inbox scope correction preserves the intended ownership.
+The final `/tmp/ui04-observation-inbox-check.log` passes type checking, lint,
+formatting, builds and all 847 tests, with zero skips.
+
+Current bundle SHA256 is
+`5b89495837005c0e3a32a0f8e96006a3057a7ff3825f7f3218cdf70343fdfcac`.
+The inspected current Inbox screenshot and completed-cleanup manifest are bound to
+this code in `/tmp/ui04-observation-inbox-screenshots.json`; screenshot SHA256 is
+`0446c310f7ae377d3c4704dbc5a21cf986b9c4b762024ca7235dbf865171aacf`.
+Unchanged layout/control evidence retains prior source and bundle attribution.
+All 15 acceptance rows retain their evidence; source identity and current pending
+request discovery gain these focused proofs. Existing Inbox sidebar/deep-link,
+header refresh, timer and exact task/request entry paths share the repaired behavior.
+
+The source-snapshot module was absent from released base `516b9ccc`. Original
+identity of previously redacted snapshots from unshipped intermediate qualification
+or fixture candidates is unknown; raw input is not reconstructed and no migration
+guarantee is claimed for that historical data. Normal prior safe-equals-original
+digests remain compatible. Stable original-input identity applies to new captures.
+The original `a21e6046` transport-only live qualification, consumed grant and
+released lock remain unchanged. No new live invocation or provider probe occurred.
