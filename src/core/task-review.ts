@@ -535,12 +535,18 @@ export class TaskReviewStore {
       );
     return record;
   }
-  contextForWork(taskId: string, assignmentId: string, workId: string) {
+  contextForWork(
+    taskId: string,
+    assignmentId: string,
+    workId: string,
+    assignmentVersion: number,
+  ) {
+    revision.parse(assignmentVersion);
     const rows = this.db
       .prepare(
-        "SELECT recordJson FROM task_review_contexts WHERE taskId=? AND assignmentId=? AND workId=? LIMIT 2",
+        "SELECT recordJson FROM task_review_contexts WHERE taskId=? AND assignmentId=? AND workId=? AND assignmentVersion=? LIMIT 2",
       )
-      .all(taskId, assignmentId, workId) as Row[];
+      .all(taskId, assignmentId, workId, assignmentVersion) as Row[];
     if (rows.length > 1) throw Error("Review work context is ambiguous");
     if (!rows[0]) return undefined;
     const context = contextCaptureSchema.parse(
@@ -549,7 +555,8 @@ export class TaskReviewStore {
     if (
       context.taskId !== taskId ||
       context.assignmentId !== assignmentId ||
-      context.workId !== workId
+      context.workId !== workId ||
+      context.assignmentVersion !== assignmentVersion
     )
       throw Error("Review work context identity mismatch");
     return context;
@@ -732,6 +739,7 @@ export class TaskReviewStore {
       assignmentId: string;
       workId: string;
       workRevision: number;
+      assignmentVersion: number;
     },
     input: unknown,
   ) {
@@ -748,6 +756,7 @@ export class TaskReviewStore {
         result.taskId,
         result.assignmentId,
         result.workId,
+        result.assignmentVersion,
       );
       if (!context?.sourceId || context.sourceId !== metadata.sourceId)
         throw Error("Review source does not match captured work context");
@@ -879,8 +888,20 @@ export class TaskReviewStore {
     const result = selection.resultId
       ? this.result(taskId, selection.resultId)
       : undefined;
-    const context = result
-      ? this.contextForWork(taskId, result.assignmentId, result.workId)
+    const actualResult = selection.resultId
+      ? (this.db
+          .prepare(
+            "SELECT taskId,assignmentId,workId,workRevision,assignmentVersion FROM coordination_results WHERE resultId=? AND taskId=?",
+          )
+          .get(selection.resultId, taskId) as Row | undefined)
+      : undefined;
+    const context = actualResult
+      ? this.contextForWork(
+          taskId,
+          String(actualResult.assignmentId),
+          String(actualResult.workId),
+          Number(actualResult.assignmentVersion),
+        )
       : undefined;
     if (
       result?.metadata.sourceId &&

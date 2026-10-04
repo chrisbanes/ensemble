@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
+import { ExecutionState } from "../src/standalone/state.js";
 import { CoordinationStore } from "../src/core/coordination.js";
 import {
   previewRecordedArtifact,
@@ -497,4 +498,178 @@ test("bound workspace alias retarget and file growth while open fail closed with
     ),
     /mismatch/,
   );
+});
+
+test("never-admitted same work rebind retains provisional captures but prompt and structured/unstructured result reads use exact bound version", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  for (const structured of [true, false]) {
+    const task = await seedReviewTask(
+      f,
+      `Version ${structured}`,
+      "Versioned task",
+      "- [ ] Original version scope",
+    );
+    const d = f.service.domain(),
+      workspace = await f.service.taskWorkspace(task.taskId);
+    assert.ok(workspace);
+    const workId = `assignment:${task.assignmentId}:initial`,
+      assignment = d.assignment(task.assignmentId);
+    f.seedPersistedState((db) => {
+      const state = new ExecutionState(db);
+      state.create(workId, String(assignment.brief), workspace.path);
+      state.bindTask(workId, {
+        taskId: task.taskId,
+        assignmentId: task.assignmentId,
+        assignmentVersion: 1,
+        instructionsRevision: 1,
+        profileRevision: 1,
+      });
+    });
+    const old = f.service
+      .taskReview()
+      .contextForWork(task.taskId, task.assignmentId, workId, 1)!;
+    assert.equal(old.sourceId, task.source.sourceId);
+    d.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      taskId: task.taskId,
+      expectedVersion: Number(d.task(task.taskId).version),
+      outcome: "- [ ] New version scope",
+    });
+    d.execute({
+      type: "profile.configure",
+      actor: "operator",
+      key: randomUUID(),
+      profileId: task.profileId,
+      expectedVersion: 1,
+      instructions: "New bound instructions",
+    });
+    d.execute({
+      type: "assignment.apply",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      assignmentId: task.assignmentId,
+      expectedVersion: 1,
+    });
+    f.seedPersistedState((db) =>
+      new ExecutionState(db).bindTask(workId, {
+        taskId: task.taskId,
+        assignmentId: task.assignmentId,
+        assignmentVersion: 2,
+        instructionsRevision: 1,
+        profileRevision: 2,
+      }),
+    );
+    const current = f.service
+      .taskReview()
+      .contextForWork(task.taskId, task.assignmentId, workId, 2)!;
+    assert.notEqual(current.captureId, old.captureId);
+    assert.notEqual(current.sourceId, old.sourceId);
+    assert.equal(
+      f.service
+        .taskReview()
+        .contextForWork(task.taskId, task.assignmentId, workId, 1)?.captureId,
+      old.captureId,
+    );
+    d.execute({
+      type: "project.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      expectedVersion: Number(d.project(task.projectId).version),
+      paused: false,
+    });
+    d.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      taskId: task.taskId,
+      expectedVersion: Number(d.task(task.taskId).version),
+      ready: true,
+    });
+    await until(() =>
+      f.service
+        .list()
+        .some((w) => w.workId === workId && w.state === "running"),
+    );
+    const work = f.service.list().find((w) => w.workId === workId)!;
+    assert.ok(work.threadId && work.turnId);
+    const prompt = f.runtime.prompts.at(-1)!;
+    assert.ok(prompt.includes("New bound instructions"));
+    const line = prompt
+      .split("\n")
+      .find((l) => l.startsWith("Captured review references (JSON): "))!;
+    assert.ok(line);
+    assert.equal(
+      JSON.parse(line.slice("Captured review references (JSON): ".length))
+        .sourceId,
+      current.sourceId,
+    );
+    const wrong = await f.runtime.callTool({
+      threadId: work.threadId,
+      turnId: work.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: {
+        summary: "Wrong provisional source",
+        review: { sourceId: old.sourceId! },
+      },
+    });
+    assert.equal(wrong.success, false);
+    assert.equal(
+      f.service.coordinationView().readTask(task.taskId).results.length,
+      0,
+    );
+    const call = {
+      threadId: work.threadId,
+      turnId: work.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: {
+        summary: "Version bound result",
+        ...(structured ? { review: { sourceId: current.sourceId! } } : {}),
+      },
+    };
+    const first = await f.runtime.callTool(call);
+    assert.equal(first.success, true);
+    assert.deepEqual(await f.runtime.callTool(call), first);
+    const result = f.service.coordinationView().readTask(task.taskId)
+      .results[0]!;
+    assert.equal(result.assignmentVersion, 2);
+    d.execute({
+      type: "assignment.apply",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: task.projectId,
+      assignmentId: task.assignmentId,
+      expectedVersion: 2,
+    });
+    const read = f.service
+      .taskReview()
+      .read(task.taskId, { resultId: result.resultId });
+    assert.ok(read.contexts.some((c) => c.captureId === current.captureId));
+    assert.ok(read.contexts.some((c) => c.captureId === old.captureId));
+    assert.equal(
+      read.contexts.find((c) => c.captureId === current.captureId)
+        ?.assignmentVersion,
+      2,
+    );
+    assert.equal(
+      f.service
+        .taskReview()
+        .contextForWork(task.taskId, task.assignmentId, workId, 2)?.sourceId,
+      current.sourceId,
+    );
+    f.runtime.complete(f.runtime.turns);
+    await until(
+      () =>
+        f.service.list().find((w) => w.workId === workId)?.state ===
+        "completed",
+    );
+  }
 });

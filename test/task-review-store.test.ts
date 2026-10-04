@@ -340,11 +340,13 @@ test("claimed result sources require one exact retained work context; absent cla
       assignmentId: f.assignmentId,
       workId: w.workId,
       workRevision: 1,
+      assignmentVersion: 1,
     };
     const context = f.stores.review.contextForWork(
       f.taskId,
       f.assignmentId,
       w.workId,
+      1,
     )!;
     f.db
       .prepare("DELETE FROM task_review_contexts WHERE captureId=?")
@@ -382,9 +384,45 @@ test("claimed result sources require one exact retained work context; absent cla
       .run(context.captureId);
     insert(context);
     insert({ ...context, captureId: randomUUID(), assignmentVersion: 2 });
+    assert.equal(
+      f.stores.review.contextForWork(f.taskId, f.assignmentId, w.workId, 1)
+        ?.captureId,
+      context.captureId,
+    );
+    assert.equal(
+      f.stores.review.contextForWork(f.taskId, f.assignmentId, w.workId, 2)
+        ?.assignmentVersion,
+      2,
+    );
+    assert.throws(() =>
+      f.stores.review.contextForWork(
+        f.taskId,
+        f.assignmentId,
+        w.workId,
+        undefined as never,
+      ),
+    );
+    assert.throws(() =>
+      f.stores.review.contextForWork(f.taskId, f.assignmentId, w.workId, 0),
+    );
     assert.throws(
-      () => f.stores.review.recordResult(result, { sourceId: source.sourceId }),
-      /ambiguous/,
+      () =>
+        f.stores.review.recordResult(
+          { ...result, assignmentVersion: 3 },
+          { sourceId: source.sourceId },
+        ),
+      /captured work context/,
+    );
+    f.db
+      .prepare("UPDATE task_review_contexts SET recordJson=? WHERE captureId=?")
+      .run(
+        JSON.stringify({ ...context, assignmentVersion: 2 }),
+        context.captureId,
+      );
+    assert.throws(
+      () =>
+        f.stores.review.contextForWork(f.taskId, f.assignmentId, w.workId, 1),
+      /identity mismatch/,
     );
     assert.equal(f.stores.review.read(f.taskId).results.length, 0);
     f.db

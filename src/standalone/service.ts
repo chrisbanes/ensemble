@@ -2327,6 +2327,7 @@ export class StandaloneService {
           binding.taskId,
           binding.assignmentId,
           request.workId,
+          binding.assignmentVersion,
         );
       } catch {
         return undefined;
