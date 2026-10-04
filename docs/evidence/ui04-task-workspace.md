@@ -1638,3 +1638,29 @@ The product bundle remains SHA256
 `68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
 All 15 acceptance rows and both ledgers agree at 883 current tests. There was no
 product, harness, timeout, retry, sleep, live, remote or authority change.
+
+
+## Neutral timeout-label follow-up
+
+Executable `5a9067e46c95127a27b6a88ff4ee4309b0da5579`, tree
+`11c7dfe11c3de88673e43000e01591531aa7318c`, changes only the fixed diagnostic
+literal from request-or-response-timeout to timeout. Locator/actionability waits
+also raise TimeoutError, so the broader neutral category avoids an unsupported
+cause claim. There is no assertion, control-flow, deadline or product change.
+
+The successful build is `/tmp/ui04-ci19-timeout-label-build.log`; focused actual
+journey `/tmp/ui04-ci19-timeout-label-focused.log` passes 1/1, zero failures,
+cancellations or skips, in 3.873 seconds. Format/diff checks pass. Root approved
+this proportional verification without repeating the full check or a separate
+visual capture. Full 883/883 remains bound to `0c7da3c8` and
+`/tmp/ui04-ci19-review-check.log`; completed clean capture 1/1, five image hashes,
+32 milestones and zero omissions remain bound to `a22f4e57` in
+`/tmp/ui04-ci19-review-screenshots.json`. Those source identities are reused
+explicitly, not retagged to this amendment. The focused run does not establish
+a newly executed failure-category branch.
+
+All 15 acceptance rows and both ledgers retain the combined evidence attribution.
+Original CI19 and first-focus exact causes remain unknown. Product bundle remains
+SHA256 `68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`;
+historical live grant remains consumed/resource released, with no live or remote
+operation performed.
