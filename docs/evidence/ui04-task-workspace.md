@@ -45,17 +45,17 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-857 deterministic tests with zero skips. Existing lint warnings remain warnings.
+859 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
 | Row | Concrete evidence |
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
-| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion |
+| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
-| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps |
+| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
@@ -65,9 +65,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
-| 15 | current full npm check 857/857; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 859/859; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-draft-preservation-check.log` (857/857).
+The current repaired full-check log is `/tmp/ui04-ci8-check.log` (859/859).
+`/tmp/ui04-draft-preservation-check.log` (857/857) retains historical unfinished-draft evidence.
 `/tmp/ui04-ci7-check.log` (857/857) retains historical CI refresh/link/head evidence.
 `/tmp/ui04-retention-access-check.log` (856/856) retains historical retained-access/paging evidence.
 `/tmp/ui04-source-history-check.log` (853/853) retains historical source-binding/checklist/history evidence.
@@ -716,7 +717,7 @@ failure; the assertion narrows its successful value explicitly. The first focuse
 failure `/tmp/ui04-ci7-focused-first-failure.log` used a mistaken aria-label DOM
 selector for the label-associated reply textarea; the corrected exact ID reads
 the existing production field. These are fixture/type corrections, not changed
-product geometry or acceptance bounds. Current full `/tmp/ui04-ci7-check.log`
+product geometry or acceptance bounds. Historical full `/tmp/ui04-ci7-check.log`
 passed 857/857, zero skipped, in 49.243 seconds.
 
 Executable source is `d88cfe9e241cb8ecb265c1f8386ea7d6ddf1d5fe`, tree
@@ -767,10 +768,11 @@ The preserved first focused failure
 existing animation-frame focus callback when an already-visible retention notice
 provided no new render boundary. The test now waits for actual composer focus
 within the unchanged five-second bound; no sleeps, retries or acceptance-bound
-changes were added. The current full pinned check
+changes were added. The historical full pinned check
 `/tmp/ui04-draft-preservation-check.log` passes 857/857, zero skipped, in
 45.464 seconds. Prior repair14's 857/857 and other evidence remain historical and
-reusable where unaffected; the current opening/table/log agree at 857.
+reusable where unaffected; that candidate’s opening/table/log agreed at 857.
+The current summary above records the later 859-test check.
 
 Executable source `89d3e2e9bd2f4994376f5073a6b6219e21c3a947`, tree
 `b4d7953ef8d1723233b4fdd6ff154d7c80a0257f`, was frozen before capture.
@@ -784,3 +786,86 @@ only the new retained-draft viewport is cited for this repair. All 15 acceptance
 rows retain prior proof, with rows 3/6/8/15 extended. No remote/live operation,
 harness/runtime/config change or new grant occurred; the historical a21/ca51
 transport-only grant remains consumed and released.
+
+
+## CI8 overlapping refresh and sanitized source boundary
+
+Required Linux run `37183720508` on `3ebf3e0d` passed 856/857 with zero skips.
+`/tmp/ui04-ci8-failure.log` preserves its unchanged five-second final settled
+predicate timeout. The artifact under `/tmp/ui04-ci8-evidence` completed cleanup
+but has no predicate or post-failure DOM snapshot; the failed predicate component
+in that original CI run remains unknown. This belongs to the same causal history
+refresh family as CI7, not a newly reset convergence sequence.
+
+Controlled `/tmp/ui04-ci8-overlap-proof.log` separately demonstrates a production
+focus-ownership defect. Its bounded sanitized manifest diagnostics show the header
+read fully settled at one item, 272 unique omissions, exact draft, position delta
+zero and focused history summary. A real timer invalidates history; a held history
+request then permits a second real timer before publication. Current successful
+task/history responses restore all material, draft and position, but the summary
+is unfocused and persisted focusRecord is null. The second capture read a temporary
+invalidated DOM and overwrote its pending focus intent. That controlled evidence
+does not claim the diagnostic-free Linux artifact had the same final state.
+
+The minimal existing capture guard now preserves an armed, known history reading/
+focus intent only when its captured history element is disconnected and the body
+is active. It records whether the original focus came from `#history`; arbitrary
+detached controls do not qualify. The existing intentional-focus listener still
+disarms restoration. Auth/disposal, latest-request ownership and fail-closed
+visibility are unchanged; no private material or stale response is restored.
+The regression establishes an atomic exact header-settled boundary before the
+controlled pending timer, holds the history read across another actual timer,
+then requires the original one item, 272 unique omissions, exact draft, less-than-
+four-pixel position and summary focus together. A second controlled gap deliberately
+focuses the live reply field; later publication keeps that new focus without a
+stale summary focus steal. Request/response chronology and every predicate's
+components are bounded and retained on failure and success. The production timer
+is enabled throughout; no sleeps, retries, increased timeouts or skips were added.
+
+Codex finding `4176496050` is also addressed. The TaskReviewStore sanitizer computes
+the complete sanitized representation and returns null if redaction expansion
+makes it exceed 16,000 characters. It no longer silently slices a retained body.
+The raw original source fingerprint is unchanged: a tail change advances identity
+and revision even when both bodies are unavailable. Existing source omission
+produces no fabricated prefix criteria and a null/unknown omitted-criterion count.
+An ordinary GitHub source below the raw limit but above the sanitized limit is
+proved through capture, runtime preparation references, actual result callback,
+curated API and collapsed/expanded Brief plus supplied-criteria disclosure.
+The existing raw-oversized journey remains a separate current case. An exact
+sanitized 16,000-character ordinary source retains its complete tail criterion and
+count zero; one further character becomes unavailable.
+
+Caller audit: assignment captures retain null briefs on overflow, bounded result
+indexes omit unavailable sanitized prose, and metadata's exact-prose privacy check
+rejects excluded/transformed material atomically. The curated API needed the same
+post-sanitization bound: otherwise an expanded assignment brief exceeded its
+existing nullable <=16,000 response schema. It now returns null on that overflow
+without a prefix. Current exclusion/auth/visibility guards are retained. Deliberate
+purpose-specific Search excerpts remain bounded and visibly partial. Previously
+clipped intermediate records have no raw-content reconstruction or completeness
+guarantee; no persisted schema tightening, destructive migration or new retention
+promise was introduced.
+
+`/tmp/ui04-ci8-focused.log` passes 15/15, zero skipped, against a successfully
+built same-source service and web bundle. `/tmp/ui04-ci8-source-build.log` and
+`/tmp/ui04-ci8-build.log` preserve a missing projectId in the new configure fixture.
+The early `/tmp/ui04-ci8-focused-first-failure.log` ran emitted service output with
+a prior web bundle after that failed build: it is INVALID focus-guard validation,
+not a current-source result. It also preserves the real expanded-brief response
+schema error motivating the approved API counterpart. The project identity was
+corrected, a successful full build preceded the credited focused run, and neither
+deadlines nor assertions were weakened. Current full `/tmp/ui04-ci8-check.log`
+passes 859/859 with zero skips in 51.697 seconds.
+
+Executable source `c94a20bf19351c6e2876d40402ed0903262b0881`, tree
+`294a03748c1648cab5fa07e9ee8750bfc099f09c`, was frozen before current capture.
+`/tmp/ui04-ci8-capture.log` passes 5/5 with zero skips in 16.888 seconds. The two
+cited affected images (phone retained omission history and ordinary redaction-
+expanded source gap) were inspected. Exact image/bundle hashes, passing predicate
+trace and all five completed cleanup manifests are in `/tmp/ui04-ci8-screenshots.json`.
+There are no screenshot/cleanup omissions or evidence failures. Prior images keep
+their original source attribution. All 15 acceptance rows retain earlier proof;
+rows 2/3/4/5/8/9/12/15 gain the relevant overlap/retention evidence. Shared workspace
+entry points use the same capture and Brief/criteria paths. Historical a21/ca51
+qualification remains transport-only with its grant consumed and resource released;
+no remote, live, harness, runtime, global or configuration operation occurred.
