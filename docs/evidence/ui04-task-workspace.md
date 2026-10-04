@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
 | 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci17-check.log` (883/883).
+The current repaired full-check log is `/tmp/ui04-ci18-check.log` (883/883).
+`/tmp/ui04-ci17-check.log` (883/883) retains historical Settings render-boundary evidence.
 `/tmp/ui04-codex16-check.log` (883/883) retains historical exact-intent/history ownership evidence.
 `/tmp/ui04-codex15-final-check.log` (883/883) retains historical source-batch/session evidence.
 `/tmp/ui04-codex14-row-check-final.log` (878/878) retains historical visibility/context evidence.
@@ -1471,3 +1472,53 @@ unchanged and current at 883 tests. The remote Codex17 quota error is retained a
 a remote review limitation, not a successful review or permission to retry/use a
 paid route. Historical `a21e6046` remains transport-only with its grant consumed
 and resource released; no live or remote operation occurred in this repair.
+
+
+## Search cross-document history settlement (CI18 repair27)
+
+Required Linux CI18 on historical `74647abb` failed only the Search private-history
+helper: native `history.back()` replaced the document while its evaluation response
+was in flight. `/tmp/ui04-ci18-failure.log` retains 882/883, one failure and zero
+cancellations or skips (150.583 seconds). The verified `/tmp/ui04-ci18-evidence`
+manifest has complete cleanup and no omitted steps, screenshots or evidence
+failures; its two console-error markers belong to intentional fault paths.
+Desktop/phone images preceding the failure do not prove completed traversal.
+The corrected Settings fixture and both original retained-history probes passed.
+
+Only `test/operator-search-browser.test.ts` changes. The helper captures the
+current document's `performance.timeOrigin`, registers the existing five-second
+main-frame navigation event before dispatching native history traversal, and joins
+both outcomes without prematurely rejecting a lost evaluation response. A rejected
+evaluation must have exactly the observed context-destroyed error message; it is
+allowed only after the actual navigation event, exact permitted destination and
+render readiness, all Search URL/input/result privacy assertions, and changed
+document identity are proven. Every other evaluation/navigation error still fails.
+No target URL is substituted, and no sleep, retry, timeout, skip, clock, product,
+schema or harness change is introduced. The three Back destinations and exact
+preceding-Back/Forward destination equality remain, and the journey requires at
+least one actual replacement document.
+
+The focused actual Search journey `/tmp/ui04-ci18-focused.log` passes 3/3, zero
+failures/cancellations/skips, in 5.180 seconds. Four private-history traversals
+observed two document replacements and zero lost evaluation responses locally.
+That is actual cross-document evidence, not an executed proof of the conditional
+error branch; its exact-message/replacement guard remains reviewable and the
+original Linux error is retained. The final pinned `/tmp/ui04-ci18-check.log`
+passes 883/883, zero failures/cancellations/skips, in 47.195 seconds.
+
+The test-only executable is `a8efff171e168fb257e57713564f785f3ea92fcf`, tree `2bf61c18f035790a69feba154ab489d2ed20bd5d`. Its clean-source
+`/tmp/ui04-ci18-clean-capture.log` passes 3/3 in 4.834 seconds and observes
+2 actual document replacements, with 0 lost evaluation responses.
+All three execution/overall phases and cleanup manifests complete; no diagnostics,
+screenshots or evidence failures are omitted. Exact desktop/phone image and
+manifest hashes are in `/tmp/ui04-ci18-screenshots.json`. Any console-error markers
+remain attributed to the existing intentional unknown/auth/failure fixture paths.
+
+The unchanged product bundle remains `index-BexsLO1G.js`, SHA256
+`68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
+Earlier product images retain their original source attribution; these affected
+Search test captures are newly bound and do not retag older images. All 15
+acceptance mappings remain current at 883 tests. Codex18's quota error remains a
+remote-review limitation, not a completed review or authority to retry/pay/reset.
+The sole historical live transport grant remains consumed and its resource
+released; no live or remote operation occurred.
