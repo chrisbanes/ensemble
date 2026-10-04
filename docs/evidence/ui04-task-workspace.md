@@ -53,12 +53,12 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion |
-| 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip |
+| 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps |
-| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation |
+| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
-| 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
+| 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison |
@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
 | 15 | current full npm check 857/857; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci7-check.log` (857/857).
+The current repaired full-check log is `/tmp/ui04-draft-preservation-check.log` (857/857).
+`/tmp/ui04-ci7-check.log` (857/857) retains historical CI refresh/link/head evidence.
 `/tmp/ui04-retention-access-check.log` (856/856) retains historical retained-access/paging evidence.
 `/tmp/ui04-source-history-check.log` (853/853) retains historical source-binding/checklist/history evidence.
 `/tmp/ui04-retention-metadata-check.log` (851/851) retains historical source-retention/metadata evidence.
@@ -731,3 +732,55 @@ deterministic fixture preview, not a live artifact or substantial comparison.
 Historical live source `a21e6046`/harness `ca51dc12` remains transport-only,
 consumed and released; the portable harness/runtime/config and live authority
 are unchanged. No new live invocation or remote mutation occurred.
+
+
+## Unfinished contextual reply preservation
+
+The integrated audit's bounded P2 at Ask lead is addressed by the existing shared
+handler. It selects the lead composer, checks the actual lead slot, and preserves
+both nonempty text and its existing immutable reference. It explains “Existing
+lead draft and reference retained. Finish or clear it before starting a new
+contextual reply” and focuses that composer. It does not silently retarget existing
+text to the newly requested anchor. Repeated selection of the same anchor also
+preserves edited text/reference. An explicitly empty lead slot can bind/prefill
+the next requested anchor normally. The separate GitHub draft is unchanged.
+Pending/uncertain guards, original-key reconciliation, completed/held-recipient
+rejection and exact-draft recovery remain effective. No confirmation dialog,
+multi-draft system, reopening or new authority is introduced.
+
+Production browsers prove an unfinished ordinary message survives criterion and
+artifact Ask actions with no fabricated reference; edited contextual A survives
+same-A and artifact-B selection with its exact original reference; explicit clear
+then B binds/prefills B and sends with the existing exact artifact/source/result
+receipt assertions. The existing definite rejection retains the draft before that
+successful send. The imported-task journey proves exact local/GitHub text survives
+destination switching and Ask brief, including selecting a new source anchor only
+after explicitly clearing the local slot. The navigation journey checks its
+restored draft first, then explicitly clears it to start a separate contextual
+intent. Brief/result/criterion/artifact buttons all share the same handler across
+unified task entry points and exact historical targets. No additional entry point
+or separate Ask implementation was introduced.
+
+`/tmp/ui04-draft-preservation-focused.log` passes 6/6, zero skipped.
+The preserved first focused failure
+`/tmp/ui04-draft-preservation-focused-first-failure.log` asserted focus before the
+existing animation-frame focus callback when an already-visible retention notice
+provided no new render boundary. The test now waits for actual composer focus
+within the unchanged five-second bound; no sleeps, retries or acceptance-bound
+changes were added. The current full pinned check
+`/tmp/ui04-draft-preservation-check.log` passes 857/857, zero skipped, in
+45.464 seconds. Prior repair14's 857/857 and other evidence remain historical and
+reusable where unaffected; the current opening/table/log agree at 857.
+
+Executable source `89d3e2e9bd2f4994376f5073a6b6219e21c3a947`, tree
+`b4d7953ef8d1723233b4fdd6ff154d7c80a0257f`, was frozen before capture.
+`/tmp/ui04-draft-preservation-capture.log` passes 3/3, zero skipped, in
+4.048 seconds. The new bounded phone composer viewport was inspected and shows
+the exact retained criterion reference, edited draft and explanation. Its hash,
+current production bundle identity and completed cleanup manifests are in
+`/tmp/ui04-draft-preservation-screenshots.json`. No cleanup or screenshot omissions
+or evidence failures occurred. Earlier images keep their original provenance;
+only the new retained-draft viewport is cited for this repair. All 15 acceptance
+rows retain prior proof, with rows 3/6/8/15 extended. No remote/live operation,
+harness/runtime/config change or new grant occurred; the historical a21/ca51
+transport-only grant remains consumed and released.
