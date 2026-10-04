@@ -365,3 +365,32 @@ All 15 acceptance rows retain their earlier evidence plus these repairs.
 | --- | --- |
 | 390-keyboard-reply.png | `02d4ef8a28ecd9c93a371b57115549b5cae563c77ea532ec53eaadcdc1797077` |
 | 1366-original-review.png | `00ad7707349bed991965137aec0aa72ad2902f79eab4290252f884c70ae3ed11` |
+
+## Source observation ordering follow-up
+
+Code `d2ae3e1fd11261d86462caa98098f43d58c6acbe`, tree
+`318ec6471e43fb2467d53473bf1a44d3e0e959c1`, repairs the remaining concurrent
+source-observation finding. Every new attempt invalidates the prior task-read
+marker. Provider completion and failure settlement require current request,
+authentication and mounted ownership. An older successful task read or provider
+response therefore cannot replace a newer failed comparison with a known claim.
+The existing successful current observation/read path still restores comparison.
+
+The production browser regression holds a successful observation's task read,
+fails a newer observation, then releases that read and verifies comparison stays
+unknown. It also holds the older provider response across the newer failure.
+Navigation, expired authentication and successful-read assertions remain in the
+same journey. `/tmp/ui04-source-order-focused.log` passes 1/1;
+`/tmp/ui04-source-order-check.log` passes the required complete check, 845/845
+with zero skips. These checks ran on the identical code tree before its commit.
+
+The current production bundle SHA256 is
+`3e3de10b72d6b9622787a11301e11f93c94f94da02a1a59ef714a6c4203f3138`.
+Fresh final-check screenshot and completed-cleanup manifests are retained in
+`/tmp/ui04-source-order-screenshots.json`; the desktop exact-comment review was
+inspected. Screenshots show the composed route; held-response assertions provide
+the ordering proof. Earlier images retain their original source attribution.
+Acceptance rows 5, 11 and 15 gain this ordering evidence; the remaining rows retain
+unchanged evidence. No runtime or provider contract changed. The historical
+`a21e6046` transport-only live proof and consumed grant remain unchanged, with no
+additional live invocation.
