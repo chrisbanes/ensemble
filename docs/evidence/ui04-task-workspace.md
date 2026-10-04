@@ -394,3 +394,29 @@ Acceptance rows 5, 11 and 15 gain this ordering evidence; the remaining rows ret
 unchanged evidence. No runtime or provider contract changed. The historical
 `a21e6046` transport-only live proof and consumed grant remain unchanged, with no
 additional live invocation.
+
+## Search history CI settlement follow-up
+
+Linux CI of `a8e308a3` passed all seven portable harness cases and 844/845 tests.
+The sole failure was Playwright's CDP history command reporting an inactive page
+before the Search privacy assertions. The test traverses a retained cross-document
+boundary and old authentication entries that the product sanitizes with
+`replaceState`. The prior test relied on one platform's `ERR_ABORTED` string and
+only waited for rendered Search destinations between traversals.
+
+Test-only commit `486686e8ad26bb302946bfaf1a0a1446f0c90d6e`, tree
+`d3a8e2806951a552021d6fafda7f5eca5bf1404f`, replaces that error catch with native
+browser history traversal, bounded actual main-frame navigation and rendered
+exact destination checks. Every revisited Search must have a sanitized URL,
+empty query and zero matches. Forward must return to the recorded preceding Back
+destination. The cross-document boundary, late responses, authentication purge,
+focus, dates, phone controls and both origin assertions remain.
+
+`/tmp/ui04-ci2-focused.log` passes 1/1; `/tmp/ui04-ci2-check.log` passes the complete
+required check, 845/845 with zero skips. The original CI failure is preserved in
+`/tmp/ui04-ci2-failed.log`; subsequent Linux CI readback belongs to the root.
+The affected Search journey's completed-cleanup manifest is recorded in the
+handoff. Production source and bundle are unchanged from the preceding ordering
+repair, so its nine screenshot identities and all 15 acceptance mappings retain
+their original source attribution. No production/runtime/provider contract,
+qualification grant or historical live evidence changed.
