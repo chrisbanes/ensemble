@@ -1315,9 +1315,12 @@ export class OperatorApi {
           view = this.coordination().readTask(taskId),
           resultId = row.resultId === null ? null : String(row.resultId),
           sourceId = row.sourceId === null ? null : String(row.sourceId),
+          source = sourceId
+            ? review.sources.find((r) => r.sourceId === sourceId)
+            : undefined,
           retained = resultId
             ? view.results.some((r) => r.resultId === resultId)
-            : review.sources.some((r) => r.sourceId === sourceId);
+            : source !== undefined;
         const current = this.requireTask(taskId);
         if (
           current.version !== t.version ||
@@ -1326,7 +1329,15 @@ export class OperatorApi {
         )
           throw new OperatorApiError(503, "unavailable");
         const excerpt = this.safe(row.excerpt, excluded);
-        if (!retained || excerpt === null || excerpt !== row.excerpt) {
+        if (
+          !retained ||
+          excerpt === null ||
+          excerpt !== row.excerpt ||
+          (source &&
+            [source.title, source.body].some(
+              (value) => value !== null && this.safe(value, excluded) !== value,
+            ))
+        ) {
           omittedCount++;
           continue;
         }

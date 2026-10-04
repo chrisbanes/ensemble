@@ -238,3 +238,89 @@ test("actual imported state-only configure keeps GitHub source provenance; place
   assert.equal(moved.data.matches[0]?.sourceId, original[0]?.sourceId);
   assert.equal(f.service.taskReview().sources(taskId)[0]?.projectId, ids[0]);
 });
+
+test("long source search keeps its title in a bounded excerpt and honestly excludes the unindexed tail", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const title = `Long source title marker ${"T".repeat(100)}`,
+    body = `Source beginning ${"x".repeat(15900)} Unindexed tail marker`,
+    a = await seedReviewTask(f, "Long source", title, body),
+    store = f.service.taskReview(),
+    api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(a.source.title, title);
+  assert.equal(a.source.body, body);
+  assert.equal(store.captureSource(a.taskId).sourceId, a.source.sourceId);
+  const rows = store.search({
+    query: "Long source title marker",
+    historical: false,
+    limit: 10,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(String(rows[0]?.excerpt).length, 16000);
+  assert.ok(String(rows[0]?.excerpt).startsWith(`${title}\nSource beginning`));
+  const read = await api.readSearch(
+    new URLSearchParams({ query: "Long source title marker" }),
+  );
+  assert.equal(read.data.matches.length, 1);
+  assert.equal(read.data.matches[0]?.sourceId, a.source.sourceId);
+  assert.equal(read.data.matches[0]?.taskTitle, title);
+  assert.equal(read.data.matches[0]?.excerpt, rows[0]?.excerpt);
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({ query: "Unindexed tail marker" }),
+      )
+    ).data.matches.length,
+    0,
+  );
+  assert.deepEqual(store.sources(a.taskId), [a.source]);
+});
+
+test("source search revalidates full retained prose when a later exclusion crosses the excerpt boundary", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const title = `Boundary title marker ${"T".repeat(100)}`,
+    privateText = "PRIVATE CROSSING BOUNDARY PHRASE",
+    body = "x".repeat(16000 - title.length - 1 - 10) + privateText + " tail",
+    a = await seedReviewTask(f, "Boundary source", title, body),
+    api = new OperatorApi(f.service, [f.directory]),
+    params = new URLSearchParams({ query: "Boundary title marker" });
+  const initial = await api.readSearch(params);
+  assert.equal(initial.data.matches.length, 1);
+  const excerpt = initial.data.matches[0]?.excerpt;
+  assert.ok(excerpt);
+  assert.ok(excerpt.endsWith(privateText.slice(0, 10)));
+  assert.ok(!excerpt.includes(privateText));
+  const d = f.service.domain();
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: a.profileId,
+    expectedVersion: Number(d.profile(a.profileId).version),
+    instructions: privateText,
+  });
+  const current = await api.readSearch(params);
+  assert.equal(current.data.matches.length, 0);
+  assert.equal(current.data.omittedCount, 1);
+  assert.equal(
+    f.service.taskReview().captureSource(a.taskId).sourceId,
+    a.source.sourceId,
+  );
+  assert.deepEqual(f.service.taskReview().sources(a.taskId), [a.source]);
+  const omitted = await seedReviewTask(
+    f,
+    "Omitted body",
+    "Separately safe title",
+    "PRIVATE REVIEW INSTRUCTIONS",
+  );
+  assert.equal(omitted.source.body, null);
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({ query: "Separately safe title" }),
+      )
+    ).data.matches[0]?.sourceId,
+    omitted.source.sourceId,
+  );
+});

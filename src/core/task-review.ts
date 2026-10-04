@@ -334,7 +334,7 @@ export class TaskReviewStore {
         "task",
         sourceId,
         null,
-        `${title ?? ""}\n${body ?? ""}`,
+        `${title ?? ""}\n${body ?? ""}`.slice(0, 16000),
         record.createdAt,
       );
     return record;

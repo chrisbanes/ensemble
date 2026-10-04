@@ -196,8 +196,9 @@ export function Search({
         <Button disabled={!input.trim()}>Search records</Button>
       </form>
       <p>
-        Search covers permitted retained task, decision and result projections.
-        It does not search complete agent transcripts or generate summaries.
+        Search covers permitted retained task, decision and result excerpts, up
+        to 16,000 characters each. Long source coverage is partial. It does not
+        search complete agent transcripts or generate summaries.
       </p>
       {query && (
         <Button variant="secondary" onClick={resource.refresh}>
