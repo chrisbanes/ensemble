@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-859 deterministic tests with zero skips. Existing lint warnings remain warnings.
+861 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -55,19 +55,20 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
-| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix |
+| 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
-| 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison |
+| 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
-| 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable |
+| 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
-| 15 | current full npm check 859/859; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 861/861; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci8-check.log` (859/859).
+The current repaired full-check log is `/tmp/ui04-observation-check.log` (861/861).
+`/tmp/ui04-ci8-check.log` (859/859) retains historical overlap/source-boundary evidence.
 `/tmp/ui04-draft-preservation-check.log` (857/857) retains historical unfinished-draft evidence.
 `/tmp/ui04-ci7-check.log` (857/857) retains historical CI refresh/link/head evidence.
 `/tmp/ui04-retention-access-check.log` (856/856) retains historical retained-access/paging evidence.
@@ -854,7 +855,7 @@ a prior web bundle after that failed build: it is INVALID focus-guard validation
 not a current-source result. It also preserves the real expanded-brief response
 schema error motivating the approved API counterpart. The project identity was
 corrected, a successful full build preceded the credited focused run, and neither
-deadlines nor assertions were weakened. Current full `/tmp/ui04-ci8-check.log`
+deadlines nor assertions were weakened. Historical full `/tmp/ui04-ci8-check.log`
 passes 859/859 with zero skips in 51.697 seconds.
 
 Executable source `c94a20bf19351c6e2876d40402ed0903262b0881`, tree
@@ -869,3 +870,57 @@ rows 2/3/4/5/8/9/12/15 gain the relevant overlap/retention evidence. Shared work
 entry points use the same capture and Brief/criteria paths. Historical a21/ca51
 qualification remains transport-only with its grant consumed and resource released;
 no remote, live, harness, runtime, global or configuration operation occurred.
+
+
+## Retained source observations and bounded delivery coverage
+
+Codex findings `4176564616` and `4176564620` are addressed without changing
+retention, delivery policy or provider authority. Ordinary fresh task reads, reopen
+and timer reads derive source-comparison availability from the current imported
+memberships: absent or incomplete membership observations remain unknown, even
+when the source identity equals the viewed baseline. Local tasks remain known on
+a fresh available read. Missing/partial retained observation uses neutral unknown
+wording, rather than claiming a failed refresh. Pending explicit refreshes and
+locally failed, partial or disposed refresh attempts retain their task/auth-scoped
+unresolved latch until the matching successful explicit read settles. An unrelated
+complete retained membership or ordinary header refresh cannot clear that latch.
+Existing request ownership, late-response, exclusion, draft and focus guards remain.
+
+The actual GitHub producer persists a partial observation with an unchanged source
+ID and baseline, then a new production app load shows unknown. Complete unchanged
+and changed observations behave correctly; a valid partial extra selection in an
+explicit refresh stays unknown through an ordinary read until matching explicit
+success. Existing delayed provider/read, failed refresh, auth/navigation and local
+comparison journeys remain covered.
+
+Curated delivery contracts retain their 128-element order/caps and add validated
+nonnegative integer `omittedCheckCount`, `omittedFeedbackCount`,
+`omittedBlockerCount` and `omittedActionCount`. Shared Changes and delivery renders
+partial coverage for each nonzero count, explicitly saying omitted checks may be
+pending or failed. The actual DeliveryStore fixture retains 129 checks (the 129th
+failed), 130 feedback records and 131 denied actions; the API returns 128 of each
+with exact counts 1, 2 and 3. Underlying observations, failure, policy and holds
+remain unchanged. Current derived blockers are below the cap; their exact counter
+and invalid negative/fractional/string rejection are tested, without claiming a
+large blocker fixture. All actions remain denied and no runtime/provider operation
+is dispatched. The alternate legacy operator HTML uses the uncapped native service
+projection; all curated clickable workspace entry points share this disclosure.
+
+The first `/tmp/ui04-observation-build.log` failed on the fixture's missing appId
+and discriminated selection type, before credited tests. Those fixture types were
+corrected; successfully built same-source service/web output precedes the credited
+`/tmp/ui04-observation-focused.log` (9/9, zero skipped). Required
+`/tmp/ui04-observation-check.log` passes 861/861, zero skipped, in 47.732 seconds.
+
+Executable source `a9cf18056bdd7d34d9a2d551ed193320558c8b39`, tree
+`a9bb5c1161e08b789603ed367f49756b005d1b49`, was frozen clean before affected
+capture. `/tmp/ui04-observation-capture.log` passes 2/2, zero skipped, in 2.917
+seconds. Four inspected desktop/phone viewport images show retained partial-source
+and provider-check coverage. Exact paths, image/bundle hashes and both completed
+cleanup manifests are in `/tmp/ui04-observation-screenshots.json`; no cleanup or
+screenshot omissions or evidence failures occurred. Expected console-error
+diagnostics in the comments failure/reconciliation journey remain recorded. Prior
+images keep original source attribution. All 15 rows retain previous evidence;
+rows 5/11/13/15 add these affected proofs. Historical a21/ca51 live qualification
+remains transport-only, grant consumed and canonical resource released. No remote,
+live, harness, runtime, global or configuration operation occurred.
