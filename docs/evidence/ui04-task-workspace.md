@@ -45,24 +45,24 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-851 deterministic tests with zero skips. Existing lint warnings remain warnings.
+853 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
 | Row | Concrete evidence |
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
-| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological |
+| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
-| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable |
+| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
-| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
+| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions |
 | 15 | current full npm check 851/851; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
@@ -574,3 +574,42 @@ reconstruction or migration guarantee is made for them. The historical `a21e6046
 transport-only live proof, consumed grant, released resource and unchanged harness
 retain their original attribution. No new live runtime invocation or provider probe
 occurred.
+
+
+## Exact work source binding, checklist coverage and retained turn omissions
+
+Code `619c20e1142cb40650029f68283107b9946d3f5f`, tree
+`9fc2d57b3820b3a434e61087a93e24f0086082c4`, repairs these three confirmed findings:
+
+| Comment | Disposition and proof |
+| --- | --- |
+| 4176194592 | A claimed result source requires exactly one retained context for its task, assignment and work, with a non-null matching captured source. Direct storage lookup avoids the bounded UI context list. The ordinary production preparation/callback test prepares S1, updates requirements to S2, rejects an S2 claim without result or completion, then records and replays the exact S1 result once, visibly stale against S2. Missing, null, foreign-identity and ambiguous contexts reject. Metadata without a source claim stays valid and explicitly unknown; neither ingestion nor preparation infers the latest source. Missing/ambiguous preparation context yields unavailable references. |
+| 4176194595 | Source snapshots add `criteriaOmittedCount`: a nonnegative integer or null, defaulting to null for historical records. New retained bodies report the exact count of literal checklist lines omitted after the first 128; omitted bodies have null. Extraction method remains literal checklists only. The 130-item producer retains stable first-128 positions/IDs and the full body, and provides count 2 to runtime preparation and API. Brief and supplied criteria disclose partial coverage while collapsed or expanded; historical null count is unknown and omitted-body coverage unavailable. No historical raw reconstruction or migration guarantee is claimed. |
+| 4176194596 | Returned turn omissions are retained and deduplicated across revalidated loaded pages, then rendered through the existing disclosure/focus seam in assignment and chronological history. Each exposes exact work/assignment/thread/turn identity and early-buffer-limit reason. Actual capture-store producers create omission-only and mixed histories; API, both UI views, paging and refresh prove identity/dedup while existing privacy failure/race, reading/focus, draft and navigation assertions remain effective. Expand/collapse applies to omissions too. No full-transcript claim is added. |
+
+Focused store/service/API checks pass 16/16 in
+`/tmp/ui04-source-history-focused.log`; affected production-browser journeys pass
+5/5 in `/tmp/ui04-source-history-browser.log`. The final pinned full check passes
+853/853 with zero skips in `/tmp/ui04-source-history-check.log`. Initial optional
+prop typing and new test setup errors are retained in
+`/tmp/ui04-source-history-typecheck.log`,
+`/tmp/ui04-source-history-build-first-failure.log` and
+`/tmp/ui04-source-history-focused-first-failure.log`; the fixture's unknown-source
+success now uses the actual result producer rather than a nonexistent result ID.
+
+Initial long full-page desktop captures exceeded existing evidence pixel bounds;
+their omissions remain in the original manifests. Only affected capture options
+changed to visible viewport shots, and the renewed final full check passed. After
+freezing the clean code commit, the two affected journeys were recaptured and
+passed 2/2 in `/tmp/ui04-source-history-capture.log`. Current desktop/phone partial
+checklist images and desktop turn-omission image were inspected and bind that exact
+clean code/tree, actual bundle SHA256
+`d88dc4f4f093ae64b063daf025984267c30287f893e439726e810589f6deb60f`,
+and completed resource-cleanup manifests in
+`/tmp/ui04-source-history-screenshots.json`. Prior images retain their original
+source provenance. All 15 acceptance rows retain existing proof, with rows
+2/9/12/15 gaining this source/coverage/history evidence. Shared task workspace
+entry points use the same disclosures. The original historical `a21e6046` /
+`ca51dc12` transport-only live proof remains unchanged, its grant consumed and
+resource released. No live invocation, remote provider call or harness change
+occurred in this repair.
