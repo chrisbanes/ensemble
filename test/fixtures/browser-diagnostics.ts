@@ -250,7 +250,11 @@ export class BrowserJourney {
       record(`pageerror-${name}`);
     });
   }
-  async capture(page: Page, name: string): Promise<string | undefined> {
+  async capture(
+    page: Page,
+    name: string,
+    fullPage = true,
+  ): Promise<string | undefined> {
     if (!this.active) return undefined;
     if (!/^[a-z0-9-]{1,100}$/.test(name)) {
       this.evidenceFailure(Error("evidence.screenshot: invalid name"));
@@ -261,7 +265,7 @@ export class BrowserJourney {
       return undefined;
     }
     try {
-      const image = await page.screenshot({ fullPage: true, timeout: 5000 });
+      const image = await page.screenshot({ fullPage, timeout: 5000 });
       if (!this.active) return undefined;
       if (
         image.length > browserEvidenceLimits.screenshotBytes ||
@@ -660,10 +664,14 @@ export async function runBrowserJourney(
 }
 // Only existing nested screenshot helpers need ambient context. Ownership stays explicit.
 const screenshotJourney = new AsyncLocalStorage<BrowserJourney>();
-export function captureBrowserEvidence(page: Page, name: string) {
+export function captureBrowserEvidence(
+  page: Page,
+  name: string,
+  options: { fullPage?: boolean } = {},
+) {
   const journey = screenshotJourney.getStore();
   if (!journey) throw Error("Screenshot must belong to a browser journey");
-  return journey.capture(page, name);
+  return journey.capture(page, name, options.fullPage ?? true);
 }
 export function browserSuite(suite: string) {
   return (

@@ -1211,10 +1211,37 @@ test("mounted reference and placement fields have unique associated controls", a
   });
   journey.observe(page);
   page.setDefaultTimeout(5000);
-  await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
   const references = page.getByLabel("Credential reference change", {
     exact: true,
   });
+  let releaseConfiguration!: () => void, configurationEntered!: () => void;
+  const configurationBarrier = new Promise<void>(
+    (resolve) => (releaseConfiguration = resolve),
+  );
+  const configurationEntry = new Promise<void>(
+    (resolve) => (configurationEntered = resolve),
+  );
+  const configurationRoute = `**/api/operator/projects/${ids.projectId}/configuration`;
+  journey.cleanup(
+    async () => releaseConfiguration(),
+    "configuration-barrier.release",
+  );
+  await page.route(configurationRoute, async (route) => {
+    const response = await route.fetch();
+    configurationEntered();
+    await configurationBarrier;
+    await route.fulfill({ response });
+  });
+  try {
+    await signIn(page, web, `/app/projects/${ids.projectId}/settings`);
+    await configurationEntry;
+    // Authentication shell readiness precedes this independently loaded resource.
+    assert.equal(await references.count(), 0);
+  } finally {
+    releaseConfiguration();
+  }
+  await references.nth(1).waitFor({ state: "visible" });
+  await page.unroute(configurationRoute);
   assert.equal(await references.count(), 2);
   for (const reference of await references.all())
     await reference.selectOption("set");

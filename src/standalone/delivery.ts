@@ -1,3 +1,4 @@
+import { isOperatorDeliveryCaller } from "../core/delivery.js";
 import type { z } from "zod";
 import {
   type DeliveryStore,
@@ -100,6 +101,11 @@ export class DeliveryCoordinator {
     caller: DeliveryCaller,
   ): Promise<DeliveryActionRecord> {
     const request = externalActionArgumentsSchema.parse(input);
+    if (
+      isOperatorDeliveryCaller(caller) &&
+      (request.action.kind !== "issue.comment" || request.approval)
+    )
+      throw Error("Operator delivery only permits issue.comment");
     return this.serialize(
       actionKeys({ binding: caller, request }),
       async () => {
@@ -194,6 +200,8 @@ export class DeliveryCoordinator {
     return observed;
   }
   async registerPr(input: unknown, caller: DeliveryCaller) {
+    if (isOperatorDeliveryCaller(caller))
+      throw Error("Operator caller cannot register a PR");
     const identity = registerPrArgumentsSchema.parse(input);
     return this.serialize([`task:${caller.taskId}`], async () => {
       this.options.authorize(caller);

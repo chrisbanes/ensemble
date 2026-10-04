@@ -1,3 +1,7 @@
+import {
+  taskReviewReadSchema,
+  feedbackReferenceSchema,
+} from "../core/task-review.js";
 import { z } from "zod";
 import {
   githubConfigurationSchema,
@@ -260,6 +264,12 @@ export const assignmentSchema = z
     assignmentId: uuid,
     profileId: uuid,
     name: safeText,
+    brief: safeText.optional(),
+    requesterAssignmentId: uuid.nullable().optional(),
+    resultDestination: safeText.optional(),
+    resultRecipientAssignmentId: uuid.nullable().optional(),
+    resultRecipientDisposition: safeText.optional(),
+    waitReason: safeText.optional(),
     version: revision,
     state: z.enum(["pending", "running", "completed", "held", "cancelled"]),
     profileRevision: revision,
@@ -289,6 +299,7 @@ const message = z
     routingOperationId: uuid.optional(),
     routingReason: safeText.optional(),
     interactionId: uuid.optional(),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const result = z
@@ -428,6 +439,117 @@ const source = z
   })
   .strict()
   .nullable();
+export const reviewReadSchema = envelope(taskReviewReadSchema);
+export const deliveryReadSchema = z
+  .object({
+    mode: z.enum(["reviewable-pr", "through-merge"]),
+    policyVersion: revision,
+    blockers: z.array(text).max(128),
+    omittedBlockerCount: z.number().int().nonnegative(),
+    omittedActionCount: z.number().int().nonnegative(),
+    binding: z
+      .object({
+        revision,
+        number: revision,
+        repositoryName: text,
+        headSha: text,
+        state: z.enum(["OPEN", "CLOSED", "MERGED"]),
+        observedAt: time,
+        readError: safeText,
+        omittedCheckCount: z.number().int().nonnegative(),
+        omittedFeedbackCount: z.number().int().nonnegative(),
+        checks: z
+          .array(
+            z
+              .object({
+                name: safeText,
+                sha: text,
+                status: z.enum(["success", "pending", "failure"]),
+              })
+              .strict(),
+          )
+          .max(128),
+        feedback: z
+          .array(
+            z
+              .object({
+                nodeId: text,
+                kind: text,
+                author: safeText,
+                body: safeText,
+                commitSha: safeText,
+                updatedAt: text,
+                state: text,
+              })
+              .strict(),
+          )
+          .max(128),
+      })
+      .strict()
+      .nullable(),
+    actions: z
+      .array(
+        z
+          .object({
+            operationId: uuid,
+            kind: text,
+            state: text,
+            reason: safeText,
+            createdAt: time,
+            updatedAt: time,
+          })
+          .strict(),
+      )
+      .max(128),
+  })
+  .strict();
+export const searchQuerySchema = z
+  .object({
+    query: z.string().trim().min(1).max(256),
+    projectId: uuid.optional(),
+    type: z.enum(["task", "decision", "result"]).optional(),
+    after: z.coerce.number().int().nonnegative().optional(),
+    before: z.coerce.number().int().nonnegative().optional(),
+    historical: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
+    cursor: z
+      .string()
+      .regex(/^[a-f0-9-]{36}(?::decision:[0-9]+)?$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(50),
+  })
+  .strict();
+export const searchReadSchema = envelope(
+  z
+    .object({
+      matches: z
+        .array(
+          z
+            .object({
+              recordId: text,
+              type: z.enum(["task", "decision", "result"]),
+              taskId: uuid,
+              projectId: uuid,
+              projectName: safeText,
+              taskTitle: safeText,
+              sourceId: uuid.nullable(),
+              resultId: uuid.nullable(),
+              excerpt: safeText,
+              createdAt: time,
+              historical: z.boolean(),
+              href: text,
+            })
+            .strict(),
+        )
+        .max(50),
+      nextCursor: text.nullable(),
+      coverage: z.literal("retained-records-only"),
+      omittedCount: time,
+    })
+    .strict(),
+);
 export const taskSchema = envelope(
   z
     .object({
@@ -443,6 +565,7 @@ export const taskSchema = envelope(
         })
         .strict(),
       lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
+      leadAssignmentId: uuid.nullable().optional(),
       assignments: z.array(assignmentSchema),
       admission: z
         .object({
@@ -509,6 +632,16 @@ export const taskSchema = envelope(
           ),
         })
         .strict(),
+      review: taskReviewReadSchema.optional(),
+      delivery: deliveryReadSchema.optional(),
+      commentPolicy: z
+        .object({
+          available: z.boolean(),
+          mode: z.enum(["allow", "approval"]).nullable(),
+          reason: safeText,
+        })
+        .strict()
+        .optional(),
       contentUnavailable: z.boolean(),
     })
     .strict(),
@@ -528,6 +661,7 @@ const binding = {
 export const assignmentHistorySchema = envelope(
   z
     .object({
+      visibilityRevision: hash.optional(),
       items: z.array(
         z
           .object({
@@ -563,6 +697,7 @@ export const assignmentHistorySchema = envelope(
           .strict(),
       ),
       omittedItemCount: time,
+      omittedTurnCount: z.number().int().nonnegative(),
     })
     .strict(),
 );
@@ -633,6 +768,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       recipientAssignmentId: uuid,
       expectedAssignmentVersion: revision,
       message: z.string().trim().min(1).max(16000),
+      reference: feedbackReferenceSchema.optional(),
     })
     .strict(),
   z
@@ -759,6 +895,49 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       taskId: uuid,
       chosenProjectId: uuid,
       expectedVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.view"),
+      taskId: uuid,
+      sourceId: uuid.nullable(),
+      resultIds: z.array(uuid).max(128),
+    })
+    .strict(),
+  z
+    .object({ ...base, type: z.literal("delivery.refresh"), taskId: uuid })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.review"),
+      taskId: uuid,
+      operationId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.confirm"),
+      taskId: uuid,
+      reviewId: uuid,
+      expectedRevision: revision,
+      materialHash: hash,
+      decision: z.enum(["approved", "denied"]),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.send"),
+      taskId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+      reviewId: uuid.optional(),
     })
     .strict(),
 ]);
@@ -1055,6 +1234,15 @@ export const projectConfigurationSchema = envelope(
     .strict(),
 );
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("review"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      operation: z.enum(["review.view", "delivery.refresh"]),
+    })
+    .strict(),
   configurationReceiptSchema,
   z
     .object({
@@ -1094,6 +1282,46 @@ export const commandReceiptSchema = z.discriminatedUnion("kind", [
       recipientAssignmentId: uuid,
       eventType: z.string(),
       createdAt: time,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("comment-review"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      reviewId: uuid,
+      operationId: uuid,
+      revision,
+      materialHash: hash,
+      decision: z.enum(["pending", "approved", "denied"]),
+      body: safeText,
+      target: z
+        .object({ repositoryId: text, nodeId: text, number: revision })
+        .strict(),
+      taskVersion: revision,
+      sourceId: uuid,
+      sourceRevision: revision,
+      sourceDigest: hash,
+      policyVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("delivery"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      operationId: uuid,
+      state: z.enum([
+        "prepared",
+        "attempting",
+        "uncertain",
+        "confirmed-success",
+        "confirmed-failure",
+        "denied",
+      ]),
+      reason: safeText,
     })
     .strict(),
 ]);

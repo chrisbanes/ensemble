@@ -16,6 +16,7 @@ import type { GitHubDeliveryProvider } from "../src/standalone/github-delivery.j
 import type {
   ExternalAction,
   PrDeliveryObservation,
+  ProviderActionObservation,
 } from "../src/core/delivery.js";
 
 export async function deliveryFixture(
@@ -29,6 +30,7 @@ export async function deliveryFixture(
     profileId = randomUUID();
   let taskId: string = randomUUID();
   let sourceLabels = ["ready"];
+  let sourceBody = "O";
   let tool: ((call: RuntimeToolCall) => Promise<RuntimeToolResult>) | undefined;
   let stopped = false;
   const turns: Array<{
@@ -90,7 +92,10 @@ export async function deliveryFixture(
     allowedMethods: ["squash"],
   };
   const effects: ExternalAction[] = [];
+  let actionOutcome: ProviderActionObservation | undefined;
+  let inspectOutcome: ProviderActionObservation | undefined;
   let preflightWait: Promise<void> | undefined;
+  let preflightHook: (() => void) | undefined;
   let readFailure = false;
   let otherPr: PrDeliveryObservation | undefined;
   let inspectionHook: (() => Promise<void> | void) | undefined;
@@ -103,13 +108,14 @@ export async function deliveryFixture(
         repositoryName: "org/repo",
         number: 1,
         title: "T",
-        body: "O",
+        body: sourceBody,
         state: "closed",
         labels: sourceLabels,
         projectFields: [],
       };
     },
     async preflight(action) {
+      preflightHook?.();
       if (preflightWait) await preflightWait;
       if (action.kind === "pr.merge" && pr.mergeBlockers.length)
         throw new Error("held");
@@ -117,6 +123,7 @@ export async function deliveryFixture(
     },
     async performAction(record) {
       effects.push(record.request.action);
+      if (actionOutcome) return actionOutcome;
       if (record.request.action.kind === "pr.merge")
         pr = {
           ...pr,
@@ -136,7 +143,13 @@ export async function deliveryFixture(
       };
     },
     async inspectAction() {
-      return { state: "uncertain", reason: "unproved", receipt: null };
+      return (
+        inspectOutcome ?? {
+          state: "uncertain",
+          reason: "unproved",
+          receipt: null,
+        }
+      );
     },
     async inspectPr(identity) {
       if (identity.expectedPrNodeId === otherPr?.nodeId) return otherPr;
@@ -169,7 +182,7 @@ export async function deliveryFixture(
                       repositoryName: "org/repo",
                       number: 1,
                       title: "T",
-                      body: "O",
+                      body: sourceBody,
                       state: "open",
                       labels: sourceLabels,
                       projectFields: [],
@@ -324,10 +337,19 @@ export async function deliveryFixture(
     service,
     domain,
     effects,
+    setActionOutcome: (value: ProviderActionObservation | undefined) => {
+      actionOutcome = value;
+    },
+    setInspectOutcome: (value: ProviderActionObservation | undefined) => {
+      inspectOutcome = value;
+    },
     turns,
     call,
     waitTurn,
     spawn: () => spawnContext,
+    setSourceBody: (body: string) => {
+      sourceBody = body;
+    },
     setSourceLabels: (labels: string[]) => {
       sourceLabels = labels;
     },
@@ -337,6 +359,9 @@ export async function deliveryFixture(
     },
     setOtherPr: (value: PrDeliveryObservation) => {
       otherPr = value;
+    },
+    onPreflight: (hook: (() => void) | undefined) => {
+      preflightHook = hook;
     },
     holdPreflight: (value: Promise<void> | undefined) => {
       preflightWait = value;

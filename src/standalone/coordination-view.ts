@@ -1,3 +1,4 @@
+import { feedbackReferenceSchema } from "../core/task-review.js";
 import {
   handbackSettlementSchema,
   type HandbackSettlement,
@@ -34,7 +35,12 @@ import type {
 
 const uuid = z.string().uuid();
 const commandKey = z.string().uuid();
-const assignmentMessageSchema = z.object({ message: z.string() }).strict();
+const assignmentMessageSchema = z
+  .object({
+    message: z.string(),
+    reference: feedbackReferenceSchema.optional(),
+  })
+  .strict();
 const answerEventSchema = z
   .object({
     interactionId: uuid,
@@ -102,6 +108,7 @@ export interface CoordinationViewMessage {
   routingOperationId?: string;
   routingReason?: string;
   interactionId?: string;
+  reference?: z.infer<typeof feedbackReferenceSchema>;
 }
 
 export interface CoordinationInteractionAttention {
@@ -205,6 +212,7 @@ export interface CoordinationCommandReceipt {
 }
 
 export interface OperatorMessageCommand {
+  reference?: z.infer<typeof feedbackReferenceSchema>;
   taskId: string;
   key: string;
   recipientAssignmentId: string;
@@ -246,6 +254,7 @@ const operatorMessageCommand = z
     recipientAssignmentId: uuid,
     expectedAssignmentVersion: z.number().int().positive(),
     message: z.string().trim().min(1).max(16000),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const resultRecipientCommand = z
@@ -298,6 +307,8 @@ export class CoordinationView {
     private readonly readConversationHistory?: (
       taskId: string,
       assignmentId: string,
+      beforeSequence?: number,
+      beforeOmissionSequence?: number,
     ) => ConversationHistoryAssignmentRead,
     private readonly deliveryApi?: {
       readTask: (taskId: string) => TaskDeliveryView;
@@ -309,13 +320,21 @@ export class CoordinationView {
   /** Assignment identity determines its task; history never authorizes execution. */
   readAssignmentHistory(
     assignmentId: string,
+    beforeSequence?: number,
+    beforeOmissionSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const assignment = this.domain.assignment(uuid.parse(assignmentId));
     const taskId = String(assignment.taskId);
-    const history = this.readConversationHistory?.(taskId, assignmentId) ?? {
+    const history = this.readConversationHistory?.(
+      taskId,
+      assignmentId,
+      beforeSequence,
+      beforeOmissionSequence,
+    ) ?? {
       items: [],
       turnOmissions: [],
       omittedItemCount: 0,
+      omittedTurnCount: 0,
     };
     if (
       [...history.items, ...history.turnOmissions].some(
@@ -682,12 +701,16 @@ export class CoordinationView {
             .strict()
             .parse(JSON.parse(event.payload)).reason,
         };
-      case "operator-message":
+      case "operator-message": {
+        const payload = assignmentMessageSchema.parse(
+          JSON.parse(event.payload),
+        );
         return {
           ...base,
-          text: assignmentMessageSchema.parse(JSON.parse(event.payload))
-            .message,
+          text: payload.message,
+          ...(payload.reference ? { reference: payload.reference } : {}),
         };
+      }
       case "question-answer": {
         const payload = answerEventSchema.parse(JSON.parse(event.payload));
         return {

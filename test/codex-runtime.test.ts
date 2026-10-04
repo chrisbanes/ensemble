@@ -1777,6 +1777,9 @@ for (const mode of [
           f.outcomes.map((o) => o.outcome),
           ["sent-unconfirmed"],
         );
+        await nativeUntil(() =>
+          f.anomalies.includes("unmatched-native-resolution"),
+        );
         assert.ok(f.anomalies.includes("unmatched-native-resolution"));
       }
     } finally {

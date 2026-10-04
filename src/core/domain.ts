@@ -1,3 +1,4 @@
+import { TaskReviewStore } from "./task-review.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./store.js";
@@ -299,6 +300,7 @@ export class DomainStore {
   ) {}
 
   migrate(): void {
+    new TaskReviewStore(this.db).migrate();
     new DeliveryStore(this.db).migrate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -609,6 +611,26 @@ export class DomainStore {
         return JSON.parse(String(receipt.result));
       }
       const result = this.apply(command, verifiedRepositories);
+      const review = new TaskReviewStore(this.db);
+      if (
+        command.type === "task.create" ||
+        (command.type === "task.configure" &&
+          !this.importedTask(command.taskId) &&
+          (command.title !== undefined || command.outcome !== undefined))
+      )
+        review.captureSource(command.taskId);
+      if (command.type === "assignment.create")
+        review.captureAssignment(
+          command.assignmentId,
+          command.requesterAssignmentId
+            ? `assignment:${command.requesterAssignmentId}`
+            : command.actor,
+        );
+      if (command.type === "task.create" && command.initialAssignment)
+        review.captureAssignment(
+          command.initialAssignment.assignmentId,
+          command.actor,
+        );
       this.db
         .prepare(
           "INSERT INTO command_receipts (scope, key, payloadHash, result) VALUES (?, ?, ?, ?)",
@@ -1983,6 +2005,10 @@ export class DomainStore {
         `Task: ${task.title}\nOutcome: ${task.outcome}`,
         assignmentId,
       );
+    new TaskReviewStore(this.db).captureAssignment(
+      assignmentId,
+      "service:project-lead",
+    );
     return this.assignment(assignmentId);
   }
 
