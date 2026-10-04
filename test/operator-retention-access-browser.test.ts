@@ -6,12 +6,13 @@ import { chromium, type Browser } from "playwright";
 import {
   browserSuite,
   captureBrowserEvidence,
+  type BrowserJourney,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedRetainedReviewWindow } from "./fixtures/task-review.js";
 import { ConversationHistoryStore } from "../src/standalone/conversation-history.js";
 const test = browserSuite("ui04-retention-access");
-test("historical Search opens exact old evidence and independently pages all retained omission turns with refresh and reading state", async (_t, j) => {
+async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
   const f = await j.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
   );
@@ -224,31 +225,35 @@ test("historical Search opens exact old evidence and independently pages all ret
     ).status(),
     400,
   );
-  const preview = page.getByRole("img", {
-    name: "evidence: Ancient artifact",
-    exact: true,
-  });
-  await preview.scrollIntoViewIfNeeded();
-  await preview.waitFor();
-  await page.waitForFunction(
-    () =>
-      (
-        document.querySelector(
-          'img[alt="evidence: Ancient artifact"]',
-        ) as HTMLImageElement | null
-      )?.naturalWidth === 1,
-  );
-  assert.equal(
-    await preview.evaluate((image) => (image as HTMLImageElement).naturalWidth),
-    1,
-  );
-  await page
-    .locator("#review")
-    .getByText(/Ancient criterion · supported/)
-    .scrollIntoViewIfNeeded();
-  await captureBrowserEvidence(page, "1366-exact-old-review", {
-    fullPage: false,
-  });
+  if (!counterpart) {
+    const preview = page.getByRole("img", {
+      name: "evidence: Ancient artifact",
+      exact: true,
+    });
+    await preview.scrollIntoViewIfNeeded();
+    await preview.waitFor();
+    await page.waitForFunction(
+      () =>
+        (
+          document.querySelector(
+            'img[alt="evidence: Ancient artifact"]',
+          ) as HTMLImageElement | null
+        )?.naturalWidth === 1,
+    );
+    assert.equal(
+      await preview.evaluate(
+        (image) => (image as HTMLImageElement).naturalWidth,
+      ),
+      1,
+    );
+    await page
+      .locator("#review")
+      .getByText(/Ancient criterion · supported/)
+      .scrollIntoViewIfNeeded();
+    await captureBrowserEvidence(page, "1366-exact-old-review", {
+      fullPage: false,
+    });
+  }
   await page.getByLabel("Editable reply").fill("Retained exact old draft");
   await page
     .getByRole("button", { name: "Expand all history", exact: true })
@@ -277,13 +282,21 @@ test("historical Search opens exact old evidence and independently pages all ret
   await page
     .getByRole("button", { name: "Expand all history", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Chronological view", exact: true })
-    .click();
-  assert.equal(await omissionRecords.count(), 271);
-  await page
-    .getByRole("button", { name: "Chronological view", exact: true })
-    .click();
+  if (counterpart) {
+    await page
+      .getByRole("button", { name: "Chronological view", exact: true })
+      .click();
+    assert.equal(await omissionRecords.count(), 271);
+    assert.equal(
+      await page
+        .locator(`[data-record-id="${a.old.workId}:single-item"]`)
+        .count(),
+      0,
+    );
+    await page
+      .getByRole("button", { name: "Chronological view", exact: true })
+      .click();
+  }
   await oldRecord.scrollIntoViewIfNeeded();
   await oldRecord.locator("summary").focus();
   const y = await oldRecord.evaluate((el) => el.getBoundingClientRect().top);
@@ -424,65 +437,75 @@ test("historical Search opens exact old evidence and independently pages all ret
   );
   await singleItem.waitFor({ state: "attached" });
   await readingDiagnostic("header-attached");
-  await waitReading("header-settled");
-  // Drive the real production timer through its pending visibility boundary.
-  let releaseTask!: () => void;
-  const heldTask = new Promise<void>((resolve) => {
-    releaseTask = resolve;
-  });
-  const taskEntered = page.waitForRequest(
-    (request) =>
-      new URL(request.url()).pathname === `/api/operator/tasks/${a.taskId}`,
-  );
-  await page.route(
-    `**/api/operator/tasks/${a.taskId}?*`,
-    async (route) => {
-      await heldTask;
-      await route.continue();
-    },
-    { times: 1 },
-  );
-  let releaseHistory!: () => void;
-  const heldHistory = new Promise<void>((resolve) => {
-    releaseHistory = resolve;
-  });
-  const historyEntered = page.waitForRequest(
-    (request) =>
-      new URL(request.url()).pathname ===
-      `/api/operator/assignments/${a.assignmentId}/history`,
-  );
-  await page.route(
-    `**/api/operator/assignments/${a.assignmentId}/history**`,
-    async (route) => {
-      await heldHistory;
-      await route.continue();
-    },
-    { times: 1 },
-  );
-  try {
-    await page.clock.fastForward(15000);
-    await taskEntered;
-    await singleItem.waitFor({ state: "detached" });
-    assert.equal(
-      await singleItem.count(),
-      0,
-      "pending refresh hides unvalidated history",
+  let snapshot = await waitReading("header-settled");
+  if (!counterpart) {
+    // Drive the real production timer through its pending visibility boundary.
+    let releaseTask!: () => void;
+    const heldTask = new Promise<void>((resolve) => {
+      releaseTask = resolve;
+    });
+    const taskEntered = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === `/api/operator/tasks/${a.taskId}`,
     );
-    await readingDiagnostic("timer-pending");
-  } finally {
-    releaseTask();
-  }
-  {
+    await page.route(
+      `**/api/operator/tasks/${a.taskId}?*`,
+      async (route) => {
+        await heldTask;
+        await route.continue();
+      },
+      { times: 1 },
+    );
+    let releaseHistory!: () => void;
+    const heldHistory = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    const historyEntered = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname ===
+        `/api/operator/assignments/${a.assignmentId}/history`,
+    );
+    await page.route(
+      `**/api/operator/assignments/${a.assignmentId}/history**`,
+      async (route) => {
+        await heldHistory;
+        await route.continue();
+      },
+      { times: 1 },
+    );
     try {
-      await historyEntered;
-      await readingDiagnostic("overlap-history-pending");
       await page.clock.fastForward(15000);
+      await taskEntered;
+      await singleItem.waitFor({ state: "detached" });
+      assert.equal(
+        await singleItem.count(),
+        0,
+        "pending refresh hides unvalidated history",
+      );
+      await readingDiagnostic("timer-pending");
     } finally {
-      releaseHistory();
+      releaseTask();
     }
+    {
+      try {
+        await historyEntered;
+        await readingDiagnostic("overlap-history-pending");
+        await page.clock.fastForward(15000);
+      } finally {
+        releaseHistory();
+      }
+    }
+    snapshot = await waitReading("timer-settled");
+    stage("timer-settled");
+    assert.equal(snapshot.items, 1);
+    assert.equal(snapshot.omissions, 272);
+    assert.equal(snapshot.uniqueOmissions, 272);
+    assert.equal(snapshot.draft, "Retained exact old draft");
+    assert.ok(snapshot.top !== undefined && Math.abs(snapshot.top - y) < 4);
+    assert.equal(snapshot.focused, true);
+    stage("reading-probe-complete");
+    return;
   }
-  const snapshot = await waitReading("timer-settled");
-  stage("timer-settled");
   assert.ok(snapshot);
   stage("validation-label-begin");
   await page
@@ -624,4 +647,9 @@ test("historical Search opens exact old evidence and independently pages all ret
   }
   await readingDiagnostic("intentional-control-focus-settled");
   stage("journey-complete");
-});
+}
+
+test("historical Search opens exact old evidence and independently pages all retained omission turns with refresh and reading state", async (_t, j) =>
+  retainedJourney(j, false));
+test("retained omission chronology phone head observations and intentional focus remain exact after refresh", async (_t, j) =>
+  retainedJourney(j, true));

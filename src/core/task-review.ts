@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { z } from "zod";
 import type { Database } from "./store.js";
 const uuid = z.string().uuid(),
@@ -431,7 +432,7 @@ export class TaskReviewStore {
         createdAt,
       );
   }
-  search(input: {
+  async search(input: {
     query: string;
     projectId?: string | undefined;
     type?: string | undefined;
@@ -442,27 +443,80 @@ export class TaskReviewStore {
     limit: number;
   }) {
     const escaped = input.query.replace(/[\\%_]/g, "\\$&");
-    return this.db
-      .prepare(`SELECT s.* FROM task_review_search s JOIN domain_tasks t ON t.id=s.taskId WHERE s.excerpt LIKE ? ESCAPE '\\'
- AND (? IS NULL OR t.projectId=?) AND (? IS NULL OR s.type=?) AND (? IS NULL OR s.createdAt>=?) AND (? IS NULL OR s.createdAt<=?)
- AND (? IS NULL OR (s.createdAt,s.recordId) > (SELECT createdAt,recordId FROM task_review_search WHERE recordId=?))
+    const frontier = this.db
+      .prepare(
+        "SELECT createdAt,recordId FROM task_review_search ORDER BY createdAt DESC,recordId DESC LIMIT 1",
+      )
+      .get() as Row | undefined;
+    if (!frontier) return [];
+    let cursor = input.cursor
+      ? (this.db
+          .prepare(
+            "SELECT createdAt,recordId FROM task_review_search WHERE recordId=?",
+          )
+          .get(input.cursor) as Row | undefined)
+      : undefined;
+    if (input.cursor && !cursor) return [];
+    const matches: Row[] = [];
+    while (matches.length < input.limit + 1) {
+      const bounds = [cursor ? "(createdAt,recordId) > (?,?)" : "1=1"];
+      const args: (string | number)[] = cursor
+        ? [Number(cursor.createdAt), String(cursor.recordId)]
+        : [];
+      bounds.push("(createdAt,recordId) <= (?,?)");
+      args.push(Number(frontier.createdAt), String(frontier.recordId));
+      if (input.after !== undefined) {
+        bounds.push("createdAt>=?");
+        args.push(input.after);
+      }
+      if (input.before !== undefined) {
+        bounds.push("createdAt<=?");
+        args.push(input.before);
+      }
+      const batch = this.db
+        .prepare(`WITH raw AS MATERIALIZED (
+ SELECT * FROM task_review_search WHERE ${bounds.join(" AND ")}
+ ORDER BY createdAt,recordId LIMIT 32
+ ) SELECT s.*, CASE WHEN t.id IS NOT NULL AND s.excerpt LIKE ? ESCAPE '\\'
+ AND (? IS NULL OR t.projectId=?) AND (? IS NULL OR s.type=?)
  AND (?=1 OR (s.type='task' AND s.sourceId=(SELECT sourceId FROM task_review_sources WHERE taskId=s.taskId ORDER BY revision DESC LIMIT 1)) OR (s.type<>'task' AND s.resultId=(SELECT resultId FROM coordination_results WHERE taskId=s.taskId ORDER BY createdAt DESC,rowid DESC LIMIT 1)))
- ORDER BY s.createdAt,s.recordId LIMIT ?`)
-      .all(
-        `%${escaped}%`,
-        input.projectId ?? null,
-        input.projectId ?? null,
-        input.type ?? null,
-        input.type ?? null,
-        input.after ?? null,
-        input.after ?? null,
-        input.before ?? null,
-        input.before ?? null,
-        input.cursor ?? null,
-        input.cursor ?? null,
-        Number(input.historical),
-        input.limit + 1,
-      ) as Row[];
+ THEN 1 ELSE 0 END AS eligible FROM raw s LEFT JOIN domain_tasks t ON t.id=s.taskId ORDER BY s.createdAt,s.recordId`)
+        .all(
+          ...args,
+          `%${escaped}%`,
+          input.projectId ?? null,
+          input.projectId ?? null,
+          input.type ?? null,
+          input.type ?? null,
+          Number(input.historical),
+        ) as Row[];
+      for (const row of batch) {
+        if (row.eligible) matches.push(row);
+        if (matches.length === input.limit + 1) break;
+      }
+      if (batch.length < 32 || matches.length === input.limit + 1) break;
+      cursor = batch.at(-1);
+      await setImmediate();
+    }
+    return matches;
+  }
+  isCurrentSearchRecord(
+    taskId: string,
+    sourceId: string | null,
+    resultId: string | null,
+  ) {
+    const row = resultId
+      ? this.db
+          .prepare(
+            "SELECT resultId AS id FROM coordination_results WHERE taskId=? ORDER BY createdAt DESC,rowid DESC LIMIT 1",
+          )
+          .get(taskId)
+      : this.db
+          .prepare(
+            "SELECT sourceId AS id FROM task_review_sources WHERE taskId=? ORDER BY revision DESC LIMIT 1",
+          )
+          .get(taskId);
+    return !!row && (row as Row).id === (resultId ?? sourceId);
   }
   sources(taskId: string) {
     return (

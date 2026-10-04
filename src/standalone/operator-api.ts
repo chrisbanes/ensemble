@@ -1338,8 +1338,10 @@ export class OperatorApi {
     const visibility = this.visibilityToken();
     const query = searchQuerySchema.parse(Object.fromEntries(params));
     if (query.projectId) this.requireProject(query.projectId);
-    const rows = this.service.taskReview().search(query),
-      page = rows.slice(0, query.limit),
+    const rows = await this.service.taskReview().search(query);
+    if (visibility !== this.visibilityToken())
+      throw new OperatorApiError(503, "unavailable");
+    const page = rows.slice(0, query.limit),
       matches = [],
       versions = new Map<string, number>();
     let omittedCount = 0;
@@ -1426,11 +1428,12 @@ export class OperatorApi {
     if (visibility !== this.visibilityToken())
       throw new OperatorApiError(503, "unavailable");
     const eligibleRecords = new Set(
-      this.service
-        .taskReview()
-        .search(query)
-        .map((row) => row.recordId),
+      (await this.service.taskReview().search(query)).map(
+        (row) => row.recordId,
+      ),
     );
+    if (visibility !== this.visibilityToken())
+      throw new OperatorApiError(503, "unavailable");
     const permitted = matches.filter((m) => {
       try {
         const current = this.requireTask(m.taskId);
@@ -1441,7 +1444,13 @@ export class OperatorApi {
         )
           return false;
         this.requireProject(m.projectId);
-        return eligibleRecords.has(m.recordId);
+        return (
+          eligibleRecords.has(m.recordId) &&
+          (query.historical ||
+            this.service
+              .taskReview()
+              .isCurrentSearchRecord(m.taskId, m.sourceId, m.resultId))
+        );
       } catch {
         return false;
       }

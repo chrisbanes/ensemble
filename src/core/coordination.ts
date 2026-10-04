@@ -470,6 +470,7 @@ export class CoordinationStore {
         createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
         UNIQUE(assignmentId, workRevision)
       );
+      CREATE INDEX IF NOT EXISTS coordination_results_task_created ON coordination_results(taskId,createdAt);
       CREATE TABLE IF NOT EXISTS coordination_unresolved_result_destinations (
         resultId TEXT PRIMARY KEY REFERENCES coordination_results(resultId),
         taskId TEXT NOT NULL REFERENCES domain_tasks(id),

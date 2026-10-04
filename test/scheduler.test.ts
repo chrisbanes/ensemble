@@ -782,7 +782,14 @@ test("default capacity limits count direct and managed turns together", async ()
         intents: service.list(),
       }),
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    assert.equal(
+      await waitUntil(() =>
+        [...managedA, managedB].every((assignment) =>
+          service.list().some((item) => item.workId === assignment.workId),
+        ),
+      ),
+      true,
+    );
 
     assert.equal(runtime.turns, 4);
     const db = (

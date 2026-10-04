@@ -1353,6 +1353,16 @@ export class LocalOperatorHttp {
         return true;
       }
       const data = await web.read(path, url.searchParams);
+      if (path === "/api/operator/search") {
+        const current = session && this.auth.getSession(session.id);
+        if (
+          !current?.authenticated ||
+          current.csrfToken !== session?.csrfToken
+        ) {
+          deny(401, "unauthenticated");
+          return true;
+        }
+      }
       if (data === undefined) deny(404, "not-found");
       else json(200, data);
     } catch (error) {
