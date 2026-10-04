@@ -1,3 +1,14 @@
+import {
+  questionReadSchema,
+  inboxReadSchema,
+  type InboxItem,
+} from "../operator/contracts.js";
+import {
+  nativeQuestionForm,
+  questionFormSchema,
+  type QuestionAnswers,
+} from "../core/question-forms.js";
+import { setImmediate as yieldTraversal } from "node:timers/promises";
 import type { OperatorCommentReview } from "../core/delivery.js";
 import { previewRecordedArtifact, ArtifactUnavailable } from "./task-review.js";
 import { taskReviewReadSchema } from "../core/task-review.js";
@@ -67,6 +78,10 @@ export class OperatorApiError extends Error {
   }
 }
 const conflicts = new Set([
+  "Question requesting work is stale, cancelled or ambiguous",
+  "Structured question unavailable or already answered",
+  "Native question unavailable, already answered or stale",
+  "Native requesting work is stale",
   "Operator command key reused with different content",
   "Interaction is not open for this response",
   "Interaction revision conflict",
@@ -548,7 +563,18 @@ export class OperatorApi {
         count += n;
       }
     };
-    add("question", view.questions.filter((i) => i.status === "open").length);
+    add(
+      "question",
+      view.questions.filter(
+        (i) =>
+          i.status === "open" ||
+          view.runtimeQuestions?.some(
+            (q) =>
+              q.interactionId === i.interactionId &&
+              q.deliveryState !== "confirmed",
+          ),
+      ).length,
+    );
     add("approval", view.approvals.filter((i) => i.status === "open").length);
     add("unresolved-result", view.unresolvedResults.length);
     add(
@@ -685,6 +711,265 @@ export class OperatorApi {
       observedAt: Date.now(),
     });
   }
+  private intactQuestion(
+    value: unknown,
+    excluded: readonly string[] | undefined,
+  ): boolean {
+    if (!excluded) return false;
+    const serialized = JSON.stringify(value);
+    if (excluded.some((v) => v.length > 0 && serialized.includes(v)))
+      return false;
+    const visit = (v: unknown): boolean =>
+      typeof v === "string"
+        ? this.exact(v, excluded) === v
+        : Array.isArray(v)
+          ? v.every(visit)
+          : v !== null && typeof v === "object"
+            ? Object.entries(v).every(([k, entry]) => visit(k) && visit(entry))
+            : true;
+    return visit(value);
+  }
+  async readQuestion(taskId: string, interactionId: string) {
+    uuid.parse(interactionId);
+    const visibility = this.visibilityToken(),
+      workspaceVisibility = this.service.taskWorkspaceVisibility(taskId),
+      task = this.requireTask(taskId),
+      excluded = await this.exclusions(String(task.projectId), taskId);
+    const view = this.coordination(),
+      v = view.readTask(taskId),
+      interaction = v.questions.find((q) => q.interactionId === interactionId);
+    if (!interaction) throw new OperatorApiError(404, "not-found");
+    const own = view.questionForm(interactionId),
+      native = v.runtimeQuestions?.find(
+        (q) => q.interactionId === interactionId,
+      );
+    const source = native ? "native" : own ? "ensemble" : "plain";
+    const form =
+      own?.form ??
+      (native
+        ? nativeQuestionForm(native.request.questions)
+        : questionFormSchema.parse({
+            version: 1,
+            questions: [
+              {
+                id: "answer",
+                kind: "free-text",
+                label: "Answer",
+                description: interaction.prompt,
+                required: true,
+                minLength: 1,
+              },
+            ],
+          }));
+    let answers: QuestionAnswers | null = own?.answers ?? null;
+    if (native?.answers)
+      answers = Object.fromEntries(
+        native.request.questions.map((q) => {
+          const text = native.answers?.[q.id]?.answers[0] ?? "",
+            index = q.options.findIndex((o) => o.label === text);
+          return [
+            q.id,
+            {
+              optionIds: index < 0 ? [] : [String(index)],
+              text: index < 0 ? text : "",
+            },
+          ];
+        }),
+      );
+    if (source === "plain" && interaction.response !== null)
+      answers = { answer: { optionIds: [], text: interaction.response } };
+    const intact =
+      this.intactQuestion(form, excluded) &&
+      this.intactQuestion(answers, excluded);
+    const unavailable =
+      (own?.requestState !== undefined && own.requestState !== "available") ||
+      native?.requestState === "unavailable";
+    const status = !intact
+      ? "unavailable"
+      : unavailable
+        ? own?.requestState === "cancelled"
+          ? "cancelled"
+          : "unsupported"
+        : interaction.status === "answered"
+          ? "recorded"
+          : !native && !view.ownQuestionEligibility(interactionId)
+            ? "stale"
+            : "pending";
+    if (
+      visibility !== this.visibilityToken() ||
+      workspaceVisibility !== this.service.taskWorkspaceVisibility(taskId) ||
+      this.requireTask(taskId).version !== task.version
+    )
+      throw new OperatorApiError(503, "unavailable");
+    return questionReadSchema.parse({
+      data: {
+        taskId,
+        interactionId,
+        requestingAssignmentId: interaction.requestingAssignmentId,
+        conversationRevision: interaction.conversationRevision,
+        revision: interaction.revision,
+        source,
+        status,
+        form: intact ? form : null,
+        answers: intact ? answers : null,
+        reason: !intact
+          ? "Exact question unavailable under current privacy coverage"
+          : unavailable
+            ? "Request is unavailable; no answer can be submitted"
+            : null,
+        deliveryState:
+          native?.deliveryState ??
+          (answers ? "Recorded; admission remains subject to holds" : null),
+      },
+      observedAt: Date.now(),
+    });
+  }
+  async readInbox(params = new URLSearchParams()) {
+    if (
+      [...params.keys()].some((k) => k !== "cursor") ||
+      params.getAll("cursor").length > 1
+    )
+      throw new OperatorApiError(400, "invalid-input");
+    const visibility = this.visibilityToken(),
+      items: InboxItem[] = [];
+    const catalog = this.domain().taskCatalog();
+    if (catalog.length > 10000) throw new OperatorApiError(503, "unavailable");
+    const tasks = catalog.map((t) => this.requireTask(t.id)),
+      snapshot = this.workspaceSnapshot(catalog.map((t) => t.id));
+    let unavailable = false;
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i]!;
+      const taskId = String(task.id);
+      try {
+        const summary = await this.taskSummary(taskId),
+          view = this.coordination().readTask(taskId),
+          excluded = await this.exclusions(String(task.projectId), taskId);
+        if (!excluded) unavailable = true;
+        const base = {
+          taskId,
+          projectId: String(task.projectId),
+          projectName: summary.project.name,
+          taskTitle: summary.title,
+          evidence: `/app/tasks/${taskId}#history`,
+        };
+        if (
+          summary.attention.codes.some((code) =>
+            [
+              "execution-uncertain",
+              "unresolved-result",
+              "completion-rejected",
+              "lead-review",
+            ].includes(code),
+          )
+        )
+          items.push({
+            ...base,
+            id: `intervention:${taskId}`,
+            kind: "intervention",
+            urgency: 0,
+            createdAt: null,
+            requestingAssignmentId: null,
+            requesterName: null,
+            interactionId: null,
+            revision: null,
+            reason:
+              "Recorded intervention requires exact recovery or review; responsibility unknown",
+            destination: `/app/tasks/${taskId}`,
+            conversation: null,
+          });
+        for (const q of [...view.questions, ...view.approvals]) {
+          const native = view.runtimeQuestions?.find(
+            (n) => n.interactionId === q.interactionId,
+          );
+          if (
+            q.status !== "open" &&
+            (!native || native.deliveryState === "confirmed")
+          )
+            continue;
+          const requester = this.domain()
+            .assignments(taskId)
+            .find((a) => a.id === q.requestingAssignmentId);
+          const name = requester
+            ? this.safe(
+                this.domain().profile(String(requester.profileId)).name,
+                excluded,
+              )
+            : null;
+          items.push({
+            ...base,
+            id: q.interactionId,
+            kind: q.kind,
+            urgency: 1,
+            createdAt: q.createdAt * 1000, // coordination SQLite timestamps are unix seconds.
+            requestingAssignmentId: q.requestingAssignmentId,
+            requesterName: name,
+            interactionId: q.interactionId,
+            revision: q.revision,
+            reason:
+              q.kind === "approval"
+                ? "Review exact approval material"
+                : native && q.status === "answered"
+                  ? "Answer recorded; native delivery remains unresolved"
+                  : "Operator answer requested",
+            destination:
+              q.kind === "question"
+                ? `/app/tasks/${taskId}?request=${q.interactionId}`
+                : `/coordination/task/${taskId}#${q.interactionId}`,
+            conversation: `/app/tasks/${taskId}?assignment=${q.requestingAssignmentId}#history`,
+          });
+        }
+        if (this.requireTask(taskId).version !== task.version)
+          throw new OperatorApiError(503, "unavailable");
+      } catch (error) {
+        if (error instanceof OperatorApiError) throw error;
+        unavailable = true;
+      }
+      if (i % 20 === 19) await yieldTraversal();
+    }
+    if (visibility !== this.visibilityToken())
+      throw new OperatorApiError(503, "unavailable");
+    this.requireWorkspaceSnapshot(snapshot);
+    for (const task of tasks) {
+      const current = this.requireTask(String(task.id));
+      if (
+        current.version !== task.version ||
+        current.projectId !== task.projectId
+      )
+        throw new OperatorApiError(503, "unavailable");
+    }
+    items.sort(
+      (a, b) =>
+        a.urgency - b.urgency ||
+        (a.createdAt ?? Number.MAX_SAFE_INTEGER) -
+          (b.createdAt ?? Number.MAX_SAFE_INTEGER) ||
+        a.id.localeCompare(b.id),
+    );
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(items))
+      .digest("hex")
+      .slice(0, 24);
+    const cursor = params.get("cursor");
+    let offset = 0;
+    if (cursor) {
+      const match = cursor.match(/^([a-f0-9]{24}):([0-9]+)$/);
+      if (!match || match[1] !== fingerprint)
+        throw new OperatorApiError(409, "conflict");
+      offset = Number(match[2]);
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > items.length)
+        throw new OperatorApiError(400, "invalid-input");
+    }
+    const next =
+      offset + 100 < items.length ? `${fingerprint}:${offset + 100}` : null;
+    return inboxReadSchema.parse({
+      data: {
+        items: items.slice(offset, offset + 100),
+        nextCursor: next,
+        complete: next === null && !unavailable,
+        unavailable,
+      },
+      observedAt: Date.now(),
+    });
+  }
   private interaction(
     i: CoordinationInteraction,
     excluded: readonly string[] | undefined,
@@ -788,6 +1073,9 @@ export class OperatorApi {
       ...(m.routingReason === undefined
         ? {}
         : { routingReason: this.safe(m.routingReason, excluded) }),
+      ...(m.questionAnswers && this.intactQuestion(m.questionAnswers, excluded)
+        ? { questionAnswers: m.questionAnswers }
+        : {}),
       ...(m.reference ? { reference: m.reference } : {}),
       ...(m.interactionId === undefined
         ? {}
@@ -2222,6 +2510,64 @@ export class OperatorApi {
         );
         if (!approval?.approvable && approval?.status !== "approved")
           throw new OperatorApiError(403, "forbidden");
+      }
+      if (
+        type === "question.form.answer" ||
+        type === "question.native.answer"
+      ) {
+        if (c.type === "question.form.answer") {
+          const prior = view.recordedQuestionFormAnswer({
+            taskId: c.taskId,
+            key: c.key,
+            interactionId: c.interactionId,
+            expectedRevision: c.expectedRevision,
+            answers: c.answers,
+          });
+          if (prior)
+            return commandReceiptSchema.parse({
+              kind: "coordination",
+              key: c.key,
+              recorded: true,
+              eventId: prior.eventId,
+              taskId: prior.taskId,
+              recipientAssignmentId: prior.recipientAssignmentId,
+              eventType: prior.eventType,
+              createdAt: prior.createdAt,
+            });
+        }
+        if (c.type === "question.native.answer") {
+          const { type: _type, ...input } = c;
+          const prior = view.recordedRuntimeQuestionAnswer(input);
+          if (prior)
+            return commandReceiptSchema.parse({
+              kind: "native-question",
+              key: c.key,
+              taskId: c.taskId,
+              ...prior,
+            });
+        }
+        const current = await this.readQuestion(c.taskId, c.interactionId);
+        if (!current.data.form) throw new OperatorApiError(403, "forbidden");
+        if (type === "question.native.answer") {
+          const receipt = await view.answerRuntimeQuestion(
+            command as Parameters<typeof view.answerRuntimeQuestion>[0],
+          );
+          return commandReceiptSchema.parse({
+            kind: "native-question",
+            key: c.key,
+            taskId: c.taskId,
+            ...receipt,
+          });
+        }
+        const receipt = await view.answerQuestionForm(
+          command as Parameters<typeof view.answerQuestionForm>[0],
+        );
+        return commandReceiptSchema.parse({
+          kind: "coordination",
+          key: c.key,
+          recorded: true,
+          ...receipt,
+        });
       }
       const saved =
         type === "message"

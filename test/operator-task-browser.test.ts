@@ -958,7 +958,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Open existing coordination controls",
+          name: "Advanced coordination controls",
           exact: true,
         })
         .getAttribute("href"),

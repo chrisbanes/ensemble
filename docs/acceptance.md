@@ -425,3 +425,13 @@ reconciles the shared React/production-HTML presentation foundation. Its
 record owned components, responsive browser checks, preserved retained forms,
 font/CSP verification and visual gaps. This does not complete the human UI
 acceptance or release/cutover gates owned by #736.
+
+## UI05 deterministic question and Inbox evidence
+
+[UI05 evidence](evidence/ui05-inbox-questions.md) records the implemented full
+Ensemble form, shared task/Inbox entry points, durable validation/replay, bounded
+transport and desktop/phone viewport journeys. Native acceptance reuses #739's
+qualified synchronous single-choice/custom round trip; grouped native shapes
+remain deterministic coverage. No additional live model attempt or physical-device
+qualification is claimed. This slice does not close parent #736 visual acceptance,
+#745/#697 assembled/provider release evidence, or #761 cutover.

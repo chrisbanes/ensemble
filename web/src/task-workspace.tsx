@@ -1,3 +1,5 @@
+import { QuestionResponse } from "./question-response.js";
+import type { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
   useEffect,
@@ -116,12 +118,14 @@ export function TaskWorkspace({
   taskId,
   path,
   state,
+  questionStates,
 }: {
   client: OperatorClient;
   session: Session;
   taskId: string;
   path: string;
   state: TaskWorkspaceState;
+  questionStates: QuestionResponseStates;
 }) {
   const [auxNotice, setAuxNotice] = useState("");
   const setSourceObservation = (value: "known" | "pending" | "unknown") => {
@@ -149,7 +153,7 @@ export function TaskWorkspace({
     capturedFocus = useRef<HTMLElement | null>(null),
     capturedHistoryFocus = useRef(false),
     material = useRef<string | null>(null);
-  const params = new URLSearchParams(path.split("?")[1] ?? "");
+  const params = new URLSearchParams((path.split("?")[1] ?? "").split("#")[0]);
   const selectedPath = useRef<string | null>(null);
   if (selectedPath.current !== path) {
     selectedPath.current = path;
@@ -352,7 +356,7 @@ export function TaskWorkspace({
         restoreReadingFocus.current = true;
         scrollTo(0, saved.scrollY);
       } else {
-        const p = new URLSearchParams(path.split("?")[1] ?? "");
+        const p = new URLSearchParams((path.split("?")[1] ?? "").split("#")[0]);
         const target = document.getElementById(
           p.get("section") ?? (p.has("result") ? "review" : "brief"),
         );
@@ -394,7 +398,7 @@ export function TaskWorkspace({
     material.current = signature;
     if (first.current) {
       first.current = false;
-      const p = new URLSearchParams(path.split("?")[1] ?? ""),
+      const p = new URLSearchParams((path.split("?")[1] ?? "").split("#")[0]),
         record = p.get("record") ?? p.get("request"),
         section = p.get("section");
       const target = record
@@ -870,30 +874,46 @@ export function TaskWorkspace({
           .map(([k]) => (
             <p key={k}>{k} hold — use exact recovery controls</p>
           ))}
-        {openRequests.map((q) => (
-          <div key={q.interactionId} data-record-id={q.interactionId}>
-            <StatusBadge tone="warning">{q.kind} pending</StatusBadge>
-            <Literal text={q.prompt} />
-            {q.kind === "approval" && (
-              <>
-                <p>
-                  Action: {q.action ?? "Unavailable"} · Target:{" "}
-                  {q.target ?? "Unavailable"} · revision {q.revision}
-                </p>
-                <p>
-                  Exact reviewed material: {q.materialHash ?? "Unavailable"}
-                </p>
-              </>
-            )}
-            <ActionLink
-              href={`/coordination/task/${taskId}#${q.interactionId}`}
-            >
-              {q.kind === "approval"
-                ? "Review exact approval / Deny / Leave pending"
-                : "Answer question"}
-            </ActionLink>
-          </div>
-        ))}
+        {params.get("request") && (
+          <QuestionResponse
+            client={client}
+            session={session}
+            taskId={taskId}
+            interactionId={params.get("request")!}
+            states={questionStates}
+            onRecorded={refresh}
+          />
+        )}
+        {openRequests
+          .filter((q) => q.interactionId !== params.get("request"))
+          .map((q) => (
+            <div key={q.interactionId} data-record-id={q.interactionId}>
+              <StatusBadge tone="warning">{q.kind} pending</StatusBadge>
+              <Literal text={q.prompt} />
+              {q.kind === "approval" && (
+                <>
+                  <p>
+                    Action: {q.action ?? "Unavailable"} · Target:{" "}
+                    {q.target ?? "Unavailable"} · revision {q.revision}
+                  </p>
+                  <p>
+                    Exact reviewed material: {q.materialHash ?? "Unavailable"}
+                  </p>
+                </>
+              )}
+              <ActionLink
+                href={
+                  q.kind === "question"
+                    ? `/app/tasks/${taskId}?request=${q.interactionId}`
+                    : `/coordination/task/${taskId}#${q.interactionId}`
+                }
+              >
+                {q.kind === "approval"
+                  ? "Review exact approval / Deny / Leave pending"
+                  : "Answer question"}
+              </ActionLink>
+            </div>
+          ))}
         {data.completionRequests
           .filter((r) => r.status === "pending")
           .map((r) => (
@@ -1425,6 +1445,15 @@ export function TaskWorkspace({
               {m.eventType} · {m.deliveryState} · {date(m.createdAt)}
             </p>
             <Literal text={m.text} />
+            {m.questionAnswers &&
+              Object.entries(m.questionAnswers).map(([id, a]) => (
+                <div key={id}>
+                  <p>
+                    Question {id}: {a.optionIds.join(", ")}
+                  </p>
+                  <Literal text={a.text} />
+                </div>
+              ))}
             {m.reference && (
               <p>Exact feedback reference: {JSON.stringify(m.reference)}</p>
             )}
@@ -1986,95 +2015,5 @@ function Changes({
         </p>
       ))}
     </section>
-  );
-}
-
-export function TaskInbox({
-  client,
-  session,
-  ids,
-  observation,
-}: {
-  client: OperatorClient;
-  session: Session;
-  ids: string[];
-  observation: object | null;
-}) {
-  return (
-    <section>
-      <ActionLink href="/coordination">
-        Open existing coordination controls
-      </ActionLink>
-      <p>
-        Pending task requests and recorded holds. Open the exact task to review
-        its current material.
-      </p>
-      {ids.length ? (
-        ids.map((id) => (
-          <InboxTask
-            key={id}
-            client={client}
-            session={session}
-            taskId={id}
-            observation={observation}
-          />
-        ))
-      ) : (
-        <p>No recorded task attention.</p>
-      )}
-    </section>
-  );
-}
-function InboxTask({
-  client,
-  session,
-  taskId,
-  observation,
-}: {
-  client: OperatorClient;
-  session: Session;
-  taskId: string;
-  observation: object | null;
-}) {
-  const loader = useCallback(
-    (signal: AbortSignal) =>
-      client.read(`/api/operator/tasks/${taskId}`, taskSchema, signal),
-    [client, taskId],
-  );
-  const r = useOperatorResource(`${session.csrfToken}:inbox:${taskId}`, loader),
-    d = r.state.data?.data;
-  const refresh = useRef(r.refresh),
-    seen = useRef(observation);
-  refresh.current = r.refresh;
-  useEffect(() => {
-    if (seen.current === observation) return;
-    seen.current = observation;
-    if (observation) refresh.current();
-  }, [observation]);
-  return (
-    <div>
-      <ResourceStatus state={r.state} retry={r.refresh} />
-      {d && (
-        <>
-          <ActionLink href={`/app/tasks/${taskId}?section=review`}>
-            {d.task.title ?? "Unavailable task"}
-          </ActionLink>
-          {[...d.questions, ...d.approvals]
-            .filter((q) => q.status === "open")
-            .map((q) => (
-              <p key={q.interactionId}>
-                <ActionLink
-                  href={`/app/tasks/${taskId}?request=${q.interactionId}`}
-                >
-                  {q.kind}: {q.prompt ?? "Material unavailable"}
-                </ActionLink>
-              </p>
-            ))}
-          {d.admission.reasons.map((c) => (
-            <p key={c}>{c}</p>
-          ))}
-        </>
-      )}
-    </div>
   );
 }

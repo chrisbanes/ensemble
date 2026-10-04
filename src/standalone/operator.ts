@@ -1,3 +1,4 @@
+import { questionCommandRawLimit } from "../operator/contracts.js";
 import type { OperatorWebBoundary } from "./operator-web.js";
 import { OperatorApiError } from "./operator-api.js";
 import { apiErrorSchema, sessionSchema } from "../operator/contracts.js";
@@ -673,7 +674,10 @@ function publicMessage(code: string): string {
   };
   return messages[code] ?? "Request unavailable.";
 }
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(
+  request: IncomingMessage,
+  commands = false,
+): Promise<unknown> {
   if (
     !/^application\/json(?:;\s*charset=utf-8)?$/i.test(
       String(request.headers["content-type"] ?? ""),
@@ -684,20 +688,41 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
+  let oversized = false;
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_FORM_BYTES) {
-      request.resume();
-      throw new OperatorHttpError(413);
+    if (size > (commands ? questionCommandRawLimit : MAX_FORM_BYTES)) {
+      oversized = true;
+      break;
     }
     chunks.push(buffer);
   }
+  if (oversized) {
+    // The iterator removes its readable listener asynchronously. Resume after
+    // that cleanup, otherwise the rejected upload can strand a keepalive socket.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    request.resume();
+    throw new OperatorHttpError(413);
+  }
   try {
-    return JSON.parse(
+    const value: unknown = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
     );
-  } catch {
+    const type =
+      value !== null && typeof value === "object" && "type" in value
+        ? value.type
+        : null;
+    if (
+      commands &&
+      size > MAX_FORM_BYTES &&
+      type !== "question.form.answer" &&
+      type !== "question.native.answer"
+    )
+      throw new OperatorHttpError(413);
+    return value;
+  } catch (error) {
+    if (error instanceof OperatorHttpError) throw error;
     throw new OperatorHttpError(400);
   }
 }
@@ -1030,6 +1055,7 @@ export class LocalOperatorHttp {
               params: slotRoute.params,
               fields: cleanQuery(url.searchParams),
               csrfToken: authorized.csrfToken,
+              webEnabled: Boolean(this.web),
             });
             this.writeRouteResult(response, result, authorized);
             return;
@@ -1073,6 +1099,7 @@ export class LocalOperatorHttp {
               params: extension.params,
               fields: cleanQuery(url.searchParams),
               csrfToken: authorized.csrfToken,
+              webEnabled: Boolean(this.web),
             });
             this.writeRouteResult(response, result, authorized);
             return;
@@ -1124,6 +1151,7 @@ export class LocalOperatorHttp {
           params: extension.params,
           fields,
           csrfToken: authorized.csrfToken,
+          webEnabled: Boolean(this.web),
         });
         this.writeRouteResult(response, result, authorized);
       } catch (error) {
@@ -1303,7 +1331,11 @@ export class LocalOperatorHttp {
           deny(403, "forbidden");
           return true;
         }
-        const body = await readJson(request);
+        const body = await readJson(request, path === "/api/operator/commands");
+        if (path !== "/api/operator/login" && !this.currentSession(session)) {
+          deny(401, "unauthenticated");
+          return true;
+        }
         if (path === "/api/operator/login") {
           const input = z
             .object({ password: z.string().max(8192) })

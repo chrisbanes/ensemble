@@ -1,3 +1,5 @@
+import { Inbox, InboxState } from "./inbox.js";
+import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
   useEffect,
@@ -33,7 +35,7 @@ import {
   ProfileConfiguration,
 } from "./settings.js";
 import { Search, SearchState } from "./search.js";
-import { TaskWorkspace, TaskInbox } from "./task-workspace.js";
+import { TaskWorkspace } from "./task-workspace.js";
 import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
@@ -199,6 +201,8 @@ export function App() {
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
   const searchState = useRef(new Map<string, SearchState>());
   const taskStates = useRef(new TaskWorkspaceStates());
+  const questionStates = useRef(new QuestionResponseStates());
+  const inboxState = useRef(new InboxState());
   // biome-ignore lint/correctness/useExhaustiveDependencies: navigation purge uses current browser entry and stable scope ref.
   const expired = useCallback(() => {
     navigationScope.current = crypto.randomUUID();
@@ -208,6 +212,8 @@ export function App() {
     setLogoutPending(false);
     drafts.current.purge();
     taskStates.current.purge();
+    questionStates.current.purge();
+    inboxState.current.clear();
     searchState.current.clear();
     setSession(null);
     setBootstrap((v) => v + 1);
@@ -227,6 +233,8 @@ export function App() {
         client.invalidateAuthentication();
         drafts.current.purge();
         taskStates.current.purge();
+        questionStates.current.purge();
+        inboxState.current.clear();
         searchState.current.clear();
         if (
           identity &&
@@ -370,7 +378,7 @@ export function App() {
     document.addEventListener("click", click);
     return () => document.removeEventListener("click", click);
   }, []);
-  const pathname = path.split("?")[0] ?? "/app";
+  const pathname = path.split(/[?#]/)[0] ?? "/app";
   const navigate = (next: string) => {
     history.replaceState({ ...history.state, scrollY }, "");
     history.pushState(
@@ -493,6 +501,8 @@ export function App() {
     const isCurrentScope = client.captureAuthenticationScope();
     drafts.current.purge();
     taskStates.current.purge();
+    questionStates.current.purge();
+    inboxState.current.clear();
     searchState.current.clear();
     setLogoutPending(true);
     setLogoutNotice(null);
@@ -636,21 +646,15 @@ export function App() {
               onRecorded={tasks.refresh}
             />
           ) : pathname === "/app/inbox" ? (
-            <>
-              <ResourceStatus state={tasks.state} retry={tasks.refresh} />
-              {tasks.state.data && (
-                <TaskInbox
-                  client={client}
-                  session={session}
-                  observation={tasks.state.data}
-                  ids={
-                    tasks.state.data.tasks
-                      .filter((t) => t.attention.count > 0)
-                      .map((t) => t.id) ?? []
-                  }
-                />
-              )}
-            </>
+            <Inbox
+              client={client}
+              session={session}
+              path={path}
+              navigate={navigate}
+              state={inboxState.current}
+              questions={questionStates.current}
+              observation={workspace.state.data}
+            />
           ) : pathname === "/app/search" ? (
             <Search
               key={`${session.csrfToken}:${entryKey}`}
@@ -668,6 +672,7 @@ export function App() {
               session={session}
               taskId={pathname.split("/")[3] ?? ""}
               path={path}
+              questionStates={questionStates.current}
               state={taskStates.current.forTask(
                 pathname.split("/")[3] ?? "",
                 entryKey,

@@ -1,3 +1,4 @@
+import { OperatorApi } from "../src/standalone/operator-api.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -809,6 +810,51 @@ test("native invalidation storage failure still stops owned resources and rethro
     // Remove the SQLite fault if the regression left the DB open for cleanup.
     if (internals.db?.isOpen)
       db.exec("DROP TRIGGER ui01_stop_invalidation_fault");
+    await f.close();
+  }
+});
+
+test("curated native form receipt retains unconfirmed Inbox attention and same-key replay has one native effect", async () => {
+  const f = await fixture();
+  try {
+    f.runtime.confirm = false;
+    const api = new OperatorApi(f.service, [f.root]),
+      q = runtimeQuestion(f.service, f.taskId);
+    const selected = await api.readQuestion(f.taskId, q.interactionId);
+    assert.equal(selected.data.source, "native");
+    assert.equal(selected.data.form?.questions[0]?.label, "Place");
+    const command = {
+      type: "question.native.answer" as const,
+      key: randomUUID(),
+      taskId: f.taskId,
+      interactionId: q.interactionId,
+      expectedRevision: q.revision,
+      answers: { q: { answers: ["Local"] } },
+    };
+    const receipt = await api.execute(command);
+    assert.equal(receipt.kind, "native-question");
+    assert.deepEqual(await api.execute(command), receipt);
+    await until(() => f.runtime.replies === 1);
+    assert.equal(f.runtime.turns, 1);
+    assert.equal(
+      f.service
+        .coordinationView()
+        .readTask(f.taskId)
+        .messages.filter((m) => m.eventType === "question-answer").length,
+      0,
+    );
+    const queue = await api.readInbox();
+    assert.ok(
+      queue.data.items.some(
+        (item) =>
+          item.id === q.interactionId && item.reason?.includes("unresolved"),
+      ),
+    );
+    assert.equal(
+      (await api.readQuestion(f.taskId, q.interactionId)).data.status,
+      "recorded",
+    );
+  } finally {
     await f.close();
   }
 });

@@ -1,4 +1,12 @@
 import {
+  questionToolArgumentsSchema,
+  questionFormSchema,
+  questionAnswersSchema,
+  validateQuestionAnswers,
+  type QuestionForm,
+  type QuestionAnswers,
+} from "./question-forms.js";
+import {
   TaskReviewStore,
   reviewMetadataSchema,
   feedbackReferenceSchema,
@@ -84,7 +92,7 @@ const questionCallSchema = z
   .object({
     ...toolIdentity,
     tool: z.literal("ensemble_ask_question"),
-    arguments: z.object({ question: summarySchema }).strict(),
+    arguments: questionToolArgumentsSchema,
   })
   .strict();
 const approvalCallSchema = z
@@ -128,7 +136,7 @@ const answerSchema = z
     key: operatorCommandKey,
     interactionId: uuid,
     expectedRevision: z.number().int().positive(),
-    answer: summarySchema,
+    answer: z.string().min(1).max(16000),
   })
   .strict();
 const approvalDecisionSchema = z
@@ -503,6 +511,11 @@ export class CoordinationStore {
         updatedAt INTEGER NOT NULL DEFAULT (unixepoch()),
         CHECK((kind = 'question' AND action IS NULL AND materialHash IS NULL) OR
           (kind = 'approval' AND action IS NOT NULL AND materialHash IS NOT NULL))
+      );
+      CREATE TABLE IF NOT EXISTS coordination_question_forms (
+        interactionId TEXT PRIMARY KEY REFERENCES coordination_interactions(interactionId),
+        schemaJson TEXT NOT NULL, schemaDigest TEXT NOT NULL, answerJson TEXT, answerDigest TEXT,
+        requestState TEXT NOT NULL DEFAULT 'available' CHECK(requestState IN ('available','cancelled','superseded','unavailable'))
       );
       CREATE TABLE IF NOT EXISTS coordination_runtime_questions (
         interactionId TEXT PRIMARY KEY REFERENCES coordination_interactions(interactionId),
@@ -1058,7 +1071,11 @@ export class CoordinationStore {
   requestQuestion(input: CoordinationCall): CoordinationToolResponse {
     const call = questionCallSchema.parse(input);
     return this.requestInteraction(call, "question", {
-      prompt: call.arguments.question,
+      prompt:
+        "question" in call.arguments
+          ? call.arguments.question
+          : "Structured question",
+      ...("form" in call.arguments ? { form: call.arguments.form } : {}),
       action: null,
       target: null,
       materialHash: null,
@@ -1426,7 +1443,7 @@ export class CoordinationStore {
         return replay;
       }
       const interaction = this.required(
-        "SELECT interactionId, taskId, requestingAssignmentId, kind, status, revision FROM coordination_interactions WHERE interactionId = ?",
+        "SELECT * FROM coordination_interactions WHERE interactionId = ?",
         command.interactionId,
       );
       if (
@@ -1441,6 +1458,11 @@ export class CoordinationStore {
         "question",
         command.expectedRevision,
       );
+      this.requireOwnQuestionEligibility(interaction);
+      if (this.questionForm(command.interactionId))
+        throw new Error(
+          "Structured questions require their form answer command",
+        );
       const event = this.insertInteractionEvent(
         String(interaction.taskId),
         String(interaction.requestingAssignmentId),
@@ -1450,6 +1472,7 @@ export class CoordinationStore {
           interactionId: command.interactionId,
           revision: command.expectedRevision + 1,
           answer: command.answer,
+          ...this.questionAttribution(interaction),
         },
       );
       this.db
@@ -1471,6 +1494,200 @@ export class CoordinationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  questionForm(interactionId: string): {
+    form: QuestionForm;
+    answers: QuestionAnswers | null;
+    requestState: "available" | "cancelled" | "superseded" | "unavailable";
+  } | null {
+    const row = this.one(
+      "SELECT * FROM coordination_question_forms WHERE interactionId=?",
+      interactionId,
+    );
+    return row
+      ? {
+          form: questionFormSchema.parse(JSON.parse(String(row.schemaJson))),
+          answers:
+            row.answerJson === null
+              ? null
+              : questionAnswersSchema.parse(JSON.parse(String(row.answerJson))),
+          requestState: z
+            .enum(["available", "cancelled", "superseded", "unavailable"])
+            .parse(row.requestState),
+        }
+      : null;
+  }
+
+  questionFormSummaries(
+    taskId: string,
+  ): Array<{ interactionId: string; requestState: string }> {
+    return (
+      this.db
+        .prepare(
+          "SELECT form.interactionId,form.requestState FROM coordination_question_forms form JOIN coordination_interactions interaction ON interaction.interactionId=form.interactionId WHERE interaction.taskId=?",
+        )
+        .all(taskId) as Row[]
+    ).map((row) => ({
+      interactionId: String(row.interactionId),
+      requestState: String(row.requestState),
+    }));
+  }
+  ownQuestionEligibility(interactionId: string): boolean {
+    try {
+      const interaction = this.required(
+        "SELECT * FROM coordination_interactions WHERE interactionId=?",
+        interactionId,
+      );
+      this.requireOwnQuestionEligibility(interaction);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  recordedQuestionFormAnswer(input: {
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: QuestionAnswers;
+  }): InboxEvent | undefined {
+    const { key, ...payload } = input;
+    return this.replayOperatorEvent("answer-question-form", key, payload);
+  }
+  recordedRuntimeQuestionAnswer(input: {
+    key: string;
+    taskId: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: StructuredQuestionAnswers;
+  }): RuntimeQuestionAnswerReceipt | undefined {
+    const { key, ...payload } = input;
+    const prior = this.one(
+      "SELECT payloadHash,result FROM coordination_operator_receipts WHERE scope='answer-runtime-question' AND commandKey=?",
+      key,
+    );
+    if (!prior) return undefined;
+    if (prior.payloadHash !== payloadHash(payload))
+      throw new Error("Operator command key reused with different content");
+    return runtimeAnswerReceiptSchema.parse(JSON.parse(String(prior.result)));
+  }
+  private questionAttribution(row: Row) {
+    return {
+      requestingWorkId: String(row.requestingWorkId),
+      requestingWorkRevision: Number(row.requestingWorkRevision),
+      requestingAssignmentVersion: Number(row.requestingAssignmentVersion),
+      conversationRevision: Number(row.conversationRevision),
+    };
+  }
+
+  private requireOwnQuestionEligibility(interaction: Row): void {
+    const rows = this.db
+      .prepare(`SELECT binding.workId FROM task_execution_bindings binding
+      JOIN domain_tasks task ON task.id=binding.taskId
+      JOIN domain_assignments assignment ON assignment.id=binding.assignmentId AND assignment.taskId=binding.taskId
+      JOIN execution_intents intent ON intent.workId=binding.workId
+      JOIN task_work_revisions revision ON revision.workId=binding.workId
+      JOIN assignment_conversations conversation ON conversation.assignmentId=binding.assignmentId
+      WHERE binding.workId=? AND binding.taskId=? AND binding.assignmentId=?
+        AND binding.assignmentVersion=? AND assignment.version=binding.assignmentVersion
+        AND binding.conversationRevision=? AND conversation.revision=binding.conversationRevision
+        AND revision.workRevision=? AND revision.assignmentId=binding.assignmentId AND revision.conversationRevision=binding.conversationRevision
+        AND task.state='open' AND assignment.state IN ('pending','running','held')
+        AND intent.state IN ('running','held','completed') AND intent.threadId IS NOT NULL AND intent.turnId IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM task_work_revision_ambiguities ambiguous WHERE ambiguous.assignmentId=binding.assignmentId AND ambiguous.conversationRevision=binding.conversationRevision)
+        AND NOT EXISTS (SELECT 1 FROM coordination_question_forms form WHERE form.interactionId=? AND form.requestState!='available')
+        AND NOT EXISTS (SELECT 1 FROM execution_intents duplicate WHERE duplicate.workId!=intent.workId AND duplicate.threadId=intent.threadId AND duplicate.turnId=intent.turnId)
+      LIMIT 2`)
+      .all(
+        String(interaction.requestingWorkId),
+        String(interaction.taskId),
+        String(interaction.requestingAssignmentId),
+        Number(interaction.requestingAssignmentVersion),
+        Number(interaction.conversationRevision),
+        Number(interaction.requestingWorkRevision),
+        String(interaction.interactionId),
+      );
+    if (rows.length !== 1)
+      throw new Error(
+        "Question requesting work is stale, cancelled or ambiguous",
+      );
+  }
+
+  answerQuestionForm(input: {
+    actor: "operator";
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: QuestionAnswers;
+  }): InboxEvent {
+    const command = z
+      .object({
+        actor: z.literal("operator"),
+        key: operatorCommandKey,
+        interactionId: uuid,
+        expectedRevision: z.number().int().positive(),
+        answers: questionAnswersSchema,
+      })
+      .strict()
+      .parse(input);
+    const { key: _key, actor: _actor, ...payload } = command;
+    return this.runtimeTransaction(() => {
+      const replay = this.replayOperatorEvent(
+        "answer-question-form",
+        command.key,
+        payload,
+      );
+      if (replay) return replay;
+      const interaction = this.required(
+        "SELECT * FROM coordination_interactions WHERE interactionId=?",
+        command.interactionId,
+      );
+      this.requireOpenInteraction(
+        interaction,
+        "question",
+        command.expectedRevision,
+      );
+      this.requireOwnQuestionEligibility(interaction);
+      const stored = this.questionForm(command.interactionId);
+      if (!stored || stored.answers)
+        throw new Error("Structured question unavailable or already answered");
+      const answers = validateQuestionAnswers(stored.form, command.answers);
+      const event = this.insertInteractionEvent(
+        String(interaction.taskId),
+        String(interaction.requestingAssignmentId),
+        command.interactionId,
+        "question-answer",
+        {
+          interactionId: command.interactionId,
+          revision: command.expectedRevision + 1,
+          formVersion: 1,
+          answers,
+          ...this.questionAttribution(interaction),
+        },
+      );
+      this.db
+        .prepare(
+          "UPDATE coordination_question_forms SET answerJson=?,answerDigest=? WHERE interactionId=?",
+        )
+        .run(
+          JSON.stringify(answers),
+          payloadHash(answers),
+          command.interactionId,
+        );
+      this.db
+        .prepare(
+          "UPDATE coordination_interactions SET status='answered',response='Structured answer recorded',revision=revision+1,updatedAt=unixepoch() WHERE interactionId=?",
+        )
+        .run(command.interactionId);
+      this.resolveAttention(command.interactionId);
+      this.saveOperatorReceipt(
+        "answer-question-form",
+        command.key,
+        payload,
+        event.eventId,
+      );
+      return event;
+    });
   }
 
   decideApproval(input: {
@@ -3225,6 +3442,7 @@ export class CoordinationStore {
       target: string | null;
       materialHash: string | null;
       materialJson: string | null;
+      form?: QuestionForm;
     },
   ): CoordinationToolResponse {
     const call = generalCallSchema.parse(input);
@@ -3259,6 +3477,16 @@ export class CoordinationStore {
           value.materialHash,
           value.materialJson,
         );
+      if (value.form)
+        this.db
+          .prepare(
+            "INSERT INTO coordination_question_forms (interactionId,schemaJson,schemaDigest) VALUES (?,?,?)",
+          )
+          .run(
+            interactionId,
+            JSON.stringify(value.form),
+            payloadHash(value.form),
+          );
       if (
         kind === "approval" &&
         actionKinds.some((action) => action === value.action)

@@ -1,3 +1,7 @@
+import {
+  questionAnswersSchema,
+  type QuestionAnswers,
+} from "../core/question-forms.js";
 import { feedbackReferenceSchema } from "../core/task-review.js";
 import {
   handbackSettlementSchema,
@@ -45,7 +49,13 @@ const answerEventSchema = z
   .object({
     interactionId: uuid,
     revision: z.number().int().positive(),
-    answer: z.string(),
+    answer: z.string().optional(),
+    formVersion: z.literal(1).optional(),
+    answers: questionAnswersSchema.optional(),
+    requestingWorkId: z.string().optional(),
+    requestingWorkRevision: z.number().int().positive().optional(),
+    requestingAssignmentVersion: z.number().int().positive().optional(),
+    conversationRevision: z.number().int().positive().optional(),
   })
   .strict();
 const approvalEventSchema = z
@@ -107,6 +117,7 @@ export interface CoordinationViewMessage {
   resultId?: string;
   routingOperationId?: string;
   routingReason?: string;
+  questionAnswers?: QuestionAnswers;
   interactionId?: string;
   reference?: z.infer<typeof feedbackReferenceSchema>;
 }
@@ -173,6 +184,7 @@ export interface CoordinationTaskView {
   unresolvedResults: UnresolvedResultDestination[];
   messages: CoordinationViewMessage[];
   questions: CoordinationInteraction[];
+  questionForms?: Array<{ interactionId: string; requestState: string }>;
   runtimeQuestions?: Array<
     Pick<
       RuntimeQuestionRecord,
@@ -485,6 +497,7 @@ export class CoordinationView {
       results: this.coordination.results(id),
       unresolvedResults: this.coordination.unresolvedResultDestinations(id),
       messages,
+      questionForms: this.coordination.questionFormSummaries(id),
       runtimeQuestions: this.coordination
         .runtimeQuestions(id)
         .map(
@@ -603,6 +616,46 @@ export class CoordinationView {
     return receipt;
   }
 
+  ownQuestionEligibility(interactionId: string) {
+    return this.coordination.ownQuestionEligibility(interactionId);
+  }
+  recordedQuestionFormAnswer(
+    input: Parameters<CoordinationStore["recordedQuestionFormAnswer"]>[0] & {
+      taskId: string;
+    },
+  ) {
+    this.requireInteraction(input.taskId, input.interactionId, "question");
+    const { taskId: _taskId, ...command } = input;
+    return this.coordination.recordedQuestionFormAnswer(command);
+  }
+  recordedRuntimeQuestionAnswer(
+    input: Parameters<CoordinationStore["recordedRuntimeQuestionAnswer"]>[0],
+  ) {
+    return this.coordination.recordedRuntimeQuestionAnswer(input);
+  }
+  questionForm(interactionId: string) {
+    return this.coordination.questionForm(interactionId);
+  }
+
+  async answerQuestionForm(input: {
+    taskId: string;
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: QuestionAnswers;
+  }): Promise<CoordinationCommandReceipt> {
+    this.requireInteraction(input.taskId, input.interactionId, "question");
+    return this.commitCommand(
+      this.coordination.answerQuestionForm({
+        actor: "operator",
+        key: input.key,
+        interactionId: input.interactionId,
+        expectedRevision: input.expectedRevision,
+        answers: input.answers,
+      }),
+    );
+  }
+
   async answerQuestion(
     input: QuestionAnswerCommand,
   ): Promise<CoordinationCommandReceipt> {
@@ -716,7 +769,9 @@ export class CoordinationView {
         return {
           ...base,
           interactionId: payload.interactionId,
-          text: payload.answer,
+          ...(payload.answers
+            ? { questionAnswers: payload.answers }
+            : { text: payload.answer ?? "Answer unavailable" }),
         };
       }
       case "approval-decision": {

@@ -85,6 +85,14 @@ export class OperatorWebBoundary {
   }
   async read(path: string, query = new URLSearchParams()) {
     if (path === "/api/operator/search") return this.api.readSearch(query);
+    if (path === "/api/operator/inbox") return this.api.readInbox(query);
+    const question = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/questions\/([^/]+)$/,
+    );
+    if (question) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return this.api.readQuestion(question[1] ?? "", question[2] ?? "");
+    }
     if (path === "/api/operator/task-list")
       return this.api.readTaskListPage(query);
     const history = path.match(
@@ -172,6 +180,7 @@ export class OperatorWebBoundary {
         "/api/operator/logout",
         "/api/operator/workspace",
         "/api/operator/task-list",
+        "/api/operator/inbox",
         "/api/operator/search",
         "/api/operator/commands",
         "/api/operator/source-refresh",
@@ -184,6 +193,7 @@ export class OperatorWebBoundary {
       /^\/api\/operator\/tasks\/[^/]+\/(?:review|artifacts\/[^/]+)$/.test(
         path,
       ) ||
+      /^\/api\/operator\/tasks\/[^/]+\/questions\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
       /^\/api\/operator\/assignments\/[^/]+\/(?:history|recovery)$/.test(path)
     );
