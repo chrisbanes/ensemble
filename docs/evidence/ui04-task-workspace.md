@@ -64,10 +64,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility and authenticated HTTP readback |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback |
 | 15 | current full npm check 867/867; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-search-liveness-check-final.log` (867/867).
+The current repaired full-check log is `/tmp/ui04-search-label-check.log` (867/867).
+`/tmp/ui04-search-liveness-check-final.log` (867/867) retains historical bounded-scan evidence.
 `/tmp/ui04-entry-artifact-check-final.log` (863/863) retains historical entry/artifact evidence.
 `/tmp/ui04-observation-check.log` (861/861) retains historical source-observation/coverage evidence.
 `/tmp/ui04-ci8-check.log` (859/859) retains historical overlap/source-boundary evidence.
@@ -1080,3 +1081,33 @@ full check passes 867/867, zero skips, in 48.937 seconds. All 15 rows retain pri
 proof, with rows 2/14/15 extended. Historical a21/ca51 qualification remains
 transport-only, consumed and released; no new runtime, harness, live or remote
 operation occurred.
+
+
+## Final historical label settlement
+
+Executable `2611bdacf5c4f2940dbb8f75902663ecc6ca02fd`, tree
+`973fafc8fcd3ccd0b7017462df3235b01b9d6d2e`, repairs the independent review's
+final historical-label finding. After the second awaited scan and current
+visibility/task/project checks, each permitted match receives one indexed exact
+current-source/result lookup. Its historical label is the inverse; current-only
+queries still omit superseded records. Page size, cursor and retained material
+remain unchanged.
+
+The actual same-task result producer appends across the second await without
+changing task.version. With historical inclusion, the exact older result remains
+available and is labelled historical; the existing current-only omission proof
+remains. `/tmp/ui04-search-label-focused-final.log` passes all nine affected
+service tests, zero skips, in 1.048 seconds. The first focused run compared the
+fixture's result object rather than its UUID; that assertion-only failure remains
+at `/tmp/ui04-search-label-focused.log` and was corrected to resultId.
+
+Pinned `/tmp/ui04-search-label-check.log` passes 867/867, zero skipped/cancelled,
+in 48.863 seconds. All 15 acceptance rows retain evidence; row 14 adds the final
+label proof and row 15/current log agrees. No frontend or fixture-lifecycle change
+was made: the unchanged `index-DmKOA1jT.js` bundle hashes to
+`bbf8baf5554e973d1163b808cc703dd46250aab92048d03e6e594e4ffe548b07`.
+Adequate split-probe captures/complete cleanup remain at their original `1c74bd4e`
+source in `/tmp/ui04-search-liveness-screenshots.json`; prior Search images retain
+`154ae946` attribution. They were not retagged or recaptured. Historical live
+qualification stays transport-only, consumed and released; no remote/live,
+harness, runtime, global or configuration operation occurred.
