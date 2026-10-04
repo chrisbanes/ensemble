@@ -182,7 +182,8 @@ export async function runQualification(options = {}) {
     auth,
     expected,
     reportCall,
-    callbackPending = false;
+    callbackPending = false,
+    callbackFailure;
   let finishing = false,
     probe;
   const pendingSteps = new Set();
@@ -227,7 +228,9 @@ export async function runQualification(options = {}) {
       mode: 0o600,
     });
   const until = async (predicate, label) => {
-    while (!predicate()) {
+    while (true) {
+      if (callbackFailure) throw callbackFailure;
+      if (predicate()) return;
       assert.ok(Date.now() < deadline, `${label}-deadline`);
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -253,6 +256,9 @@ export async function runQualification(options = {}) {
                 spawnEnvironment: () => ({
                   ...context.spawnEnvironment(),
                   UI04_FIXTURE_DELAY: "50",
+                  UI04_FIXTURE_MALFORMED: fixture?.malformedCallback
+                    ? "1"
+                    : "0",
                 }),
               }
             : {}),
@@ -278,54 +284,72 @@ export async function runQualification(options = {}) {
         };
         runtime.onToolCall = (listener) =>
           onTool(async (call) => {
-            assert.equal(
-              call.tool,
-              "ensemble_report_result",
-              "unexpected-tool",
-            );
-            assert.equal(
-              evidence.counts.reports++,
-              0,
-              "second-report-forbidden",
-            );
-            assert.deepEqual(
-              call.arguments,
-              expected,
-              "exact-callback-material",
-            );
-            reportCall = call;
-            evidence.callback = {
-              tool: call.tool,
-              callId: call.callId,
-              threadId: call.threadId,
-              turnId: call.turnId,
-              enteredAt: new Date().toISOString(),
-            };
-            callbackPending = true;
-            const work = service
-              .list()
-              .find(
-                (i) => i.threadId === call.threadId && i.turnId === call.turnId,
+            try {
+              assert.equal(
+                call.tool,
+                "ensemble_report_result",
+                "unexpected-tool",
               );
-            assert.ok(work);
-            const reporting = (async () => {
-              if (fixture?.delayCallback) {
-                await new Promise((r) => setTimeout(r, 150));
-                assert.equal(
-                  service.coordinationView().readTask(taskId).results.length,
-                  0,
-                  "callback-not-ended-before-persistence",
+              assert.equal(
+                evidence.counts.reports++,
+                0,
+                "second-report-forbidden",
+              );
+              assert.deepEqual(
+                call.arguments,
+                expected,
+                "exact-callback-material",
+              );
+              reportCall = call;
+              evidence.callback = {
+                tool: call.tool,
+                callId: call.callId,
+                threadId: call.threadId,
+                turnId: call.turnId,
+                enteredAt: new Date().toISOString(),
+              };
+              callbackPending = true;
+              const work = service
+                .list()
+                .find(
+                  (i) =>
+                    i.threadId === call.threadId && i.turnId === call.turnId,
                 );
+              assert.ok(work);
+              const reporting = (async () => {
+                if (fixture?.delayCallback) {
+                  await new Promise((r) => setTimeout(r, 150));
+                  assert.equal(
+                    service.coordinationView().readTask(taskId).results.length,
+                    0,
+                    "callback-not-ended-before-persistence",
+                  );
+                }
+                return listener(call);
+              })();
+              service.registerExecutionCallback(work.workId, reporting);
+              let result;
+              try {
+                result = await reporting;
+              } finally {
+                callbackPending = false;
+                evidence.callbackEnded = true;
+                evidence.callback.endedAt = new Date().toISOString();
               }
-              return listener(call);
-            })();
-            service.registerExecutionCallback(work.workId, reporting);
-            const result = await reporting;
-            assert.equal(result.success, true);
-            callbackPending = false;
-            evidence.callbackEnded = true;
-            evidence.callback.endedAt = new Date().toISOString();
-            return result;
+              assert.equal(result.success, true);
+              return result;
+            } catch (error) {
+              callbackFailure = error;
+              evidence.callbackFailure = {
+                reason: String(error.message).slice(0, 1024),
+                at: new Date().toISOString(),
+                tool: call.tool,
+                callId: call.callId,
+                threadId: call.threadId,
+                turnId: call.turnId,
+              };
+              throw error;
+            }
           });
         return runtime;
       },

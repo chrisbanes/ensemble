@@ -52,7 +52,12 @@ for await (const line of createInterface({ input: process.stdin })) {
             turnId: "ui04-turn",
             callId: "ui04-call",
             tool: "ensemble_report_result",
-            arguments: JSON.parse(marker.slice("UI04_CALLBACK_JSON=".length)),
+            arguments: {
+              ...JSON.parse(marker.slice("UI04_CALLBACK_JSON=".length)),
+              ...(process.env.UI04_FIXTURE_MALFORMED === "1"
+                ? { summary: "wrong material" }
+                : {}),
+            },
           },
         }),
       Number(process.env.UI04_FIXTURE_DELAY ?? 25),

@@ -113,3 +113,15 @@ test("UI04 failed late-resource cleanup remains unresolved even after tracked se
   );
   assert.equal(r.cleanup.verified, false);
 });
+
+test("UI04 malformed callback material promptly ends the one attempt, preserves rejection and verifies exact cleanup without retry", async () => {
+  const r = await module.runQualification({
+    fixture: { malformedCallback: true },
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.failure.reason, /exact-callback-material/);
+  assert.equal(r.callbackEnded, false);
+  assert.deepEqual(r.counts, { threads: 1, turns: 1, reports: 1 });
+  assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
+  assert.ok(r.callbackFailure);
+});
