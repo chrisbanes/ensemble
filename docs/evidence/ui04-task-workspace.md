@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
 | 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-ci19-check.log` (883/883).
+The current repaired full-check log is `/tmp/ui04-ci19-review-check.log` (883/883).
+`/tmp/ui04-ci19-check.log` (883/883) retains historical initial receipt/read correlation evidence.
 `/tmp/ui04-ci18-check.log` (883/883) retains historical Search replacement-document evidence.
 `/tmp/ui04-ci17-check.log` (883/883) retains historical Settings render-boundary evidence.
 `/tmp/ui04-codex16-check.log` (883/883) retains historical exact-intent/history ownership evidence.
@@ -1568,11 +1569,13 @@ and held receipt release are owned in finally and fixture cleanup. The successfu
 clean run records 26 events and zero omitted milestones; exact ordered
 stages are in `/tmp/ui04-ci19-screenshots.json` and its capture log.
 
-The first controlled proof `/tmp/ui04-ci19-focused.log` failed at an added,
-unrelated conditional composer-button assertion while the view receipt was held;
-its later waiter timeouts were initially unhandled. That extra assertion was
-removed without weakening any original assertion, and all waiters/repeat work
-were made rejection-safe. `/tmp/ui04-ci19-owned-build.log` preserves a subsequent
+The first controlled proof `/tmp/ui04-ci19-focused.log` records a held-repeat-view
+acknowledgement timeout, milestones ending at server-committed, and initially
+unhandled waiter rejections. Its retained runtime evidence does not establish the
+exact cause. The first written fixture also contained an extra conditional
+composer-button await; removing it was fixture cleanup, not a proven explanation
+of that failure. All waiters/repeat work were made rejection-safe without weakening
+original assertions. `/tmp/ui04-ci19-owned-build.log` preserves a subsequent
 test-only exact-optional diagnostic type error, corrected before execution. Neither
 failed run is credited as current validation or a product defect.
 The first failed-focus manifest is
@@ -1598,3 +1601,40 @@ All 15 acceptance rows and both current ledgers agree at 883 tests. Codex19's qu
 limit remains unavailable-review evidence, not a successful review or authority
 to retry/pay/reset. Historical `a21e6046` remains transport-only, with its sole
 grant consumed and resource released; no live or remote operation occurred.
+
+
+## Review29 diagnostic qualification
+
+The bounded follow-up qualifies the first-focus failure as observed timeout and
+waiter activity with unknown exact cause, and leaves the original Linux CI19 cause
+unknown. The exact matched task GET response and HTTP status are now recorded
+before status, JSON or task-identity assertions; a separate completed-read marker
+follows validated material. On failure, the final comparison snapshot adds only
+one fixed category: request-or-response-timeout, assertion-failed, or
+unexpected-segment-error. No raw error text or private response material is added
+to those diagnostics. Behavior, original assertions, cleanup, cap64 and deadlines
+remain unchanged.
+
+Pre-label `/tmp/ui04-ci19-review-focused.log` passes 1/1 in 4.022 seconds. Current
+`/tmp/ui04-ci19-review-check.log` passes 883/883, zero failures/cancellations/skips,
+in 50.548 seconds, bound to `0c7da3c8fb5019c2f2966830e5eef16d53bc36c1`,
+tree `a38b48691805c39ad80daf29874149e88ef9fb4a`. The final amendment changes only
+the fixed diagnostic label to assertion-failed: Error.name cannot establish which
+segment assertion failed. `/tmp/ui04-ci19-review-label-focused.log` passes 1/1 in
+3.518 seconds on that amendment. Root accepted focused/clean verification of this
+label-only change instead of another full check; no assertion/control-flow change
+occurred. The earlier 883-test log remains historical evidence.
+Test-only executable `a22f4e5797897605657054d9f248d60feffaac87`, tree `375a23ec93e55045bfafc0d98d9b66b6c1a8abbe`, was frozen before
+`/tmp/ui04-ci19-review-clean-capture.log` passed 1/1 in 3.419 seconds.
+The clean run records 32 milestones and zero omitted events. All execution/
+overall/cleanup phases complete, with no omitted diagnostics/screenshots/evidence
+failures; existing console markers remain intentional failure/auth paths. Exact
+five affected image hashes and manifest identities are in
+`/tmp/ui04-ci19-review-screenshots.json`, while prior captures keep their original
+source attribution. The failure-category branch is reviewable code, not a newly
+executed local fault-injection claim.
+
+The product bundle remains SHA256
+`68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
+All 15 acceptance rows and both ledgers agree at 883 current tests. There was no
+product, harness, timeout, retry, sleep, live, remote or authority change.
