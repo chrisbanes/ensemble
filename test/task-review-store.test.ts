@@ -85,6 +85,8 @@ function fixture() {
       "Fixture work preparation",
       workId,
     );
+    const batch = stores.c.bindDeliveryBatch(assignmentId, workId);
+    if (batch) stores.c.completeDeliveryBatch(workId);
     return { workId, threadId, turnId };
   }
   return {
@@ -603,6 +605,193 @@ test("upgrade population rolls back missing source and review/index writes then 
         .prepare("SELECT excerpt FROM task_review_search WHERE recordId=?")
         .get(result.resultId)?.excerpt,
       "",
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("maximum bounded review callback discovers exclusions once and rejects a private later-tail field atomically", () => {
+  const f = fixture();
+  try {
+    const w = f.work(),
+      metadata = {
+        validations: Array.from({ length: 128 }, (_, i) => ({
+          label: `Check ${i}`,
+          outcome: "passed" as const,
+          scope: "Recorded scope",
+          provenance: "Fixture producer",
+        })),
+        artifacts: Array.from({ length: 64 }, (_, i) => ({
+          artifactId: randomUUID(),
+          label: `Artifact ${i}`,
+          role: "evidence" as const,
+          revision: 1,
+          availability: "unavailable" as const,
+        })),
+        changes: {
+          files: Array.from({ length: 128 }, (_, i) => `file-${i}.ts`),
+          findings: Array.from({ length: 128 }, (_, i) => ({
+            finding: `Finding ${i}`,
+          })),
+        },
+        decisions: Array.from({ length: 128 }, (_, i) => ({
+          text: `Decision ${i}`,
+          attribution: "Lead",
+        })),
+      };
+    const prepare = f.db.prepare.bind(f.db);
+    let discoveries = 0;
+    f.db.prepare = (sql) => {
+      if (
+        sql.includes(
+          "UNION ALL SELECT instructions FROM project_instruction_revisions",
+        )
+      )
+        discoveries++;
+      return prepare(sql);
+    };
+    const call = {
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "Maximum recorded review", review: metadata },
+    };
+    const rejected = structuredClone(call);
+    rejected.arguments.review.decisions[127]!.text =
+      "PRIVATE INSTRUCTIONS tail";
+    assert.throws(() => f.stores.c.recordResult(rejected), /excluded material/);
+    assert.equal(discoveries, 1);
+    assert.equal(f.stores.c.results(f.taskId).length, 0);
+    assert.equal(
+      f.db.prepare("SELECT COUNT(*) AS n FROM task_review_artifact_ids").get()
+        ?.n,
+      0,
+    );
+    discoveries = 0;
+    const result = f.stores.c.recordResult(call);
+    assert.equal(discoveries, 1);
+    assert.equal(f.stores.c.recordResult(call).replayed, true);
+    assert.equal(discoveries, 1);
+    assert.equal(
+      f.stores.review.result(f.taskId, result.result.resultId)?.metadata
+        .artifacts.length,
+      64,
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("artifact identity migration preserves bytes, rolls back conflicting owners and uses an indexed point lookup", () => {
+  const f = fixture();
+  try {
+    const id = randomUUID(),
+      artifact = {
+        artifactId: id,
+        label: "Retained identity",
+        role: "evidence" as const,
+        revision: 1,
+        availability: "unavailable" as const,
+      },
+      w = f.work();
+    const first = f.stores.c.recordResult({
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "Owner one", review: { artifacts: [artifact] } },
+    }).result;
+    const v = f.work();
+    const second = f.stores.c.recordResult({
+      threadId: v.threadId,
+      turnId: v.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "Owner two", review: {} },
+    }).result;
+    for (let index = 0; index < 128; index++) {
+      const owned = f.work();
+      f.stores.c.recordResult({
+        threadId: owned.threadId,
+        turnId: owned.turnId,
+        callId: randomUUID(),
+        tool: "ensemble_report_result",
+        arguments: {
+          summary: `Corpus ${index}`,
+          review: { artifacts: [{ ...artifact, artifactId: randomUUID() }] },
+        },
+      });
+    }
+    assert.equal(
+      f.db.prepare("SELECT COUNT(*) AS n FROM task_review_artifact_ids").get()
+        ?.n,
+      129,
+    );
+    const original = f.db
+      .prepare("SELECT recordJson FROM task_review_results WHERE resultId=?")
+      .get(second.resultId)!.recordJson as string;
+    const conflict = JSON.parse(original);
+    conflict.metadata.artifacts = [artifact];
+    f.db
+      .prepare("UPDATE task_review_results SET recordJson=? WHERE resultId=?")
+      .run(JSON.stringify(conflict), second.resultId);
+    f.db.exec("DELETE FROM task_review_artifact_ids");
+    assert.throws(
+      () => f.stores.c.migrate(),
+      /Conflicting retained artifact identity/,
+    );
+    assert.equal(
+      f.db.prepare("SELECT COUNT(*) AS n FROM task_review_artifact_ids").get()
+        ?.n,
+      0,
+    );
+    f.db
+      .prepare("UPDATE task_review_results SET recordJson=? WHERE resultId=?")
+      .run(original, second.resultId);
+    f.stores.c.migrate();
+    const rows = f.db.prepare("SELECT * FROM task_review_artifact_ids").all();
+    f.reopen();
+    assert.deepEqual(
+      f.db.prepare("SELECT * FROM task_review_artifact_ids").all(),
+      rows,
+    );
+    assert.equal(
+      f.stores.review.artifactOwner(f.taskId, id)?.resultId,
+      first.resultId,
+    );
+    const plan = f.db
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT resultId,taskId FROM task_review_artifact_ids WHERE artifactId=?",
+      )
+      .all(id) as { detail: string }[];
+    assert.ok(
+      plan.some((r) =>
+        /SEARCH task_review_artifact_ids USING INDEX/.test(r.detail),
+      ),
+    );
+    assert.ok(!plan.some((r) => /SCAN/.test(r.detail)));
+    console.info("artifact-identity-query-plan", JSON.stringify(plan));
+    const bad = f.work();
+    assert.throws(
+      () =>
+        f.stores.c.recordResult({
+          threadId: bad.threadId,
+          turnId: bad.turnId,
+          callId: randomUUID(),
+          tool: "ensemble_report_result",
+          arguments: {
+            summary: "Duplicate owner",
+            review: { artifacts: [artifact] },
+          },
+        }),
+      /already recorded/,
+    );
+    assert.equal(f.stores.c.results(f.taskId).length, 130);
+    assert.deepEqual(
+      f.db.prepare("SELECT * FROM task_review_artifact_ids").all(),
+      rows,
     );
   } finally {
     f.close();

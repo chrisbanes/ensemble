@@ -8,6 +8,7 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { TaskReviewStore } from "../src/core/task-review.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-review");
@@ -719,6 +720,72 @@ test("partial literal checklist coverage remains explicit with collapsed and exp
     .getByText(partial, { exact: true })
     .scrollIntoViewIfNeeded();
   await captureBrowserEvidence(page, "390-partial-checklist-coverage", {
+    fullPage: false,
+  });
+});
+
+test("bounded captured context warns with exact omitted count while pinning an old result on desktop and phone", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f, "Context coverage");
+  const old = a.result("Old exact context", { sourceId: a.source.sourceId });
+  for (let i = 0; i < 270; i++)
+    f.service
+      .taskReview()
+      .captureAssignment(
+        a.assignmentId,
+        `Captured preparation ${i}`,
+        `unstarted-${i}`,
+      );
+  const core = f.service
+    .taskReview()
+    .read(a.taskId, { resultId: old.resultId });
+  assert.equal(core.contexts.length, 256);
+  assert.ok(core.contexts.some((c) => c.workId === old.workId));
+  assert.equal(core.contextsOmittedCount, 16);
+  const read = await new OperatorApi(f.service, [f.directory]).readTask(
+    a.taskId,
+    { resultId: old.resultId },
+  );
+  assert.equal(read.data.review?.contextsOmittedCount, 16);
+  f.seedPersistedState((db) => {
+    const reopened = new TaskReviewStore(db).read(a.taskId, {
+      resultId: old.resultId,
+    });
+    assert.equal(reopened.contextsOmittedCount, 16);
+    assert.ok(reopened.contexts.some((c) => c.workId === old.workId));
+  });
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(
+    `${web.origin}/app/tasks/${a.taskId}?result=${old.resultId}&section=context`,
+  );
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const warning = page.getByText(
+    "Partial captured context coverage: 16 retained preparation records are not shown.",
+    { exact: true },
+  );
+  await warning.waitFor();
+  await warning.scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "1366-context-coverage", {
+    fullPage: false,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await warning.scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "390-context-coverage", {
     fullPage: false,
   });
 });

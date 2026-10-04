@@ -173,6 +173,7 @@ export const taskReviewReadSchema = z
   .object({
     sources: z.array(sourceSnapshotSchema).max(128),
     contexts: z.array(contextCaptureSchema).max(256),
+    contextsOmittedCount: z.number().int().nonnegative(),
     results: z.array(resultReviewSchema).max(128),
     viewed: viewedReferenceSchema.nullable(),
     coverage: z.literal("retained-records-only"),
@@ -185,6 +186,7 @@ export class TaskReviewStore {
     this.db.exec(`CREATE TABLE IF NOT EXISTS task_review_sources(sourceId TEXT PRIMARY KEY,taskId TEXT NOT NULL REFERENCES domain_tasks(id),projectId TEXT NOT NULL,revision INTEGER NOT NULL,recordJson TEXT NOT NULL,UNIQUE(taskId,revision));
  CREATE TABLE IF NOT EXISTS task_review_contexts(captureId TEXT PRIMARY KEY,taskId TEXT NOT NULL REFERENCES domain_tasks(id),assignmentId TEXT NOT NULL REFERENCES domain_assignments(id),assignmentVersion INTEGER NOT NULL,workId TEXT,recordJson TEXT NOT NULL,UNIQUE(assignmentId,assignmentVersion,workId));
  CREATE TABLE IF NOT EXISTS task_review_results(resultId TEXT PRIMARY KEY REFERENCES coordination_results(resultId),taskId TEXT NOT NULL REFERENCES domain_tasks(id),recordJson TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS task_review_artifact_ids(artifactId TEXT PRIMARY KEY,resultId TEXT NOT NULL REFERENCES task_review_results(resultId) ON DELETE CASCADE,taskId TEXT NOT NULL REFERENCES domain_tasks(id));
  CREATE TABLE IF NOT EXISTS task_review_search(recordId TEXT PRIMARY KEY,taskId TEXT NOT NULL REFERENCES domain_tasks(id),projectId TEXT NOT NULL,type TEXT NOT NULL,sourceId TEXT,resultId TEXT,excerpt TEXT NOT NULL,createdAt INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS task_review_search_order ON task_review_search(createdAt,recordId);
  CREATE INDEX IF NOT EXISTS task_review_search_project ON task_review_search(projectId,type,createdAt,recordId);
@@ -314,6 +316,7 @@ export class TaskReviewStore {
           this.safe(String(row.summary)) ?? "",
           Number(row.createdAt) * 1000,
         );
+        this.indexArtifactIdentities(review);
         review.metadata.decisions.forEach((decision, index) => {
           const attribution = this.safe(decision.attribution),
             text = this.safe(decision.text);
@@ -338,20 +341,20 @@ export class TaskReviewStore {
       if (rows.length < 64) break;
     }
   }
-  private safe(value: string): string | null {
+  private exclusions(): string[] | undefined {
     const rows = this.db
       .prepare(
         "SELECT instructions FROM profile_revisions UNION ALL SELECT instructions FROM project_instruction_revisions LIMIT 257",
       )
       .all() as Row[];
-    if (rows.length > 256) return null;
+    if (rows.length > 256) return undefined;
     const excluded = rows.map((r) => String(r.instructions)).filter(Boolean);
     const refs = this.db
       .prepare(
         "SELECT credentialRef FROM project_routing UNION ALL SELECT credentialRef FROM project_github_sources LIMIT 257",
       )
       .all() as Row[];
-    if (refs.length > 256) return null;
+    if (refs.length > 256) return undefined;
     for (const ref of refs) {
       if (ref.credentialRef) {
         const name = String(ref.credentialRef).slice(4);
@@ -362,13 +365,13 @@ export class TaskReviewStore {
     const repositories = this.db
       .prepare("SELECT repositories FROM project_github_sources LIMIT 129")
       .all() as Row[];
-    if (repositories.length > 128) return null;
+    if (repositories.length > 128) return undefined;
     for (const row of repositories) {
       const repos = JSON.parse(String(row.repositories)) as {
         path?: string;
         gitCommonDirectory?: string;
       }[];
-      if (repos.length > 128) return null;
+      if (repos.length > 128) return undefined;
       for (const repo of repos)
         excluded.push(
           ...[repo.path, repo.gitCommonDirectory].filter((v): v is string =>
@@ -386,13 +389,13 @@ export class TaskReviewStore {
       const workspaces = this.db
         .prepare("SELECT path FROM task_workspace_bindings LIMIT 129")
         .all() as Row[];
-      if (workspaces.length > 128) return null;
+      if (workspaces.length > 128) return undefined;
       excluded.push(...workspaces.map((w) => String(w.path)));
     }
     const policies = this.db
       .prepare("SELECT policyJson FROM delivery_policies LIMIT 129")
       .all() as Row[];
-    if (policies.length > 128) return null;
+    if (policies.length > 128) return undefined;
     for (const row of policies) {
       const policy = JSON.parse(String(row.policyJson)) as {
         credentialRef?: string;
@@ -407,7 +410,17 @@ export class TaskReviewStore {
     for (const [key, v] of Object.entries(process.env))
       if (/TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/.test(key) && v)
         excluded.push(v);
-    if (excluded.some((v) => value.includes(v))) return null;
+    return excluded;
+  }
+  private safe(
+    value: string,
+    snapshot: { excluded: readonly string[] | undefined } = {
+      excluded: this.exclusions(),
+    },
+  ): string | null {
+    const excluded = snapshot.excluded;
+    if (excluded === undefined || excluded.some((v) => value.includes(v)))
+      return null;
     const sanitized = value
       .replace(
         /((?:password|token|api[_-]?key|secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
@@ -567,6 +580,7 @@ export class TaskReviewStore {
     projectId: string,
     summary: string,
     createdAt: number,
+    snapshot?: { excluded: readonly string[] | undefined },
   ) {
     this.db
       .prepare(
@@ -579,7 +593,7 @@ export class TaskReviewStore {
         "result",
         null,
         resultId,
-        this.safe(summary) ?? "",
+        this.safe(summary, snapshot) ?? "",
         createdAt,
       );
   }
@@ -719,14 +733,37 @@ export class TaskReviewStore {
       throw Error("Review result identity mismatch");
     return record;
   }
-  artifactOwner(taskId: string, artifactId: string) {
-    const rows = this.db
-      .prepare(
-        "SELECT DISTINCT r.resultId FROM task_review_results r, json_each(r.recordJson,'$.metadata.artifacts') a WHERE r.taskId=? AND json_extract(a.value,'$.artifactId')=? LIMIT 2",
+  private indexArtifactIdentities(record: z.infer<typeof resultReviewSchema>) {
+    if (
+      new Set(record.metadata.artifacts.map((a) => a.artifactId)).size !==
+      record.metadata.artifacts.length
+    )
+      throw Error("Duplicate retained artifact identity");
+    for (const artifact of record.metadata.artifacts) {
+      const prior = this.db
+        .prepare(
+          "SELECT resultId,taskId FROM task_review_artifact_ids WHERE artifactId=?",
+        )
+        .get(artifact.artifactId) as Row | undefined;
+      if (
+        prior &&
+        (prior.resultId !== record.resultId || prior.taskId !== record.taskId)
       )
-      .all(taskId, artifactId) as Row[];
-    if (rows.length !== 1) return undefined;
-    const record = this.result(taskId, String(rows[0]?.resultId));
+        throw Error("Conflicting retained artifact identity");
+      if (!prior)
+        this.db
+          .prepare("INSERT INTO task_review_artifact_ids VALUES(?,?,?)")
+          .run(artifact.artifactId, record.resultId, record.taskId);
+    }
+  }
+  artifactOwner(taskId: string, artifactId: string) {
+    const owner = this.db
+      .prepare(
+        "SELECT resultId,taskId FROM task_review_artifact_ids WHERE artifactId=?",
+      )
+      .get(artifactId) as Row | undefined;
+    if (!owner || owner.taskId !== taskId) return undefined;
+    const record = this.result(taskId, String(owner.resultId));
     return record?.metadata.artifacts.filter((a) => a.artifactId === artifactId)
       .length === 1
       ? record
@@ -744,6 +781,7 @@ export class TaskReviewStore {
     input: unknown,
   ) {
     const metadata = reviewMetadataSchema.parse(input);
+    const snapshot = { excluded: this.exclusions() };
     if (
       new Set(metadata.criteria.map((c) => c.criterionId)).size !==
       metadata.criteria.length
@@ -792,9 +830,7 @@ export class TaskReviewStore {
         throw Error("Unsafe artifact path");
       if (
         this.db
-          .prepare(
-            "SELECT 1 FROM task_review_results r, json_each(r.recordJson,'$.metadata.artifacts') a WHERE json_extract(a.value,'$.artifactId')=? LIMIT 1",
-          )
+          .prepare("SELECT 1 FROM task_review_artifact_ids WHERE artifactId=?")
           .get(artifact.artifactId)
       )
         throw Error("Artifact identity already recorded");
@@ -823,7 +859,7 @@ export class TaskReviewStore {
     ];
     if (
       suppliedText.some(
-        (value) => value !== undefined && this.safe(value) !== value,
+        (value) => value !== undefined && this.safe(value, snapshot) !== value,
       )
     )
       throw Error("Review metadata contains excluded material");
@@ -838,6 +874,7 @@ export class TaskReviewStore {
     this.db
       .prepare("INSERT INTO task_review_results VALUES(?,?,?)")
       .run(result.resultId, result.taskId, JSON.stringify(record));
+    this.indexArtifactIdentities(record);
     const row = this.db
       .prepare(
         "SELECT projectId,summary,createdAt FROM coordination_results JOIN domain_tasks ON coordination_results.taskId=domain_tasks.id WHERE resultId=?",
@@ -847,8 +884,9 @@ export class TaskReviewStore {
       result.resultId,
       result.taskId,
       String(row.projectId),
-      this.safe(String(row.summary)) ?? "",
+      this.safe(String(row.summary), snapshot) ?? "",
       Number(row.createdAt) * 1000,
+      snapshot,
     );
     metadata.decisions.forEach((decision, index) => {
       this.db
@@ -936,7 +974,24 @@ export class TaskReviewStore {
           )
           .all(taskId, ...ids, limit) as Row[]
       ).sort((a, b) => Number(a.ordering) - Number(b.ordering));
+    const contexts = rows(
+      "task_review_contexts",
+      "captureId",
+      256,
+      context ? [context.captureId] : [],
+    ).map((r) => contextCaptureSchema.parse(JSON.parse(String(r.recordJson))));
+    const contextCount = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_review_contexts WHERE taskId=?",
+          )
+          .get(taskId) as Row
+      ).count,
+    );
     return taskReviewReadSchema.parse({
+      contextsOmittedCount:
+        contextCount - new Set(contexts.map((c) => c.captureId)).size,
       sources: rows(
         "task_review_sources",
         "sourceId",
@@ -946,14 +1001,7 @@ export class TaskReviewStore {
       ).map((r) =>
         sourceSnapshotSchema.parse(JSON.parse(String(r.recordJson))),
       ),
-      contexts: rows(
-        "task_review_contexts",
-        "captureId",
-        256,
-        context ? [context.captureId] : [],
-      ).map((r) =>
-        contextCaptureSchema.parse(JSON.parse(String(r.recordJson))),
-      ),
+      contexts,
       results: rows(
         "task_review_results",
         "resultId",

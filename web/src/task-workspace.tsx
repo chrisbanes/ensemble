@@ -1108,6 +1108,12 @@ export function TaskWorkspace({
           current configuration. Availability is not proof that an agent read
           it.
         </p>
+        {!!review?.contextsOmittedCount && (
+          <p role="status">
+            Partial captured context coverage: {review.contextsOmittedCount}{" "}
+            retained preparation records are not shown.
+          </p>
+        )}
         {review?.contexts.length ? (
           review.contexts.map((c) => (
             <div key={c.captureId} data-record-id={c.captureId}>

@@ -1,3 +1,4 @@
+import { SqliteWorkspaceBindingStore } from "../src/standalone/workspaces.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -963,4 +964,70 @@ test("ordinary service upgrade from missing review tables exposes retained sourc
     ).data.matches.length,
     2,
   );
+});
+
+test("second yielding search excludes matches after same-version repository visibility changes", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(
+    f,
+    "Binding visibility",
+    "/newly/protected/git-common-dir",
+  );
+  a.result("/newly/protected/git-common-dir result");
+  const binding = await f.service.taskWorkspace(a.taskId);
+  assert.ok(binding);
+  f.seedPersistedState((db) =>
+    db
+      .prepare(
+        "UPDATE task_workspace_bindings SET repositories=? WHERE taskId=?",
+      )
+      .run(
+        JSON.stringify([
+          {
+            repositoryId: "repository",
+            sourcePath: "/retained/source",
+            workspacePath: binding.path,
+            ref: "main",
+            gitCommonDir: null,
+            commit: null,
+          },
+        ]),
+        a.taskId,
+      ),
+  );
+  const originalWorkspace = f.service.taskWorkspace.bind(f.service);
+  f.service.taskWorkspace = async () => binding;
+  const store = f.service.taskReview(),
+    original = store.search.bind(store),
+    factory = f.service.taskReview.bind(f.service);
+  f.service.taskReview = () => store;
+  t.after(() => {
+    f.service.taskReview = factory;
+    f.service.taskWorkspace = originalWorkspace;
+  });
+  const version = f.service.domain().task(a.taskId).version;
+  let scans = 0;
+  store.search = async (input) => {
+    const rows = await original(input);
+    if (++scans === 2)
+      f.seedPersistedState((db) =>
+        new SqliteWorkspaceBindingStore(db).bindRepository(
+          a.taskId,
+          "repository",
+          "/newly/protected/git-common-dir",
+          "b".repeat(40),
+        ),
+      );
+    return rows;
+  };
+  const read = await new OperatorApi(f.service, [f.directory]).readSearch(
+    new URLSearchParams({
+      query: "/newly/protected/git-common-dir",
+      historical: "true",
+    }),
+  );
+  assert.equal(read.data.matches.length, 0);
+  assert.equal(scans, 2);
+  assert.equal(f.service.domain().task(a.taskId).version, version);
 });

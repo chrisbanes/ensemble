@@ -3,6 +3,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { SqliteWorkspaceBindingStore } from "../src/standalone/workspaces.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
@@ -526,6 +527,104 @@ test("awaited actual recorded artifact GET revalidates exact session on logout a
       release();
       await pending;
       OperatorApi.prototype.readArtifact = original;
+    }
+  }
+});
+
+test("all curated task entry points reject same-version workspace binding changes after an awaited read", async (t) => {
+  for (const kind of [
+    "task",
+    "review",
+    "history",
+    "list",
+    "project",
+    "composer",
+    "settings",
+    "recovery",
+  ]) {
+    const f = await createOperatorFixture();
+    try {
+      const a = await seedReviewTask(
+        f,
+        "Binding visibility",
+        "/newly/protected/git-common-dir",
+      );
+      a.result("Retained safe result");
+      const api = new OperatorApi(f.service, [f.directory]);
+      const read = () =>
+        kind === "task"
+          ? api.readTask(a.taskId)
+          : kind === "review"
+            ? api.readReview(a.taskId)
+            : kind === "history"
+              ? api.readAssignmentHistory(a.assignmentId)
+              : kind === "list"
+                ? api.readTaskListPage()
+                : kind === "project"
+                  ? api.readProject(a.projectId)
+                  : kind === "composer"
+                    ? api.readComposerOptions(a.projectId)
+                    : kind === "settings"
+                      ? api.readRuntimeSettings()
+                      : api.readAssignmentRecovery(a.assignmentId);
+      await read();
+      const binding = await f.service.taskWorkspace(a.taskId);
+      assert.ok(binding);
+      f.seedPersistedState((db) =>
+        db
+          .prepare(
+            "UPDATE task_workspace_bindings SET repositories=? WHERE taskId=?",
+          )
+          .run(
+            JSON.stringify([
+              {
+                repositoryId: "repository",
+                sourcePath: "/retained/source",
+                workspacePath: binding.path,
+                ref: "main",
+                gitCommonDir: null,
+                commit: null,
+              },
+            ]),
+            a.taskId,
+          ),
+      );
+      const version = f.service.domain().task(a.taskId).version;
+      const original = f.service.taskWorkspace.bind(f.service);
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let calls = 0;
+      f.service.taskWorkspace = async (id) => {
+        if (id === a.taskId && ++calls === (kind === "recovery" ? 2 : 1)) {
+          entered();
+          await gate;
+        }
+        return binding;
+      };
+      const pending = read();
+      await entry;
+      f.seedPersistedState((db) =>
+        new SqliteWorkspaceBindingStore(db).bindRepository(
+          a.taskId,
+          "repository",
+          "/newly/protected/git-common-dir",
+          "a".repeat(40),
+        ),
+      );
+      assert.equal(f.service.domain().task(a.taskId).version, version);
+      release();
+      await assert.rejects(pending, /unavailable/, kind);
+      f.service.taskWorkspace = original;
+      t.diagnostic(
+        `${kind}: unchanged binding passed; same-version binding change rejected`,
+      );
+    } finally {
+      await f.close();
     }
   }
 });

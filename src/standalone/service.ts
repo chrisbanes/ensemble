@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   materialDigest,
   isOperatorDeliveryCaller,
@@ -1181,6 +1182,28 @@ export class StandaloneService {
     return binding;
   }
 
+  taskWorkspaceVisibility(taskId: string) {
+    if (!this.workspaceBindings) throw Error("Service not started");
+    const binding = this.workspaceBindings.get(taskId);
+    return createHash("sha256")
+      .update(
+        JSON.stringify(
+          binding
+            ? {
+                workspaceId: binding.workspaceId,
+                path: binding.path,
+                repositories: binding.repositories.map((r) => [
+                  r.repositoryId,
+                  r.sourcePath,
+                  r.workspacePath,
+                  r.gitCommonDir,
+                ]),
+              }
+            : null,
+        ),
+      )
+      .digest("hex");
+  }
   taskWorkspace(taskId: string) {
     this.domain().task(taskId);
     return this.requireWorkspaces().get(taskId);

@@ -411,33 +411,45 @@ export class OperatorApi {
         }
       : null;
   }
+  private workspaceSnapshot(taskIds: readonly string[]) {
+    return new Map(
+      taskIds.map((id) => [id, this.service.taskWorkspaceVisibility(id)]),
+    );
+  }
+  private requireWorkspaceSnapshot(snapshot: ReadonlyMap<string, string>) {
+    for (const [id, fingerprint] of snapshot)
+      if (this.service.taskWorkspaceVisibility(id) !== fingerprint)
+        throw new OperatorApiError(503, "unavailable");
+  }
   async readProject(projectId: string) {
     const p = this.requireProject(projectId),
+      rows = this.domain().tasks(projectId),
+      snapshot = this.workspaceSnapshot(rows.map((t) => String(t.id))),
       excluded = await this.exclusions(projectId);
-    return projectSchema.parse({
+    const response = {
       data: {
         project: this.project(p, excluded),
         profiles: this.profiles(excluded),
         tasks: await Promise.all(
-          this.domain()
-            .tasks(projectId)
-            .map(async (t) => ({
-              id: String(t.id),
-              projectId,
-              title: this.safe(
-                t.title,
-                await this.exclusions(projectId, String(t.id)),
-              ),
-              version: Number(t.version),
-              state: t.state,
-              ready: Boolean(t.ready),
-              execution: this.execution(t),
-              sourceIdentity: this.identity(String(t.id)),
-            })),
+          rows.map(async (t) => ({
+            id: String(t.id),
+            projectId,
+            title: this.safe(
+              t.title,
+              await this.exclusions(projectId, String(t.id)),
+            ),
+            version: Number(t.version),
+            state: t.state,
+            ready: Boolean(t.ready),
+            execution: this.execution(t),
+            sourceIdentity: this.identity(String(t.id)),
+          })),
         ),
       },
       observedAt: Date.now(),
-    });
+    };
+    this.requireWorkspaceSnapshot(snapshot);
+    return projectSchema.parse(response);
   }
   private capacity(projectId: string) {
     const c = this.domain().capacityLimits([projectId]);
@@ -608,10 +620,13 @@ export class OperatorApi {
       : -1;
     if (query.cursor && index < 0)
       throw new OperatorApiError(400, "invalid-input");
-    const page = catalog.slice(index + 1, index + 1 + query.limit);
+    const page = catalog.slice(index + 1, index + 1 + query.limit),
+      snapshot = this.workspaceSnapshot(page.map((t) => t.id)),
+      tasks = await Promise.all(page.map((t) => this.taskSummary(t.id)));
+    this.requireWorkspaceSnapshot(snapshot);
     return taskListPageSchema.parse({
       data: {
-        tasks: await Promise.all(page.map((t) => this.taskSummary(t.id))),
+        tasks,
         nextCursor:
           index + 1 + page.length < catalog.length
             ? (page.at(-1)?.id ?? null)
@@ -626,6 +641,9 @@ export class OperatorApi {
       d = this.domain(),
       catalog = d.taskCatalog();
     if (catalog.length > 10000) throw new OperatorApiError(503, "unavailable");
+    const snapshot = this.workspaceSnapshot(
+      catalog.filter((t) => t.projectId === projectId).map((t) => t.id),
+    );
     const excluded = await this.exclusions(projectId);
     const permitted = new Set(
       d.routingCandidates(projectId).map((p) => String(p.profileId)),
@@ -654,6 +672,7 @@ export class OperatorApi {
           };
         }),
     );
+    this.requireWorkspaceSnapshot(snapshot);
     return composerOptionsSchema.parse({
       data: {
         project: this.project(p, excluded),
@@ -732,6 +751,7 @@ export class OperatorApi {
     } = {},
   ) {
     const visibility = this.visibilityToken();
+    const workspaceVisibility = this.service.taskWorkspaceVisibility(taskId);
     const t = this.requireTask(taskId),
       projectId = String(t.projectId),
       d = this.domain(),
@@ -954,6 +974,7 @@ export class OperatorApi {
     };
     if (
       visibility !== this.visibilityToken() ||
+      workspaceVisibility !== this.service.taskWorkspaceVisibility(taskId) ||
       this.requireTask(taskId).version !== t.version
     )
       throw new OperatorApiError(503, "unavailable");
@@ -1065,6 +1086,9 @@ export class OperatorApi {
             .assignments(String(task.id))
             .some((a) => a.id === assignmentId)
         ) {
+          const workspaceVisibility = this.service.taskWorkspaceVisibility(
+            String(task.id),
+          );
           const history = this.coordination().readAssignmentHistory(
             assignmentId,
             beforeSequence,
@@ -1077,6 +1101,8 @@ export class OperatorApi {
           );
           if (
             visibility !== this.visibilityToken() ||
+            workspaceVisibility !==
+              this.service.taskWorkspaceVisibility(String(task.id)) ||
             this.requireTask(String(task.id)).version !== task.version
           )
             throw new OperatorApiError(503, "unavailable");
@@ -1084,7 +1110,7 @@ export class OperatorApi {
             data: {
               ...history,
               visibilityRevision: createHash("sha256")
-                .update(`${visibility}:${task.version}`)
+                .update(`${visibility}:${task.version}:${workspaceVisibility}`)
                 .digest("hex"),
               items: history.items.map((item) => {
                 if (item.lifecycle !== "completed") return item;
@@ -1321,11 +1347,13 @@ export class OperatorApi {
     } = {},
   ) {
     const visibility = this.visibilityToken();
+    const workspaceVisibility = this.service.taskWorkspaceVisibility(taskId);
     const t = this.requireTask(taskId),
       excluded = await this.exclusions(String(t.projectId), taskId);
     const data = await this.reviewProjection(taskId, excluded, selection);
     if (
       visibility !== this.visibilityToken() ||
+      workspaceVisibility !== this.service.taskWorkspaceVisibility(taskId) ||
       this.requireTask(taskId).version !== t.version
     )
       throw new OperatorApiError(503, "unavailable");
@@ -1343,13 +1371,19 @@ export class OperatorApi {
       throw new OperatorApiError(503, "unavailable");
     const page = rows.slice(0, query.limit),
       matches = [],
-      versions = new Map<string, number>();
+      versions = new Map<string, number>(),
+      workspaceVisibilities = new Map<string, string>();
     let omittedCount = 0;
     for (const row of page) {
       try {
         const taskId = String(row.taskId),
           t = this.requireTask(taskId),
           p = this.requireProject(String(t.projectId)),
+          workspaceVisibility = this.service.taskWorkspaceVisibility(taskId),
+          snapshot = workspaceVisibilities.has(taskId)
+            ? workspaceVisibilities.get(taskId)!
+            : (workspaceVisibilities.set(taskId, workspaceVisibility),
+              workspaceVisibility),
           excluded = await this.exclusions(String(t.projectId), taskId),
           view = this.coordination().readTask(taskId),
           resultId = row.resultId === null ? null : String(row.resultId),
@@ -1377,6 +1411,10 @@ export class OperatorApi {
           (query.projectId && current.projectId !== query.projectId)
         )
           throw new OperatorApiError(503, "unavailable");
+        if (snapshot !== this.service.taskWorkspaceVisibility(taskId)) {
+          omittedCount++;
+          continue;
+        }
         const excerpt = this.safe(row.excerpt, excluded);
         if (
           !retained ||
@@ -1439,6 +1477,8 @@ export class OperatorApi {
         const current = this.requireTask(m.taskId);
         if (
           Number(current.version) !== versions.get(m.taskId) ||
+          workspaceVisibilities.get(m.taskId) !==
+            this.service.taskWorkspaceVisibility(m.taskId) ||
           String(current.projectId) !== m.projectId ||
           (query.projectId && String(current.projectId) !== query.projectId)
         )
@@ -1471,6 +1511,8 @@ export class OperatorApi {
     try {
       return await previewRecordedArtifact(async () => {
         const visibility = this.visibilityToken();
+        const workspaceVisibility =
+          this.service.taskWorkspaceVisibility(taskId);
         const t = this.requireTask(taskId),
           excluded = await this.exclusions(String(t.projectId), taskId),
           workspace = await this.service.taskWorkspace(taskId);
@@ -1481,6 +1523,8 @@ export class OperatorApi {
           );
         if (
           visibility !== this.visibilityToken() ||
+          workspaceVisibility !==
+            this.service.taskWorkspaceVisibility(taskId) ||
           !workspace ||
           workspace.state !== "ready" ||
           !record ||
@@ -1495,6 +1539,7 @@ export class OperatorApi {
           identity: JSON.stringify({
             taskId,
             taskVersion: current.version,
+            workspaceVisibility,
             workspaceId: workspace.workspaceId,
             workspaceState: workspace.state,
             resultId: record.resultId,
@@ -1610,9 +1655,12 @@ export class OperatorApi {
   async readRuntimeSettings() {
     const d = this.domain(),
       projects = d.projects(),
+      snapshot = this.workspaceSnapshot(
+        projects.flatMap((p) => d.tasks(String(p.id)).map((t) => String(t.id))),
+      ),
       excluded = await this.exclusions(),
       limits = this.service.capacityLimits(projects.map((p) => String(p.id)));
-    return runtimeSettingsSchema.parse({
+    const response = {
       data: {
         globalLimit: limits.globalLimit,
         defaultProjectLimit: limits.defaultProjectLimit,
@@ -1667,7 +1715,9 @@ export class OperatorApi {
         ),
       },
       observedAt: Date.now(),
-    });
+    };
+    this.requireWorkspaceSnapshot(snapshot);
+    return runtimeSettingsSchema.parse(response);
   }
   async readAssignmentRecovery(assignmentId: string) {
     uuid.parse(assignmentId);
@@ -1678,6 +1728,7 @@ export class OperatorApi {
     if (!entry) throw new OperatorApiError(404, "not-found");
     const taskId = entry.id,
       projectId = entry.projectId,
+      snapshot = this.workspaceSnapshot([taskId]),
       task = await this.readTask(taskId),
       assignment = task.data.assignments.find(
         (a) => a.assignmentId === assignmentId,
@@ -1719,6 +1770,7 @@ export class OperatorApi {
         "resolved-failed",
       ]),
       requestStates = new Set(["queued", "active", "completed", "held"]);
+    this.requireWorkspaceSnapshot(snapshot);
     return assignmentRecoverySchema.parse({
       data: {
         assignment,

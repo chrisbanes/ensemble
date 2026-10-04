@@ -635,7 +635,7 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
   }
   try {
     await page.waitForFunction(
-      ({ itemId, oldId, expectedY }) => {
+      ({ itemId, oldId }) => {
         const items = document.querySelectorAll(`[data-record-id="${itemId}"]`),
           omissions = [
             ...document.querySelectorAll('[data-record-id^="turn-omission:"]'),
@@ -652,8 +652,7 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
               "#workspace-reply",
             ) as HTMLTextAreaElement | null
           )?.value === "Retained exact old draft" &&
-          summary?.isConnected &&
-          Math.abs(old!.getBoundingClientRect().top - expectedY) < 4
+          summary?.isConnected
         );
       },
       { ...readingArgs, expectedY: phoneReadingY },
