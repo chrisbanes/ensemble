@@ -1,7 +1,7 @@
 {
   "version": 1,
   "issues": [745, 697],
-  "status": "offline qualification pending final check; sole live journey unqualified pending new root grant",
+  "status": "UI07 technical evidence complete; root independent integrated review and Chris final human review pending",
   "baseline": {
     "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
     "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
@@ -32,7 +32,7 @@
     "node": "24.21.0",
     "npm": "12.2.0",
     "installation": "passed",
-    "fullCheck": "pending",
+    "fullCheck": "passed",
     "fullCheckScope": "type checking, lint, formatting, service/web build, fixture preflight and complete deterministic suite",
     "failuresPreservedInPrivateDeliveryRecord": true,
     "passingHistoricalCandidate": {
@@ -45,7 +45,18 @@
       "skipped": 0,
       "testDurationMs": 62812.016458,
       "scope": "Passing before distinct visible review fixture replacement; final affected review/full check renewal required"
-    }
+    },
+    "sourceHead": "f455679ce62f6284fece21d6f8f454b2c4488db4",
+    "sourceTree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
+    "tests": 930,
+    "passed": 930,
+    "failed": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "testDurationMs": 61853.36125,
+    "fullCheckLogSha256": "f22fdaff1dd70dff52e920edf15fea0a0302e5838901e81c4a7e95e5a773b2ec",
+    "ciLogSha256": "33ecd62e8b8cbfb33a3d91e71d64f8af0891aa63bf387c5add4ce4e5f8e886d7",
+    "reuse": "Final packet changes after this passing candidate are documentation only; source/test/bundle identities unchanged"
   },
   "criteria": [
     {
@@ -55,7 +66,7 @@
         "test/operator-integrated-browser.test.ts",
         "test/ui07-live-harness.test.ts"
       ],
-      "disposition": "offline-final-check-pending"
+      "disposition": "technical-proof-passed"
     },
     {
       "id": "AC2",
@@ -66,7 +77,7 @@
         "test/runtime-question-service.test.ts",
         "test/s05-runtime-integration.test.ts"
       ],
-      "disposition": "live-pending"
+      "disposition": "technical-proof-passed"
     },
     {
       "id": "AC3",
@@ -103,7 +114,7 @@
         "test/runtime-question-service.test.ts",
         "test/ui07-live-harness.test.ts"
       ],
-      "disposition": "live-pending"
+      "disposition": "technical-proof-passed"
     },
     {
       "id": "AC6",
@@ -172,7 +183,7 @@
   ],
   "amendments": {
     "fullForms": "Deterministic complete Ensemble own-tool form schema/service/SQLite/production browser, including grouped/free/single/multiple/custom/optional/constraint cases",
-    "nativeLive": "One single-choice/custom-text native request with false/null continuation only; unsupported shapes remain unresolved",
+    "nativeLive": "One synchronous single-choice native request with false/null continuation; custom text conditional on native isOther, otherwise Local; actual mode flag not separately retained. Unsupported shapes remain unresolved.",
     "taskEvidence": "S1/R2/R3/S2 exact source/result/criterion/artifact relations, distinct local1040x480 synthetic PNG byte loads/previews and contextual feedback, recorded provider state; selected visible desktop/phone pictures have separate pair/revision/size/SHA identities",
     "search": "Exact historical R2 destinations and return/filter/selection/focus/draft/scroll restored in tests; selected desktop picture has historical enabled and R2/R3 links; phone picture has current-only matches",
     "foundation": "84 controls,15 destinations,42 forms,13 command discriminants,14 actions,23 extension routes; actual retained HTML/login/setup/recovery source scopes distinct",
@@ -180,13 +191,13 @@
   },
   "reuse": [
     {
-      "issue": 738,
+      "issue": 739,
       "document": "ui01-runtime-input.md",
       "source": "f0002f0a1b1dd899eb5423c8321565dafa324265",
       "scope": "Unchanged bounded native codec/continuation evidence; does not qualify changed UI07 browser create/answer boundary"
     },
     {
-      "issue": 739,
+      "issue": 742,
       "document": "ui04-task-workspace.md",
       "source": "f2be0a1a172229a78616274e779aa42855a549b8",
       "scope": "Task/evidence/search deterministic contracts; prior synthetic callback-only live not ordinary artifact producer proof; old grant consumed"
@@ -222,8 +233,8 @@
     ]
   },
   "live": {
-    "status": "not-attempted",
-    "attempts": 0,
+    "status": "passed",
+    "attempts": 1,
     "reportBridgeScope": "Exact native answer map consumption and real ensemble_report_result persistence, not ordinary model-authored artifact production",
     "limits": {
       "appServers": 1,
@@ -243,7 +254,27 @@
     "prompt": "Normal captured production executionPrompt with disposable profile/task outcome instructions; no override",
     "completion": "Exact successful bound terminal, ended callback, no independent hold, exact counts through inspection and cleanup",
     "persistence": "Ordinary project pause; independent read-only SQLite answer and command receipt commit before reply; ordinary unpause",
-    "cleanup": "Exact child process identity verification; no descendant containment claim"
+    "cleanup": "Exact child process identity verification; no descendant containment claim",
+    "manifest": "ui07/live-journey.json",
+    "sourceHead": "f455679ce62f6284fece21d6f8f454b2c4488db4",
+    "sourceTree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
+    "totalMs": 20920,
+    "counts": {
+      "threads": 1,
+      "turns": 1,
+      "requests": 1,
+      "replies": 1,
+      "reports": 1
+    },
+    "receiptOutcome": "confirmed",
+    "settlement": {
+      "exactBoundSuccessfulTerminal": true,
+      "callbackEnded": true,
+      "noOtherHold": true
+    },
+    "cleanupVerified": true,
+    "cleanupMethod": "mac-pid-absent-same-boot",
+    "resourceReleased": true
   },
   "failures": [
     {
@@ -290,5 +321,13 @@
     }
   ],
   "releaseReady": false,
-  "privacy": "No public grant/credential/configuration/database/raw history/process identity; selected pictures synthetic"
+  "privacy": "No public grant/credential/configuration/database/raw history/process identity; selected pictures synthetic",
+  "technicalQualification": {
+    "status": "ready-for-root-independent-review",
+    "criteria": 11,
+    "liveJourneySharedWith": [745, 697],
+    "humanAcceptance": false,
+    "providerIntegrationQualified": false,
+    "cutoverQualified": false
+  }
 }

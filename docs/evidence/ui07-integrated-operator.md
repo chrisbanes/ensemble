@@ -3,7 +3,7 @@
 The integrated browser path now creates a local task, records its exact native
 answer, and inspects the bound result using the production UI, authenticated
 service and persistent SQLite. Offline qualification uses a fake App Server.
-The sole live attempt is still pending a new root grant. Chris's final
+The sole finite live attempt passed in 20.920 seconds with verified cleanup. Chris's final
 visual/usability acceptance remains pending on [#736](https://github.com/chrisbanes/ensemble/issues/736).
 
 ## Candidate and evidence boundary
@@ -22,10 +22,30 @@ service/store fixtures. They do not supply runtime/provider qualification or
 physical-device acceptance. Raw databases, credentials, configuration, histories,
 process identities and grants are excluded from this packet.
 
+The qualified live source is `f455679ce62f6284fece21d6f8f454b2c4488db4`, tree
+`138c7271516d255f43ef4c4ede5d01acc8eea594`. Pinned Node `24.21.0` and npm
+`12.2.0` installation passed; the complete check passed **930/930 tests**, zero
+failures, cancellations or skips. The final packet only changes documentation
+from that candidate; its production/test/bundle input hashes remain unchanged.
+
+[The sanitized live manifest](ui07/live-journey.json) records Codex App Server
+`0.159.0`, executable SHA-256
+`e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a`,
+normal prepared prompt/context, exact counts and action timing. One thread, turn,
+native request, reply and exact-map report completed. A separate SQLite connection
+observed one committed answer and command receipt while native replies were zero.
+The ordered receipt confirmed after successful stdin write; the bridge received
+the exact answer map. The successful terminal was bound to that work, the callback
+ended and no independent hold remained through final browser inspection/cleanup.
+Browser, operator listener, authentication and service cleanup settled; exact
+process absence on the same boot verified cleanup. The disposable fixture was
+removed and the lead released the matching resource. No descendant containment or
+ordinary model-authored artifact-production claim follows from that result.
+
 ## Connected walkthrough
 
-1. Sign in, open New task, select the disposable project and Default project lead allocation, enter the
-   title and desired outcome, then explicitly choose Create and start. Task Ready
+1. Sign in, open New task, select the disposable project and Default project lead
+   allocation, enter the title and desired outcome, then explicitly choose Create and start. Task Ready
    is a creation receipt; execution status remains an independent observation.
 2. Open the task's exact request. The shared form preserves the requesting
    assignment/conversation and literal native question. Task, Inbox and direct
@@ -38,7 +58,8 @@ process identities and grants are excluded from this packet.
    report bridge to the real `ensemble_report_result` callback. Inspect the
    persisted result in the browser. One successful bound terminal, an ended
    callback and no independent hold are required through final inspection.
-5. Search from shared desktop/phone navigation or a task/workspace origin. Inspect
+5. In the separately qualified deterministic browser continuation, search from
+   shared desktop/phone navigation or a task/workspace origin. Inspect
    the exact historical result/section, then return with query, filters, selected
    match, reading anchor, workspace view and unsent drafts retained.
 
@@ -74,10 +95,10 @@ containment.
 | Acceptance | Concrete proof |
 | --- | --- |
 | AC1 pinned validation/reuse | Final `npm ci` / `npm run check` and exact input identities in the shared inventory. Historical evidence stays labelled with its own source. |
-| AC2 connected create/observe/answer/result and holds | `ui07-live-harness`, `operator-integrated-browser`, `runtime-question-service`, `s05-runtime-integration`; live attempt pending. |
+| AC2 connected create/observe/answer/result and holds | `ui07-live-harness`, `operator-integrated-browser`, `runtime-question-service`, `s05-runtime-integration`; one live journey passed. |
 | AC3 forms, List/Board, imported content, histories and expiry | `operator-question-browser`, `structured-question-store/service`, `operator-task-browser`, `operator-task-workspace-browser`, `operator-api` and `operator-web-browser`. |
 | AC4 keyboard/focus/layout/captures | Question, task, review, search, foundation and settings production browser suites; selected laptop/phone/reduced-height captures below. |
-| AC5 runtime/version/continuation/limits | UI01's unchanged native codec evidence; UI07's changed assembled boundary requires its own finite live proof. |
+| AC5 runtime/version/continuation/limits | UI01's unchanged native codec evidence and UI07's passed finite assembled native/browser proof. |
 | AC6 defects/blockers/human review | Repairs above, retained failed fixtures and current gate states in inventory; Chris review remains pending. |
 | AC7 attributable evidence/context/feedback/delivery | `operator-review-browser`, `task-review-store/service`, `delivery-operator/service`; real local bytes/receipts, recorded provider observations. |
 | AC8 search origins/history/return/errors | `operator-search-browser`, workspace/task browser suites; exact historical destinations and shared draft/selection restoration. |
@@ -88,8 +109,10 @@ containment.
 Full Ensemble forms have deterministic browser/service/SQLite proof for individual
 and grouped free text, single/multiple choice, literal IDs, descriptions,
 recommendations, custom permissions, optional empty answers and constraints.
-Native live scope remains one synchronous single-choice/custom-text round trip,
-with observed `isBlocking=false` and `autoResolutionMs=null`. Unsupported native
+Native live proof covers one synchronous single-choice round trip, with observed
+`isBlocking=false` and `autoResolutionMs=null`. Custom text was conditional on
+native `isOther` support, otherwise the harness selected Local; its actual mode
+flag was not separately retained. Unsupported native
 shapes remain unresolved. No new native free-text, multiple-selection,
 recommendation, grouped-live or comprehensive tool-history claim is made.
 
@@ -134,7 +157,8 @@ unchecked and shows current matches.
 
 ## Remaining gates
 
-The sole finite UI07 live journey remains grant-gated. The accepted limits are one
+The sole finite UI07 live journey passed once and is permanently consumed. Its
+accepted limits were one
 App Server/thread/turn/native request/reply/exact-map report, zero retries or
 follow-up/resume turns, a 90-second request deadline, 240-second total deadline
 including setup/readback, 10 seconds reserved for cleanup, and each action capped
