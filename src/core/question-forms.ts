@@ -110,10 +110,39 @@ export const questionFormSchema = z
       issue([], "Question payload exceeds limit");
   });
 export type QuestionForm = z.infer<typeof questionFormSchema>;
+const questionAnswerSchema = z
+  .object({ optionIds: z.array(identity).max(100), text: prose })
+  .strict();
+// Parse own entries explicitly: Zod record intentionally omits __proto__, which
+// is a supported literal question identity rather than a prototype operation.
 export const questionAnswersSchema = z
-  .record(
-    identity,
-    z.object({ optionIds: z.array(identity).max(100), text: prose }).strict(),
+  .unknown()
+  .transform(
+    (input, ctx): Record<string, z.infer<typeof questionAnswerSchema>> => {
+      if (input === null || typeof input !== "object" || Array.isArray(input)) {
+        ctx.addIssue({ code: "custom", message: "Expected answer dictionary" });
+        return z.NEVER;
+      }
+      const entries: Array<[string, z.infer<typeof questionAnswerSchema>]> = [];
+      let invalid = false;
+      for (const [id, value] of Object.entries(input)) {
+        const key = identity.safeParse(id),
+          answer = questionAnswerSchema.safeParse(value);
+        if (!key.success) {
+          invalid = true;
+          for (const issue of key.error.issues)
+            ctx.addIssue({ ...issue, path: [id, ...issue.path] });
+        }
+        if (!answer.success) {
+          invalid = true;
+          for (const issue of answer.error.issues)
+            ctx.addIssue({ ...issue, path: [id, ...issue.path] });
+        }
+        if (key.success && answer.success)
+          entries.push([key.data, answer.data]);
+      }
+      return invalid ? z.NEVER : Object.fromEntries(entries);
+    },
   )
   .superRefine((answers, ctx) => {
     if (
@@ -137,7 +166,7 @@ export function validateQuestionAnswers(
   )
     issue("", "Incomplete or unknown answer identities");
   for (const q of form.questions) {
-    const answer = answers[q.id];
+    const answer = Object.hasOwn(answers, q.id) ? answers[q.id] : undefined;
     if (!answer) {
       issue(
         q.id,

@@ -149,3 +149,51 @@ test("constraints reject required zero-capacity forms and custom text that canno
     { q: { optionIds: ["one"], text: "" } },
   );
 });
+
+test("literal prototype-shaped question IDs preserve supplied JSON entries and missing IDs produce field issues", () => {
+  const form = questionFormSchema.parse({
+    version: 1,
+    questions: ["__proto__", "constructor", "toString"].map((id) => ({
+      id,
+      kind: "free-text",
+      label: id,
+      required: true,
+    })),
+  });
+  const answers = Object.fromEntries(
+    form.questions.map((q) => [q.id, { optionIds: [], text: "Valid answer" }]),
+  );
+  const parsed = validateQuestionAnswers(
+    form,
+    JSON.parse(JSON.stringify(answers)),
+  );
+  assert.deepEqual(parsed, answers);
+  assert.equal(Object.hasOwn(parsed, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+  assert.throws(
+    () => validateQuestionAnswers(form, {}),
+    (error) =>
+      typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      error.name === "ZodError" &&
+      "issues" in error &&
+      (error.issues as Array<{ path: unknown[] }>).some(
+        (issue) => issue.path[0] === "__proto__",
+      ),
+  );
+  assert.throws(
+    () =>
+      validateQuestionAnswers(
+        form,
+        Object.create({
+          constructor: { optionIds: [], text: "Inherited answer" },
+        }),
+      ),
+    (error) =>
+      typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      error.name === "ZodError",
+  );
+});

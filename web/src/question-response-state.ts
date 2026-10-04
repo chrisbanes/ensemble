@@ -14,7 +14,7 @@ export class QuestionResponseState {
   readonly form: QuestionForm;
   readonly revision: number;
   answers: QuestionAnswers;
-  errors: Record<string, string> = {};
+  errors: Record<string, string> = Object.create(null);
   notice = "";
   sending = false;
   scrollTop = 0;
@@ -37,7 +37,7 @@ export class QuestionResponseState {
         );
   }
   validate() {
-    this.errors = {};
+    this.errors = Object.create(null);
     try {
       validateQuestionAnswers(this.form, this.answers);
       return true;

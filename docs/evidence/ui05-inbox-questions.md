@@ -18,22 +18,22 @@ Generated assets and disposable fixture databases are not committed.
 
 The final integrated validation is `npm run check` (type checking, lint,
 formatting, service/web builds and the complete deterministic test suite), followed
-by `git diff --check`. Final validation: 908/908 tests passed, zero failures/cancellations/skips; all
+by `git diff --check`. Final validation: 911/911 tests passed, zero failures/cancellations/skips; all
 required type/lint/format/build stages passed. Final complete log:
-`/tmp/ui05-final-check-7.log` (47.967 seconds for tests).
+`/tmp/ui05-prototype-full-check.log` (47.598 seconds for tests).
 No App Server/model/live/paid attempt was added by UI05. Browser evidence uses the
 production Vite bundle, real disposable SQLite and deterministic runtime doubles.
 
 | Changed source | SHA-256 |
 | --- | --- |
-| `src/core/question-forms.ts` | `3e8d8557b381a1b9555842cec33e6aebd6f7edea5a23dce9cfc53987a0051949` |
+| `src/core/question-forms.ts` | `7798a80cfc49964e3645fa3d00a6152c01d81edbee576efa7f54f19c387724d3` |
 | `src/core/coordination.ts` | `b07f11c5158ec2488adf3f93741feb127bfb2454fa82249732de9bbe78d81c9b` |
 | `src/standalone/operator-api.ts` | `553f8ec918046b20891d5b8e5ef1f0a3972d8b40db32644ecb15f491dd71d440` |
 | `src/standalone/operator.ts` | `48de0dede752441d0c2d78aa000773d09be5e981ac2d86cebb6c88df8779bc3e` |
 | `web/src/inbox.tsx` | `c33d94f0fff3f543c0799733426561bfd53218ab6caad25ed563827a050e375f` |
 | `web/src/question-response.tsx` | `83991c811c8e2f39b10df776b1a652d6086b1926f592a4a8deaf809ffcf60135` |
-| `web/src/question-response-state.ts` | `af75b581f260d1cb32a80c51fb9773a591f6c7770532be4f17ac303accb9d635` |
-| Generated `index-CYEx3Mhk.js` | `20d327146c7b2aca36853cb8f27326c413ac724c781dd9da3975df66f1f26891` |
+| `web/src/question-response-state.ts` | `572cab75387e5b5a11c2c12e23cde29961970f8497efd29b668a284cc343545a` |
+| Generated `index-Ddymzjxa.js` | `1332a1bd0dd2ef8418e9e3ce542b1c364429a1daa416228a49b298c2424dc02e` |
 
 ## Acceptance evidence
 
@@ -53,6 +53,21 @@ passive fixture modules.
 | AC7 / A12: exact conversation, SQLite/service/UI and qualified native reuse | Task/Inbox exact request views link the requesting assignment/conversation. Production mixed form records exactly once and keeps typed content. Curated native API adapts exact labels/custom values; deterministic grouped 32-question identity coverage remains distinct from live native shape qualification. See native evidence below. |
 | Post-await privacy/session boundaries | Entire unsafe form/answer is withheld rather than relabelling options. Exact form rechecks task/workspace/visibility after awaits. Inbox retains bounded catalog/workspace/task snapshots and rejects earlier-row workspace removal or task mutation while a later exclusion read is held. Authenticated held upload followed by logout finishes 401 with zero answer event/receipt/effect. Existing post-commit logout privacy checks retain the historical receipt while denying private output. |
 | Bounded transport / recovery | Same keepalive socket exercises canonical exactly-256-KiB answer plus strict derived envelope; raw overflow, whitespace/escape expansion, answer overflow and non-question 64-KiB overflow reject before persistence. Source refresh retains its prior raw limit. Rejected uploads drain after iterator listener cleanup; the exact socket remains usable for valid command/replay. Other route limits are unchanged. |
+
+## Literal question identity repair
+
+A bounded root probe found that Zod record parsing omitted a supplied `__proto__`
+key, and absent-key validation could read inherited prototype values. The follow-up
+preserves literal bounded IDs by validating each own dictionary entry and rebuilding
+with `Object.fromEntries`; absent answers use `Object.hasOwn`. Shared field errors
+use a null-prototype dictionary. Schema/state/API/SQLite tests cover supplied and
+missing `__proto__`, `constructor` and `toString`, exact readback and one-event
+receipt replay, without prototype mutation. The API JSON shape is unchanged.
+Runtime tool JSON-schema generation consumes the form argument schema, not this
+answer decoder, so its existing generated input schema remains supported. Native
+codec/adapter/delivery source remains unchanged. Original candidate
+`2a33f6019e6d08d6c73a6fd9f901c516c26476c9` and its 908-test check remain historical
+attribution in the delivery record; the repaired complete check is authoritative.
 
 ## Entry points and recovery
 
@@ -130,7 +145,7 @@ proof; the separate early recorded capture remains inconsistent paint evidence.
 
 | Capture | Viewport / observed state | SHA-256 |
 | --- | --- | --- |
-| `1366-inbox-draft.png` | 1366×900; populated summary queue, styled filters, exact draft | `c48ec09e2c7f2f89c756c9944bdea4ec47cfe66d7d2d0cda608a6041800cd3af` |
-| `390x480-inbox-draft.png` | 390×480; phone detail, draft and visible actions | `de63babee703f0d01243aef88b8e48d3ed8bab598e750bc6f341ebd593d3ec08` |
+| `1366-inbox-draft.png` | 1366×900; populated summary queue, styled filters, exact draft | `2de5b29544d3400c28d5123ff7b7b101b6056380c4233b718b3167bd74e3807b` |
+| `390x480-inbox-draft.png` | 390×480; phone detail, draft and visible actions | `5e0392d3490bfa9cfdfe1e961761e410270d8d981c00efd1f2bc95b2f6c2cfb0` |
 | `390x480-last-field.png` | 390×480; recorded task, full last field above readable actions | `e720ff1a424747c0f0fe1a09427eebb5fcfb225dcc17fd9c4c4423afbb3ff05b` |
-| `390x844-last-field.png` | 390×844; task field/actions | `61c8017dd4de077727065a99660601d981c253938e48544c13667d3551bd3912` |
+| `390x844-last-field.png` | 390×844; task field/actions | `939f8348dbfe4d47f3c1672316e93dce97c3cb803514564ac1300ee7d05357c7` |

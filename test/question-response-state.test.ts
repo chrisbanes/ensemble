@@ -74,3 +74,24 @@ test("oversized aggregate drafts remain editable and validation reports the aggr
   assert.equal(state.answers["0"]?.text, "Changed draft");
   assert.equal(state.lifecycle.bytes, null);
 });
+
+test("missing prototype-shaped IDs retain own field validation errors", () => {
+  const form = {
+      version: 1 as const,
+      questions: [
+        {
+          id: "__proto__",
+          kind: "free-text" as const,
+          label: "Literal",
+          required: true,
+        },
+      ],
+    },
+    state = new QuestionResponseStates().forQuestion({ ...data, form });
+  state.answers = {};
+  assert.equal(state.validate(), false);
+  assert.equal(Object.hasOwn(state.errors, "__proto__"), true);
+  assert.ok(state.errors.__proto__?.includes("required"));
+  state.setAnswer("__proto__", { optionIds: [], text: "Valid" });
+  assert.equal(state.validate(), true);
+});

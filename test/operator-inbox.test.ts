@@ -524,3 +524,50 @@ test("Inbox combines approval/question age across 100-row pages and exact select
     await f.close();
   }
 });
+
+test("own form prototype-shaped IDs survive curated command validation, SQLite receipt and exact readback", async () => {
+  const f = await createOperatorFixture();
+  try {
+    const form = {
+        version: 1 as const,
+        questions: ["__proto__", "constructor", "toString"].map((id) => ({
+          id,
+          kind: "free-text" as const,
+          label: id,
+          required: true,
+        })),
+      },
+      a = await seedOwnQuestion(f, form),
+      api = new OperatorApi(f.service, [f.directory]);
+    const answers = Object.fromEntries(
+        form.questions.map((q) => [
+          q.id,
+          { optionIds: [], text: `Exact ${q.id}` },
+        ]),
+      ),
+      command = {
+        type: "question.form.answer" as const,
+        key: randomUUID(),
+        taskId: a.taskId,
+        interactionId: a.interactionId,
+        expectedRevision: 1,
+        answers,
+      };
+    const receipt = await api.execute(JSON.parse(JSON.stringify(command)));
+    assert.equal(receipt.kind, "coordination");
+    assert.deepEqual(
+      (await api.readQuestion(a.taskId, a.interactionId)).data.answers,
+      answers,
+    );
+    assert.deepEqual(await api.execute(command), receipt);
+    assert.equal(
+      f.service
+        .coordinationView()
+        .readTask(a.taskId)
+        .messages.filter((m) => m.eventType === "question-answer").length,
+      1,
+    );
+  } finally {
+    await f.close();
+  }
+});
