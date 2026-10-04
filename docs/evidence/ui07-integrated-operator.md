@@ -121,9 +121,14 @@ The selected [populated Overview](ui07/1366-overview-attention-work.png),
 [reduced-height Inbox draft](ui07/390x480-inbox-draft.png),
 [sign-in](ui07/1366-signin.png) and
 [retained runtime controls](ui07/390-retained-runtime-controls.png) have inspected
-pixels and exact hashes in the manifest. Review pictures visibly show unavailable
-or redacted previews. Tests separately assert real local PNG byte loads before
-capture; these pictures do not claim visible artifact previews. Desktop search
+pixels and exact hashes in the manifest. Those original full-page review pictures
+used identical one-pixel PNGs; they prove byte transport and unavailable/redacted
+states, without representative visible comparison. Additional
+[desktop visible comparison](ui07/1366-visible-comparison.png) and
+[phone visible comparison](ui07/390-visible-comparison.png) use the existing distinct
+1040×480 synthetic design images as real local artifact bytes. Both show the
+focus-ring difference, pair/revision labels and contextual feedback controls. Their
+new source identities are separate in the manifest. Desktop search
 shows historical R2 and current R3 links; the phone picture has historical search
 unchecked and shows current matches.
 

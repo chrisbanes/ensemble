@@ -19,7 +19,10 @@
     "test/ui07-live-harness.test.ts": "f2e41fa0a6ea7574b4072e095004f0a62c5c2648092d9d20028f4a2772b2fc6c",
     "test/ui07/runtime-contract.mjs": "13fca5e87c7154a2064e86f55bb6f453b137fc9ca04f785d936a41edccba09f7",
     "test/ui07/fake-app-server.mjs": "0af45d8190bdd3be57148fdb368322337d3e38f826178d21d005bbf279d1c028",
-    "test/ui04/runtime-contract.mjs": "8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783"
+    "test/ui04/runtime-contract.mjs": "8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783",
+    "test/operator-review-browser.test.ts": "363849a299e1160fb705f327eed5ab9ed610d63136ea4ca8753bb21f214a7939",
+    "design/assets/command-menu-after.png": "ced77efa11396eb9ab2fcf4d3ee0e9e31cbe93c976699854add796340db7b4ab",
+    "design/assets/command-menu-before.png": "72a1f44bc131c5c454b3193f5450b1b9a468fefe3265cc58be1d6f82e16e5139"
   },
   "productionBundles": {
     "dist/operator/assets/index-QXFEB72c.css": "c777e8ce1f418a17dbf4d51c1ca89b488b25b26df4c794cc9cdb8eef763b99a0",
@@ -31,7 +34,18 @@
     "installation": "passed",
     "fullCheck": "pending",
     "fullCheckScope": "type checking, lint, formatting, service/web build, fixture preflight and complete deterministic suite",
-    "failuresPreservedInPrivateDeliveryRecord": true
+    "failuresPreservedInPrivateDeliveryRecord": true,
+    "passingHistoricalCandidate": {
+      "head": "d02db753937d05d1fc54c7393b1eb8ede067f6a4",
+      "tree": "a201102dee5c20a10cedbdb335ed708360ed050c",
+      "tests": 930,
+      "passed": 930,
+      "failed": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "testDurationMs": 62812.016458,
+      "scope": "Passing before distinct visible review fixture replacement; final affected review/full check renewal required"
+    }
   },
   "criteria": [
     {
@@ -159,7 +173,7 @@
   "amendments": {
     "fullForms": "Deterministic complete Ensemble own-tool form schema/service/SQLite/production browser, including grouped/free/single/multiple/custom/optional/constraint cases",
     "nativeLive": "One single-choice/custom-text native request with false/null continuation only; unsupported shapes remain unresolved",
-    "taskEvidence": "S1/R2/R3/S2 exact source/result/criterion/artifact relations, local PNG byte loads and previews, recorded provider state; selected review pictures visibly qualify unavailable/redacted states rather than actual previews",
+    "taskEvidence": "S1/R2/R3/S2 exact source/result/criterion/artifact relations, distinct local1040x480 synthetic PNG byte loads/previews and contextual feedback, recorded provider state; selected visible desktop/phone pictures have separate pair/revision/size/SHA identities",
     "search": "Exact historical R2 destinations and return/filter/selection/focus/draft/scroll restored in tests; selected desktop picture has historical enabled and R2/R3 links; phone picture has current-only matches",
     "foundation": "84 controls,15 destinations,42 forms,13 command discriminants,14 actions,23 extension routes; actual retained HTML/login/setup/recovery source scopes distinct",
     "review": "One root independent integrated review before first push; no parent human acceptance inferred"

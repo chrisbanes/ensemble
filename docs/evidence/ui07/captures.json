@@ -195,8 +195,66 @@
       "suite": "ui04-search",
       "fixtureManifestSha256": "44c9c69d6c7fca15bb5cd8348698ae15d7d0cb8f1484a0fa352eddfb12011bf8",
       "inspection": "Pixels inspected; historical R2/current R3 visible; exact destination/return separately asserted by test"
+    },
+    {
+      "file": "1366-visible-comparison.png",
+      "sha256": "d4a07c6089c6a4da38a005e2deb4942fd6c0d04ed90408a1512654ae3fa9184c",
+      "pixels": [1366, 900],
+      "viewport": [1366, 900],
+      "deviceScaleFactor": 1,
+      "sourceHead": "36ddd2e3da89ee4b2cbf61369204a648477df396",
+      "sourceTree": "a6ac3c2959a6e92bcd5e270f1a9993e90d6dd014",
+      "scenario": "Visible distinct synthetic focus-pair before revision1 and after revision2; ordinary local PNG preview bytes and exact contextual feedback controls",
+      "designAssociation": "dKc4O/mrRXI comparison association; fictional design images are supplied artifact bytes, not runtime evidence",
+      "test": "test/operator-review-browser.test.ts",
+      "testSha256": "363849a299e1160fb705f327eed5ab9ed610d63136ea4ca8753bb21f214a7939",
+      "testName": "exact S1 R2 R3 S2 review retains scoped outcomes, captured context, comparison identities and local artifact feedback on desktop and phone",
+      "suite": "ui04-review",
+      "fixtureManifestSha256": "d831551675cd7e557076acb47ffc83be5fc597ab03ed7a964f89405e9dbdf0e3",
+      "syntheticArtifactInputs": {
+        "design/assets/command-menu-after.png": {
+          "sha256": "ced77efa11396eb9ab2fcf4d3ee0e9e31cbe93c976699854add796340db7b4ab",
+          "bytes": 31685,
+          "pixels": [1040, 480]
+        },
+        "design/assets/command-menu-before.png": {
+          "sha256": "72a1f44bc131c5c454b3193f5450b1b9a468fefe3265cc58be1d6f82e16e5139",
+          "bytes": 31885,
+          "pixels": [1040, 480]
+        }
+      },
+      "inspection": "Pixels inspected: before lacks focus ring, after has focus ring; separate pair/revision labels and Ask lead controls visible; desktop two columns and phone stacked"
+    },
+    {
+      "file": "390-visible-comparison.png",
+      "sha256": "d0dc59ef3b7b5576adc39eb0c6337628e7a1e0f64685f7f5ec7fb59c38b57f29",
+      "pixels": [390, 844],
+      "viewport": [390, 844],
+      "deviceScaleFactor": 1,
+      "sourceHead": "36ddd2e3da89ee4b2cbf61369204a648477df396",
+      "sourceTree": "a6ac3c2959a6e92bcd5e270f1a9993e90d6dd014",
+      "scenario": "Visible distinct synthetic focus-pair before revision1 and after revision2; ordinary local PNG preview bytes and exact contextual feedback controls",
+      "designAssociation": "dKc4O/mrRXI comparison association; fictional design images are supplied artifact bytes, not runtime evidence",
+      "test": "test/operator-review-browser.test.ts",
+      "testSha256": "363849a299e1160fb705f327eed5ab9ed610d63136ea4ca8753bb21f214a7939",
+      "testName": "exact S1 R2 R3 S2 review retains scoped outcomes, captured context, comparison identities and local artifact feedback on desktop and phone",
+      "suite": "ui04-review",
+      "fixtureManifestSha256": "d831551675cd7e557076acb47ffc83be5fc597ab03ed7a964f89405e9dbdf0e3",
+      "syntheticArtifactInputs": {
+        "design/assets/command-menu-after.png": {
+          "sha256": "ced77efa11396eb9ab2fcf4d3ee0e9e31cbe93c976699854add796340db7b4ab",
+          "bytes": 31685,
+          "pixels": [1040, 480]
+        },
+        "design/assets/command-menu-before.png": {
+          "sha256": "72a1f44bc131c5c454b3193f5450b1b9a468fefe3265cc58be1d6f82e16e5139",
+          "bytes": 31885,
+          "pixels": [1040, 480]
+        }
+      },
+      "inspection": "Pixels inspected: before lacks focus ring, after has focus ring; separate pair/revision labels and Ask lead controls visible; desktop two columns and phone stacked"
     }
   ],
   "privacy": "Only disposable synthetic fixture pixels are selected; no raw configuration, credentials, databases, process identities, histories or grants",
-  "reviewImageLimits": "Selected review pictures expose unavailable/redacted preview states. Real local PNG byte loads are separately asserted by operator-review-browser before capture; these full-page pictures do not visibly qualify actual artifact previews."
+  "reviewImageLimits": "Original01d full-page review images used identical1x1 PNG fixtures, proving byte transport but no representative visible comparison. Additional36ddd focused pictures use distinct existing1040x480 synthetic design PNGs and visibly qualify paired preview presentation. Neither supplies runtime/provider evidence."
 }
