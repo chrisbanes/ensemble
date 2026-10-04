@@ -263,7 +263,11 @@ export class TaskReviewStore {
         "$1[redacted]",
       )
       .replace(/\bbearer\s+[^\s,;]+/gi, "Bearer [redacted]")
-      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+      .split("")
+      .filter(
+        (c) => c.charCodeAt(0) >= 32 || [9, 10, 13].includes(c.charCodeAt(0)),
+      )
+      .join("")
       .slice(0, 16000);
   }
   captureSource(
@@ -407,8 +411,8 @@ export class TaskReviewStore {
   }) {
     const escaped = input.query.replace(/[\\%_]/g, "\\$&");
     return this.db
-      .prepare(`SELECT s.* FROM task_review_search s WHERE s.excerpt LIKE ? ESCAPE '\\'
- AND (? IS NULL OR s.projectId=?) AND (? IS NULL OR s.type=?) AND (? IS NULL OR s.createdAt>=?) AND (? IS NULL OR s.createdAt<=?)
+      .prepare(`SELECT s.* FROM task_review_search s JOIN domain_tasks t ON t.id=s.taskId WHERE s.excerpt LIKE ? ESCAPE '\\'
+ AND (? IS NULL OR t.projectId=?) AND (? IS NULL OR s.type=?) AND (? IS NULL OR s.createdAt>=?) AND (? IS NULL OR s.createdAt<=?)
  AND (? IS NULL OR (s.createdAt,s.recordId) > (SELECT createdAt,recordId FROM task_review_search WHERE recordId=?))
  AND (?=1 OR (s.type='task' AND s.sourceId=(SELECT sourceId FROM task_review_sources WHERE taskId=s.taskId ORDER BY revision DESC LIMIT 1)) OR (s.type<>'task' AND s.resultId=(SELECT resultId FROM coordination_results WHERE taskId=s.taskId ORDER BY createdAt DESC,rowid DESC LIMIT 1)))
  ORDER BY s.createdAt,s.recordId LIMIT ?`)
@@ -518,7 +522,7 @@ export class TaskReviewStore {
       this.safe(String(row.summary)) ?? "",
       Number(row.createdAt) * 1000,
     );
-    metadata.decisions.forEach((decision, index) =>
+    metadata.decisions.forEach((decision, index) => {
       this.db
         .prepare("INSERT INTO task_review_search VALUES(?,?,?,?,?,?,?,?)")
         .run(
@@ -530,8 +534,8 @@ export class TaskReviewStore {
           result.resultId,
           `${decision.attribution}: ${decision.text}`,
           Number(row.createdAt) * 1000,
-        ),
-    );
+        );
+    });
   }
   read(taskId: string) {
     return taskReviewReadSchema.parse({

@@ -612,7 +612,12 @@ export class DomainStore {
       }
       const result = this.apply(command, verifiedRepositories);
       const review = new TaskReviewStore(this.db);
-      if (command.type === "task.create" || command.type === "task.configure")
+      if (
+        command.type === "task.create" ||
+        (command.type === "task.configure" &&
+          !this.importedTask(command.taskId) &&
+          (command.title !== undefined || command.outcome !== undefined))
+      )
         review.captureSource(command.taskId);
       if (command.type === "assignment.create")
         review.captureAssignment(

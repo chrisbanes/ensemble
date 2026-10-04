@@ -1466,7 +1466,7 @@ function PlacementConfiguration(
       <p className="body">
         {c.title ?? "Task title unavailable"}; task version {c.version}.
       </p>
-      <a href={`/task/${c.taskId}`}>Task source review</a>
+      <a href={`/task/${c.taskId}`}>Advanced source review controls</a>
       <form
         onSubmit={(e) => {
           d.set("placementOriginProjectId", p.projectId);

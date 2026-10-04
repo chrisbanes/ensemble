@@ -120,3 +120,104 @@ test("search honors type/date/history filters and current exclusions; no broad t
     api.readSearch(new URLSearchParams({ query: "x".repeat(257) })),
   );
 });
+test("actual imported state-only configure keeps GitHub source provenance; placement search filters current owning project", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const d = f.service.domain(),
+    ids = [randomUUID(), randomUUID()];
+  for (const projectId of ids) {
+    d.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: projectId,
+      leadProfileId: null,
+    });
+    d.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      credentialRef: "env:FIXTURE_SOURCE",
+      selections: [
+        {
+          id: "repo",
+          kind: "repository",
+          repositoryId: "R1",
+          owner: "org",
+          name: "repo",
+        },
+      ],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    d.execute({
+      type: "github.activate",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      selectionId: "repo",
+      expectedVersion: 2,
+    });
+    f.service.githubSources().reconcileSelection(projectId, "repo", {
+      complete: true,
+      reason: null,
+      issues: [
+        {
+          providerInstance: "github.com",
+          nodeId: "I_TRANSFER",
+          repositoryId: "R1",
+          repositoryName: "org/repo",
+          number: 1,
+          title: "Transferred command focus",
+          body: "GitHub supplied checklist\n- [ ] Keep focus",
+          state: "open",
+          labels: ["ready"],
+          projectFields: [],
+        },
+      ],
+    });
+  }
+  const taskId = String(f.service.githubSources().issue("I_TRANSFER")?.taskId),
+    original = f.service.taskReview().sources(taskId);
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids[0]!,
+    taskId,
+    expectedVersion: Number(d.task(taskId).version),
+    state: "cancelled",
+  });
+  assert.deepEqual(f.service.taskReview().sources(taskId), original);
+  assert.equal(original[0]?.kind, "github");
+  d.execute({
+    type: "github.place",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: ids[0]!,
+    taskId,
+    expectedVersion: Number(d.task(taskId).version),
+    chosenProjectId: ids[1]!,
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({ query: "Transferred", projectId: ids[0]! }),
+      )
+    ).data.matches.length,
+    0,
+  );
+  const moved = await api.readSearch(
+    new URLSearchParams({ query: "Transferred", projectId: ids[1]! }),
+  );
+  assert.equal(moved.data.matches[0]?.projectId, ids[1]);
+  assert.equal(moved.data.matches[0]?.sourceId, original[0]?.sourceId);
+  assert.equal(f.service.taskReview().sources(taskId)[0]?.projectId, ids[0]);
+});

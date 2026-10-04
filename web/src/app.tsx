@@ -32,6 +32,9 @@ import {
   ProjectConfiguration,
   ProfileConfiguration,
 } from "./settings.js";
+import { Search, SearchState } from "./search.js";
+import { TaskWorkspace, TaskInbox } from "./task-workspace.js";
+import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
@@ -85,6 +88,9 @@ function ProjectNavigation({
       </RouteLink>
       <RouteLink href="/app/tasks" path={path} navigate={navigate}>
         All tasks
+      </RouteLink>
+      <RouteLink href="/app/search" path={path} navigate={navigate}>
+        Search
       </RouteLink>
       <h2 className="small-heading">Projects</h2>
       {workspace?.data.projects.length === 0 && (
@@ -174,14 +180,19 @@ export function App() {
     [bootstrapError, setBootstrapError] = useState(false),
     [bootstrap, setBootstrap] = useState(0),
     [path, setPath] = useState(location.pathname + location.search),
+    [navigationVersion, setNavigationVersion] = useState(0),
     [drawer, setDrawer] = useState(false),
     [logoutPending, setLogoutPending] = useState(false),
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
+  const searchState = useRef(new Map<string, SearchState>());
+  const taskStates = useRef(new TaskWorkspaceStates());
   const expired = useCallback(() => {
     clientRef.current?.invalidateAuthentication();
     acceptedIdentity.current = null;
     setLogoutPending(false);
     drafts.current.purge();
+    taskStates.current.purge();
+    searchState.current.clear();
     setSession(null);
     setBootstrap((v) => v + 1);
     setDrawer(false);
@@ -194,6 +205,8 @@ export function App() {
       if (identity !== acceptedIdentity.current) {
         client.invalidateAuthentication();
         drafts.current.purge();
+        taskStates.current.purge();
+        searchState.current.clear();
         acceptedIdentity.current = identity;
         setLogoutPending(false);
       }
@@ -218,8 +231,19 @@ export function App() {
       active = false;
     };
   }, [client, bootstrap, acceptSession]);
+  const restoreFocus = useRef<string | null>(null);
   useEffect(() => {
-    const pop = () => setPath(location.pathname + location.search);
+    const pop = () => {
+      restoreFocus.current = history.state?.focusedHref ?? null;
+      setPath(location.pathname + location.search);
+      setNavigationVersion((n) => n + 1);
+      requestAnimationFrame(() =>
+        scrollTo(
+          0,
+          (history.state as { scrollY?: number } | null)?.scrollY ?? 0,
+        ),
+      );
+    };
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, []);
@@ -240,6 +264,18 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     taskLoader,
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore the previous entry focus after its route and asynchronous task content render.
+  useEffect(() => {
+    const href = restoreFocus.current;
+    if (!href) return;
+    const target = [
+      ...document.querySelectorAll<HTMLAnchorElement>("a[href]"),
+    ].find((a) => a.getAttribute("href") === href);
+    if (target) {
+      target.focus({ preventScroll: true });
+      restoreFocus.current = null;
+    }
+  }, [path, navigationVersion, tasks.state.data, workspace.state.data]);
   useEffect(() => {
     const click = (e: MouseEvent) => {
       if (e.defaultPrevented) return;
@@ -256,8 +292,29 @@ export function App() {
         e.button === 0
       ) {
         e.preventDefault();
-        history.pushState(null, "", href);
+        history.replaceState(
+          { ...history.state, scrollY, focusedHref: href },
+          "",
+        );
+        history.pushState(
+          {
+            origin: location.pathname + location.search,
+            workspaceOrigin:
+              location.pathname === "/app/search"
+                ? history.state?.workspaceOrigin
+                : location.pathname + location.search,
+            navKey: crypto.randomUUID(),
+            entryIndex: (history.state?.entryIndex ?? 0) + 1,
+            workspaceIndex:
+              location.pathname === "/app/search"
+                ? (history.state?.workspaceIndex ?? 0)
+                : (history.state?.entryIndex ?? 0),
+          },
+          "",
+          href,
+        );
         setPath(href);
+        setNavigationVersion((n) => n + 1);
         setDrawer(false);
       }
     };
@@ -266,8 +323,26 @@ export function App() {
   }, []);
   const pathname = path.split("?")[0] ?? "/app";
   const navigate = (next: string) => {
-    history.pushState(null, "", next);
+    history.replaceState({ ...history.state, scrollY }, "");
+    history.pushState(
+      {
+        origin: location.pathname + location.search,
+        workspaceOrigin:
+          location.pathname === "/app/search"
+            ? history.state?.workspaceOrigin
+            : location.pathname + location.search,
+        navKey: crypto.randomUUID(),
+        entryIndex: (history.state?.entryIndex ?? 0) + 1,
+        workspaceIndex:
+          location.pathname === "/app/search"
+            ? (history.state?.workspaceIndex ?? 0)
+            : (history.state?.entryIndex ?? 0),
+      },
+      "",
+      next,
+    );
     setPath(next);
+    setNavigationVersion((n) => n + 1);
     setDrawer(false);
   };
   if (!session)
@@ -314,27 +389,38 @@ export function App() {
         )}
       </>
     );
+  const entryKey = history.state?.navKey ?? path;
+  let activeSearch = searchState.current.get(entryKey);
+  if (!activeSearch) {
+    activeSearch = new SearchState();
+    searchState.current.set(entryKey, activeSearch);
+  }
   const projectId = pathname.match(/^\/app\/projects\/([^/]+)$/)?.[1];
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
   const title =
-    pathname === "/app"
-      ? "Overview"
-      : pathname === "/app/tasks"
-        ? "All tasks"
-        : pathname === "/app/tasks/new"
-          ? "New task"
-          : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname)
-            ? "Recovery"
-            : pathname === "/app/inbox"
-              ? "Inbox"
-              : pathname.startsWith("/app/settings") ||
-                  pathname.endsWith("/settings")
-                ? "Settings"
-                : projectId
-                  ? (project?.name ?? "Project")
-                  : "Page not found";
+    pathname === "/app/search"
+      ? "Search"
+      : pathname === "/app"
+        ? "Overview"
+        : /^\/app\/tasks\/[^/]+$/.test(pathname) &&
+            pathname !== "/app/tasks/new"
+          ? "Task workspace"
+          : pathname === "/app/tasks"
+            ? "All tasks"
+            : pathname === "/app/tasks/new"
+              ? "New task"
+              : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname)
+                ? "Recovery"
+                : pathname === "/app/inbox"
+                  ? "Inbox"
+                  : pathname.startsWith("/app/settings") ||
+                      pathname.endsWith("/settings")
+                    ? "Settings"
+                    : projectId
+                      ? (project?.name ?? "Project")
+                      : "Page not found";
   const destination =
     projectId && project
       ? `/project/${project.id}`
@@ -354,6 +440,8 @@ export function App() {
     acceptedIdentity.current = null;
     const isCurrentScope = client.captureAuthenticationScope();
     drafts.current.purge();
+    taskStates.current.purge();
+    searchState.current.clear();
     setLogoutPending(true);
     setLogoutNotice(null);
     try {
@@ -491,6 +579,35 @@ export function App() {
                 ""
               }
               onRecorded={tasks.refresh}
+            />
+          ) : pathname === "/app/inbox" ? (
+            <TaskInbox
+              client={client}
+              session={session}
+              ids={
+                tasks.state.data?.tasks
+                  .filter((t) => t.attention.count > 0)
+                  .map((t) => t.id) ?? []
+              }
+            />
+          ) : pathname === "/app/search" ? (
+            <Search
+              key={`${session.csrfToken}:${entryKey}`}
+              client={client}
+              session={session}
+              workspace={workspace.state.data}
+              path={path}
+              navigate={navigate}
+              state={activeSearch}
+            />
+          ) : /^\/app\/tasks\/[^/]+$/.test(pathname) ? (
+            <TaskWorkspace
+              key={`${session.csrfToken}:${pathname}`}
+              client={client}
+              session={session}
+              taskId={pathname.split("/")[3] ?? ""}
+              path={path}
+              state={taskStates.current.forTask(pathname.split("/")[3] ?? "")}
             />
           ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
             <TaskViews

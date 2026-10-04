@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useLayoutEffect } from "react";
 import type {
   Workspace,
   TaskListSummary,
@@ -78,7 +78,27 @@ export function TaskCard({ task }: { task: TaskListSummary }) {
   );
 }
 export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
-  const [selected, setSelected] = useState(0);
+  const [selected, updateSelected] = useState<number>(
+    () => history.state?.board?.selected ?? 0,
+  );
+  const board = useRef<HTMLDivElement>(null);
+  const setSelected = (value: number | ((previous: number) => number)) => {
+    updateSelected((previous) => {
+      const next = typeof value === "function" ? value(previous) : value;
+      history.replaceState(
+        {
+          ...history.state,
+          board: { ...history.state?.board, selected: next },
+        },
+        "",
+      );
+      return next;
+    });
+  };
+  useLayoutEffect(() => {
+    if (board.current)
+      board.current.scrollLeft = history.state?.board?.scrollLeft ?? 0;
+  }, []);
   return (
     <div className="task-board">
       <div
@@ -122,7 +142,19 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
           Next column
         </Button>
       </div>
-      <div className="board-columns">
+      <div
+        className="board-columns"
+        ref={board}
+        onScroll={(e) =>
+          history.replaceState(
+            {
+              ...history.state,
+              board: { selected, scrollLeft: e.currentTarget.scrollLeft },
+            },
+            "",
+          )
+        }
+      >
         {columns.map((column, index) => (
           <section
             key={column}

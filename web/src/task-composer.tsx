@@ -158,7 +158,10 @@ export function TaskComposer({
         <p className="body" role="status">
           {state.notice}
         </p>
-        <ActionLink variant="primary" href={`/task/${state.frozen?.taskId}`}>
+        <ActionLink
+          variant="primary"
+          href={`/app/tasks/${state.frozen?.taskId}`}
+        >
           Open task
         </ActionLink>
         <h3 className="small-heading">Current execution</h3>

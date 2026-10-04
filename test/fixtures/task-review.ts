@@ -45,7 +45,11 @@ export async function seedReviewTask(
   await f.service.provisionTask(taskId);
   const assignmentId = String(assignment.id),
     source = f.service.taskReview().sources(taskId)[0]!;
-  function result(summary: string, metadata?: Partial<ReviewMetadata>) {
+  function result(
+    summary: string,
+    metadata?: Partial<ReviewMetadata>,
+    producerAssignmentId = assignmentId,
+  ) {
     let resultId = "";
     const workId = randomUUID();
     f.seedPersistedState((db) => {
@@ -56,19 +60,19 @@ export async function seedReviewTask(
       ).run(randomUUID(), workId, workId, workId);
       s.bindTask(workId, {
         taskId,
-        assignmentId,
-        assignmentVersion: Number(d.assignment(assignmentId).version),
+        assignmentId: producerAssignmentId,
+        assignmentVersion: Number(d.assignment(producerAssignmentId).version),
         instructionsRevision: 1,
         profileRevision: 1,
       });
       db.prepare(
         "UPDATE domain_assignments SET state='running' WHERE id=?",
-      ).run(assignmentId);
+      ).run(producerAssignmentId);
       const revision = c.results(taskId).length + 1;
       db.prepare(
         "INSERT INTO task_work_revisions(workId,assignmentId,conversationRevision,workRevision) VALUES(?,?,1,?)",
-      ).run(workId, assignmentId, revision);
-      const batch = c.bindDeliveryBatch(assignmentId, workId);
+      ).run(workId, producerAssignmentId, revision);
+      const batch = c.bindDeliveryBatch(producerAssignmentId, workId);
       if (batch) c.completeDeliveryBatch(workId);
       resultId = c.recordResult({
         threadId: workId,
@@ -83,5 +87,35 @@ export async function seedReviewTask(
     });
     return { resultId, workId };
   }
-  return { profileId, projectId, taskId, assignmentId, source, result };
+  function delegatedResult(
+    summary: string,
+    metadata?: Partial<ReviewMetadata>,
+  ) {
+    const delegateId = randomUUID();
+    d.execute({
+      type: "assignment.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      assignmentId: delegateId,
+      profileId,
+      brief: "Produce the scoped delegated review result",
+      resultDestination: "lead",
+      requesterAssignmentId: null,
+    });
+    return {
+      ...result(summary, metadata, delegateId),
+      assignmentId: delegateId,
+    };
+  }
+  return {
+    profileId,
+    projectId,
+    taskId,
+    assignmentId,
+    source,
+    result,
+    delegatedResult,
+  };
 }

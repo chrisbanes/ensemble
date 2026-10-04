@@ -782,6 +782,10 @@ export class OperatorApi {
             name: this.safe(profile.name, excluded),
           }
         : null,
+      leadAssignmentId:
+        this.domain()
+          .leadBindings()
+          .find((b) => String(b.taskId) === taskId)?.assignmentId ?? null,
       assignments: assignments.map((a) => {
         const s = this.selection(a),
           request = s.request;

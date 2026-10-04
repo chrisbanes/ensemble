@@ -142,16 +142,14 @@ test("exact review and paginated history fail closed when visibility/material re
         : api.readAssignmentHistory(task.assignmentId, 999);
     await entry;
     const profile = f.service.domain().profile(task.profileId);
-    f.service
-      .domain()
-      .execute({
-        type: "profile.configure",
-        actor: "operator",
-        key: randomUUID(),
-        profileId: task.profileId,
-        expectedVersion: Number(profile.version),
-        instructions: `Changed private ${kind} instructions`,
-      });
+    f.service.domain().execute({
+      type: "profile.configure",
+      actor: "operator",
+      key: randomUUID(),
+      profileId: task.profileId,
+      expectedVersion: Number(profile.version),
+      instructions: `Changed private ${kind} instructions`,
+    });
     release();
     await assert.rejects(read, /unavailable/);
     f.service.taskWorkspace = original;

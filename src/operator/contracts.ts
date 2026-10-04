@@ -555,6 +555,7 @@ export const taskSchema = envelope(
         })
         .strict(),
       lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
+      leadAssignmentId: uuid.nullable().optional(),
       assignments: z.array(assignmentSchema),
       admission: z
         .object({

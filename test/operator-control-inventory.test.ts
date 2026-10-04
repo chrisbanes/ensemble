@@ -278,6 +278,7 @@ test("retained rendered form actions, fields and mounted route controls match do
     "/",
     `/project/${projectId}`,
     `/task/${taskId}`,
+    `/app/tasks/${taskId}`,
     `/task/${importedId}`,
     `/profile/${profileId}`,
     `/assignment/${assignmentId}`,
@@ -366,7 +367,7 @@ test("retained rendered form actions, fields and mounted route controls match do
   for (const path of [
     "/",
     `/project/${projectId}`,
-    `/task/${taskId}`,
+    `/app/tasks/${taskId}`,
     `/profile/${profileId}`,
     "/runtime",
     "/coordination",
