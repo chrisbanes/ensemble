@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-863 deterministic tests with zero skips. Existing lint warnings remain warnings.
+867 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -64,10 +64,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries |
-| 15 | current full npm check 863/863; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility and authenticated HTTP readback |
+| 15 | current full npm check 867/867; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-entry-artifact-check-final.log` (863/863).
+The current repaired full-check log is `/tmp/ui04-search-liveness-check-final.log` (867/867).
+`/tmp/ui04-entry-artifact-check-final.log` (863/863) retains historical entry/artifact evidence.
 `/tmp/ui04-observation-check.log` (861/861) retains historical source-observation/coverage evidence.
 `/tmp/ui04-ci8-check.log` (859/859) retains historical overlap/source-boundary evidence.
 `/tmp/ui04-draft-preservation-check.log` (857/857) retains historical unfinished-draft evidence.
@@ -1022,3 +1023,60 @@ phone Search, and phone independent omission history. All four cleanup manifests
 completed with no omitted steps/screenshots or evidence failures. Expected Search
 failure/auth diagnostics and bounded history stage/reading diagnostics remain
 recorded, not described as an empty diagnostic set.
+
+
+## Bounded search liveness and independently owned history probes
+
+Executable `1c74bd4ea835c4d126b4d1c11624a6807e060c82`, tree
+`e30494ee4222b81703e4d2dbd2978804ff7acc89`, bounds each raw Search
+keyset batch to 32 indexed rows and materializes that batch before substring,
+current-source/result and filter checks. Matching page storage remains bounded;
+no-match scans yield with `setImmediate` so ordinary operator work progresses.
+The invocation's indexed maximum key prevents newer appends extending that scan;
+this is a finite frontier, not a transactional snapshot. Exact SQL literal,
+filter, equal-time cursor and historical semantics remain. Both awaited scans
+revalidate visibility; bounded final matches re-read indexed current source/result
+identity, task version/project and permission. The Search HTTP route rechecks the
+exact authenticated session before emitting retained payload.
+
+Actual SQLite producer/API proofs cover 105 long retained sources, sparse literal
+tails, no-match operator progress, append-during-yield, exclusion/version/current
+result changes, close/reopen and index survival. Captured query plans show indexed
+raw keyset reads, `MATERIALIZE raw`, bounded `SCAN s`, and indexed task/latest
+source/latest result lookups. Actual held HTTP Search followed by logout returns
+401 without private matches. All nine Search service tests, including final supersession, pass in the
+required full check; prior combined focused proof before that final predicate is
+historical 14/14 at `/tmp/ui04-search-liveness-focused-final.log`.
+
+CI11's original combined history journey reached timer settlement with exact
+1-item/272-unique-omission/draft/focus/position state at 36.129 seconds, then
+chronology/phone/head-read stages consumed the remaining 45-second execution
+budget. Its incomplete cleanup and original log `/tmp/ui04-ci11-failure.log` remain
+historical failure evidence. CI10's original later-stage cause remains unknown.
+The fixture now has two independently owned probes with unchanged deadlines,
+corpus, actual production timer overlap and all original assertions. The first
+covers old exact Search/review/preview, header and overlapping read restoration;
+the counterpart retains 271/no-item chronology, 272-after-insertion chronology,
+phone/head observations and intentional live-control focus. No timer is disabled.
+
+Clean-source probes pass 2/2 in 23.052 seconds at
+`/tmp/ui04-search-liveness-capture.log`; both execution and cleanup manifests are
+complete. Hashes, exact source/tree and four bounded images are recorded in
+`/tmp/ui04-search-liveness-screenshots.json`. Desktop exact-old-review and phone
+omission images were inspected. Prior Search images retain original `154ae946`
+provenance; the frontend bundle remains `index-DmKOA1jT.js`, SHA256
+`bbf8baf5554e973d1163b808cc703dd46250aab92048d03e6e594e4ffe548b07`.
+Bounded stage/reading and deliberate provider-failure diagnostics are retained.
+
+The first full check passed 866/867: an unrelated scheduler fixture read missing
+waiting intents after a fixed 25ms sleep. Its exact isolation passed; the producer
+serially awaits request attempts, so admitted turns did not establish later intent
+publication. The lead-approved test-only correction waits for every exact managed
+work ID through the existing bounded helper, retaining all capacity/ledger/state
+assertions. `/tmp/ui04-search-liveness-scheduler-fixed.log` passes 1/1. Initial SQL
+spy/factory fixture failures and the SQLite row-inference build failure remain in
+the ledger; emitted tests from that failed build are not credited. Final pinned
+full check passes 867/867, zero skips, in 48.937 seconds. All 15 rows retain prior
+proof, with rows 2/14/15 extended. Historical a21/ca51 qualification remains
+transport-only, consumed and released; no new runtime, harness, live or remote
+operation occurred.
