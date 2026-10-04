@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
 | 15 | repaired full npm check 843/843; fake changed callback harness 6/6; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-r2-check.log` (843/843).
+The current repaired full-check log is `/tmp/ui04-r3-check.log` (843/843).
+`/tmp/ui04-r2-check.log` (843/843) records the four-interaction follow-up candidate.
 `/tmp/ui04-repair-check.log` (843/843) records the first repaired candidate. The earlier
 `/tmp/ui04-check-final.log` (842/842) belongs to the historical qualification source; proportional slice logs
 are `/tmp/ui04-t2.log` (36/36), `/tmp/ui04-t3.log` (38/38),
@@ -249,7 +250,7 @@ privately with the handoff. Sanitizer redaction is `[redacted]`, rather than an
 omission message; failed-read alerts remain inside collapsed assignment disclosures.
 These test expectation corrections are recorded without weakening production contracts.
 
-Latest fixture screenshots bind the code candidate above and production bundle
+The four-interaction follow-up fixture screenshots bind the code candidate above and production bundle
 SHA256 `227ae7481f254ae64fbc5cbe7ac25efbcf7c4547e734ca093b8a81252d291af9`.
 Desktop review (showing one newer result), phone Search and reduced-height reply
 were inspected. All three manifests record completed execution and cleanup.
@@ -259,7 +260,7 @@ retain their earlier evidence with these stronger history/navigation/authenticat
 regressions. The sole live grant remains consumed/released; no new live qualification
 or external provider operation occurred.
 
-| Current screenshot | SHA256 |
+| Four-interaction follow-up screenshot | SHA256 |
 | --- | --- |
 | 1366-task-failed-refresh.png | `b3a1dacaad3fb65ec6232e0f443129bb8a99d789b6b8e32422204837787093f2` |
 | 390-reply-with-anchor.png | `d4e406596cdaa96af70484daaeb8d9e1ad1365b0aedce527a974b43c0829f628` |
@@ -269,3 +270,43 @@ or external provider operation occurred.
 | 390-original-comparison.png | `e602364c6c75b8f4bdbec73fb09e148cba42e82c93deb802d88e8592e104faf3` |
 | 390-shared-search.png | `ee9a8b992522939a9893bdfff751fe60e07ccee293031d63b3e52716fbeed5ba` |
 | 1366-cross-project-search.png | `c3be83d40d69401324637f494b36301dcbceeba2ccdb80de0bb547762df32a96` |
+
+
+## Focus restoration repair
+
+Focused review of `cb73efd4` resolved the four follow-up findings and identified
+one refresh focus regression. Code candidate
+`8190b99f26a4643975e4145f55777d14eac89cb1`, tree
+`5ab8e4d211f1a1e1c898a51510d301619399d808`, repairs the existing capture seam:
+it records the actual focused element, rearms history restoration when that element
+is invalidated, keeps connected controls focused and cancels stale restoration on
+an intentional later focus change. Previously recorded focus is not reused when
+the operator is now focused elsewhere.
+
+`/tmp/ui04-r3-focused.log` passes the workspace browser. It asserts summary focus
+immediately after programmatic refresh, before any refocus, and after the production
+15-second interval callback using the browser clock. It waits for the actual
+retained-page response and verifies the focused history record after reinsertion.
+An explicitly clicked Refresh control retains focus; deliberately focusing the
+reply field while a history response is held also retains focus after release.
+The existing four-pixel refresh/return position, exact result/Back/draft, old-after-new
+redaction and failed-current-read assertions remain. The new deliberate intermediate
+focus/scroll actions required measuring the updated pre-navigation reading position;
+the initial refresh position assertion remains unchanged.
+
+The final required `/tmp/ui04-r3-check.log` passes type checking, lint, formatting,
+production builds and all 843 tests, zero skips. The six fake qualification cases
+remain unchanged. Current source/bundle/screenshot manifests are recorded in the
+handoff; bundle SHA256 is
+`583955a84f1f89682e3f6973eac0e3ed9a86984d4f20a101f74e962a967151e8`.
+Fresh desktop workspace and reduced-height reply screenshots were inspected.
+All current workspace/review/Search manifests record completed execution and cleanup;
+unaffected earlier review evidence is reused with its original source attribution.
+All 15 acceptance rows remain mapped. The historical `a21e6046` live proof remains
+transport-only, its grant consumed and canonical lock released; no new runtime,
+provider or external mutation occurred.
+
+| Focus repair screenshot | SHA256 |
+| --- | --- |
+| 1366-task-failed-refresh.png | `78e673d432124fcf561fd0d355502b236d69e4382a4e7bcde910e87b62d22a0b` |
+| 390-keyboard-reply.png | `455dba394222f5bb1b76f19a1d49ff133a07be4f35ff2a8502e36576cb9345b7` |
