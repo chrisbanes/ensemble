@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-856 deterministic tests with zero skips. Existing lint warnings remain warnings.
+857 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -61,13 +61,14 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
-| 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
+| 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
-| 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
+| 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
-| 15 | current full npm check 856/856; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 857/857; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-retention-access-check.log` (856/856).
+The current repaired full-check log is `/tmp/ui04-ci7-check.log` (857/857).
+`/tmp/ui04-retention-access-check.log` (856/856) retains historical retained-access/paging evidence.
 `/tmp/ui04-source-history-check.log` (853/853) retains historical source-binding/checklist/history evidence.
 `/tmp/ui04-retention-metadata-check.log` (851/851) retains historical source-retention/metadata evidence.
 `/tmp/ui04-decision-excerpt-check.log` (850/850) retains prior decision excerpt evidence.
@@ -669,3 +670,64 @@ material rather than a new retention/permission guarantee or general browsing UI
 The historical `a21e6046`/`ca51dc12` live proof remains transport-only, its sole grant
 consumed and resource released. Harness/runtime/provider/config behavior is
 unchanged; no new live invocation or remote operation occurred.
+
+
+## Required Linux CI and recorded review link/head follow-up
+
+Required Linux run `37181850783` on `e46945ec` reached all test stages and
+failed one of 856 tests (855 passed, zero skipped). Its retained log is
+`/tmp/ui04-retention-access-ci-failure.log`. The artifact manifest completed
+cleanup but did not capture the failure DOM, so it does not establish a final
+product state. The failed test made separate asynchronous attached/count reads.
+The real 15-second workspace refresh intentionally hides unvalidated history
+while its task read is pending. A deterministic production-browser proof now
+advances that actual timer, holds exactly one task response, observes the attached
+entry disappear while pending, then releases it and observes settled publication.
+One atomic DOM snapshot checks one item, 272 unique omissions, the exact draft,
+summary focus and the original less-than-4-pixel reading-position bound. The
+production timer and history privacy/restoration behavior are unchanged; there
+are no retries, skips, added sleeps or increased deadlines.
+
+Review `5404590158` findings `4176389028` and `4176389031` are addressed.
+New result ingestion rejects data/custom change-reference protocols before the
+atomic result/review/completion commit; HTTP(S) references remain valid. The
+actual runtime callback rejects both unsupported protocols with zero result or
+completion effect and accepts/replays the supported callback. Persisted parsing
+remains compatible: both curated task/review projections omit legacy unsupported
+references, preserve the other material, and the shared workspace defensively
+prevents unsupported links. Missing/omitted references say “No available recorded
+change reference”; no raw-material migration or URL fetch is introduced.
+
+Validation records compare their immutable checked head against the currently
+observed delivery binding. A known mismatch is explicitly stale and names both
+heads; a missing checked head or unavailable binding/head is unknown. Equality
+says recorded against the current bound head and implies no independent
+verification or overall pass. The browser creates a real fixture DeliveryStore
+binding at A, observes B through the production store, refreshes and checks stale
+text together with preserved history/draft/focus/position. A subsequent recorded
+provider-read failure makes comparison unknown. Source revision staleness remains
+separate. The use-site audit found no alternate change-reference or checked-head
+rendering outside shared ReviewEvidence; all unified task entry points use it.
+
+Focused `/tmp/ui04-ci7-focused.log` passed 13/13, zero skipped. The first build
+log `/tmp/ui04-ci7-build.log` preserves the snapshot false-union type-narrowing
+failure; the assertion narrows its successful value explicitly. The first focused
+failure `/tmp/ui04-ci7-focused-first-failure.log` used a mistaken aria-label DOM
+selector for the label-associated reply textarea; the corrected exact ID reads
+the existing production field. These are fixture/type corrections, not changed
+product geometry or acceptance bounds. Current full `/tmp/ui04-ci7-check.log`
+passed 857/857, zero skipped, in 49.243 seconds.
+
+Executable source is `d88cfe9e241cb8ecb265c1f8386ea7d6ddf1d5fe`, tree
+`f1fd168e56de6a1e59c8a7e5f3a4c9b951b3b225`. Post-clean-commit capture
+`/tmp/ui04-ci7-capture.log` passed 1/1 with zero skips in 14.595 seconds.
+Four bounded viewport images (exact old review, stale validation head, desktop
+and phone independently paged omission history) were inspected; their actual
+hashes/source identities, production bundle identity and completed cleanup
+manifest are in `/tmp/ui04-ci7-screenshots.json`. No screenshots were omitted.
+Previous images retain their original attribution. All 15 rows retain earlier
+proof, with rows 11/13/15 extended by this batch. The one-pixel PNG remains a
+deterministic fixture preview, not a live artifact or substantial comparison.
+Historical live source `a21e6046`/harness `ca51dc12` remains transport-only,
+consumed and released; the portable harness/runtime/config and live authority
+are unchanged. No new live invocation or remote mutation occurred.
