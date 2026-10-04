@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-843 deterministic tests with zero skips. Existing lint warnings remain warnings.
+845 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -65,9 +65,10 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
-| 15 | repaired full npm check 843/843; fake changed callback harness 6/6; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 845/845; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-r3-check.log` (843/843).
+The current repaired full-check log is `/tmp/ui04-ci-check.log` (845/845).
+`/tmp/ui04-r3-check.log` (843/843) records the earlier focus-repair candidate.
 `/tmp/ui04-r2-check.log` (843/843) records the four-interaction follow-up candidate.
 `/tmp/ui04-repair-check.log` (843/843) records the first repaired candidate. The earlier
 `/tmp/ui04-check-final.log` (842/842) belongs to the historical qualification source; proportional slice logs
@@ -310,3 +311,57 @@ provider or external mutation occurred.
 | --- | --- |
 | 1366-task-failed-refresh.png | `78e673d432124fcf561fd0d355502b236d69e4382a4e7bcde910e87b62d22a0b` |
 | 390-keyboard-reply.png | `455dba394222f5bb1b76f19a1d49ff133a07be4f35ff2a8502e36576cb9345b7` |
+
+
+## Linux CI fixture and review-comment repairs
+
+CI run `37171525219` at `6f6614cb` passed 839/843 and failed four fake-harness
+cleanup assertions on Linux. Production intentionally returns no Mac process
+birth/boot identity on unsupported hosts; the fake path incorrectly required that
+Mac-only proof. Production runtime and termination behavior are unchanged.
+The fixture now binds the exact spawned fake `ChildProcess` through the existing
+test-only capture seam, returns null OS identity, and requires that handle's observed
+exit event plus exit/signal status. Method `fixture-owned-child-exit` proves the
+owned fixture lifecycle, not OS PID absence, process birth identity or a production
+cross-platform termination guarantee. A real spawned fixture-child regression rejects
+still-present and previously unobserved exits, then proves that same handle's exit.
+Existing assertion-failure/restart, malformed callback, deadline and failed late-resource
+cleanup cases retain their conservative outcomes. There are no skipped or unconditional
+fixture cleanup passes. The live path still uses the Mac verifier unchanged.
+
+The same candidate repairs all four confirmed PR #767 review findings:
+
+| Comment | Repair and evidence |
+| --- | --- |
+| 4175879994 | Curated metadata sanitizes explicit prose fields while preserving enums, IDs, digests and revisions. API regression with private instruction `failed` retains valid failed outcomes and immutable anchors, redacts supplied prose, and retains safe artifact/file/URL handling. |
+| 4175880000 | Earlier history refresh derives each older cursor from the freshly fetched preceding page, retaining loaded depth rather than replaying stale window boundaries. Browser advances 250 retained items to 251 after an older page is loaded and verifies every sequence exactly once; prior generation/privacy/position/focus assertions remain. |
+| 4175880003 | New report validation rejects duplicate criterion IDs atomically. Actual service callback returns failure with no result/review record and execution still running. Legacy stored duplicates remain readable and display all contradictory outcomes with an explicit unknown overall outcome. |
+| 4175880011 | Source comparison is explicitly pending or unknown after refresh failure. Unknown survives navigation; successful sync followed by failed current task read stays unknown, and a subsequent successful sync/read restores the comparison. Logout/relogin rejects a held old-auth source response and purges the private draft. |
+
+Code candidate `5c2f5978b3f144c833b4be5af6fd59f98b2fac35`, tree
+`828b9fd8f7b6022e0ea05356e7b8f56d02bcd649`, passed affected tests 20/20 in
+`/tmp/ui04-ci-focused.log`; the additional source journey passed 1/1 in
+`/tmp/ui04-ci-source.log`. The first combined check stopped before tests on a test
+formatting error, retained at `/tmp/ui04-ci-check-format-failure.log`. After correction,
+`/tmp/ui04-ci-check.log` passed type checking, lint, formatting, production builds
+and all 845 tests with zero skips on the local pinned Node/npm host. Linux CI readback
+for this new candidate remains with the root delivery owner; local tests do not claim
+that later remote CI result.
+
+Current harness SHA256 is
+`8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783`.
+The historical live source `a21e6046` and harness SHA256 `ca51dc12…` remain the
+original one-use transport proof; the new fixture harness has no live qualification
+or grant. That sole attempt stays consumed and its canonical lock released.
+Current production bundle SHA256 is
+`e21386bbc5d52baed5fc748aff346404e22bd9fbb7087fc4d69c730500335ff7`.
+Final-check workspace/review/Search/comment screenshot paths, hashes and completed
+cleanup manifests bind the code candidate in the handoff. Desktop review and
+reduced-height phone reply were inspected. Previous screenshot/source identities,
+one-pixel preview, simulated keyboard and paused/integration limits remain explicit.
+All 15 acceptance rows retain their earlier evidence plus these repairs.
+
+| CI/comment repair screenshot | SHA256 |
+| --- | --- |
+| 390-keyboard-reply.png | `02d4ef8a28ecd9c93a371b57115549b5cae563c77ea532ec53eaadcdc1797077` |
+| 1366-original-review.png | `00ad7707349bed991965137aec0aa72ad2902f79eab4290252f884c70ae3ed11` |
