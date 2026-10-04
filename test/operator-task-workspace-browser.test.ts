@@ -39,6 +39,24 @@ test("production workspace retains literal history, pending request, focused rep
       "INSERT INTO coordination_interactions(interactionId,taskId,requestingAssignmentId,requestingWorkId,requestingWorkRevision,requestingAssignmentVersion,conversationRevision,kind,status,prompt,revision) VALUES(?,?,?,?,1,1,1,'question','open','Which focus target?',1)",
     ).run(questionId, a.taskId, r.assignmentId, r.workId);
   });
+  const responsibilityAssignmentId = randomUUID();
+  f.service.domain().execute({
+    type: "assignment.create",
+    actor: "operator",
+    key: randomUUID(),
+    assignmentId: responsibilityAssignmentId,
+    projectId: a.projectId,
+    taskId: a.taskId,
+    profileId: a.profileId,
+    brief: "Review responsibility distinct from implementation",
+    resultDestination: a.assignmentId,
+    requesterAssignmentId: a.assignmentId,
+  });
+  a.result(
+    "Exact responsibility review result",
+    undefined,
+    responsibilityAssignmentId,
+  );
   const web = await j.start("fixture.web", () => f.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
@@ -52,6 +70,13 @@ test("production workspace retains literal history, pending request, focused rep
   await page
     .getByRole("heading", { name: "Evidence review", exact: true })
     .waitFor();
+  await page
+    .locator("#history")
+    .getByText("Review responsibility distinct from implementation", {
+      exact: true,
+    })
+    .waitFor({ state: "attached" });
+  assert.ok((await page.getByText(/Requester assignment:/).count()) >= 2);
   assert.equal(
     await page.getByText("Which focus target?", { exact: true }).count(),
     1,
@@ -68,6 +93,56 @@ test("production workspace retains literal history, pending request, focused rep
   await page
     .getByRole("button", { name: "Expand all history", exact: true })
     .click();
+  const reading = page.locator(`[data-record-id="${r.workId}:item-0"]`);
+  await reading.scrollIntoViewIfNeeded();
+  const readingY = await reading.evaluate(
+    (el) => el.getBoundingClientRect().top,
+  );
+  await reading.locator("summary").focus();
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByText("Literal update 0 long supplied text ", { exact: true })
+    .waitFor({ state: "attached" });
+  assert.ok(
+    Math.abs(
+      (await reading.evaluate((el) => el.getBoundingClientRect().top)) -
+        readingY,
+    ) < 4,
+    JSON.stringify({
+      readingY,
+      actualY: await reading.evaluate((el) => el.getBoundingClientRect().top),
+      scroll: await page.evaluate(() => scrollY),
+    }),
+  );
+  await reading.locator("summary").focus();
+  await page
+    .getByRole("link", { name: "Search", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByRole("button", { name: "Back to originating workspace", exact: true })
+    .click();
+  await page
+    .getByText("Literal update 0 long supplied text ", { exact: true })
+    .waitFor({ state: "attached" });
+  assert.ok(
+    Math.abs(
+      (await reading.evaluate((el) => el.getBoundingClientRect().top)) -
+        readingY,
+    ) < 4,
+    JSON.stringify({
+      readingY,
+      actualY: await reading.evaluate((el) => el.getBoundingClientRect().top),
+      scroll: await page.evaluate(() => scrollY),
+    }),
+  );
+  assert.equal(
+    await reading
+      .locator("summary")
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
   await page
     .getByRole("button", { name: "Collapse all history", exact: true })
     .click();
@@ -230,4 +305,16 @@ test("production workspace retains literal history, pending request, focused rep
     true,
   );
   assert.equal(replyRequests.length, 2);
+  f.service.domain().execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: a.profileId,
+    expectedVersion: Number(f.service.domain().profile(a.profileId).version),
+    instructions: "Literal update 0 long supplied text",
+  });
+  await page.getByRole("button", { name: "Refresh task", exact: true }).click();
+  await page
+    .getByText("Literal update 0 long supplied text ", { exact: true })
+    .waitFor({ state: "detached" });
 });

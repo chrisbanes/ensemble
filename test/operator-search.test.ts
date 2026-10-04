@@ -196,6 +196,20 @@ test("actual imported state-only configure keeps GitHub source provenance; place
   });
   assert.deepEqual(f.service.taskReview().sources(taskId), original);
   assert.equal(original[0]?.kind, "github");
+  const api = new OperatorApi(f.service, [f.directory]);
+  let release!: () => void, entered!: () => void;
+  const barrier = new Promise<void>((r) => (release = r)),
+    entry = new Promise<void>((r) => (entered = r));
+  const originalWorkspace = f.service.taskWorkspace.bind(f.service);
+  f.service.taskWorkspace = async (id) => {
+    entered();
+    await barrier;
+    return originalWorkspace(id);
+  };
+  const delayed = api.readSearch(
+    new URLSearchParams({ query: "Transferred", projectId: ids[0]! }),
+  );
+  await entry;
   d.execute({
     type: "github.place",
     actor: "operator",
@@ -205,7 +219,10 @@ test("actual imported state-only configure keeps GitHub source provenance; place
     expectedVersion: Number(d.task(taskId).version),
     chosenProjectId: ids[1]!,
   });
-  const api = new OperatorApi(f.service, [f.directory]);
+  release();
+  const stale = await delayed;
+  assert.equal(stale.data.matches.length, 0);
+  f.service.taskWorkspace = originalWorkspace;
   assert.equal(
     (
       await api.readSearch(

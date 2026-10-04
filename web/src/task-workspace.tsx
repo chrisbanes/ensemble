@@ -25,6 +25,7 @@ import {
 } from "./components.js";
 import { Textarea } from "./ui/textarea.js";
 import type { TaskWorkspaceState } from "./task-workspace-state.js";
+import { NativeSelect } from "./ui/native-select.js";
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
 const date = (n: number) => new Date(n < 1e12 ? n * 1000 : n).toLocaleString();
@@ -85,6 +86,7 @@ export function TaskWorkspace({
     anchor = useRef<{ id: string; y: number } | null>(null),
     bottom = useRef(false),
     first = useRef(true),
+    restoreReadingFocus = useRef(true),
     material = useRef<string | null>(null);
   const loader = useCallback(
     (signal: AbortSignal) =>
@@ -99,13 +101,26 @@ export function TaskWorkspace({
   const capture = () => {
     bottom.current =
       innerHeight + scrollY >= document.documentElement.scrollHeight - 64;
-    const el = [
+    const visible = [
       ...document.querySelectorAll<HTMLElement>("[data-record-id]"),
-    ].find((e) => e.getBoundingClientRect().bottom > 80);
+    ].filter((e) => {
+      const bounds = e.getBoundingClientRect();
+      return bounds.bottom > 80 && bounds.top < innerHeight;
+    });
+    const el = visible.find(
+      (e) => !visible.some((child) => child !== e && e.contains(child)),
+    );
     anchor.current = el
       ? { id: el.dataset.recordId ?? "", y: el.getBoundingClientRect().top }
       : null;
     state.scrollY = scrollY;
+    state.historyAnchor = anchor.current;
+    state.focusRecord =
+      (
+        document.activeElement?.closest(
+          "[data-record-id]",
+        ) as HTMLElement | null
+      )?.dataset.recordId ?? state.focusRecord;
   };
   const refresh = () => {
     capture();
@@ -113,18 +128,36 @@ export function TaskWorkspace({
   };
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
   useEffect(() => {
     scope.current = true;
+    const leave = (event: MouseEvent) => {
+      if ((event.target as Element | null)?.closest('a[href^="/app"]'))
+        captureRef.current();
+    };
+    document.addEventListener("click", leave, true);
     const timer = setInterval(() => refreshRef.current(), 15000);
     return () => {
       scope.current = false;
       clearInterval(timer);
-      state.scrollY = scrollY;
+      document.removeEventListener("click", leave, true);
     };
-  }, [state]);
+  }, []);
   // biome-ignore lint/correctness/useExhaustiveDependencies: history DOM insertion must restore the previously captured reading anchor.
   useLayoutEffect(() => {
     if (!data) return;
+    if (restoreReadingFocus.current) {
+      const target = state.focusRecord
+        ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")]
+            .find((e) => e.dataset.recordId === state.focusRecord)
+            ?.querySelector<HTMLElement>("summary,button,a")
+        : null;
+      if (target) {
+        target.focus({ preventScroll: true });
+        restoreReadingFocus.current = false;
+      } else if (!state.focusRecord) restoreReadingFocus.current = false;
+    }
     const signature = JSON.stringify([
       data.task,
       data.results,
@@ -158,11 +191,16 @@ export function TaskWorkspace({
           : null;
       if (target && state.scrollY === 0) target.scrollIntoView();
       else scrollTo(0, state.scrollY);
+      if (state.focusRecord)
+        [...document.querySelectorAll<HTMLElement>("[data-record-id]")]
+          .find((e) => e.dataset.recordId === state.focusRecord)
+          ?.querySelector<HTMLElement>("summary,button,a")
+          ?.focus({ preventScroll: true });
       return;
     }
     if (bottom.current) scrollTo(0, document.documentElement.scrollHeight);
     else {
-      const a = anchor.current,
+      const a = anchor.current ?? state.historyAnchor,
         el = a
           ? [
               ...document.querySelectorAll<HTMLElement>("[data-record-id]"),
@@ -185,28 +223,55 @@ export function TaskWorkspace({
     async (id: string, before?: number) => {
       const current = client.captureAuthenticationScope();
       try {
-        const value = await client.read(
-          `/api/operator/assignments/${id}/history${before ? `?beforeSequence=${before}` : ""}`,
-          assignmentHistorySchema,
-        );
+        const pages = [...(state.historyPages[id] ?? [])];
+        if (before && !pages.includes(before)) pages.push(before);
+        const values: History[] = [];
+        for (const boundary of [undefined, ...pages]) {
+          values.push(
+            (
+              await client.read(
+                `/api/operator/assignments/${id}/history${boundary ? `?beforeSequence=${boundary}` : ""}`,
+                assignmentHistorySchema,
+              )
+            ).data,
+          );
+        }
         if (!scope.current || !current()) return;
+        const recent = values[0];
+        if (!recent) return;
+        if (
+          values.some(
+            (value) => value.visibilityRevision !== recent.visibilityRevision,
+          )
+        ) {
+          setHistory((old) => {
+            const next = { ...old };
+            delete next[id];
+            return next;
+          });
+          throw Error(
+            "History visibility changed while loading retained pages",
+          );
+        }
+        const items = values
+          .flatMap((value) => value.items)
+          .filter(
+            (item, i, all) =>
+              all.findIndex(
+                (other) =>
+                  other.workId === item.workId && other.itemId === item.itemId,
+              ) === i,
+          )
+          .sort((a, b) => a.sequence - b.sequence);
+        state.historyPages[id] = pages;
         setHistory((old) => ({
           ...old,
-          [id]:
-            before && old[id]
-              ? {
-                  ...value.data,
-                  items: [
-                    ...value.data.items,
-                    ...old[id].items.filter(
-                      (i) =>
-                        !value.data.items.some(
-                          (v) => v.itemId === i.itemId && v.workId === i.workId,
-                        ),
-                    ),
-                  ],
-                }
-              : value.data,
+          [id]: {
+            ...recent,
+            items,
+            omittedItemCount:
+              values.at(-1)?.omittedItemCount ?? recent.omittedItemCount,
+          },
         }));
         setHistoryErrors((old) => ({ ...old, [id]: "" }));
       } catch (e) {
@@ -217,12 +282,11 @@ export function TaskWorkspace({
           }));
       }
     },
-    [client],
+    [client, state],
   );
   useEffect(() => {
-    for (const a of data?.assignments ?? [])
-      if (!histories[a.assignmentId]) void loadHistory(a.assignmentId);
-  }, [data, histories, loadHistory]);
+    for (const a of data?.assignments ?? []) void loadHistory(a.assignmentId);
+  }, [data, loadHistory]);
   async function command(input: OperatorCommand) {
     if (pending) return;
     setPending(true);
@@ -464,10 +528,10 @@ export function TaskWorkspace({
       <nav className="task-actions" aria-label="Task sections">
         {["brief", "review", "context", "changes", "history", "reply"].map(
           (s) => (
-            <a className="control" key={s} href={`#${s}`}>
+            <ActionLink variant="secondary" key={s} href={`#${s}`}>
               {s[0]?.toUpperCase()}
               {s.slice(1)}
-            </a>
+            </ActionLink>
           ),
         )}
       </nav>
@@ -521,9 +585,10 @@ export function TaskWorkspace({
         {!source && !state.selectedSource && (
           <Literal text={data.task.outcome} />
         )}
-        <label>
+        <label htmlFor="retained-source-revision">
           Retained source revision{" "}
-          <select
+          <NativeSelect
+            id="retained-source-revision"
             className="control"
             value={state.selectedSource ?? ""}
             onChange={(e) => {
@@ -537,7 +602,7 @@ export function TaskWorkspace({
                 Revision {s.revision}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         {data.source && (
           <div>
@@ -600,9 +665,17 @@ export function TaskWorkspace({
               type: "review.view",
               key: crypto.randomUUID(),
               taskId,
-              sourceId: latestSource?.sourceId ?? null,
-              resultIds: data.results.map((r) => r.resultId),
+              sourceId: state.selectedSource
+                ? (source?.sourceId ?? null)
+                : selected
+                  ? (meta?.metadata.sourceId ?? null)
+                  : (source?.sourceId ?? null),
+              resultIds: selected ? [selected.resultId] : [],
             })
+          }
+          disabled={
+            Boolean(state.selectedResult && !selected) ||
+            Boolean(state.selectedSource && !source)
           }
         >
           Set viewing reference
@@ -611,9 +684,10 @@ export function TaskWorkspace({
           Viewing records availability only; it does not approve work or clear
           holds. Retained records may be incomplete.
         </p>
-        <label>
+        <label htmlFor="retained-result-revision">
           Result revision{" "}
-          <select
+          <NativeSelect
+            id="retained-result-revision"
             className="control"
             value={state.selectedResult ?? ""}
             onChange={(e) => {
@@ -627,7 +701,7 @@ export function TaskWorkspace({
                 Result {i + 1} · {r.workId}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         {state.selectedResult && !selected && (
           <p role="alert">
@@ -808,6 +882,30 @@ export function TaskWorkspace({
                 {a.profileRevision} · instructions revision{" "}
                 {a.instructionsRevision}
               </p>
+              <p>Supplied responsibility / brief</p>
+              <Literal text={a.brief} />
+              <p>
+                Requester assignment:{" "}
+                {a.requesterAssignmentId ?? "Not recorded"}; result destination:{" "}
+                {a.resultDestination ?? "Unavailable"}; resolved recipient:{" "}
+                {a.resultRecipientAssignmentId ?? "Unavailable"} (
+                {a.resultRecipientDisposition ?? "Unknown disposition"}).
+              </p>
+              <p>
+                Recorded wait / execution reason:{" "}
+                {a.waitReason ?? "No recorded wait reason; unknown"}.
+              </p>
+              {data.results
+                .filter((r) => r.assignmentId === a.assignmentId)
+                .map((r) => (
+                  <p key={r.resultId}>
+                    <ActionLink
+                      href={`/app/tasks/${taskId}?section=review&assignment=${a.assignmentId}&result=${r.resultId}`}
+                    >
+                      Open exact assignment result {r.resultId}
+                    </ActionLink>
+                  </p>
+                ))}
               <ActionLink href={`/coordination/assignment/${a.assignmentId}`}>
                 Advanced assignment and history controls
               </ActionLink>
@@ -1140,25 +1238,63 @@ function ReviewEvidence({
       )}
       <h4>Recorded comparisons and evidence</h4>
       {!metadata.artifacts.length && <p>No artifact evidence supplied.</p>}
-      <div className="artifact-comparisons">
-        {metadata.artifacts.map((a) => (
-          <Artifact
-            key={a.artifactId}
-            taskId={data.task.id}
-            artifact={a}
-            ask={() =>
-              ask(
-                {
-                  resultId,
-                  artifactId: a.artifactId,
-                  ...(sourceId ? { sourceId } : {}),
-                },
-                `${a.role} artifact ${a.label}`,
-              )
-            }
-          />
-        ))}
-      </div>
+      {[
+        ...new Set(
+          metadata.artifacts.map((a) => a.pairId ?? `unpaired:${a.artifactId}`),
+        ),
+      ].map((pair) => {
+        const group = metadata.artifacts.filter(
+          (a) => (a.pairId ?? `unpaired:${a.artifactId}`) === pair,
+        );
+        return (
+          <section key={pair} data-artifact-pair={pair}>
+            <h5>
+              {pair.startsWith("unpaired:")
+                ? "Unpaired recorded evidence"
+                : `Recorded pair ${pair}`}
+            </h5>
+            <div className="artifact-comparisons">
+              {["before", "after", "evidence"].map((role) => (
+                <div key={role} data-artifact-role={role}>
+                  {group
+                    .filter((a) => a.role === role)
+                    .map((a) =>
+                      metadata.artifacts.filter(
+                        (v) => v.artifactId === a.artifactId,
+                      ).length > 1 ? (
+                        <p key={`${a.artifactId}:${role}:${a.label}`}>
+                          Duplicate artifact identity {a.artifactId}; preview
+                          and feedback unavailable.
+                        </p>
+                      ) : (
+                        <Artifact
+                          key={a.artifactId}
+                          taskId={data.task.id}
+                          artifact={a}
+                          ask={() =>
+                            ask(
+                              {
+                                resultId,
+                                artifactId: a.artifactId,
+                                ...(sourceId ? { sourceId } : {}),
+                              },
+                              `${a.role} artifact ${a.label}`,
+                            )
+                          }
+                        />
+                      ),
+                    )}
+                  {!pair.startsWith("unpaired:") &&
+                    role !== "evidence" &&
+                    !group.some((a) => a.role === role) && (
+                      <p>{role}: recorded side missing.</p>
+                    )}
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })}
       <p>
         Before/after labels and pairing are producer records. Missing sides and
         preview failures are not replaced with another revision.

@@ -793,6 +793,23 @@ export class OperatorApi {
           assignmentId: String(a.id),
           profileId: String(a.profileId),
           name: this.safe(d.profile(String(a.profileId)).name, excluded),
+          brief: this.safe(a.brief, excluded),
+          requesterAssignmentId: a.requesterAssignmentId
+            ? String(a.requesterAssignmentId)
+            : null,
+          resultDestination: this.safe(a.resultDestination, excluded),
+          resultRecipientAssignmentId: a.resultRecipientAssignmentId
+            ? String(a.resultRecipientAssignmentId)
+            : null,
+          resultRecipientDisposition: this.safe(
+            a.resultRecipientDisposition,
+            excluded,
+          ),
+          waitReason: this.safe(
+            s.intent?.reason ??
+              (d.assignmentAdmission(String(a.id)).reasons.join("; ") || null),
+            excluded,
+          ),
           version: Number(a.version),
           state: a.state,
           profileRevision: Number(a.profileRevision),
@@ -1054,6 +1071,9 @@ export class OperatorApi {
           return assignmentHistorySchema.parse({
             data: {
               ...history,
+              visibilityRevision: createHash("sha256")
+                .update(`${visibility}:${task.version}`)
+                .digest("hex"),
               items: history.items.map((item) => {
                 if (item.lifecycle !== "completed") return item;
                 const text =
@@ -1245,7 +1265,8 @@ export class OperatorApi {
     if (query.projectId) this.requireProject(query.projectId);
     const rows = this.service.taskReview().search(query),
       page = rows.slice(0, query.limit),
-      matches = [];
+      matches = [],
+      versions = new Map<string, number>();
     let omittedCount = 0;
     for (const row of page) {
       try {
@@ -1260,6 +1281,13 @@ export class OperatorApi {
           retained = resultId
             ? view.results.some((r) => r.resultId === resultId)
             : review.sources.some((r) => r.sourceId === sourceId);
+        const current = this.requireTask(taskId);
+        if (
+          current.version !== t.version ||
+          current.projectId !== t.projectId ||
+          (query.projectId && current.projectId !== query.projectId)
+        )
+          throw new OperatorApiError(503, "unavailable");
         const excerpt = this.safe(row.excerpt, excluded);
         if (!retained || excerpt === null || excerpt !== row.excerpt) {
           omittedCount++;
@@ -1268,6 +1296,7 @@ export class OperatorApi {
         const historical = resultId
           ? view.results.at(-1)?.resultId !== resultId
           : review.sources.at(-1)?.sourceId !== sourceId;
+        versions.set(taskId, Number(t.version));
         matches.push({
           recordId: row.recordId,
           type: row.type,
@@ -1292,11 +1321,23 @@ export class OperatorApi {
     }
     if (visibility !== this.visibilityToken())
       throw new OperatorApiError(503, "unavailable");
+    const eligibleRecords = new Set(
+      this.service
+        .taskReview()
+        .search(query)
+        .map((row) => row.recordId),
+    );
     const permitted = matches.filter((m) => {
       try {
-        this.requireTask(m.taskId);
+        const current = this.requireTask(m.taskId);
+        if (
+          Number(current.version) !== versions.get(m.taskId) ||
+          String(current.projectId) !== m.projectId ||
+          (query.projectId && String(current.projectId) !== query.projectId)
+        )
+          return false;
         this.requireProject(m.projectId);
-        return true;
+        return eligibleRecords.has(m.recordId);
       } catch {
         return false;
       }
@@ -2051,6 +2092,13 @@ export class OperatorApi {
     } catch (error) {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)
         throw error;
+      if (
+        error instanceof Error &&
+        /^Feedback (?:source|result|work|criterion|artifact)/.test(
+          error.message,
+        )
+      )
+        throw new OperatorApiError(409, "conflict");
       if (error instanceof DomainPolicyError)
         throw new OperatorApiError(503, "command-outcome-unknown");
       if (

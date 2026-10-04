@@ -59,6 +59,14 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     ],
     artifacts: [
       {
+        artifactId: randomUUID(),
+        label: "Secondary before",
+        role: "before",
+        pairId: "secondary-pair",
+        revision: 1,
+        availability: "unavailable",
+      },
+      {
         artifactId: before,
         label: "Before focus",
         role: "before",
@@ -124,6 +132,41 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     outcome:
       "- [ ] Restore focus\n- [ ] Retain drafts\n- [ ] New toolbar requirement",
   });
+  f.seedPersistedState((db) => {
+    const row = db
+      .prepare("SELECT recordJson FROM task_review_results WHERE resultId=?")
+      .get(r2.resultId) as { recordJson: string };
+    const record = JSON.parse(row.recordJson);
+    const duplicateId = randomUUID();
+    record.metadata.artifacts.push(
+      {
+        artifactId: randomUUID(),
+        label: "Secondary after",
+        role: "after",
+        pairId: "secondary-pair",
+        revision: 1,
+        availability: "unavailable",
+      },
+      {
+        artifactId: randomUUID(),
+        label: "Unpaired supplied capture",
+        role: "evidence",
+        revision: 1,
+        availability: "unavailable",
+      },
+      ...["before", "after"].map((role) => ({
+        artifactId: duplicateId,
+        label: "Legacy duplicate",
+        role,
+        pairId: "legacy-duplicate",
+        revision: 1,
+        availability: "unavailable",
+      })),
+    );
+    db.prepare(
+      "UPDATE task_review_results SET recordJson=? WHERE resultId=?",
+    ).run(JSON.stringify(record), r2.resultId);
+  });
   const web = await j.start("fixture.web", () => f.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
@@ -150,6 +193,39 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   );
   assert.ok(await page.getByText(/Newer source revision 2/).count());
   assert.ok(await page.getByText(/No bound PR/).count());
+  await page
+    .getByRole("button", { name: "Set viewing reference", exact: true })
+    .click();
+  await page.getByText(/2 new result/).waitFor();
+  assert.deepEqual(f.service.taskReview().read(a.taskId).viewed?.resultIds, [
+    r2.resultId,
+  ]);
+  assert.equal(
+    f.service.taskReview().read(a.taskId).viewed?.sourceId,
+    a.source.sourceId,
+  );
+  const pair = page.locator('[data-artifact-pair="focus-pair"]');
+  assert.equal(await pair.getByText(/Secondary/).count(), 0);
+  assert.equal(
+    await pair.locator('[data-artifact-role="before"] figure').count(),
+    1,
+  );
+  assert.equal(
+    await pair.locator('[data-artifact-role="after"] figure').count(),
+    1,
+  );
+  assert.equal(await page.getByText(/Duplicate artifact identity/).count(), 2);
+  assert.equal(
+    await page.getByText("Unpaired recorded evidence", { exact: true }).count(),
+    1,
+  );
+  const bounds = await page
+    .locator("nav.task-actions a, #brief select, #review select")
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+  assert.ok(
+    bounds.every((h) => h >= 36),
+    JSON.stringify(bounds),
+  );
   await page.locator("#review").scrollIntoViewIfNeeded();
   await page.getByAltText("before: Before focus").waitFor();
   assert.equal(
@@ -160,23 +236,68 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   );
   await captureBrowserEvidence(page, "1366-original-review");
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator(".artifact-comparisons").scrollIntoViewIfNeeded();
+  await page.locator(".artifact-comparisons").first().scrollIntoViewIfNeeded();
   assert.equal(
     await page
       .locator(".artifact-comparisons")
+      .first()
       .evaluate(
         (el) => getComputedStyle(el).gridTemplateColumns.split(" ").length,
       ),
     1,
   );
+  const phoneBounds = await page
+    .locator("nav.task-actions a, #brief select, #review select")
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+  assert.ok(
+    phoneBounds.every((h) => h >= 44),
+    JSON.stringify(phoneBounds),
+  );
   await captureBrowserEvidence(page, "390-original-comparison");
-  await page
+  await pair
+    .locator('[data-artifact-role="before"]')
     .getByRole("button", { name: "Ask lead about artifact", exact: true })
     .first()
     .click();
   await page
     .getByLabel("Editable reply")
     .fill("Check this exact before artifact");
+  await page.route("**/api/operator/commands", async (route) => {
+    const input = route.request().postDataJSON();
+    if (input.type !== "message") return route.continue();
+    const response = await route.fetch({
+      postData: JSON.stringify({
+        ...input,
+        reference: {
+          ...input.reference,
+          sourceId: f.service.taskReview().sources(a.taskId).at(-1)?.sourceId,
+        },
+      }),
+    });
+    await route.fulfill({ response });
+  });
+  await page
+    .getByRole("button", { name: "Send to task lead", exact: true })
+    .click();
+  await page.getByText(/conflict: conflict.*Draft retained/).waitFor();
+  assert.ok(await page.getByLabel("Editable reply").isEditable());
+  assert.equal(
+    f.service
+      .coordinationView()
+      .readTask(a.taskId)
+      .messages.filter((m) => m.eventType === "operator-message").length,
+    0,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", {
+        name: "Reconcile original operation",
+        exact: true,
+      })
+      .count(),
+    0,
+  );
+  await page.unroute("**/api/operator/commands");
   await page
     .getByRole("button", { name: "Send to task lead", exact: true })
     .click();

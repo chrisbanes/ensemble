@@ -39,6 +39,9 @@ export class TaskWorkspaceState {
   }
   uncertain = false;
   scrollY = 0;
+  historyPages: Record<string, number[]> = {};
+  focusRecord: string | null = null;
+  historyAnchor: { id: string; y: number } | null = null;
   selectedResult: string | null = null;
   selectedSource: string | null = null;
 }

@@ -175,6 +175,19 @@ export function Login({
 export function App() {
   const drafts = useRef(new ConfigurationDrafts());
   const acceptedIdentity = useRef<string | null>(null);
+  const navigationScope = useRef(crypto.randomUUID());
+  const clearPrivateNavigation = () => {
+    const next =
+      location.pathname === "/app/search"
+        ? "/app/search"
+        : location.pathname + location.search;
+    history.replaceState(
+      { navigationScope: navigationScope.current, navKey: crypto.randomUUID() },
+      "",
+      next,
+    );
+    setPath(next);
+  };
   const clientRef = useRef<OperatorClient | null>(null);
   const [session, setSession] = useState<Session | null>(null),
     [bootstrapError, setBootstrapError] = useState(false),
@@ -186,7 +199,10 @@ export function App() {
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
   const searchState = useRef(new Map<string, SearchState>());
   const taskStates = useRef(new TaskWorkspaceStates());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: navigation purge uses current browser entry and stable scope ref.
   const expired = useCallback(() => {
+    navigationScope.current = crypto.randomUUID();
+    clearPrivateNavigation();
     clientRef.current?.invalidateAuthentication();
     acceptedIdentity.current = null;
     setLogoutPending(false);
@@ -199,14 +215,30 @@ export function App() {
   }, []);
   const client = useMemo(() => new OperatorClient(fetch, expired), [expired]);
   clientRef.current = client;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: browser-entry purge is needed only when accepting this exact current authentication scope.
   const acceptSession = useCallback(
     (next: Session) => {
       const identity = next.authenticated ? next.csrfToken : null;
       if (identity !== acceptedIdentity.current) {
+        if (!identity && acceptedIdentity.current) {
+          navigationScope.current = crypto.randomUUID();
+          clearPrivateNavigation();
+        }
         client.invalidateAuthentication();
         drafts.current.purge();
         taskStates.current.purge();
         searchState.current.clear();
+        if (
+          identity &&
+          history.state?.navigationScope &&
+          history.state.navigationScope !== navigationScope.current
+        )
+          clearPrivateNavigation();
+        if (identity)
+          history.replaceState(
+            { ...history.state, navigationScope: navigationScope.current },
+            "",
+          );
         acceptedIdentity.current = identity;
         setLogoutPending(false);
       }
@@ -232,9 +264,13 @@ export function App() {
     };
   }, [client, bootstrap, acceptSession]);
   const restoreFocus = useRef<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: current scope ref guards browser Back/Forward entries across authentication expiry.
   useEffect(() => {
     const pop = () => {
-      restoreFocus.current = history.state?.focusedHref ?? null;
+      if (history.state?.navigationScope !== navigationScope.current) {
+        clearPrivateNavigation();
+        restoreFocus.current = null;
+      } else restoreFocus.current = history.state?.focusedHref ?? null;
       setPath(location.pathname + location.search);
       setNavigationVersion((n) => n + 1);
       requestAnimationFrame(() =>
@@ -303,6 +339,7 @@ export function App() {
               location.pathname === "/app/search"
                 ? history.state?.workspaceOrigin
                 : location.pathname + location.search,
+            navigationScope: navigationScope.current,
             navKey: crypto.randomUUID(),
             entryIndex: (history.state?.entryIndex ?? 0) + 1,
             workspaceIndex:
@@ -331,6 +368,7 @@ export function App() {
           location.pathname === "/app/search"
             ? history.state?.workspaceOrigin
             : location.pathname + location.search,
+        navigationScope: navigationScope.current,
         navKey: crypto.randomUUID(),
         entryIndex: (history.state?.entryIndex ?? 0) + 1,
         workspaceIndex:

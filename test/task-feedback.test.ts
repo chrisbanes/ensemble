@@ -79,3 +79,83 @@ test("exact contextual feedback remains anchored to the original result/source a
   );
   await assert.rejects(api.execute({ ...command, message: "Changed" }));
 });
+
+test("implicit artifact owner rejects partial mismatched source/criterion/work and actual coordination API returns definite conflict without effect", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(f);
+  const artifactId = randomUUID();
+  f.service.domain().execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    taskId: a.taskId,
+    expectedVersion: 1,
+    outcome: "- [ ] Revised criterion",
+  });
+  const source2 = f.service.taskReview().sources(a.taskId).at(-1)!;
+  const r = a.delegatedResult("Revised result", {
+    sourceId: source2.sourceId,
+    artifacts: [
+      {
+        artifactId,
+        label: "Revised artifact",
+        role: "evidence",
+        revision: 1,
+        availability: "unavailable",
+      },
+    ],
+  });
+  const api = new OperatorApi(f.service, [f.directory]);
+  const command = {
+    type: "message",
+    key: randomUUID(),
+    taskId: a.taskId,
+    recipientAssignmentId: a.assignmentId,
+    expectedAssignmentVersion: 1,
+    message: "Exact editable draft",
+    reference: {
+      artifactId,
+      sourceId: a.source.sourceId,
+      criterionId: a.source.criteria[0]!.criterionId,
+    },
+  };
+  for (const reference of [
+    command.reference,
+    { artifactId, workId: "wrong-work" },
+    { resultId: r.resultId, sourceId: a.source.sourceId },
+  ]) {
+    await assert.rejects(
+      api.execute({ ...command, key: randomUUID(), reference }),
+      /conflict/,
+    );
+  }
+  assert.equal(
+    f.service
+      .coordinationView()
+      .readTask(a.taskId)
+      .messages.filter((m) => m.eventType === "operator-message").length,
+    0,
+  );
+  assert.equal(f.service.domain().task(a.taskId).state, "open");
+  assert.equal(
+    f.service.coordinationView().readTask(a.taskId).approvals.length,
+    0,
+  );
+  assert.equal(f.runtime.turns, 0);
+  const duplicateId = randomUUID();
+  assert.throws(
+    () =>
+      a.delegatedResult("Duplicate identities", {
+        artifacts: ["before", "after"].map((role) => ({
+          artifactId: duplicateId,
+          label: role,
+          role: role as "before" | "after",
+          revision: 1,
+          availability: "unavailable",
+        })),
+      }),
+    /Duplicate artifact identity/,
+  );
+});

@@ -264,6 +264,12 @@ export const assignmentSchema = z
     assignmentId: uuid,
     profileId: uuid,
     name: safeText,
+    brief: safeText.optional(),
+    requesterAssignmentId: uuid.nullable().optional(),
+    resultDestination: safeText.optional(),
+    resultRecipientAssignmentId: uuid.nullable().optional(),
+    resultRecipientDisposition: safeText.optional(),
+    waitReason: safeText.optional(),
     version: revision,
     state: z.enum(["pending", "running", "completed", "held", "cancelled"]),
     profileRevision: revision,
@@ -651,6 +657,7 @@ const binding = {
 export const assignmentHistorySchema = envelope(
   z
     .object({
+      visibilityRevision: hash.optional(),
       items: z.array(
         z
           .object({

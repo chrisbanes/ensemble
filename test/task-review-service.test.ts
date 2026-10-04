@@ -72,8 +72,32 @@ test("production service creates source, assignment and work captures, and real 
   await until(() => f.service.list().some((w) => w.state === "running"));
   const w = f.service.list().find((w) => w.state === "running");
   assert.ok(w?.threadId && w.turnId);
-  const source = f.service.taskReview().sources(taskId)[0];
+  const prepared = f.runtime.prompts[0]
+    ?.split("\n")
+    .find((line) => line.startsWith("Captured review references (JSON): "));
+  assert.ok(prepared);
+  const references = JSON.parse(
+    prepared.slice("Captured review references (JSON): ".length),
+  );
+  const source = f.service.taskReview().source(taskId, references.sourceId);
   assert.ok(source);
+  assert.equal(
+    references.criteria[0].criterionId,
+    source.criteria[0]?.criterionId,
+  );
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    expectedVersion: Number(d.task(taskId).version),
+    outcome: "- [ ] New scope after preparation",
+  });
+  assert.notEqual(
+    f.service.taskReview().sources(taskId).at(-1)?.sourceId,
+    references.sourceId,
+  );
   const call = {
     threadId: w.threadId,
     turnId: w.turnId,
@@ -82,10 +106,10 @@ test("production service creates source, assignment and work captures, and real 
     arguments: {
       summary: "Restored focus",
       review: {
-        sourceId: source.sourceId,
+        sourceId: references.sourceId,
         criteria: [
           {
-            criterionId: source.criteria[0]!.criterionId,
+            criterionId: references.criteria[0].criterionId,
             outcome: "supported",
             scope: "Literal original checklist only",
             provenance: "Agent supplied browser assertion",

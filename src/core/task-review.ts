@@ -475,6 +475,11 @@ export class TaskReviewStore {
         if (a?.taskId !== result.taskId)
           throw Error("Repair assignment belongs to another task");
       }
+    if (
+      new Set(metadata.artifacts.map((a) => a.artifactId)).size !==
+      metadata.artifacts.length
+    )
+      throw Error("Duplicate artifact identity");
     for (const artifact of metadata.artifacts) {
       if (
         artifact.file &&
@@ -574,24 +579,34 @@ export class TaskReviewStore {
       read = this.read(taskId);
     if (ref.sourceId && !read.sources.some((s) => s.sourceId === ref.sourceId))
       throw Error("Feedback source unavailable");
-    const r = ref.resultId
+    const artifactOwners = ref.artifactId
+      ? read.results.filter((r) =>
+          r.metadata.artifacts.some((a) => a.artifactId === ref.artifactId),
+        )
+      : [];
+    if (ref.artifactId && artifactOwners.length !== 1)
+      throw Error("Feedback artifact unavailable");
+    const ownerId = ref.resultId ?? artifactOwners[0]?.resultId;
+    if (
+      ref.resultId &&
+      artifactOwners.length &&
+      artifactOwners[0]?.resultId !== ref.resultId
+    )
+      throw Error("Feedback artifact does not match result");
+    const r = ownerId
       ? (this.db
           .prepare(
             "SELECT taskId,workId FROM coordination_results WHERE resultId=?",
           )
-          .get(ref.resultId) as Row | undefined)
+          .get(ownerId) as Row | undefined)
       : undefined;
     if (ref.resultId && r?.taskId !== taskId)
       throw Error("Feedback result unavailable");
-    const linked = read.results.find((x) => x.resultId === ref.resultId);
-    if (
-      ref.resultId &&
-      ref.sourceId &&
-      linked?.metadata.sourceId !== ref.sourceId
-    )
+    const linked = read.results.find((x) => x.resultId === ownerId);
+    if (ownerId && ref.sourceId && linked?.metadata.sourceId !== ref.sourceId)
       throw Error("Feedback source does not match result");
     if (
-      ref.resultId &&
+      ownerId &&
       ref.criterionId &&
       !this.source(taskId, linked?.metadata.sourceId ?? "")?.criteria.some(
         (x) => x.criterionId === ref.criterionId,

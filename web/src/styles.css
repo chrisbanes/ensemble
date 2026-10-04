@@ -749,3 +749,16 @@ nav h2 {
   align-items: center;
   min-height: 44px;
 }
+
+.task-workspace [data-slot="native-select"],
+.search-workspace [data-slot="native-select"],
+.search-workspace [data-slot="input"] {
+  min-height: 36px;
+}
+@media (max-width: 700px) {
+  .task-workspace [data-slot="native-select"],
+  .search-workspace [data-slot="native-select"],
+  .search-workspace [data-slot="input"] {
+    min-height: 44px;
+  }
+}

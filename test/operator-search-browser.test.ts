@@ -53,6 +53,15 @@ test("shared Search preserves exact historical target, dates, selected focus and
   const searchURL = page.url();
   assert.ok(await page.getByText(/Alpha · result/).count());
   assert.ok(await page.getByText(/Beta · result/).count());
+  const desktopBounds = await page
+    .locator(
+      '.search-workspace select, .search-workspace input[type="date"], .search-matches a',
+    )
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+  assert.ok(
+    desktopBounds.every((h) => h >= 36),
+    JSON.stringify(desktopBounds),
+  );
   await captureBrowserEvidence(page, "1366-cross-project-search");
   await page.locator(`[data-search-record="${r.resultId}"] a`).click();
   await page.getByText("Shared command R2 original", { exact: true }).waitFor();
@@ -139,9 +148,82 @@ test("shared Search preserves exact historical target, dates, selected focus and
     .getByRole("button", { name: "Search records", exact: true })
     .click();
   await page.locator("[data-search-record]").first().waitFor();
+  const phoneBounds = await page
+    .locator(
+      '.search-workspace select, .search-workspace input[type="date"], .search-matches a',
+    )
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+  assert.ok(
+    phoneBounds.every((h) => h >= 44),
+    JSON.stringify(phoneBounds),
+  );
   await captureBrowserEvidence(page, "390-shared-search");
   await page
     .getByRole("button", { name: "Back to originating workspace", exact: true })
     .click();
   assert.ok(page.url().endsWith(`/app/projects/${b.projectId}`));
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.getByRole("link", { name: "Search", exact: true }).click();
+  await page
+    .getByLabel("Search retained task, decision and result records")
+    .fill("Shared command");
+  await page
+    .getByRole("button", { name: "Search records", exact: true })
+    .click();
+  await page.locator("[data-search-record]").first().waitFor();
+  let release!: () => void, entered!: () => void;
+  const barrier = new Promise<void>((r) => (release = r)),
+    entry = new Promise<void>((r) => (entered = r));
+  await page.route("**/api/operator/search?*", async (route) => {
+    const response = await route.fetch();
+    entered();
+    await barrier;
+    await route
+      .fulfill({ response })
+      .catch((error) =>
+        assert.match(String(error), /already handled|Target.*closed/),
+      );
+  });
+  await page
+    .getByRole("button", { name: "Refresh results", exact: true })
+    .click();
+  await entry;
+  await page.context().clearCookies();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.getByLabel("Password").waitFor();
+  assert.equal(new URL(page.url()).search, "");
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByLabel("Search retained task, decision and result records")
+    .waitFor();
+  release();
+  await page.unroute("**/api/operator/search?*");
+  assert.equal(
+    await page
+      .getByLabel("Search retained task, decision and result records")
+      .inputValue(),
+    "",
+  );
+  assert.equal(await page.locator("[data-search-record]").count(), 0);
+  for (let i = 0; i < 3; i++) {
+    await page.goBack();
+    if (new URL(page.url()).pathname === "/app/search") {
+      await page
+        .getByLabel("Search retained task, decision and result records")
+        .waitFor();
+      assert.equal(new URL(page.url()).search, "");
+      assert.equal(
+        await page
+          .getByLabel("Search retained task, decision and result records")
+          .inputValue(),
+        "",
+      );
+    }
+  }
+  await page
+    .goForward({ waitUntil: "commit" })
+    .catch((error) => assert.match(String(error), /ERR_ABORTED/));
+  if (new URL(page.url()).pathname === "/app/search")
+    assert.equal(new URL(page.url()).search, "");
 });

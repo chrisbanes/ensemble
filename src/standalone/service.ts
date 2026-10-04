@@ -2316,9 +2316,28 @@ export class StandaloneService {
     const roleContext = leadBinding
       ? "Assignment role: project lead. You are accountable for coordinating this task, reviewing its results, and deciding whether to request completion."
       : "Assignment role: project assignee. The project lead remains accountable for coordinating this task and reviewing its results before completion. Report your result and durable next action through Ensemble.";
+    const capture = this.taskReview()
+      .read(binding.taskId)
+      .contexts.find(
+        (c) =>
+          c.workId === request.workId &&
+          c.assignmentId === binding.assignmentId,
+      );
+    const source = capture?.sourceId
+      ? this.taskReview().source(binding.taskId, capture.sourceId)
+      : undefined;
+    const reviewReferences = source
+      ? JSON.stringify({
+          sourceId: source.sourceId,
+          sourceRevision: source.revision,
+          criteria: source.criteria,
+        })
+      : "Unavailable: no retained source capture for this work";
     return [
       request.prompt,
       roleContext,
+      `Captured review references (JSON): ${reviewReferences}`,
+
       `Captured project instructions (revision ${binding.instructionsRevision}):\n${projectInstructions || "(none)"}`,
       `Captured profile instructions (revision ${binding.profileRevision}):\n${profileInstructions || "(none)"}`,
     ].join("\n\n");

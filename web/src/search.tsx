@@ -8,6 +8,7 @@ import type { z } from "zod";
 import type { OperatorClient } from "./api.js";
 import { useOperatorResource } from "./resource.js";
 import { Button, ActionLink, ResourceStatus, TextField } from "./components.js";
+import { Input } from "./ui/input.js";
 import { NativeSelect } from "./ui/native-select.js";
 const localDay = (value: string | null) => {
   if (!value) return "";
@@ -171,18 +172,20 @@ export function Search({
             />
             Include historical records
           </label>
-          <label>
+          <label htmlFor="search-from-date">
             From date
-            <input
+            <Input
+              id="search-from-date"
               className="control"
               type="date"
               value={after}
               onChange={(e) => setAfter(e.target.value)}
             />
           </label>
-          <label>
+          <label htmlFor="search-through-date">
             Through date
-            <input
+            <Input
+              id="search-through-date"
               className="control"
               type="date"
               value={before}
@@ -237,8 +240,8 @@ export function Search({
                   {m.historical ? "· historical" : ""} ·{" "}
                   {new Date(m.createdAt).toLocaleString()}
                 </p>
-                <a
-                  className="control task-title"
+                <ActionLink
+                  className="task-title"
                   href={m.href}
                   onClick={() => {
                     state.selected = m.recordId;
@@ -246,7 +249,7 @@ export function Search({
                   }}
                 >
                   {m.taskTitle ?? "Title unavailable"}
-                </a>
+                </ActionLink>
                 <p className="literal-preview">
                   {m.excerpt ?? "Excerpt unavailable"}
                 </p>
