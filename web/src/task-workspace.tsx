@@ -1581,7 +1581,14 @@ function ReviewEvidence({
         metadata.validations.map((v) => (
           <p key={`${v.label}:${v.scope}:${v.provenance}`}>
             {v.label}: {v.outcome} · {v.scope} · {v.provenance} · checked head{" "}
-            {v.checkedHead ?? "not supplied"}
+            {v.checkedHead ?? "not supplied"} · {(() => {
+              const binding = data.delivery?.binding;
+              if (!v.checkedHead || !binding?.headSha || binding.readError)
+                return "Head comparison unknown; current bound head unavailable";
+              return v.checkedHead === binding.headSha
+                ? `Recorded against the current bound head ${binding.headSha}`
+                : `Stale validation; checked head ${v.checkedHead}, current bound head ${binding.headSha}`;
+            })()}
           </p>
         ))
       ) : (
@@ -1748,10 +1755,13 @@ function Changes({
             Recorded commits: {changes.commits.join(", ") || "not supplied"}
           </p>
           <Literal text={changes.diff} />
-          {changes.reference && (
+          {changes.reference &&
+          ["http:", "https:"].includes(new URL(changes.reference).protocol) ? (
             <ActionLink href={changes.reference}>
               Recorded change reference
             </ActionLink>
+          ) : (
+            <p>No available recorded change reference.</p>
           )}
           {changes.findings.map((f) => (
             <p key={`${f.finding}:${f.repairAssignmentId ?? "unknown"}`}>

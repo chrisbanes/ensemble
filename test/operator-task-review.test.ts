@@ -345,3 +345,54 @@ test("ordinary GitHub observation identity survives changed redaction exclusions
     ),
   );
 });
+
+test("recorded change references preserve supported web links and keep legacy unsupported material readable without a link", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f);
+  const api = new OperatorApi(f.service, [f.directory]);
+  for (const reference of [
+    "http://example.com/record",
+    "https://example.com/record",
+  ]) {
+    const result = task.result("Web reference", {
+      changes: { reference, files: [], commits: [], findings: [] },
+    });
+    assert.equal(
+      (
+        await api.readReview(task.taskId, { resultId: result.resultId })
+      ).data.results.find((r) => r.resultId === result.resultId)?.metadata
+        .changes?.reference,
+      reference,
+    );
+  }
+  const old = task.result("Legacy material", {
+    changes: {
+      reference: "https://example.com/legacy",
+      files: ["retained.ts"],
+      commits: [],
+      findings: [],
+    },
+  });
+  for (const reference of ["data:text/html,unsafe", "custom://unsafe"]) {
+    f.seedPersistedState((db) => {
+      const row = db
+        .prepare("SELECT recordJson FROM task_review_results WHERE resultId=?")
+        .get(old.resultId) as { recordJson: string };
+      const record = JSON.parse(row.recordJson);
+      record.metadata.changes.reference = reference;
+      db.prepare(
+        "UPDATE task_review_results SET recordJson=? WHERE resultId=?",
+      ).run(JSON.stringify(record), old.resultId);
+    });
+    for (const read of [
+      (await api.readTask(task.taskId)).data.review!,
+      (await api.readReview(task.taskId)).data,
+    ]) {
+      const changes = read.results.find((r) => r.resultId === old.resultId)
+        ?.metadata.changes;
+      assert.deepEqual(changes?.files, ["retained.ts"]);
+      assert.equal(changes?.reference, undefined);
+    }
+  }
+});

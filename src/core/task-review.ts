@@ -590,6 +590,13 @@ export class TaskReviewStore {
       )
         throw Error("Artifact identity already recorded");
     }
+    if (
+      metadata.changes?.reference &&
+      !["http:", "https:"].includes(
+        new URL(metadata.changes.reference).protocol,
+      )
+    )
+      throw Error("Unsupported recorded change reference protocol");
     // Validate supplied prose and paths, not structural enums/identities.
     const suppliedText = [
       ...metadata.criteria.flatMap((c) => [c.scope, c.provenance]),

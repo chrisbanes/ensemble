@@ -1228,6 +1228,9 @@ export class OperatorApi {
                     : {}),
                   reference:
                     result.metadata.changes.reference &&
+                    ["http:", "https:"].includes(
+                      new URL(result.metadata.changes.reference).protocol,
+                    ) &&
                     this.safe(result.metadata.changes.reference, excluded) ===
                       result.metadata.changes.reference
                       ? result.metadata.changes.reference

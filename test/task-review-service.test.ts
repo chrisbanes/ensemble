@@ -122,6 +122,28 @@ test("production service creates source, assignment and work captures, and real 
     f.service.list().find((item) => item.workId === w.workId)?.state,
     "running",
   );
+  for (const reference of ["data:text/html,unsafe", "custom://unsafe"]) {
+    const invalid = await f.runtime.callTool({
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: {
+        summary: "Rejected reference",
+        review: { changes: { reference } },
+      },
+    });
+    assert.equal(invalid.success, false);
+    assert.equal(
+      f.service.coordinationView().readTask(taskId).results.length,
+      0,
+    );
+    assert.equal(f.service.taskReview().read(taskId).results.length, 0);
+    assert.equal(
+      f.service.list().find((item) => item.workId === w.workId)?.state,
+      "running",
+    );
+  }
   const call = {
     threadId: w.threadId,
     turnId: w.turnId,
@@ -131,6 +153,7 @@ test("production service creates source, assignment and work captures, and real 
       summary: "Restored focus",
       review: {
         sourceId: references.sourceId,
+        changes: { reference: "https://example.com/recorded" },
         criteria: [
           {
             criterionId: references.criteria[0].criterionId,
