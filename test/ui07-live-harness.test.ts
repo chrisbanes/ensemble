@@ -29,6 +29,13 @@ test("UI07 production browser creates task, persists native answer before reply,
   assert.equal(r.callbackEnded, true);
   assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
   assert.equal(r.screenshots.length, 1);
+  assert.deepEqual(r.closedQuestionProjection, {
+    taskReload: true,
+    inboxReload: true,
+    retainedExactAnswer: true,
+    readOnly: true,
+    zeroCommands: true,
+  });
 });
 for (const mode of [
   "assertion-active",

@@ -792,6 +792,47 @@ export async function runQualification(options = {}) {
         })
         .waitFor();
     }, "browser-inspect-persisted-result");
+    await step(async () => {
+      const commandCount = commands.length;
+      const expected = nativeCall.request.questions[0].isOther ? text : "Local";
+      for (const route of [
+        `/app/tasks/${taskId}?request=${q.interactionId}`,
+        `/app/inbox?task=${taskId}&request=${q.interactionId}`,
+      ]) {
+        await page.goto(`${origin}${route}`);
+        await page.reload();
+        const form = page.getByRole("region", {
+          name: "Exact question response",
+        });
+        await form
+          .getByText(
+            "Answer recorded. Request closed; the retained answer is read-only.",
+            { exact: true },
+          )
+          .waitFor();
+        assert.equal(
+          await form
+            .getByRole("button", { name: "Submit answer", exact: true })
+            .isDisabled(),
+          true,
+        );
+        if (nativeCall.request.questions[0].isOther)
+          assert.equal(await form.getByRole("textbox").inputValue(), expected);
+        else
+          assert.equal(
+            await form.getByRole("radio", { name: /^Local/ }).isChecked(),
+            true,
+          );
+      }
+      assert.equal(commands.length, commandCount);
+      evidence.closedQuestionProjection = {
+        taskReload: true,
+        inboxReload: true,
+        retainedExactAnswer: true,
+        readOnly: true,
+        zeroCommands: true,
+      };
+    }, "browser-inspect-closed-recorded-question");
     const screenshot = `${root}-runtime-review.png`;
     await step(
       () =>
