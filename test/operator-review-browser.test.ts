@@ -32,7 +32,7 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     missing = randomUUID();
   await writeFile(join(workspace.path, "before.png"), png);
   await writeFile(join(workspace.path, "after.png"), png);
-  a.delegatedResult("R1 initial");
+  const r1 = a.delegatedResult("R1 initial");
   const r2 = a.delegatedResult("R2 original scope", {
     sourceId: a.source.sourceId,
     criteria: [
@@ -196,7 +196,7 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   await page
     .getByRole("button", { name: "Set viewing reference", exact: true })
     .click();
-  await page.getByText(/2 new result/).waitFor();
+  await page.getByText(/1 new result/).waitFor();
   assert.deepEqual(f.service.taskReview().read(a.taskId).viewed?.resultIds, [
     r2.resultId,
   ]);
@@ -204,6 +204,10 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     f.service.taskReview().read(a.taskId).viewed?.sourceId,
     a.source.sourceId,
   );
+  await page.getByLabel("Result revision").selectOption(r1.resultId);
+  await page.getByText("R1 initial", { exact: true }).waitFor();
+  await page.getByLabel("Result revision").selectOption(r2.resultId);
+  await page.getByText("R2 original scope", { exact: true }).waitFor();
   const pair = page.locator('[data-artifact-pair="focus-pair"]');
   assert.equal(await pair.getByText(/Secondary/).count(), 0);
   assert.equal(

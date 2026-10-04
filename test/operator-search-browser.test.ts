@@ -226,4 +226,74 @@ test("shared Search preserves exact historical target, dates, selected focus and
     .catch((error) => assert.match(String(error), /ERR_ABORTED/));
   if (new URL(page.url()).pathname === "/app/search")
     assert.equal(new URL(page.url()).search, "");
+  for (const unknown of [false, true]) {
+    await page
+      .getByRole("link", { name: "Search", exact: true })
+      .evaluate((el) => (el as HTMLElement).click());
+    await page
+      .getByLabel("Search retained task, decision and result records")
+      .fill("Shared command");
+    await page
+      .getByRole("button", { name: "Search records", exact: true })
+      .click();
+    await page.locator("[data-search-record]").first().waitFor();
+    let releaseLate!: () => void, enterLate!: () => void;
+    const lateBarrier = new Promise<void>((r) => (releaseLate = r)),
+      lateEntry = new Promise<void>((r) => (enterLate = r));
+    await page.route("**/api/operator/search?*", async (route) => {
+      const response = await route.fetch();
+      enterLate();
+      await lateBarrier;
+      await route
+        .fulfill({ response })
+        .catch((error) =>
+          assert.match(String(error), /already handled|Target.*closed/),
+        );
+    });
+    await page
+      .getByRole("button", { name: "Refresh results", exact: true })
+      .click();
+    await lateEntry;
+    if (unknown)
+      await page.route("**/api/operator/logout", async (route) => {
+        await route.fetch();
+        await route.abort("failed");
+      });
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await page.getByLabel("Password").waitFor();
+    assert.equal(new URL(page.url()).search, "");
+    await page.getByLabel("Password").fill(web.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page
+      .getByLabel("Search retained task, decision and result records")
+      .waitFor();
+    releaseLate();
+    await page.unroute("**/api/operator/search?*");
+    await page.unroute("**/api/operator/logout");
+    assert.equal(
+      await page
+        .getByLabel("Search retained task, decision and result records")
+        .inputValue(),
+      "",
+    );
+    assert.equal(await page.locator("[data-search-record]").count(), 0);
+    await page.goBack();
+    if (new URL(page.url()).pathname === "/app/search") {
+      await page
+        .getByLabel("Search retained task, decision and result records")
+        .waitFor();
+      assert.equal(new URL(page.url()).search, "");
+      assert.equal(
+        await page
+          .getByLabel("Search retained task, decision and result records")
+          .inputValue(),
+        "",
+      );
+    }
+    await page
+      .goForward({ waitUntil: "commit" })
+      .catch((error) => assert.match(String(error), /ERR_ABORTED/));
+    if (new URL(page.url()).pathname === "/app/search")
+      assert.equal(new URL(page.url()).search, "");
+  }
 });

@@ -52,7 +52,7 @@ test("production workspace retains literal history, pending request, focused rep
     resultDestination: a.assignmentId,
     requesterAssignmentId: a.assignmentId,
   });
-  a.result(
+  const responsibilityResult = a.result(
     "Exact responsibility review result",
     undefined,
     responsibilityAssignmentId,
@@ -142,6 +142,57 @@ test("production workspace retains literal history, pending request, focused rep
       .locator("summary")
       .evaluate((el) => el === document.activeElement),
     true,
+  );
+  await page
+    .getByLabel("Editable reply")
+    .fill("Navigation draft remains exact");
+  const exactLink = page.getByRole("link", {
+    name: `Open exact assignment result ${responsibilityResult.resultId}`,
+    exact: true,
+  });
+  await exactLink.scrollIntoViewIfNeeded();
+  await exactLink.focus();
+  const exactY = await exactLink.evaluate(
+    (el) => el.getBoundingClientRect().top,
+  );
+  await exactLink.click();
+  const reviewHeading = page.getByRole("heading", {
+    name: "Evidence review",
+    exact: true,
+  });
+  await page
+    .getByText("Exact responsibility review result", { exact: true })
+    .waitFor();
+  const destination = await page.locator("#review").evaluate((el) => ({
+    y: el.getBoundingClientRect().top,
+    margin: parseFloat(getComputedStyle(el).scrollMarginTop),
+  }));
+  assert.ok(
+    Math.abs(destination.y - destination.margin) < 4,
+    JSON.stringify(destination),
+  );
+  assert.equal(
+    await reviewHeading.evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await page
+    .getByText("Exact responsibility review result", { exact: true })
+    .waitFor();
+  await page.goBack();
+  await reading.waitFor({ state: "attached" });
+  assert.ok(
+    Math.abs(
+      (await exactLink.evaluate((el) => el.getBoundingClientRect().top)) -
+        exactY,
+    ) < 4,
+  );
+  assert.equal(
+    await exactLink.evaluate((el) => el === document.activeElement),
+    true,
+  );
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Navigation draft remains exact",
   );
   await page
     .getByRole("button", { name: "Collapse all history", exact: true })
@@ -305,6 +356,28 @@ test("production workspace retains literal history, pending request, focused rep
     true,
   );
   assert.equal(replyRequests.length, 2);
+  let releaseHistory!: () => void,
+    historyEntered!: () => void,
+    historySettled!: () => void;
+  const historyBarrier = new Promise<void>((r) => (releaseHistory = r)),
+    historyEntry = new Promise<void>((r) => (historyEntered = r)),
+    historyDone = new Promise<void>((r) => (historySettled = r));
+  let delayedHistory = false;
+  const historyRoute = `**/api/operator/assignments/${r.assignmentId}/history*`;
+  await page.route(historyRoute, async (route) => {
+    const response = await route.fetch();
+    if (!delayedHistory && route.request().url().includes("beforeSequence")) {
+      delayedHistory = true;
+      historyEntered();
+      await historyBarrier;
+      await route.fulfill({ response });
+      historySettled();
+    } else await route.fulfill({ response });
+  });
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await historyEntry;
   f.service.domain().execute({
     type: "profile.configure",
     actor: "operator",
@@ -317,4 +390,48 @@ test("production workspace retains literal history, pending request, focused rep
   await page
     .getByText("Literal update 0 long supplied text ", { exact: true })
     .waitFor({ state: "detached" });
+  await reading.getByText(/\[redacted\]/).waitFor({ state: "attached" });
+  releaseHistory();
+  await historyDone;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  assert.equal(
+    await page
+      .getByText("Literal update 0 long supplied text ", { exact: true })
+      .count(),
+    0,
+  );
+  await page.unroute(historyRoute);
+  f.service.domain().execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: a.profileId,
+    expectedVersion: Number(f.service.domain().profile(a.profileId).version),
+    instructions: "Literal update 1 long supplied text",
+  });
+  await page.route(historyRoute, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    }),
+  );
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByText(/History refresh failed:/)
+    .first()
+    .waitFor({ state: "attached" });
+  assert.equal(
+    await page
+      .getByText("Literal update 1 long supplied text ", { exact: true })
+      .count(),
+    0,
+  );
 });

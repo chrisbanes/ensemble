@@ -474,6 +474,8 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   async function logout() {
+    navigationScope.current = crypto.randomUUID();
+    clearPrivateNavigation();
     client.invalidateAuthentication();
     acceptedIdentity.current = null;
     const isCurrentScope = client.captureAuthenticationScope();

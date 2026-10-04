@@ -82,6 +82,12 @@ export function TaskWorkspace({
     [historyErrors, setHistoryErrors] = useState<Record<string, string>>({}),
     [pending, setPending] = useState(false),
     [updates, setUpdates] = useState(false);
+  const historyRequests = useRef(new Map<string, number>());
+  const invalidateHistory = () => {
+    for (const [id, revision] of historyRequests.current)
+      historyRequests.current.set(id, revision + 1);
+    setHistory({});
+  };
   const scope = useRef(true),
     anchor = useRef<{ id: string; y: number } | null>(null),
     bottom = useRef(false),
@@ -121,9 +127,21 @@ export function TaskWorkspace({
           "[data-record-id]",
         ) as HTMLElement | null
       )?.dataset.recordId ?? state.focusRecord;
+    history.replaceState(
+      {
+        ...history.state,
+        taskWorkspaceReading: {
+          scrollY: state.scrollY,
+          historyAnchor: state.historyAnchor,
+          focusRecord: state.focusRecord,
+        },
+      },
+      "",
+    );
   };
   const refresh = () => {
     capture();
+    invalidateHistory();
     resource.refresh();
   };
   const refreshRef = useRef(refresh);
@@ -144,9 +162,41 @@ export function TaskWorkspace({
       document.removeEventListener("click", leave, true);
     };
   }, []);
+  const layoutPath = useRef(path);
   // biome-ignore lint/correctness/useExhaustiveDependencies: history DOM insertion must restore the previously captured reading anchor.
   useLayoutEffect(() => {
     if (!data) return;
+    if (layoutPath.current !== path) {
+      layoutPath.current = path;
+      const saved = history.state?.taskWorkspaceReading;
+      if (saved) {
+        state.scrollY = saved.scrollY;
+        state.historyAnchor = saved.historyAnchor;
+        state.focusRecord = saved.focusRecord;
+        anchor.current = saved.historyAnchor;
+        restoreReadingFocus.current = true;
+        scrollTo(0, saved.scrollY);
+      } else {
+        const p = new URLSearchParams(path.split("?")[1] ?? "");
+        const target = document.getElementById(
+          p.get("section") ?? (p.has("result") ? "review" : "brief"),
+        );
+        if (target) {
+          target.scrollIntoView();
+          anchor.current = null;
+          state.historyAnchor = null;
+          bottom.current = false;
+          state.scrollY = scrollY;
+          restoreReadingFocus.current = false;
+          const heading = target.querySelector<HTMLElement>("h3,h4");
+          if (heading) {
+            heading.tabIndex = -1;
+            heading.focus({ preventScroll: true });
+          }
+          return;
+        }
+      }
+    }
     if (restoreReadingFocus.current) {
       const target = state.focusRecord
         ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")]
@@ -222,6 +272,17 @@ export function TaskWorkspace({
   const loadHistory = useCallback(
     async (id: string, before?: number) => {
       const current = client.captureAuthenticationScope();
+      const revision = (historyRequests.current.get(id) ?? 0) + 1;
+      historyRequests.current.set(id, revision);
+      const owned = () =>
+        scope.current &&
+        current() &&
+        historyRequests.current.get(id) === revision;
+      setHistory((old) => {
+        const next = { ...old };
+        delete next[id];
+        return next;
+      });
       try {
         const pages = [...(state.historyPages[id] ?? [])];
         if (before && !pages.includes(before)) pages.push(before);
@@ -236,7 +297,7 @@ export function TaskWorkspace({
             ).data,
           );
         }
-        if (!scope.current || !current()) return;
+        if (!owned()) return;
         const recent = values[0];
         if (!recent) return;
         if (
@@ -245,6 +306,7 @@ export function TaskWorkspace({
           )
         ) {
           setHistory((old) => {
+            if (!owned()) return old;
             const next = { ...old };
             delete next[id];
             return next;
@@ -264,29 +326,49 @@ export function TaskWorkspace({
           )
           .sort((a, b) => a.sequence - b.sequence);
         state.historyPages[id] = pages;
-        setHistory((old) => ({
-          ...old,
-          [id]: {
-            ...recent,
-            items,
-            omittedItemCount:
-              values.at(-1)?.omittedItemCount ?? recent.omittedItemCount,
-          },
-        }));
-        setHistoryErrors((old) => ({ ...old, [id]: "" }));
+        setHistory((old) =>
+          owned()
+            ? {
+                ...old,
+                [id]: {
+                  ...recent,
+                  items,
+                  omittedItemCount:
+                    values.at(-1)?.omittedItemCount ?? recent.omittedItemCount,
+                },
+              }
+            : old,
+        );
+        setHistoryErrors((old) => (owned() ? { ...old, [id]: "" } : old));
       } catch (e) {
-        if (scope.current && current())
-          setHistoryErrors((old) => ({
-            ...old,
-            [id]: e instanceof Error ? e.message : "Unavailable",
-          }));
+        if (owned()) {
+          setHistory((old) => {
+            if (!owned()) return old;
+            const next = { ...old };
+            delete next[id];
+            return next;
+          });
+          setHistoryErrors((old) =>
+            owned()
+              ? {
+                  ...old,
+                  [id]: e instanceof Error ? e.message : "Unavailable",
+                }
+              : old,
+          );
+        }
       }
     },
     [client, state],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pending/error invalidates the current history ownership before any late batch can publish.
   useEffect(() => {
+    if (resource.state.pending || resource.state.error) {
+      invalidateHistory();
+      return;
+    }
     for (const a of data?.assignments ?? []) void loadHistory(a.assignmentId);
-  }, [data, loadHistory]);
+  }, [data, loadHistory, resource.state.pending, resource.state.error]);
   async function command(input: OperatorCommand) {
     if (pending) return;
     setPending(true);
@@ -433,8 +515,13 @@ export function TaskWorkspace({
     state.frozen = structuredClone(input);
     await command(input);
   }
+  const viewedIndexes =
+    review?.viewed?.resultIds.map((id) =>
+      data.results.findIndex((r) => r.resultId === id),
+    ) ?? [];
+  const newestViewed = Math.max(-1, ...viewedIndexes);
   const changes = review?.viewed
-    ? `${data.results.filter((r) => !review.viewed?.resultIds.includes(r.resultId)).length} new result(s); ${review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
+    ? `${newestViewed >= 0 ? `${data.results.length - newestViewed - 1} new result(s)` : "Newer results unknown; no retained viewed result ordering"}; ${review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
     : "No viewing baseline. Comparison with previously viewed material is unknown.";
   return (
     <article className="task-workspace" aria-label="Task workspace">
@@ -912,7 +999,7 @@ export function TaskWorkspace({
               {historyErrors[a.assignmentId] && (
                 <p role="alert">
                   History refresh failed: {historyErrors[a.assignmentId]}.
-                  Earlier successful material retained.
+                  Unvalidated history is hidden; retry to read current material.
                 </p>
               )}
               <p className="literal-preview">
