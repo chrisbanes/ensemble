@@ -12,17 +12,462 @@ evidence, and [#736](https://github.com/chrisbanes/ensemble/issues/736) owns del
 scope and sequencing. Resolve conflicts in favour of those contracts. This file
 records presentation and design references. The user approved shadcn as the component foundation; this canvas migration does not install or implement the application frontend.
 
-## Pending task overview design — 3 October 2026
+## Reviewed task overview design — 3 October 2026
 
 The [task overview specification amendment](../docs/SPEC.md#task-overview-and-evidence--design-direction-3-october-2026)
 and [design-review criteria](../docs/acceptance.md#task-overview-and-evidence-design-review--3-october-2026)
 add shared brief, delegation, evidence and compact progress requirements. This is
 the separate amendment from PR #763, retained when rebasing; the approved
-operator refinements below do not qualify it. Design
-and review these in Pen before implementation. The existing canvas and handoff
-are not evidence that this amendment has been designed or approved visually.
-After review, update the relevant screen/state references and interaction handoff
-here, and link the reviewed design from the specification and delivery issues.
+operator refinements below do not qualify it. The proposal below is designed
+in the existing canvas. Chris agreed to carry the reviewed extensions into the
+specification, acceptance checks and issue briefs on 3 October 2026. Status:
+**design reviewed; implementation deferred**. This records design review and
+scope agreement, not final acceptance of an implemented UI. #742 owns task review,
+search and its shared navigation; #745 owns integrated qualification and #736
+retains Chris's final human acceptance. The preview-removal note at the end records
+the remaining comparison-image loading gap. Earlier save/review notes describe
+their individual review passes.
+
+### Task overview proposal — reviewed design
+
+The task header establishes project, source, accountable lead and current wait.
+Actionable requests sit above disclosure. Desktop places the shared brief beside
+the latest result, its evidence and compact delegation rows; phone discloses the
+brief, result detail and assignment history from a single task summary. Existing
+shadcn controls, semantic colours, Inter and identifier roles remain the foundation.
+The reusable compact progress component is `cIimt`. The review-interaction
+extension below adds criterion rows `GA7Ra` and local-feedback context `xljAv`.
+
+These are fictional design fixtures. Criterion labels C1/C2, validation V-22,
+revisions and results illustrate recorded relationships; they are not observations
+of Ensemble's backend or proof of a passed check. AT-142 retains the existing
+AP-17 v2 exact-material approval and independent GitHub dependency. A-105 and
+A-106 have parallel responsibilities using the same Builder profile; their IDs,
+requesters and result destinations distinguish them. At the illustrated snapshot,
+A-105 has reported R2 and A-106 has recorded a failed focus check before waiting
+on the dependency. FN-58's empty and
+expanded views are different moments in the same local-task journey.
+
+| Review surface | Pen node |
+| --- | --- |
+| Desktop task, 1366 × 900 | `MRbe2` |
+| Full-content task inventory | `TG3LC` |
+| Phone task, 390 × 844 | `YFLwX` |
+| Phone evidence and earlier results | `XQI9S` |
+| Empty, dependency, refresh and uncertainty specimens | `oJHx1` |
+| Expanded local brief, question, history and retained draft | `vesIN` |
+| Phone long brief and retained draft | `LrM0E` |
+| Phone empty local task | `Crq7h` |
+| Phone failed refresh and uncertain execution | `F2OKCj` |
+| Shared compact progress and entry-point specimens | `L2aXf` |
+| Phone delegation and history access | `qCkVq` |
+
+### Interaction and state handoff
+
+- **Brief:** GitHub requirements remain read-only with links to the full source
+  brief on GitHub. Local brief content expands in the task reading area. Local
+  requirements identify the operator. Approach and recorded decisions identify
+  the reporting assignment. Missing criteria say “None supplied”. Requests are
+  never hidden by collapsing either the brief or history.
+- **Results:** the latest reported result identifies assignment and revision.
+  Criterion-linked validation shows scope, outcome and provenance; it does not
+  establish whole-task delivery. Screenshot and log links open the associated
+  material. The phone evidence view illustrates a failed screenshot preview;
+  retry fetches the artifact, not execution. Earlier results are separately
+  labelled with their revision. Old validation does not verify newer work.
+  Missing, stale, unavailable and redacted evidence have distinct explanations.
+- **Delegation:** responsibility, profile, assignment ID, requester, destination
+  and known wait reason remain visible. The laptop's compact arrow means
+  requester → result destination. Opening a row discloses its result and bounded
+  history. Unknown observations remain unknown; conversation text does not
+  establish execution state or repair ownership.
+- **Attention and controls:** AP-17 links to existing desktop `DAeiN` / phone
+  `ZWQIU` exact-material review, preserving action, target, patch and description
+  revisions, Deny and Leave pending. Changed material needs renewed review.
+  Approval leaves independent holds intact. Execution, Stop and recovery remain
+  reachable through existing controls; existing Resume/reconciliation boundaries
+  are unchanged. Q-24 uses the existing structured-answer flow. A message to the
+  lead is local and does not submit a question response or GitHub comment.
+- **Updates:** preserve the visible record anchor, expansion choices, focus and
+  unsent replies. Append routine activity behind “new updates”; reveal it on
+  request without silently jumping or discarding drafts. Load earlier history
+  inserts above the current anchor. Fresh actionable requests update the visible
+  request area without stealing focus. Failed refresh keeps the last successful
+  read and timestamp. If a pending request changes while answering, retain the
+  draft and use the existing stale-request review flow before submission.
+- **Entry points:** Overview, project/cross-project List and Board share the
+  compact facts and task detail. Back restores filters, selection and position;
+  Board also restores its column. Inbox enters at the relevant request and
+  returns to that queue item. Direct task entry retains project/source context
+  with project return as fallback. No new context-menu, extension or notification
+  surface is proposed. Existing screens remain as prior references; frame 54
+  specifies the shared change rather than duplicating every screen.
+- **Phone:** use 44px controls and one reading column. Detail subviews retain the
+  pending-request shortcut and return anchor. In implementation, keep request
+  access and response actions reachable while scrolling and with the keyboard
+  open. The full-content desktop frame is an inventory, not a screen to shrink.
+
+### Open design and data-contract questions
+
+The proposal needs review of the desktop brief/result balance and the depth of
+phone disclosure. It also requires confirmation of the following data support
+before implementation; no API fields, routes, storage or renderer are prescribed:
+
+- Explicit evidence-to-result/criterion relationships, revision identity,
+  validation provenance and freshness. Without records, show unlinked artifacts
+  or an agent report; never infer a verified criterion.
+- Durable responsibility, requester, destination and waiting observations for
+  assignment summaries, including explicit unknown values.
+- Attribution for approach/decisions, ordering of current versus earlier results,
+  and stable history identities for reading-position restoration.
+- Artifact availability/redaction and preview support. The proposal supplies an
+  unavailable-preview state and open-material controls, not an attachment service.
+
+### Review checklist and limits
+
+- [x] Inspected renders for hierarchy, spacing, contrast and readable state labels.
+- [x] Checked all 11 new frames, including resolved component instances: zero
+  visible clipping problems. Checked new root placements for overlap: none.
+- [x] Cleared completed placeholders; review the referenced frames in Pen.
+- [x] Preserved source ownership, exact approval, independent holds and recovery
+  access; represented all requested state categories on desktop and phone.
+- [ ] Chris's final visual/interaction acceptance of the integrated UI.
+- [ ] Real resizing, keyboard/focus, scroll restoration, drafts and runtime data
+  behaviour. Static canvas checks do not verify these implementation properties.
+
+At this review pass, Pen MCP showed the 11 new frames and reusable component; the
+on-disk `design.pen` changed during the session. Native UI access was denied, so
+the Save indicator and reopening the saved document were not verified. Wiki
+access was also denied; current SPEC, acceptance, PR #763 and the existing canvas
+supplied the requirements. No application code, policy, delivery status or
+integration changed. Earlier save/review statements below describe prior work.
+
+### Review interactions extension — reviewed design
+
+Implementation remains deferred. The existing desktop and phone task summaries
+now prioritise supplied criterion outcomes and contextual feedback. Comparison
+and revision changes disclose from the result; they are not four new dashboard
+panels. Shared brief, delegation, attention and execution/recovery access remain.
+
+| Review surface | Pen node |
+| --- | --- |
+| Reusable criterion and feedback context | `njRTx` |
+| Revised result and criteria needing another look | `gAT6T` |
+| Labelled before/after comparison | `dKc4O` |
+| Inspect evidence and edit contextual feedback | `WEBvT` |
+| Confirmed send failure with editable draft | `uqbVh` |
+| Confirmed local-message receipt | `AVuFr` |
+| Phone before/after comparison | `mrRXI` |
+| Missing before and unavailable after material | `OisQm` |
+| Revision changes, no baseline and failed-source alternatives | `ge1Mm` |
+| Revised phone task summary | `IuukL` |
+| Phone changes disclosure | `cP92Q` |
+
+The comparison uses fictional UI captures created on the canvas. The two image
+assets are retained in `design/assets/` because the comparison frames reference
+them; screen preview exports are omitted. These images illustrate
+the evidence presentation; they are not screenshots of implemented Ensemble
+behaviour or real validation. Earlier unavailable/unverified fixtures remain
+alternative or earlier states, not simultaneous claims about the latest result.
+
+#### Correction journey and outcome semantics
+
+1. At the first review, source snapshot S1 supplies only C1 and C2. R2 is A-105's
+   report at `8d31c4a`. C1 is supported by recorded keyboard check V-22. A-106's
+   V-23 records a focus-restoration failure; E-31 illustrates the missing focus
+   ring. The agent's earlier implementation claim stays separate from that check.
+2. Open C2 evidence, then Ask lead for changes. The editable local message is
+   addressed to Mira and bound to C2, source S1, R2 and `8d31c4a`. The example asks
+   for focus restoration and a regression test. A confirmed send failure keeps
+   the draft editable. M-42 at 11:15 confirms only that the local message was
+   recorded; it does not establish that an agent acted or changed task state.
+3. R3 at `b72e910`, reported by A-105 at 11:40, claims the correction. V-24 records
+   two passing checks for the default opener; E-32 illustrates its visible ring.
+   R2's failure remains historical. C1's V-22 is stale for the new work revision.
+4. GitHub snapshot S2, captured at 11:35, adds toolbar launch to C2's focus
+   requirement. No recorded check covers that new scope. C2 is unverified against
+   S2 even though V-24 supports the default-opener scope. The operator can inspect
+   the source change and request further work without an invented overall pass.
+
+Supported, failed, unverified and stale describe the displayed evidence scope.
+There is no overall pass, acceptance percentage or automatic task transition.
+Tasks without supplied criteria retain “None supplied”; inferred criteria are
+not generated. Source requirements remain read-only with GitHub attribution.
+
+#### Interaction details
+
+- **Contextual feedback:** result actions bind R2/R3; criterion actions also bind
+  the supplied criterion and source snapshot; artifact actions bind E-31/E-32.
+  All retain the relevant work revision. Show the destination and reference before
+  sending, and allow editing. Back keeps the draft. The reference must not silently
+  retarget if a newer result arrives. A confirmed rejection offers Retry; an
+  unknown send outcome needs status reconciliation before retry. Success returns
+  to the selected evidence anchor, without discarding other unfinished replies.
+  This is an Ensemble message, not a GitHub comment, rejection or approval.
+- **Comparison:** desktop places labelled captures side by side; phone stacks the
+  same pair with persistent Before/After labels and result/revision attribution.
+  Details reach originals and associated checks. Missing material and failed
+  preview loading remain distinct. Retain available material and labels; retry
+  fetching does not rerun execution. Never substitute a different revision to
+  fill an empty slot. Images alone do not verify focus behaviour.
+- **Since viewed:** disclose newer results, superseded evidence and recorded
+  requirement changes relative to the illustrated 11:12 viewing reference. The
+  marker is neither acceptance nor approval. With no reference, show the current
+  result without labelling everything new. If source comparison is unavailable,
+  retain the last read and do not claim requirements are unchanged. Opening the
+  disclosure never answers an approval or clears a hold.
+- **Preserved context:** updates retain reading anchors, comparison selection,
+  expansion choices, focus and unsent feedback. New activity does not replace the
+  selected evidence. Actionable requests remain outside collapsed history and
+  reachable from the evidence, feedback and changes views. Phone forms use 44px
+  actions; keyboard/safe-area behaviour remains an implementation check.
+- **Approval boundary:** initial views retain AP-17 v2 for `8d31c4a` and description
+  v2. The later fictional snapshot contains a recorded AP-17 v3 for `b72e910` and
+  description v3; v2 is superseded. The design does not assume a new request is
+  created merely because a result changed. Both preserve the independent
+  `acme/design-system#87` hold and existing exact-material review, Deny and Leave
+  pending flow. Execution and recovery remain available through task navigation.
+- **Entry points:** updated shared progress `cIimt` and frame `L2aXf` cover Overview,
+  project/cross-project List and Board. They reach the same result/criteria view
+  and restore the origin's filters, selected task, column and position on return.
+  Inbox still opens the exact actionable request; Open task reaches review tools
+  without converting new results into attention. No additional notification,
+  context-menu, extension or integration surface is introduced.
+
+#### Unresolved data requirements
+
+These are questions to settle against available records after design review,
+not prescribed fields, API or storage contracts:
+
+- Can a supplied criterion retain its identity and source revision across edits,
+  and can recorded checks express exactly which scope and work revision they cover?
+- Which records establish result supersession and before/after capture pairing,
+  including scenario, assignment, revision and unavailable/redacted material?
+- Can a local lead message preserve its result/criterion/artifact reference and
+  provide confirmed success, confirmed failure and unknown-outcome reconciliation?
+- Is a per-operator viewing reference available, and what establishes it? How
+  should missing or expired references and unavailable source history be shown?
+- Can stable record identities preserve drafts, open disclosures and reading
+  anchors while newer source and result revisions arrive?
+
+#### Extension validation and save boundary
+
+All 17 affected canvas frames, including the two fixture assets, passed resolved
+visible-node clipping checks; affected root placements had no overlaps. Renders
+were inspected. Two laptop overflows were repaired
+by tightening existing result spacing. This is static design validation, not
+testing of message delivery, source comparison, permissions or draft persistence.
+
+At this review pass, the extension was present in the active Pen canvas.
+**Saved-file verification was pending:** native Pen access was rejected (“Computer Use was not approved
+to use Pen”), and the available MCP tools expose no Save/reopen operation. The
+file timestamp predates the latest edits, so a changed file alone is not evidence
+that the complete extension was saved. The preview-removal note below records
+subsequent Save/reopen checks and their remaining gap. No implementation, runtime policy, delivery status
+or integration was changed.
+
+## Assignment context, delivery and search — reviewed design
+
+The latest review additions are represented in the existing Pen proposal.
+Implementation remains deferred. Document-wide discovery inspected all 92
+existing top-level objects before adding these ten surfaces; existing review
+work was reused, including the sidebar, buttons, input, result criteria and
+feedback journeys. These are fictional design fixtures, not provider observations.
+
+| New surface | Pen node |
+| --- | --- |
+| Desktop captured assignment and current requirements | `DBsYv` |
+| Phone captured assignment and references | `tK66S` |
+| Desktop recorded changes, evidence and delivery | `M41aTm` |
+| Phone changes and delivery | `eP5LX` |
+| Desktop PR, repair, head and delivery alternatives | `ExcLV` |
+| Phone delivery alternatives | `c3utBY` |
+| Desktop search with attributed excerpts | `WaBk5` |
+| Phone search and restored selected match | `JPf7F` |
+| Desktop search coverage, recovery and historical result | `qYS87` |
+| Phone search recovery and historical result | `IzE97` |
+
+### Connected journey and hierarchy
+
+Desktop: `WaBk5` → matching result in `gAT6T` → assignment context `DBsYv`
+→ changes/delivery `M41aTm` → selected match in `WaBk5`.
+Phone: `JPf7F` → matching result in `IuukL` → context `tK66S`
+→ delivery `eP5LX` → selected match in `JPf7F`.
+The relevant canvas controls carry destination-node annotations. These are
+static design annotations, not working navigation or prescribed application routes.
+
+The desktop result now leads with “Focus correction reported; toolbar needs
+another look”. Work revision and evidence gaps remain immediately visible.
+Assignment, result, instruction/profile, source-snapshot, commit and validation
+identities sit beneath the outcome or in the context/provenance disclosure.
+The existing parallel-assignment rows remain in the document behind disclosure;
+the initial result view uses a compact summary. Attribution remains available
+without competing with the outcome. `IuukL` retains phone criterion summaries
+and links into assignment context and delivery.
+
+The existing C1/C2 summary, comparison `dKc4O` / `mrRXI`, contextual feedback
+`WEBvT`, send-failure recovery `uqbVh`, confirmation `AVuFr`, and since-viewed
+`ge1Mm` / `cP92Q` remain. Contextual feedback keeps its exact result/material
+reference when newer work appears; it does not silently retarget.
+
+### Entry points, return behaviour and state coverage
+
+- **Assignment context:** enter from the task’s assignment/provenance disclosure
+  or a selected assignment. Show the captured brief and its supplier, instruction
+  and profile revisions, and attributed references. S1 is captured context;
+  source-owned S2 is current requirements. Profile revision 5 is distinct from
+  captured revision 4 and is not silently applied. Missing toolbar reference,
+  unavailable guidance snapshot and changed requirements are represented on both
+  sizes. Available material never claims that the agent read it. Open captured
+  material and retry access keep assignment/result selection and reading position.
+- **Changes and delivery:** enter from the result or assignment context. The
+  primary fixture has recorded files/commit, result revision, diff and evidence
+  access, stale and scope-limited checks, an outstanding finding, unknown repair
+  ownership and no linked PR. Alternative snapshots show linked PR #214, a
+  failing check with recorded A-106 repair, the same failure with unknown owner,
+  changed head, stale provider data and merged-but-task-not-complete. Alternatives
+  are labelled; they are not simultaneous facts or evidence that approval or
+  publication happened in the primary fixture. Provider observations identify
+  their timestamp and revision. Refresh retries a read, not execution. Result
+  diffs stay bound to the result revision; head comparisons are separate.
+- **Search:** a shared search destination for tasks, recorded decisions and
+  results. Project, record type, date and inclusion of historical records are
+  the proposed filters. Each match has an attributed excerpt; opening it selects
+  the matching requirement, decision or result section, including historical R2
+  rather than silently opening current R3. The coverage/recovery surfaces include
+  loading, no matches, failure with retained earlier matches, partial coverage,
+  historical results and unavailable destinations. Search makes no complete
+  transcript claim. Unavailable destinations retain attribution and offer retry
+  or return; absence of matches does not establish absence from omitted records.
+- **Returning:** Back through the journey restores the previous section and
+  reading anchor. Return to search restores the query, every filter, selected
+  match and position. External evidence opens with task context retained; returning
+  restores that exact material. Preserve expansion, comparison selection, focus
+  and drafts while updates arrive. If the selected item is unavailable, keep its
+  unavailable state rather than substituting a newer record. Direct entry without
+  search context falls back to the task’s project.
+- **Existing entry points and boundaries:** Overview, project/cross-project
+  List/Board and Inbox still open the shared task experience. Inbox keeps its
+  request anchor and queue return. Context, delivery and evidence retain access
+  to pending requests and the existing exact-material approval, Deny and Leave
+  pending flow. Execution, Stop and recovery remain reachable via task navigation.
+  Independent source and execution holds remain independent of approval, checks
+  and merge. No new context-menu, extension, notification or integration surface
+  is proposed. Search is now placed in the shared desktop sidebar and phone header;
+  see the review refinement below for entry, active state and return behaviour.
+
+### Unresolved data needs
+
+These are discovery questions for implementation after review, not API or storage
+contracts. Confirm availability of captured brief/instruction/profile revisions,
+reference attribution and unavailable/missing distinctions; current requirements
+and explicit revision comparisons; recorded file/commit/result relationships;
+PR-head and check provenance, observation age, findings and recorded repair
+ownership; and independently reported task/delivery holds. Do not infer a record
+from an agent claim. Establish which record types and historical excerpts search
+can cover and how unavailable destinations are identified. Confirm support for
+stable matching-section anchors and retained query/filter/draft/reading context.
+The proposal does not add transcript ingestion, source writes or runtime powers.
+
+### Validation and persistence boundary
+
+- [x] Inspected all ten new desktop/phone renders and the refined result hierarchy
+  for readable type, contrast, spacing, alignment and content fit.
+- [x] Resolved visible-node clipping checks passed on the ten new surfaces and
+  two modified task frames. New root frames are arranged in paired desktop/phone
+  rows below the prior proposal without overlap.
+- [x] Completed placeholders cleared. Screen references identify the Pen frames.
+- [ ] Chris’s final visual/usability acceptance of the integrated UI.
+- [ ] Interactive navigation, keyboard/focus and safe-area behaviour; scroll,
+  query/filter and draft persistence; live updates and provider reconciliation.
+  Static renders and destination annotations cannot verify these behaviours.
+- [ ] **At this pass, Save/reopen persistence was unverified.** Native access was
+  attempted again and returned “Computer Use was not approved to use Pen”. The
+  available Pen MCP tools expose no Save/reopen operation. Live canvas readback
+  is verified separately; it does not prove the latest canvas
+  was persisted in `design.pen`. See the preview-removal note for later checks.
+
+The personal wiki could not be searched: filesystem access returned “Operation
+not permitted”. The supplied review, current SPEC/acceptance and existing canvas
+provided this design’s requirements. No application code, runtime policy,
+permissions, delivery status or integration was changed.
+
+## Search and state-navigation refinement — reviewed design
+
+Design only, 3 October 2026. Implementation remains deferred. This refinement
+updates existing screens and navigation; the agreed behaviours are now reflected
+in SPEC and acceptance.
+It supersedes the earlier deferred search-placement note.
+
+- **Discoverable entry:** Search sits beside Overview and Inbox in the desktop
+  navigation component and the representative Overview, List, Board, Inbox,
+  task, context and delivery screens. Phone Inbox exposes a labelled 44px Search
+  action in its reusable header; the phone Board uses the same labelled action.
+  Search has the active desktop navigation treatment; Overview is inactive there.
+  The phone search header identifies the current Search view and offers Workspace
+  return. No keyboard shortcut is required to discover it.
+- **Connected journey:** desktop `N9G11A` → Search `WaBk5` → selected AT-142
+  result `gAT6T` → Back to `WaBk5`; phone `U3RAH` or `GWXOi` → `JPf7F` →
+  `IuukL` → Back to `JPf7F`. Opening selects the exact matching requirement,
+  decision or result section. Returning restores `focus`, All projects, All types,
+  Any date, history included, match 2 of 4 and its reading position. Return to
+  Workspace restores the originating queue/board selection, filters and position.
+  Existing task context, delivery, comparison and feedback disclosures retain
+  their anchors, disclosure choices and drafts. Direct entry still falls back to
+  the task project. These are static interaction annotations, not working routes.
+- **Independent attribution:** four fictional matches span Atlas AT-142 (Command
+  menu) and Relay RL-88 (Connection dialog). Both result matches have the similar
+  title “Focus correction”; each identifies its own project, task ID/title,
+  reporting assignment, result and work revision, and current/historical status.
+  Task requirements identify their GitHub source and source revision. The decision
+  identifies Mira/A-104, D1/S1 and historical status. Matching excerpts lead;
+  metadata is compact and remains within the owning row, even with All projects
+  selected. Historical R2 in the state specimens has the same complete ownership.
+- **States belong to flows:** Search states & coverage and Provider/head/repair
+  destination controls are removed. Search filters edit the current query scope;
+  Refresh provider status retries the read in the current delivery view. Existing
+  checks, findings, comparison and recovery controls remain. `qYS87`, `IzE97`,
+  `ExcLV` and `c3utBY` are explicitly labelled canvas review specimens with no
+  product navigation into them. Their loading, failure, partial-coverage and
+  changed-head snapshots replace content within the owning flow. Retry retains
+  previous observations with their age, selected material, drafts and all holds.
+- **Entry-point coverage:** shared desktop navigation and representative phone
+  Inbox/Board are updated. Overview/List/Board still enter the shared task;
+  Inbox still targets the actionable request. No context-menu, notification,
+  extension or deep-link behaviour is added. Older reference screens remain
+  historical examples; apply the shared navigation treatment during implementation.
+
+| Updated entry reference | Pen node |
+| --- | --- |
+| Desktop shared navigation | `m0d2bc` |
+| Desktop Overview → Search | `N9G11A` |
+| Phone Inbox → Search | `U3RAH` |
+| Phone Board → Search | `GWXOi` |
+
+The search, matching task, context, delivery and specimen frames are referenced
+in the existing tables above. The criteria summary, screenshot comparison,
+contextual feedback, assignment context, exact-material approvals, independent
+holds, Stop and recovery controls are preserved.
+
+Validation checklist:
+
+- [x] Inspected affected search, navigation, task and delivery/specimen renders
+  for hierarchy, readable ownership, contrast, clipping and overlap.
+- [x] Updated existing frames; no duplicate screen designs or root placement changes.
+- [x] Retained Pen node references for review; screen preview exports are omitted.
+- [ ] Chris’s final visual/usability acceptance of the integrated UI.
+- [ ] Interactive focus, scroll, query/filter and draft persistence: static design
+  only, not implementation evidence.
+- [ ] **At this pass, Save/reopen persistence was unverified.** Native Pen access returned
+  “Computer Use was not approved to use Pen”. The available Pen MCP tools expose
+  no Save/reopen operation. Active-canvas readback does not
+  prove the latest edits survive reopening `design.pen`. See the preview-removal
+  note for later checks.
+
+The personal wiki search was denied by filesystem access. This review used the
+supplied findings, current repository contracts and live canvas. No application
+code, API/storage contract, policy, permissions, delivery status or integration
+was changed.
 
 ## Approved refinement brief — 3 October 2026
 
@@ -299,7 +744,9 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 Keep the editable Pen document in the main design checkout. Worktrees can use this
 Markdown reference without opening or creating competing copies of the canvas.
 When the design changes, refresh this snapshot through MCP; do not parse the `.pen`
-file directly. No screenshots, PDF or generated HTML are included in this handoff.
+file directly. Review the proposal in Pen using the node references above.
+Screen preview exports are omitted; comparison image assets remain in
+`design/assets/` for use by the canvas.
 
 This snapshot covers the screens listed above. It does not supply complete login,
 guided setup or every configuration/recovery screen. Those remaining product
@@ -398,3 +845,14 @@ the board, imported detail and approval screens. Composer `Z315o` now uses 12px
 for the shared sidebar workspace label. The four affected renders were inspected;
 resolved-node checks found no clipping. These are canvas checks, not application
 or runtime validation.
+
+### Preview export removal — 3 October 2026
+
+Screen preview exports and their handoff links are removed. The two fictional
+comparison captures remain as source assets in `design/assets/`; five canvas
+image references now use those paths. Native Save cleared the Edited indicator.
+The design was reopened during this cleanup and the review/search frames were
+read back. The relocated image references were saved subsequently, but Pen MCP
+renders still show image placeholders, so comparison-image loading remains
+unverified. Source asset files were checked as valid PNGs. Earlier export and
+persistence statements above describe prior review passes.

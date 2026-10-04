@@ -221,6 +221,7 @@ for (const viewport of [
           "/app",
           "/app/inbox",
           "/app/tasks",
+          "/app/search",
           `/app/projects/${projectId}`,
           "/app/settings",
           "/",

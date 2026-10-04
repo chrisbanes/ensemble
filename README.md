@@ -78,6 +78,13 @@ before storage, with current exclusions reapplied when reading history. This is
 a bounded diagnostic view, not a complete transcript or ownership-release proof.
 Missing history does not change admission or completion gates.
 
+The shared task workspace now retains exact source and result revisions, scoped
+supplied evidence, captured context and separate local/GitHub replies. Search
+covers permitted retained tasks, decisions and results with historical navigation
+and preserved return state. Legacy advanced controls remain reachable.
+[UI04 evidence](docs/evidence/ui04-task-workspace.md) records the deterministic
+browser checks, one bounded live callback and remaining qualification limits.
+
 The service now includes local GitHub discovery for selected repository issues,
 searches and Projects, with provider-owned readiness and dependency holds.
 Operators can inspect source state and refresh it in the authenticated UI.

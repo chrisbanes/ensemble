@@ -435,6 +435,14 @@ The following describes desired behaviour, not implemented capability or a fixed
 screen layout. Existing GitHub delivery issues remain authoritative for sequencing
 and slice acceptance; this amendment does not complete UI04 or qualify release.
 
+The [Pen source](../design/design.pen) and
+[interaction and state handoff](../design/DESIGN.md) include the subsequent review
+extensions below. Chris agreed to carry these into the specification and delivery
+briefs on 3 October 2026. Status: **design reviewed; implementation deferred**.
+Static canvas review does not establish implemented behaviour or final integrated
+visual/usability acceptance. Comparison-image loading remains unverified after
+relocating the source assets; retain that handoff gap until it is checked.
+
 - **Shared task brief.** Make the desired outcome, supplied acceptance criteria,
   current approach, recorded decisions and unresolved questions easy to find.
   Preserve provenance: imported GitHub content remains authoritative and read-only
@@ -456,6 +464,57 @@ and slice acceptance; this amendment does not complete UI04 or qualify release.
   progress and dependency waiting separate from decisions needing the operator.
   List, Board, overview and attention entry points must lead to a consistent task
   experience without losing project or source context.
+
+The reviewed extension adds these behaviours to the same task experience:
+
+- **Criterion outcomes.** Summarise supplied criteria using their recorded
+  evidence relationships. Distinguish supported, failed, unverified and stale
+  evidence; expose the supporting result, assignment and revision. Do not infer
+  an overall pass from agent claims, missing checks or a count of supported rows.
+- **Before/after comparison.** Pair recorded captures with labels identifying
+  their role, result and work/artifact revision. Keep the relevant criterion and
+  evidence context reachable. Missing, unavailable, redacted or mismatched
+  captures remain explicit; an image comparison does not itself verify a
+  criterion. Comparison is also usable on phone.
+- **Contextual feedback.** From a result, criterion or artifact, let the operator
+  inspect the context and edit an “Ask lead for changes” draft before sending.
+  Show the accountable lead destination and preserve the exact recorded anchors.
+  This is an ordinary local message under existing permissions: it does not
+  approve, reject, change task state or post to GitHub. A confirmed failure
+  retains an editable draft for retry; an unknown send outcome requires existing
+  reconciliation before another send, and confirmed delivery has a receipt.
+- **Changes since viewed.** Identify newer results, superseded evidence and
+  changed source requirements relative to the recorded viewing reference.
+  Keep earlier revisions accessible. Viewing is not approval. Show no baseline
+  or unknown source comparison explicitly; a failed refresh cannot establish
+  that requirements are unchanged.
+- **Captured assignment context.** Show who supplied the brief, its captured
+  version, recorded instruction/profile revisions and source references, with
+  unavailable or incomplete capture explicit. Distinguish that assignment's
+  captured context from current requirements. A reference being available does
+  not establish that an agent read it. Do not expose secrets or imply complete
+  runtime visibility.
+- **Recorded changes and delivery.** Keep recorded files, commits, result diff,
+  PR identity, checks and findings close to the result. Attribute repair ownership
+  only when recorded. Identify provider state, the checked head/revision and
+  stale or changed-head evidence; retain a useful no-PR state. Provider refresh
+  is a read. A merged PR does not complete the Ensemble task, and these views
+  retain exact-material approvals and independent dependency/recovery holds.
+- **Search recorded work.** Provide discoverable Search in shared desktop and
+  phone navigation for retained tasks, decisions and results within permitted
+  project access. Every match identifies its project, parent task and record type,
+  including similar matches from different projects. Open the exact matching
+  section and revision, with historical results labelled. Return preserves query,
+  filters, selected match and reading position; returning to the originating
+  workspace preserves its view state. Distinguish no matches, partial coverage
+  and failed search. Search does not promise a complete runtime transcript or
+  access to unavailable, redacted or unretained material. Canvas state specimens
+  are review aids, not additional product navigation.
+
+These behaviours belong to #742, including search and the shared navigation
+changes needed to reach it. #736 retains the overall scope and final human
+acceptance gate; #745 qualifies the assembled experience. This amendment does
+not reopen completed #741 work or authorise implementation dispatch.
 
 The Pen design should explore information hierarchy, concise previews and expanded
 detail on laptop and phone. Include tasks with no assignments or results, parallel

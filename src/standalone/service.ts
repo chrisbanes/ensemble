@@ -1,3 +1,11 @@
+import {
+  materialDigest,
+  isOperatorDeliveryCaller,
+  type RuntimeDeliveryCaller,
+  type OperatorDeliveryCaller,
+  type OperatorCommentReview,
+  type DeliveryActionRecord,
+} from "../core/delivery.js";
 import { z } from "zod";
 import {
   ArchivedResumeRejectedError,
@@ -328,6 +336,11 @@ export class StandaloneService {
           : {}),
         authorize: (caller, exceptOperationId, request) => {
           this.authorizeDelivery(caller, exceptOperationId);
+          if (isOperatorDeliveryCaller(caller)) {
+            if (request && request.action.kind !== "issue.comment")
+              throw Error("Operator delivery only permits issue.comment");
+            return;
+          }
           if (
             request &&
             (request.action.kind === "pr.merge" ||
@@ -378,22 +391,24 @@ export class StandaloneService {
             identity,
           ),
         approved: (request, caller) =>
-          Boolean(
-            request.approval &&
-              deliveryStore.approvalCurrent(
-                request.approval.interactionId,
-                caller,
-                request.action,
-                request.operationId,
-              ) &&
-              coordination.authorizationFor({
-                assignmentId: caller.assignmentId,
-                ...request.approval,
-                action: request.action.kind,
-                target: canonicalMaterial(request.action.target),
-                material: request.action,
-              }),
-          ),
+          isOperatorDeliveryCaller(caller)
+            ? deliveryStore.operatorApprovalCurrent(request, caller)
+            : Boolean(
+                request.approval &&
+                  deliveryStore.approvalCurrent(
+                    request.approval.interactionId,
+                    caller,
+                    request.action,
+                    request.operationId,
+                  ) &&
+                  coordination.authorizationFor({
+                    assignmentId: caller.assignmentId,
+                    ...request.approval,
+                    action: request.action.kind,
+                    target: canonicalMaterial(request.action.target),
+                    material: request.action,
+                  }),
+              ),
         activationAllowed: (policy) =>
           !policy.credentialRef ||
           (!this.runtimeSpawnSnapshot?.[policy.credentialRef.slice(4)] &&
@@ -759,6 +774,11 @@ export class StandaloneService {
     return this.schedulerStore.list();
   }
 
+  taskReview() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.taskReview();
+  }
+
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;
@@ -804,6 +824,19 @@ export class StandaloneService {
     caller: DeliveryCaller,
     exceptOperationId?: string,
   ): void {
+    if (isOperatorDeliveryCaller(caller)) {
+      this.delivery().validateOperatorCaller(caller);
+      if (
+        this.requireState().taskHold(caller.taskId) ||
+        this.domain()
+          .admission(caller.taskId)
+          .reasons.filter((reason) => !reason.startsWith("external-action-"))
+          .length ||
+        this.delivery().actionBlockers(caller.taskId, exceptOperationId).length
+      )
+        throw Error("Task admission is held");
+      return;
+    }
     const state = this.requireState(),
       coordination = this.coordination,
       intent = state.byWorkId(caller.workId);
@@ -832,6 +865,111 @@ export class StandaloneService {
       this.delivery().actionBlockers(caller.taskId, exceptOperationId).length
     )
       throw new Error("Task admission is held");
+  }
+  operatorCommentCaller(taskId: string): OperatorDeliveryCaller {
+    const d = this.domain(),
+      task = d.task(taskId),
+      imported = d.importedTask(taskId),
+      source = this.taskReview().sources(taskId).at(-1),
+      review = imported
+        ? this.githubSources().review(String(imported.nodeId))
+        : undefined;
+    if (!imported || !source || !review)
+      throw Error("Imported task source unavailable");
+    return {
+      actor: "operator",
+      principal: "installation-operator",
+      projectId: String(task.projectId),
+      taskId,
+      taskVersion: Number(task.version),
+      sourceId: source.sourceId,
+      sourceRevision: source.revision,
+      sourceDigest: String(review.observedDigest),
+      sourceNodeId: String(imported.nodeId),
+      sourceRepositoryId: String(imported.repositoryId),
+      policyVersion: this.delivery().configuration(String(task.projectId))
+        .version,
+    };
+  }
+  private operatorCommentAction(caller: OperatorDeliveryCaller, body: string) {
+    const issue = this.githubSources().issue(caller.sourceNodeId);
+    if (!issue) throw Error("Imported task issue unavailable");
+    return {
+      kind: "issue.comment" as const,
+      target: {
+        nodeId: caller.sourceNodeId,
+        repositoryId: caller.sourceRepositoryId,
+        number: Number(issue.issueNumber),
+      },
+      body,
+    };
+  }
+  reviewOperatorComment(command: {
+    key: string;
+    taskId: string;
+    operationId: string;
+    expectedTaskVersion: number;
+    body: string;
+  }): OperatorCommentReview {
+    const prior = this.delivery().operatorReview(command.key);
+    if (prior) {
+      if (prior.commandHash !== materialDigest(command))
+        throw Error("Operator review key reused with different material");
+      return prior;
+    }
+    const caller = this.operatorCommentCaller(command.taskId);
+    return this.delivery().reviewOperatorComment(
+      command,
+      caller,
+      this.operatorCommentAction(caller, command.body),
+    );
+  }
+  confirmOperatorComment(command: {
+    key: string;
+    taskId: string;
+    reviewId: string;
+    expectedRevision: number;
+    materialHash: string;
+    decision: "approved" | "denied";
+  }) {
+    return this.delivery().confirmOperatorComment(command, () => {
+      const record = this.delivery().operatorReview(command.reviewId);
+      if (!record) throw Error("Operator review unavailable");
+      this.authorizeDelivery(record.caller);
+    });
+  }
+  async postOperatorComment(command: {
+    key: string;
+    taskId: string;
+    expectedTaskVersion: number;
+    body: string;
+    reviewId?: string | undefined;
+  }): Promise<DeliveryActionRecord> {
+    const prior = this.delivery()
+      .actions(command.taskId)
+      .find((a) => a.operationId === command.key);
+    if (prior) {
+      if (
+        !isOperatorDeliveryCaller(prior.binding) ||
+        prior.request.action.kind !== "issue.comment" ||
+        prior.request.action.body !== command.body ||
+        prior.binding.taskVersion !== command.expectedTaskVersion ||
+        prior.request.operatorReviewId !== command.reviewId
+      )
+        throw Error("Operation key used with different material or caller");
+      return prior;
+    }
+    const caller = this.operatorCommentCaller(command.taskId);
+    if (caller.taskVersion !== command.expectedTaskVersion)
+      throw Error("Operator task revision conflict");
+    return this.requireDeliveryCoordinator().submit(
+      {
+        operationId: command.key,
+        action: this.operatorCommentAction(caller, command.body),
+        ...(command.reviewId ? { operatorReviewId: command.reviewId } : {}),
+      },
+      caller,
+    );
   }
   async refreshGitHub(): Promise<void> {
     if (!this.githubSynchronizer) throw new Error("Service is not started");
@@ -954,8 +1092,8 @@ export class StandaloneService {
       this.state,
       this.routingAttempts,
       () => this.wakeScheduler(),
-      (taskId, assignmentId) =>
-        this.readConversationHistory(taskId, assignmentId),
+      (taskId, assignmentId, beforeSequence) =>
+        this.readConversationHistory(taskId, assignmentId, beforeSequence),
       {
         readTask: (taskId) => this.delivery().publicTask(taskId),
         settleHandback: (command) => this.settleHandback(command),
@@ -1418,7 +1556,7 @@ export class StandaloneService {
         success: false,
       });
 
-    let capturedDeliveryCaller: DeliveryCaller | undefined;
+    let capturedDeliveryCaller: RuntimeDeliveryCaller | undefined;
     const pending = Promise.resolve()
       .then(async () => {
         if (call.tool === "ensemble_external_action") {
@@ -2178,9 +2316,28 @@ export class StandaloneService {
     const roleContext = leadBinding
       ? "Assignment role: project lead. You are accountable for coordinating this task, reviewing its results, and deciding whether to request completion."
       : "Assignment role: project assignee. The project lead remains accountable for coordinating this task and reviewing its results before completion. Report your result and durable next action through Ensemble.";
+    const capture = this.taskReview()
+      .read(binding.taskId)
+      .contexts.find(
+        (c) =>
+          c.workId === request.workId &&
+          c.assignmentId === binding.assignmentId,
+      );
+    const source = capture?.sourceId
+      ? this.taskReview().source(binding.taskId, capture.sourceId)
+      : undefined;
+    const reviewReferences = source
+      ? JSON.stringify({
+          sourceId: source.sourceId,
+          sourceRevision: source.revision,
+          criteria: source.criteria,
+        })
+      : "Unavailable: no retained source capture for this work";
     return [
       request.prompt,
       roleContext,
+      `Captured review references (JSON): ${reviewReferences}`,
+
       `Captured project instructions (revision ${binding.instructionsRevision}):\n${projectInstructions || "(none)"}`,
       `Captured profile instructions (revision ${binding.profileRevision}):\n${profileInstructions || "(none)"}`,
     ].join("\n\n");
@@ -2691,6 +2848,7 @@ export class StandaloneService {
   private readConversationHistory(
     taskId: string,
     assignmentId: string,
+    beforeSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const history = this.conversationHistory;
     if (!history) throw new Error("Service is not started");
@@ -2699,6 +2857,7 @@ export class StandaloneService {
       assignmentId,
       200,
       this.conversationExclusionsForAssignment(taskId, assignmentId),
+      beforeSequence,
     );
   }
 

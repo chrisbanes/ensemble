@@ -180,7 +180,7 @@ export class LocalOperatorUi {
       .tasks(projectId)
       .map(
         (task) =>
-          `<li><a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)}). <a href="/runtime/task/${escapeHtml(task.id)}">Runtime</a> · <a href="/coordination/task/${escapeHtml(task.id)}">Coordination</a></li>`,
+          `<li><a href="/app/tasks/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a> (${task.ready ? "ready" : "unready"}; ${escapeHtml(task.state)}; blockers ${escapeHtml(task.importedBlockers)}). <a href="/runtime/task/${escapeHtml(task.id)}">Runtime</a> · <a href="/coordination/task/${escapeHtml(task.id)}">Coordination</a></li>`,
       )
       .join("");
     const candidateProfileIds = JSON.stringify(
@@ -304,7 +304,7 @@ export class LocalOperatorUi {
     const assignment = this.store.assignment(assignmentId);
     const task = this.store.task(String(assignment.taskId));
     const profile = this.store.profile(String(assignment.profileId));
-    return `<main><h1>${escapeHtml(profile.name)} assignment</h1><p>Task: <a href="/task/${escapeHtml(task.id)}">${escapeHtml(task.title)}</a>. Assignment lifecycle state: ${escapeHtml(assignment.state)}; this does not confirm runtime admission or execution.</p><p><a href="/runtime/assignment/${escapeHtml(assignment.id)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/assignment/${escapeHtml(assignment.id)}">Conversation and coordination history</a></p></main>`;
+    return `<main><h1>${escapeHtml(profile.name)} assignment</h1><p>Task: <a href="/app/tasks/${escapeHtml(task.id)}?assignment=${escapeHtml(assignment.id)}">${escapeHtml(task.title)}</a>. Assignment lifecycle state: ${escapeHtml(assignment.state)}; this does not confirm runtime admission or execution.</p><p><a href="/runtime/assignment/${escapeHtml(assignment.id)}">Runtime status, controls and recovery evidence</a> · <a href="/coordination/assignment/${escapeHtml(assignment.id)}">Conversation and coordination history</a></p></main>`;
   }
 
   runtime(): string {
@@ -1332,6 +1332,24 @@ export class LocalOperatorHttp {
           return true;
         }
         json(200, await web.api.execute(body));
+        return true;
+      }
+      const artifact = path.match(
+        /^\/api\/operator\/tasks\/([^/]+)\/artifacts\/([^/]+)$/,
+      );
+      if (artifact) {
+        if ([...url.searchParams].length)
+          throw new OperatorApiError(400, "invalid-input");
+        const data = await web.api.readArtifact(
+          artifact[1] ?? "",
+          artifact[2] ?? "",
+        );
+        response.writeHead(200, {
+          ...headers,
+          "content-type": data.type,
+          "x-content-type-options": "nosniff",
+        });
+        response.end(data.body);
         return true;
       }
       const data = await web.read(path, url.searchParams);

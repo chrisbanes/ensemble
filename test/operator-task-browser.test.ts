@@ -75,7 +75,7 @@ test("List and Board preserve identical filtered task IDs and never submit comma
       })),
     );
   const list = await links();
-  assert.deepEqual(list, [{ id: ids[0], href: `/task/${ids[0]}` }]);
+  assert.deepEqual(list, [{ id: ids[0], href: `/app/tasks/${ids[0]}` }]);
   const rowGeometry = await page
     .locator(`[data-task-id="${ids[0]}"]`)
     .evaluate((el) => ({
@@ -120,6 +120,34 @@ test("List and Board preserve identical filtered task IDs and never submit comma
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Search tasks").inputValue(), "Literal");
   assert.deepEqual(await links(), list);
+  await page.getByRole("button", { name: "Paused (1)", exact: true }).click();
+  const boardScroll = await page
+    .locator(".board-columns")
+    .evaluate((el) => el.scrollLeft);
+  await page.locator(`[data-task-id="${ids[0]}"] .task-title`).click();
+  await page
+    .getByRole("heading", { name: "Evidence review", exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Back to originating view", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Paused (1)", exact: true })
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.equal(
+    await page.locator(".board-columns").evaluate((el) => el.scrollLeft),
+    boardScroll,
+  );
+  assert.equal(
+    await page
+      .locator(`[data-task-id="${ids[0]}"] .task-title`)
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
   await screenshot(page, "1366-filtered-board");
   assert.equal(posts, 0);
 });
@@ -1117,7 +1145,10 @@ for (const viewport of [
     await page
       .getByRole("link", { name: "Imported source task", exact: true })
       .click();
-    assert.ok(page.url().endsWith(`/task/${ids.importedId}`));
+    assert.ok(page.url().endsWith(`/app/tasks/${ids.importedId}`));
+    await page
+      .getByRole("link", { name: "Runtime / Stop / Resume", exact: true })
+      .waitFor();
     assert.equal(
       await page
         .locator('input[name="title"],textarea[name="outcome"]')
@@ -1127,7 +1158,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Runtime status, controls and recovery evidence",
+          name: "Runtime / Stop / Resume",
           exact: true,
         })
         .count(),
@@ -1136,7 +1167,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Task-scoped coordination and history",
+          name: "Requests and coordination",
           exact: true,
         })
         .count(),

@@ -1,3 +1,4 @@
+import { TaskReviewStore } from "./task-review.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./store.js";
@@ -153,6 +154,7 @@ export const externalActionArgumentsSchema = z
   .object({
     operationId: z.string().uuid(),
     action: externalActionSchema,
+    operatorReviewId: z.string().uuid().optional(),
     approval: z
       .object({
         interactionId: z.string().uuid(),
@@ -166,7 +168,7 @@ export type ExternalAction = z.output<typeof externalActionSchema>;
 export type ExternalActionArguments = z.output<
   typeof externalActionArgumentsSchema
 >;
-const bindingSchema = z
+export const runtimeDeliveryCallerSchema = z
   .object({
     projectId: z.string().uuid(),
     taskId: z.string().uuid(),
@@ -178,7 +180,58 @@ const bindingSchema = z
     conversationRevision: z.number().int().positive(),
   })
   .strict();
+export type RuntimeDeliveryCaller = z.output<
+  typeof runtimeDeliveryCallerSchema
+>;
+export const operatorDeliveryCallerSchema = z
+  .object({
+    actor: z.literal("operator"),
+    principal: z.literal("installation-operator"),
+    projectId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    taskVersion: z.number().int().positive(),
+    sourceId: z.string().uuid(),
+    sourceRevision: z.number().int().positive(),
+    sourceDigest: z.string().length(64),
+    sourceNodeId: identity,
+    sourceRepositoryId: identity,
+    policyVersion: z.number().int().positive(),
+  })
+  .strict();
+export type OperatorDeliveryCaller = z.output<
+  typeof operatorDeliveryCallerSchema
+>;
+// The first branch explicitly preserves the historical persisted runtime shape and its material hash.
+const bindingSchema = z.union([
+  runtimeDeliveryCallerSchema,
+  operatorDeliveryCallerSchema,
+]);
 export type DeliveryCaller = z.output<typeof bindingSchema>;
+export function isOperatorDeliveryCaller(
+  caller: DeliveryCaller,
+): caller is OperatorDeliveryCaller {
+  return "actor" in caller && caller.actor === "operator";
+}
+export const operatorCommentReviewSchema = z
+  .object({
+    reviewId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    key: z.string().uuid(),
+    commandHash: z.string().length(64),
+    operationId: z.string().uuid(),
+    caller: operatorDeliveryCallerSchema,
+    action: externalActionSchema,
+    materialHash: z.string().length(64),
+    revision: z.number().int().positive(),
+    decision: z.enum(["pending", "approved", "denied"]),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+  })
+  .strict()
+  .refine((r) => r.action.kind === "issue.comment");
+export type OperatorCommentReview = z.output<
+  typeof operatorCommentReviewSchema
+>;
 export const actionObservationSchema = z
   .object({
     state: z.enum(["uncertain", "confirmed-success", "confirmed-failure"]),
@@ -338,7 +391,9 @@ export function materialDigest(value: unknown): string {
 export class DeliveryStore {
   constructor(private readonly db: Database) {}
   migrate(): void {
-    this.db.exec(`CREATE TABLE IF NOT EXISTS delivery_policies (
+    this.db.exec(`CREATE TABLE IF NOT EXISTS delivery_operator_comment_reviews(reviewId TEXT PRIMARY KEY,key TEXT NOT NULL UNIQUE,operationId TEXT NOT NULL UNIQUE,taskId TEXT NOT NULL REFERENCES domain_tasks(id),recordJson TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS delivery_operator_confirm_receipts(key TEXT PRIMARY KEY,material TEXT NOT NULL,recordJson TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS delivery_policies (
       projectId TEXT PRIMARY KEY REFERENCES domain_projects(id), version INTEGER NOT NULL,
       policyJson TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS delivery_actions (
@@ -419,6 +474,43 @@ export class DeliveryStore {
     policyVersion?: number,
   ): void {
     const policy = this.configuration(binding.projectId);
+    if (isOperatorDeliveryCaller(binding)) {
+      this.validateOperatorCaller(binding);
+      if (
+        request.action.kind !== "issue.comment" ||
+        request.approval ||
+        request.action.target.nodeId !== binding.sourceNodeId ||
+        request.action.target.repositoryId !== binding.sourceRepositoryId ||
+        request.action.target.number !==
+          Number(
+            (
+              this.db
+                .prepare(
+                  "SELECT issueNumber FROM github_external_issues WHERE nodeId=?",
+                )
+                .get(binding.sourceNodeId) as
+                | { issueNumber: number }
+                | undefined
+            )?.issueNumber,
+          )
+      )
+        throw Error("Operator caller only permits the bound issue.comment");
+      if (
+        request.operatorReviewId &&
+        !this.operatorApprovalCurrent(request, binding)
+      )
+        approved = false;
+      if (
+        policy.grants.some(
+          (g) =>
+            g.action === "issue.comment" &&
+            g.repositoryId === binding.sourceRepositoryId &&
+            g.mode === "approval",
+        )
+      )
+        approved = this.operatorApprovalCurrent(request, binding);
+    } else if (request.operatorReviewId)
+      throw Error("Runtime caller cannot use an operator confirmation");
     if (policyVersion !== undefined && policy.version !== policyVersion)
       throw new Error("Delivery policy changed");
     const action = request.action;
@@ -481,9 +573,203 @@ export class DeliveryStore {
         throw new Error("Agent cannot change readiness fields");
     }
   }
+  validateOperatorCaller(input: OperatorDeliveryCaller): void {
+    const caller = operatorDeliveryCallerSchema.parse(input),
+      policy = this.configuration(caller.projectId),
+      source = new TaskReviewStore(this.db).sources(caller.taskId).at(-1),
+      row = this.db
+        .prepare(
+          `SELECT task.projectId,task.version,imported.nodeId,imported.repositoryId,review.observedDigest FROM domain_tasks task JOIN github_imported_tasks imported ON imported.taskId=task.id JOIN github_source_reviews review ON review.nodeId=imported.nodeId WHERE task.id=?`,
+        )
+        .get(caller.taskId) as
+        | {
+            projectId: string;
+            version: number;
+            nodeId: string;
+            repositoryId: string;
+            observedDigest: string;
+          }
+        | undefined;
+    if (
+      !row ||
+      row.projectId !== caller.projectId ||
+      row.version !== caller.taskVersion ||
+      row.nodeId !== caller.sourceNodeId ||
+      row.repositoryId !== caller.sourceRepositoryId ||
+      row.observedDigest !== caller.sourceDigest ||
+      source?.sourceId !== caller.sourceId ||
+      source.revision !== caller.sourceRevision ||
+      policy.version !== caller.policyVersion
+    )
+      throw Error("Operator delivery authority changed");
+  }
+  operatorReview(id: string): OperatorCommentReview | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT recordJson FROM delivery_operator_comment_reviews WHERE reviewId=? OR key=?",
+      )
+      .get(id, id) as { recordJson: string } | undefined;
+    return row
+      ? operatorCommentReviewSchema.parse(JSON.parse(row.recordJson))
+      : undefined;
+  }
+  reviewOperatorComment(
+    command: {
+      key: string;
+      taskId: string;
+      operationId: string;
+      expectedTaskVersion: number;
+      body: string;
+    },
+    caller: OperatorDeliveryCaller,
+    action: ExternalAction,
+  ): OperatorCommentReview {
+    const prior = this.operatorReview(command.key),
+      commandHash = materialDigest(command);
+    if (prior) {
+      if (prior.commandHash !== commandHash)
+        throw Error("Operator review key reused with different material");
+      return prior;
+    }
+    this.validateOperatorCaller(caller);
+    if (
+      action.kind !== "issue.comment" ||
+      action.body !== command.body ||
+      action.target.nodeId !== caller.sourceNodeId ||
+      action.target.repositoryId !== caller.sourceRepositoryId ||
+      action.target.number !==
+        Number(
+          (
+            this.db
+              .prepare(
+                "SELECT issueNumber FROM github_external_issues WHERE nodeId=?",
+              )
+              .get(caller.sourceNodeId) as { issueNumber: number } | undefined
+          )?.issueNumber,
+        ) ||
+      caller.taskVersion !== command.expectedTaskVersion ||
+      caller.taskId !== command.taskId
+    )
+      throw Error("Operator review material mismatch");
+    const record = operatorCommentReviewSchema.parse({
+      reviewId: command.key,
+      key: command.key,
+      taskId: command.taskId,
+      commandHash,
+      operationId: command.operationId,
+      caller,
+      action,
+      materialHash: materialDigest({
+        operationId: command.operationId,
+        caller,
+        action,
+      }),
+      revision: 1,
+      decision: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    this.db
+      .prepare(
+        "INSERT INTO delivery_operator_comment_reviews VALUES(?,?,?,?,?)",
+      )
+      .run(
+        record.reviewId,
+        record.key,
+        record.operationId,
+        record.taskId,
+        canonicalMaterial(record),
+      );
+    return record;
+  }
+  confirmOperatorComment(
+    command: {
+      key: string;
+      taskId: string;
+      reviewId: string;
+      expectedRevision: number;
+      materialHash: string;
+      decision: "approved" | "denied";
+    },
+    authorize: () => void,
+  ): OperatorCommentReview {
+    return this.transaction(() => {
+      const material = canonicalMaterial(command),
+        prior = this.db
+          .prepare(
+            "SELECT material,recordJson FROM delivery_operator_confirm_receipts WHERE key=?",
+          )
+          .get(command.key) as
+          | { material: string; recordJson: string }
+          | undefined;
+      if (prior) {
+        if (prior.material !== material)
+          throw Error(
+            "Operator confirmation key reused with different material",
+          );
+        return operatorCommentReviewSchema.parse(JSON.parse(prior.recordJson));
+      }
+      const record = this.operatorReview(command.reviewId);
+      if (
+        !record ||
+        record.taskId !== command.taskId ||
+        record.revision !== command.expectedRevision ||
+        record.materialHash !== command.materialHash ||
+        record.decision !== "pending"
+      )
+        throw Error("Operator confirmation revision/material mismatch");
+      if (command.decision === "approved") {
+        authorize();
+        this.validateOperatorCaller(record.caller);
+        const policy = this.configuration(record.caller.projectId);
+        if (
+          !policy.grants.some(
+            (g) =>
+              g.action === "issue.comment" &&
+              g.repositoryId === record.caller.sourceRepositoryId,
+          )
+        )
+          throw Error("External action denied by project policy");
+      }
+      const saved = {
+        ...record,
+        revision: record.revision + 1,
+        decision: command.decision,
+        updatedAt: Date.now(),
+      };
+      this.db
+        .prepare(
+          "UPDATE delivery_operator_comment_reviews SET recordJson=? WHERE reviewId=?",
+        )
+        .run(canonicalMaterial(saved), saved.reviewId);
+      this.db
+        .prepare("INSERT INTO delivery_operator_confirm_receipts VALUES(?,?,?)")
+        .run(command.key, material, canonicalMaterial(saved));
+      return saved;
+    });
+  }
+  operatorApprovalCurrent(
+    request: ExternalActionArguments,
+    caller: OperatorDeliveryCaller,
+  ): boolean {
+    if (!request.operatorReviewId) return false;
+    const record = this.operatorReview(request.operatorReviewId);
+    return Boolean(
+      record &&
+        record.decision === "approved" &&
+        record.operationId === request.operationId &&
+        record.taskId === caller.taskId &&
+        record.materialHash ===
+          materialDigest({
+            operationId: request.operationId,
+            caller,
+            action: request.action,
+          }),
+    );
+  }
   recordApprovalContextWithinTransaction(
     interactionId: string,
-    caller: DeliveryCaller,
+    caller: RuntimeDeliveryCaller,
     action: ExternalAction,
   ): void {
     this.db
@@ -504,7 +790,7 @@ export class DeliveryStore {
   }
   approvalCurrent(
     interactionId: string,
-    caller: DeliveryCaller,
+    caller: RuntimeDeliveryCaller,
     action: ExternalAction,
     operationId: string,
   ): boolean {
@@ -564,7 +850,11 @@ export class DeliveryStore {
         this.authorize(request, binding, approved);
         if (this.actionBlockers(binding.taskId).length)
           throw new Error("Task has unresolved external action");
-        if (approved && request.approval) {
+        if (
+          approved &&
+          request.approval &&
+          !isOperatorDeliveryCaller(binding)
+        ) {
           if (
             !this.approvalCurrent(
               request.approval.interactionId,
@@ -698,7 +988,7 @@ export class DeliveryStore {
       .run(binding.taskId, canonicalMaterial(prBindingSchema.parse(binding)));
   }
   registerPrWithinTransaction(
-    caller: DeliveryCaller,
+    caller: RuntimeDeliveryCaller,
     observation: PrDeliveryObservation,
     leadAssignmentId: string,
   ): PrDeliveryBinding {

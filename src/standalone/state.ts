@@ -1,3 +1,4 @@
+import { TaskReviewStore } from "../core/task-review.js";
 import { canonicalMaterial } from "../core/delivery.js";
 import {
   archivedResumeRejectionSchema,
@@ -889,6 +890,11 @@ export class ExecutionState {
       throw new Error(
         "Work ID already bound to another task or assignment revision",
       );
+    new TaskReviewStore(this.db).captureAssignment(
+      input.assignmentId,
+      "service:work-preparation",
+      workId,
+    );
     this.db
       .prepare(`INSERT OR IGNORE INTO task_work_revision_pending (workId)
       SELECT b.workId FROM task_execution_bindings b

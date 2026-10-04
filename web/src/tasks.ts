@@ -78,7 +78,7 @@ export function taskColumn(task: TaskListSummary): TaskColumn {
   return "Ready";
 }
 export const taskDetailHref = (task: Pick<TaskListSummary, "id">) =>
-  `/task/${task.id}`;
+  `/app/tasks/${task.id}`;
 export interface TaskFilters {
   project: string;
   state: string;

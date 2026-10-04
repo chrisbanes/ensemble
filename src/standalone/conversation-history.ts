@@ -255,8 +255,13 @@ export class ConversationHistoryStore {
     assignmentId: string,
     limit = 200,
     currentExclusions?: readonly string[],
+    beforeSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const boundedLimit = z.number().int().positive().max(200).parse(limit);
+    const before =
+      beforeSequence === undefined
+        ? null
+        : z.number().int().positive().parse(beforeSequence);
     const task = z.string().min(1).parse(taskId);
     const assignment = z.string().min(1).parse(assignmentId);
     const rawItems = this.db
@@ -264,25 +269,25 @@ export class ConversationHistoryStore {
           instructionsRevision, profileRevision, conversationRevision,
           workRevision, threadId, turnId, itemId, lifecycle, text,
           omissionReason, deltaBytes, createdAt, updatedAt
-        FROM conversation_history_items WHERE taskId = ? AND assignmentId = ?
+        FROM conversation_history_items WHERE taskId = ? AND assignmentId = ? AND (? IS NULL OR sequence < ?)
         ORDER BY sequence DESC LIMIT ?`)
-      .all(task, assignment, boundedLimit)
+      .all(task, assignment, before, before, boundedLimit)
       .reverse()
       .map((row) => historyEntrySchema.parse(row));
     const rawOmissions = this.db
       .prepare(`SELECT sequence, workId, taskId, assignmentId, assignmentVersion,
           instructionsRevision, profileRevision, conversationRevision,
           workRevision, threadId, turnId, reason, createdAt
-        FROM conversation_history_turn_omissions WHERE taskId = ? AND assignmentId = ?
+        FROM conversation_history_turn_omissions WHERE taskId = ? AND assignmentId = ? AND (? IS NULL OR sequence < ?)
         ORDER BY sequence DESC LIMIT ?`)
-      .all(task, assignment, boundedLimit)
+      .all(task, assignment, before, before, boundedLimit)
       .reverse()
       .map((row) => turnOmissionSchema.parse(row));
     const itemCount = (
       this.db
         .prepare(`SELECT COUNT(*) AS count FROM conversation_history_items
-          WHERE taskId = ? AND assignmentId = ?`)
-        .get(task, assignment) as { count: number }
+          WHERE taskId = ? AND assignmentId = ? AND (? IS NULL OR sequence < ?)`)
+        .get(task, assignment, before, before) as { count: number }
     ).count;
     const items: ConversationHistoryEntry[] = rawItems.map((item) => {
       if (item.lifecycle !== "completed") return item;

@@ -143,7 +143,7 @@ export function RuntimeSettings(p: SettingsProps) {
                       : "Review execution evidence"}
                 </StatusBadge>
                 <div className="settings-actions">
-                  <a href={`/task/${task.taskId}`}>Task detail</a>
+                  <a href={`/app/tasks/${task.taskId}`}>Task detail</a>
                   <a href={`/runtime/task/${task.taskId}`}>
                     Stop, Resume, dependencies and Apply
                   </a>
@@ -327,7 +327,9 @@ export function AssignmentRecovery(
             <a href={`/coordination/assignment/${p.assignmentId}`}>
               Captured assignment history
             </a>
-            <a href={`/task/${data.taskId}`}>Task detail and source review</a>
+            <a href={`/app/tasks/${data.taskId}?assignment=${p.assignmentId}`}>
+              Task detail
+            </a>
             <a href={`/coordination/task/${data.taskId}`}>
               Messages, results, questions and approvals
             </a>

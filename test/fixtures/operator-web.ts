@@ -40,6 +40,7 @@ import {
 } from "./fixture-lifecycle.js";
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
+  prompts: string[] = [];
   private outcomes = new Map<string, (value: "completed" | "failed") => void>();
   private tool:
     | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
@@ -52,7 +53,8 @@ export class OperatorFixtureRuntime implements Runtime {
     return "fixture-thread";
   }
   async resumeThread() {}
-  async startTurn() {
+  async startTurn(_thread?: string, _workspace?: string, prompt?: string) {
+    if (prompt) this.prompts.push(prompt);
     return `fixture-turn-${++this.turns}`;
   }
   async interruptTurn() {}
