@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import {
@@ -25,15 +25,21 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   const a = await seedReviewTask(f),
     workspace = await f.service.taskWorkspace(a.taskId);
   assert.ok(workspace);
-  const png = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1cAAAAASUVORK5CYII=",
-      "base64",
+  const beforePng = await readFile(
+      join(process.cwd(), "design/assets/command-menu-before.png"),
+    ),
+    afterPng = await readFile(
+      join(process.cwd(), "design/assets/command-menu-after.png"),
     ),
     before = randomUUID(),
     after = randomUUID(),
     missing = randomUUID();
-  await writeFile(join(workspace.path, "before.png"), png);
-  await writeFile(join(workspace.path, "after.png"), png);
+  assert.notEqual(
+    createHash("sha256").update(beforePng).digest("hex"),
+    createHash("sha256").update(afterPng).digest("hex"),
+  );
+  await writeFile(join(workspace.path, "before.png"), beforePng);
+  await writeFile(join(workspace.path, "after.png"), afterPng);
   const r1 = a.delegatedResult("R1 initial", {
     sourceId: a.source.sourceId,
     criteria: [
@@ -87,9 +93,9 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
         availability: "available",
         file: {
           relativePath: "before.png",
-          size: png.length,
+          size: beforePng.length,
           mime: "image/png",
-          sha256: createHash("sha256").update(png).digest("hex"),
+          sha256: createHash("sha256").update(beforePng).digest("hex"),
         },
       },
       {
@@ -101,9 +107,9 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
         availability: "available",
         file: {
           relativePath: "after.png",
-          size: png.length,
+          size: afterPng.length,
           mime: "image/png",
-          sha256: createHash("sha256").update(png).digest("hex"),
+          sha256: createHash("sha256").update(afterPng).digest("hex"),
         },
       },
       {
@@ -278,9 +284,29 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     await page
       .getByAltText("before: Before focus")
       .evaluate((el) => el instanceof HTMLImageElement && el.naturalWidth),
-    1,
+    1040,
+  );
+  await page.getByAltText("after: After focus").waitFor();
+  assert.deepEqual(
+    await pair
+      .locator("img")
+      .evaluateAll((images) =>
+        images.map((image) =>
+          image instanceof HTMLImageElement
+            ? [image.naturalWidth, image.naturalHeight]
+            : null,
+        ),
+      ),
+    [
+      [1040, 480],
+      [1040, 480],
+    ],
   );
   await captureBrowserEvidence(page, "1366-original-review");
+  await pair.scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "1366-visible-comparison", {
+    fullPage: false,
+  });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator(".artifact-comparisons").first().scrollIntoViewIfNeeded();
   assert.equal(
@@ -300,6 +326,10 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     JSON.stringify(phoneBounds),
   );
   await captureBrowserEvidence(page, "390-original-comparison");
+  await pair.scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "390-visible-comparison", {
+    fullPage: false,
+  });
   const reply = page.getByLabel("Editable reply");
   const criterionAsk = page
     .getByRole("button", { name: "Ask lead about criterion", exact: true })

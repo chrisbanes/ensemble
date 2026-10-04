@@ -858,3 +858,88 @@ test("curated native form receipt retains unconfirmed Inbox attention and same-k
     await f.close();
   }
 });
+
+for (const answerMode of ["confirmed", "held", "unanswered"] as const) {
+  test(`closed native endpoint preserves ${answerMode} recorded projection without another effect`, async () => {
+    const f = await fixture();
+    try {
+      const api = new OperatorApi(f.service, [f.root]);
+      const q = runtimeQuestion(f.service, f.taskId);
+      if (answerMode === "held")
+        command(f.service, {
+          type: "project.configure",
+          actor: "operator",
+          projectId: f.projectId,
+          expectedVersion: Number(
+            f.service.domain().project(f.projectId).version,
+          ),
+          paused: true,
+        });
+      if (answerMode !== "unanswered") {
+        await api.execute({
+          type: "question.native.answer",
+          key: randomUUID(),
+          taskId: f.taskId,
+          interactionId: q.interactionId,
+          expectedRevision: q.revision,
+          answers: { q: { answers: ["Retained custom answer"] } },
+        });
+        if (answerMode === "confirmed")
+          await until(() => f.runtime.replies === 1);
+      }
+      if (answerMode === "confirmed") {
+        command(f.service, {
+          type: "project.configure",
+          actor: "operator",
+          projectId: f.projectId,
+          expectedVersion: Number(
+            f.service.domain().project(f.projectId).version,
+          ),
+          paused: true,
+        });
+        f.runtime.terminal.resolve("completed");
+      } else {
+        await f.service.stopTask(f.taskId);
+      }
+      await until(
+        () =>
+          runtimeQuestion(f.service, f.taskId).requestState === "unavailable",
+      );
+      const retained = runtimeQuestion(f.service, f.taskId);
+      const selected = (await api.readQuestion(f.taskId, q.interactionId)).data;
+      assert.equal(selected.deliveryState, retained.deliveryState);
+      assert.equal(
+        selected.status,
+        answerMode === "unanswered" ? "unsupported" : "recorded",
+      );
+      assert.equal(
+        selected.reason,
+        answerMode === "unanswered"
+          ? "Request is unavailable; no answer can be submitted"
+          : "Answer recorded. Request closed; the retained answer is read-only.",
+      );
+      assert.deepEqual(
+        selected.answers,
+        answerMode === "unanswered"
+          ? null
+          : {
+              q: { optionIds: [], text: "Retained custom answer" },
+            },
+      );
+      const redacted = (
+        await new OperatorApi(f.service, [
+          "Retained custom answer",
+        ]).readQuestion(f.taskId, q.interactionId)
+      ).data;
+      if (answerMode !== "unanswered") {
+        assert.equal(redacted.status, "unavailable");
+        assert.equal(redacted.form, null);
+        assert.equal(redacted.answers, null);
+      }
+      assert.equal(f.runtime.replies, answerMode === "confirmed" ? 1 : 0);
+      assert.equal(f.runtime.turns, 1);
+    } finally {
+      await f.close();
+    }
+  });
+}

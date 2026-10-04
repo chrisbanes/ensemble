@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "issues": [745, 697],
+  "status": "passed",
+  "attempts": 1,
+  "source": {
+    "head": "f455679ce62f6284fece21d6f8f454b2c4488db4",
+    "tree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
+    "clean": true,
+    "harness": "test/ui07/runtime-contract.mjs",
+    "harnessSha256": "13fca5e87c7154a2064e86f55bb6f453b137fc9ca04f785d936a41edccba09f7",
+    "inputs": {
+      "src/standalone/service.ts": "173314ddd6e2e2cacb71e4907c7adf174bd611eca746c412d318ccec37531060",
+      "src/standalone/state.ts": "208273acf13d2e1d657422f2bc5777dcabd8f538757404eb01e4d1fb3aa37d02",
+      "src/standalone/scheduler.ts": "9eea431599dd62523e9478b7a8522519750798b985d37cc0657412a9699a7361",
+      "src/standalone/codex.ts": "a1a10fac3c5c7e5abac315998ae1d2a0a2fcb3977149897866a4d06140e89434",
+      "src/standalone/operator-api.ts": "553f8ec918046b20891d5b8e5ef1f0a3972d8b40db32644ecb15f491dd71d440",
+      "web/src/app.tsx": "2c18fb1a8ac3f951ab4ca5988c4f280eb6ad16f0fda8ff84994dde01b6fd6d40",
+      "web/src/question-response.tsx": "c6f8a0335a7c34d33b2f888af325359241a21d8f8ba660f69c6dce47170ff9fe",
+      "test/ui07/runtime-contract.mjs": "13fca5e87c7154a2064e86f55bb6f453b137fc9ca04f785d936a41edccba09f7",
+      "test/ui07/fake-app-server.mjs": "0af45d8190bdd3be57148fdb368322337d3e38f826178d21d005bbf279d1c028",
+      "test/ui04/runtime-contract.mjs": "8110d626ffabcbef3240711a0269414f992a67d6aab0f7b7fcc297da4726f783",
+      "dist/operator/assets/index-CsF3lIED.js": "b424a9ee46bb490a73abec949c83102014f310bc04fcfb8dd479d4251eda7c01",
+      "dist/operator/assets/index-QXFEB72c.css": "c777e8ce1f418a17dbf4d51c1ca89b488b25b26df4c794cc9cdb8eef763b99a0"
+    }
+  },
+  "runtime": {
+    "api": "Codex App Server JSON-RPC over stdio",
+    "version": "0.159.0",
+    "executableSha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+    "authentication": "Existing ChatGPT login, verified through ordinary runtime startup; metadata alone was not qualification"
+  },
+  "timing": {
+    "startedAt": "2026-10-04T17:59:48.955Z",
+    "endedAt": "2026-10-04T18:00:09.875Z",
+    "totalMs": 20920,
+    "actions": [
+      {
+        "action": "service-start",
+        "startedAt": "2026-10-04T17:59:49.212Z",
+        "startedMs": 257,
+        "state": "completed",
+        "endedMs": 1761
+      },
+      {
+        "action": "port",
+        "startedAt": "2026-10-04T17:59:50.730Z",
+        "startedMs": 1775,
+        "state": "completed",
+        "endedMs": 1778
+      },
+      {
+        "action": "port-close",
+        "startedAt": "2026-10-04T17:59:50.733Z",
+        "startedMs": 1778,
+        "state": "completed",
+        "endedMs": 1778
+      },
+      {
+        "action": "auth-initialize",
+        "startedAt": "2026-10-04T17:59:50.733Z",
+        "startedMs": 1778,
+        "state": "completed",
+        "endedMs": 1825
+      },
+      {
+        "action": "auth-open",
+        "startedAt": "2026-10-04T17:59:50.780Z",
+        "startedMs": 1825,
+        "state": "completed",
+        "endedMs": 1826
+      },
+      {
+        "action": "bundle-open",
+        "startedAt": "2026-10-04T17:59:50.781Z",
+        "startedMs": 1826,
+        "state": "completed",
+        "endedMs": 1828
+      },
+      {
+        "action": "operator-start",
+        "startedAt": "2026-10-04T17:59:50.783Z",
+        "startedMs": 1828,
+        "state": "completed",
+        "endedMs": 1831
+      },
+      {
+        "action": "browser-start",
+        "startedAt": "2026-10-04T17:59:50.786Z",
+        "startedMs": 1831,
+        "state": "completed",
+        "endedMs": 1984
+      },
+      {
+        "action": "browser-page",
+        "startedAt": "2026-10-04T17:59:50.939Z",
+        "startedMs": 1984,
+        "state": "completed",
+        "endedMs": 2030
+      },
+      {
+        "action": "browser-create-task",
+        "startedAt": "2026-10-04T17:59:50.985Z",
+        "startedMs": 2030,
+        "state": "completed",
+        "endedMs": 2424
+      },
+      {
+        "action": "browser-observe-question",
+        "startedAt": "2026-10-04T18:00:00.377Z",
+        "startedMs": 11422,
+        "state": "completed",
+        "endedMs": 11452
+      },
+      {
+        "action": "browser-mounted-native-form",
+        "startedAt": "2026-10-04T18:00:00.407Z",
+        "startedMs": 11452,
+        "state": "completed",
+        "endedMs": 11518
+      },
+      {
+        "action": "browser-submit-native-answer",
+        "startedAt": "2026-10-04T18:00:00.474Z",
+        "startedMs": 11519,
+        "state": "completed",
+        "endedMs": 11593
+      },
+      {
+        "action": "browser-inspect-persisted-result",
+        "startedAt": "2026-10-04T18:00:09.566Z",
+        "startedMs": 20611,
+        "state": "completed",
+        "endedMs": 20687
+      },
+      {
+        "action": "browser-screenshot",
+        "startedAt": "2026-10-04T18:00:09.642Z",
+        "startedMs": 20687,
+        "state": "completed",
+        "endedMs": 20835
+      }
+    ]
+  },
+  "limits": {
+    "totalMs": 240000,
+    "cleanupMs": 10000
+  },
+  "counts": {
+    "threads": 1,
+    "turns": 1,
+    "requests": 1,
+    "replies": 1,
+    "reports": 1
+  },
+  "prompt": {
+    "sha256": "f2b6e43ecac688078944c2f8d148c58e1038c6b12db245e27951c7dd9ff63863",
+    "includesFixedInstructions": true,
+    "includesRoleSourceProjectProfileContext": true,
+    "contextCaptured": true,
+    "overridden": false
+  },
+  "journey": "Production browser signs in, creates/starts repository-free task using Default project lead allocation, opens exact native form, submits explicit answer, inspects persisted bound result",
+  "native": {
+    "shape": "One synchronous single-choice request; custom text is used only when native isOther permits it, otherwise Local. Actual mode flag was not separately retained.",
+    "isBlocking": false,
+    "autoResolutionMs": null,
+    "answerMapMatched": true,
+    "answerDigest": "7c8afe9047615bf443751e8ebb82b18198ca71c7bf91dd33d820b69e4410aead",
+    "modeFlagRetained": false
+  },
+  "persistence": {
+    "committedBeforeEffect": true,
+    "independentReadOnlyConnection": true,
+    "zeroReplies": true,
+    "answerDigest": "7c8afe9047615bf443751e8ebb82b18198ca71c7bf91dd33d820b69e4410aead",
+    "receiptCount": 1
+  },
+  "receipt": {
+    "outcome": "confirmed",
+    "reason": "Matching resolution after successful stdin write",
+    "orderedReceipt": {
+      "writeInitiated": 1,
+      "stdinSucceeded": 2,
+      "matchingResolution": 3
+    }
+  },
+  "settlement": {
+    "exactBoundSuccessfulTerminal": true,
+    "callbackEnded": true,
+    "noOtherHold": true
+  },
+  "cleanup": {
+    "verified": true,
+    "method": "mac-pid-absent-same-boot",
+    "operations": {
+      "browser-close": "settled",
+      "operator-close": "settled",
+      "auth-close": "settled",
+      "service-close": "settled"
+    },
+    "failureCount": 0,
+    "lateResourceCount": 0,
+    "disposableFixtureRemoved": true,
+    "resourceRelease": "Root verified matching exact process identity/consumption/ledger and released resource; no additional attempt permitted"
+  },
+  "reportBridge": {
+    "scope": "Exact received native answer map validates bound request/thread/turn and invokes real ensemble_report_result; proves consumption and result persistence",
+    "ordinaryModelArtifactProducer": false,
+    "registeredBoundCallbackEnded": true
+  },
+  "privateRawEvidenceSha256": "658a0536dc373b89a1022b516917da7bded681723e833d668bfe998fba9fac6a",
+  "limitsDisclosure": [
+    "No native free-text/multi-select/grouped/recommendation live qualification",
+    "No comprehensive tool-history or independent Ensemble execution sandbox claim",
+    "No descendant containment or universal live reattachment claim",
+    "No actual provider/delivery integration or human visual/usability acceptance",
+    "Search/approval/full forms/artifact bytes/feedback/layout use separately attributable deterministic production browser/service/SQLite suites"
+  ],
+  "privacy": "Process/native identities, local paths, raw histories/configuration/credentials and grant identity omitted"
+}

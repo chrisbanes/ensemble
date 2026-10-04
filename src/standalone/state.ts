@@ -2149,6 +2149,25 @@ export class ExecutionState {
       .map((row) => intentSchema.parse(row));
   }
 
+  hasTaskWorkspaceEvidence(taskId: string): boolean {
+    const id = z.string().uuid().parse(taskId);
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 FROM task_execution_bindings WHERE taskId = ? LIMIT 1",
+        )
+        .get(id)
+    )
+      return true;
+    return Boolean(
+      this.hasTurnRequests &&
+        this.db
+          .prepare(`SELECT 1 FROM turn_requests WHERE taskId = ?
+            AND (workspace IS NOT NULL OR previousWorkId IS NOT NULL) LIMIT 1`)
+          .get(id),
+    );
+  }
+
   taskTurnRequests(taskId: string): TaskTurnRequest[] {
     if (!this.hasTurnRequests) return [];
     return this.db

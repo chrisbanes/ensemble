@@ -786,12 +786,12 @@ export class OperatorApi {
       native?.requestState === "unavailable";
     const status = !intact
       ? "unavailable"
-      : unavailable
-        ? own?.requestState === "cancelled"
-          ? "cancelled"
-          : "unsupported"
-        : interaction.status === "answered"
-          ? "recorded"
+      : interaction.status === "answered"
+        ? "recorded"
+        : unavailable
+          ? own?.requestState === "cancelled"
+            ? "cancelled"
+            : "unsupported"
           : !native && !view.ownQuestionEligibility(interactionId)
             ? "stale"
             : "pending";
@@ -814,9 +814,11 @@ export class OperatorApi {
         answers: intact ? answers : null,
         reason: !intact
           ? "Exact question unavailable under current privacy coverage"
-          : unavailable
-            ? "Request is unavailable; no answer can be submitted"
-            : null,
+          : unavailable && status === "recorded"
+            ? "Answer recorded. Request closed; the retained answer is read-only."
+            : unavailable
+              ? "Request is unavailable; no answer can be submitted"
+              : null,
         deliveryState:
           native?.deliveryState ??
           (answers ? "Recorded; admission remains subject to holds" : null),
