@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-871 deterministic tests with zero skips. Existing lint warnings remain warnings.
+872 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -62,12 +62,13 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope; recorded validation head equality, A-to-B staleness and unavailable-head comparison; current source observations gate comparison independently of source identity and preserve unresolved explicit refreshes |
-| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures; legacy retained results get empty metadata with source/context still unavailable |
+| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures; legacy retained results get empty metadata with source/context still unavailable; supported never-admitted rebind retains provisional captures and resolves prompt/result context by exact captured assignmentVersion |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts; new change links permit only HTTP(S), legacy unsupported links remain unavailable with other material readable; bounded provider checks/feedback/blockers/actions disclose exact omitted counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation |
-| 15 | current full npm check 871/871; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 15 | current full npm check 872/872; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-upgrade-check.log` (871/871).
+The current repaired full-check log is `/tmp/ui04-context-version-check.log` (872/872).
+`/tmp/ui04-upgrade-check.log` (871/871) retains historical upgrade/session evidence.
 `/tmp/ui04-search-label-check.log` (867/867) retains historical final-label evidence.
 `/tmp/ui04-search-liveness-check-final.log` (867/867) retains historical bounded-scan evidence.
 `/tmp/ui04-entry-artifact-check-final.log` (863/863) retains historical entry/artifact evidence.
@@ -1166,3 +1167,45 @@ Adequate split-probe images/complete cleanup retain original `1c74bd4e` attribut
 in `/tmp/ui04-search-liveness-screenshots.json`; Search images retain `154ae946`.
 No recapture/retagging, remote/live operation, harness/runtime/config change or
 renewal of the consumed historical transport-only grant occurred.
+
+
+## Exact captured assignment-version context
+
+Executable `8e3f70aad94208e14bbfdb654075c9d1c4ede8fd`, tree
+`48118238270b49446071ec0b8c6c5d2639d7fe87`, resolves retained work context by
+task, assignment, work and required validated positive assignmentVersion. SQL and
+parsed JSON must agree; missing/wrong versions remain unavailable or reject a
+claimed source, foreign identity rejects, and ambiguity still rejects. Earlier
+provisional captures are preserved rather than selected as latest or deleted.
+
+Production prompt references use exact TaskExecutionBinding.assignmentVersion.
+Result ingestion uses the internal CoordinationStore result's captured version;
+no client-selected version is accepted. Exact selected review reads use the
+matching persisted coordination result identity/version for both structured and
+unstructured results, independently of the current mutable assignment. The
+existing authoritative result schema supplies this version; no persisted review
+schema or legacy evidence is rewritten.
+
+The real SQLite/service fixture creates never-admitted ready work, captures
+version 1/S1, applies new instructions/assignment revision and source scope, then
+rebinds the same workId to version 2/S2 through the supported ExecutionState seam.
+Actual admission receives correct prompt references. A callback claiming the old
+provisional source rejects without a result; the exact current structured callback
+succeeds and replays once. Its unstructured counterpart also succeeds/replays.
+After another assignment apply, exact selected result reads still resolve the
+original version-2 capture and both historical captures remain retained. Existing
+admitted/rebind-denied guards are unchanged and exercised by the full suite.
+Missing/zero/wrong-version and foreign JSON-version tests preserve fail-closed
+behavior without choosing a newer record.
+
+`/tmp/ui04-context-version-focused.log` passes 22/22, zero skips, in 0.879 seconds.
+Pinned `/tmp/ui04-context-version-check.log` passes 872/872, zero skipped/cancelled,
+in 48.415 seconds. All 15 rows retain prior proof; row 12 adds exact version
+resolution and row 15/opening/current log agree. No new validation failure occurred.
+Frontend remains unchanged; verified `index-DmKOA1jT.js` SHA256 is
+`bbf8baf5554e973d1163b808cc703dd46250aab92048d03e6e594e4ffe548b07`.
+Prior split images/complete cleanup retain `1c74bd4e` attribution in
+`/tmp/ui04-search-liveness-screenshots.json`; Search images retain `154ae946`.
+Historical a21/ca51 qualification remains transport-only, consumed and released.
+No remote/live operation, runtime/harness/global/configuration change, recapture
+or image retagging occurred.
