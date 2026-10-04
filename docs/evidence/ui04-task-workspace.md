@@ -45,29 +45,30 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-853 deterministic tests with zero skips. Existing lint warnings remain warnings.
+856 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
 | Row | Concrete evidence |
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
-| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup |
+| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps |
 | 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes |
-| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body |
+| 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window |
 | 10 | task-feedback + review/workspace browsers pending lead exact anchor; completed/held unavailable draft |
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
-| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup |
+| 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI; exact claimed source must match one immutable work context, without bounded UI-list lookup; exact selected context remains reachable beyond 256 recent captures |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions |
-| 15 | current full npm check 853/853; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material |
+| 15 | current full npm check 856/856; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-source-history-check.log` (853/853).
+The current repaired full-check log is `/tmp/ui04-retention-access-check.log` (856/856).
+`/tmp/ui04-source-history-check.log` (853/853) retains historical source-binding/checklist/history evidence.
 `/tmp/ui04-retention-metadata-check.log` (851/851) retains historical source-retention/metadata evidence.
 `/tmp/ui04-decision-excerpt-check.log` (850/850) retains prior decision excerpt evidence.
 `/tmp/ui04-source-excerpt-check.log` (849/849) retains the preceding source excerpt evidence.
@@ -614,3 +615,57 @@ entry points use the same disclosures. The original historical `a21e6046` /
 `ca51dc12` transport-only live proof remains unchanged, its grant consumed and
 resource released. No live invocation, remote provider call or harness change
 occurred in this repair.
+
+
+## Exact retained access and independent omission paging
+
+Executable repair `0075278a8c6572a3aac5f5e19dd56b60dfc83ad4`, tree
+`055027cccb0b035ac131a2ab3ffd1583050126e9`, addresses the two subsequent findings:
+
+| Comment | Disposition and proof |
+| --- | --- |
+| 4176263193 | Existing task/review GET routes accept optional UUID `resultId`/`sourceId` selectors. An exact selected result and associated retained source/work context are pinned inside the existing 128-result, 128-source and 256-context limits, displacing oldest unselected recent rows. Sources preserve revision order; contexts/results preserve row order and latest semantics. Exact source/result/artifact-owner lookups validate actual task/work/result relationships rather than recent lists. Historical Search decision validation, previews, feedback compound anchors and viewed source validation use those exact seams. Foreign requested anchors reject; missing retained evidence stays unavailable. A 271-result/source fixture verifies old metadata/source/context, exact decision routing, actual recorded 1px PNG preview, current exclusion rejection and foreign-task/compound feedback/viewed behavior. |
+| 4176263197 | `beforeOmissionSequence` independently pages the omission stream and `omittedTurnCount` reports its remaining older rows; item `beforeSequence`/count semantics stay unchanged. Capture store, coordination/service, curated API and browser preserve independent cursors and loaded depths. Refresh derives fresh preceding cursors for each stream, deduplicates exact identities and revalidates every page's visibility revision before publication. Actual capture-store records prove all 271 turn omissions with zero/one item, unequal sequence ranges and the separate earlier-omissions control. The production journey traverses all once in both views; insertion/refresh retains all 272 once plus the one item, reading position/focus and editable draft. Chronology uses captured timestamp first and sequence only within the same stream; equal timestamps across streams use stable item-before-omission display order, which does not establish temporal precedence. No storage re-key, full transcript or general pager is introduced. |
+
+Affected checks pass 38/38 in `/tmp/ui04-retention-access-focused.log`. The final
+history/browser check passes 3/3 in
+`/tmp/ui04-retention-access-final-history-browser.log`. The final required pinned
+full check passes 856/856 with zero skips in
+`/tmp/ui04-retention-access-check.log`. The earlier 856-pass source before the
+chronological tie correction remains historical at
+`/tmp/ui04-retention-access-check-before-chronological-tie.log`.
+
+Initial typecheck/build failures (removed recent-review variable and optional
+selector typing) remain in `/tmp/ui04-retention-access-typecheck.log` and
+`/tmp/ui04-retention-access-build-first-failure.log`. Initial new-browser failures
+remain in `/tmp/ui04-retention-access-new-browser-first-failure.log` (fixture alt
+label lacked the existing role prefix) and
+`/tmp/ui04-retention-access-new-browser-second-failure.log` (preview and expanded
+text both legitimately matched a single text locator). Corrected assertions use
+the actual image label/decoded preview and exact retained entry identity. The
+initial existing Back-position failure remains in
+`/tmp/ui04-retention-access-existing-first-failure.log`: its assertion ran while
+old history DOM remained attached, before the new return-selection/history reads
+settled. Awaiting those exact response/render boundaries passes unchanged 4px,
+focus and draft assertions without changing production restoration ownership.
+The first required-check formatter failure remains at
+`/tmp/ui04-retention-access-check-format-failure.log`; the supported formatter
+corrected the one fixture file before the final check. No retries, skips or
+increased timeouts were added.
+
+After freezing the clean executable source, the affected journey was recaptured
+and passed 1/1 in `/tmp/ui04-retention-access-capture.log`. Inspected desktop old
+review and desktop/phone omission views bind that exact clean source/tree and
+actual bundle SHA256
+`4455290b660578fa261306969f53efe0acaee17f0f4eda5cc628de5bd6dda049`,
+with hashes and completed resource cleanup at
+`/tmp/ui04-retention-access-screenshots.json`. No captures were omitted. The PNG
+preview is deterministic fixture proof, not a substantial comparison or live
+artifact result. Prior images keep their original provenance. All 15 acceptance
+rows retain prior evidence; rows 2/9/12/14/15 gain this retained-access/paging proof.
+Shared workspace entry points and historical Search use the same exact selection
+path. Recent windows remain bounded; this adds access to already retained scoped
+material rather than a new retention/permission guarantee or general browsing UI.
+The historical `a21e6046`/`ca51dc12` live proof remains transport-only, its sole grant
+consumed and resource released. Harness/runtime/provider/config behavior is
+unchanged; no new live invocation or remote operation occurred.
