@@ -110,7 +110,7 @@ test("production service creates source, assignment and work captures, and real 
         criteria: [
           {
             criterionId: references.criteria[0].criterionId,
-            outcome: "supported",
+            outcome: "failed",
             scope: "Literal original checklist only",
             provenance: "Agent supplied browser assertion",
           },
@@ -118,7 +118,7 @@ test("production service creates source, assignment and work captures, and real 
         validations: [
           {
             label: "Focus return",
-            outcome: "passed",
+            outcome: "failed",
             scope: "Desktop fixture",
             provenance: "Agent supplied assertion",
           },
@@ -146,6 +146,100 @@ test("production service creates source, assignment and work captures, and real 
     f.service.list().find((entry) => entry.workId === w.workId)?.state,
     "running",
   );
+  d.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId,
+    expectedVersion: Number(d.profile(profileId).version),
+    instructions: "failed",
+  });
+  const privateReviews = [
+    {
+      ...call.arguments.review,
+      criteria: [{ ...call.arguments.review.criteria[0], scope: "failed" }],
+    },
+    {
+      ...call.arguments.review,
+      validations: [
+        { ...call.arguments.review.validations[0], label: "failed" },
+      ],
+    },
+    {
+      ...call.arguments.review,
+      decisions: [{ text: "failed", attribution: "Task lead" }],
+    },
+    {
+      ...call.arguments.review,
+      artifacts: [
+        {
+          artifactId: randomUUID(),
+          label: "Safe label",
+          role: "evidence",
+          revision: 1,
+          availability: "available",
+          url: "https://failed.example/evidence",
+        },
+      ],
+    },
+    {
+      ...call.arguments.review,
+      artifacts: [
+        {
+          artifactId: randomUUID(),
+          label: "Safe label",
+          role: "evidence",
+          revision: 1,
+          availability: "available",
+          file: {
+            relativePath: "failed.png",
+            sha256: "a".repeat(64),
+            mime: "image/png",
+            size: 8,
+          },
+        },
+      ],
+    },
+    {
+      ...call.arguments.review,
+      changes: { files: ["failed.ts"], commits: [] },
+    },
+    {
+      ...call.arguments.review,
+      changes: {
+        files: [],
+        commits: [],
+        reference: "https://failed.example/diff",
+      },
+    },
+    {
+      ...call.arguments.review,
+      decisions: [
+        { text: "secret=private-callback-token", attribution: "Task lead" },
+      ],
+    },
+  ];
+  for (const review of privateReviews) {
+    assert.equal(
+      (
+        await f.runtime.callTool({
+          ...call,
+          callId: randomUUID(),
+          arguments: { ...call.arguments, review },
+        })
+      ).success,
+      false,
+    );
+    assert.equal(
+      f.service.coordinationView().readTask(taskId).results.length,
+      0,
+    );
+    assert.equal(f.service.taskReview().read(taskId).results.length, 0);
+    assert.equal(
+      f.service.list().find((entry) => entry.workId === w.workId)?.state,
+      "running",
+    );
+  }
   const result = await f.runtime.callTool(call);
   assert.equal(result.success, true, result.text);
   assert.equal((await f.runtime.callTool(call)).success, true);
@@ -154,7 +248,15 @@ test("production service creates source, assignment and work captures, and real 
   assert.ok(read.contexts.some((c) => c.workId === w.workId));
   assert.equal(read.results[0]?.workId, w.workId);
   assert.ok(!JSON.stringify(read).includes("PRIVATE UI04 instructions"));
+  assert.equal(read.results[0]?.metadata.criteria[0]?.outcome, "failed");
+  assert.equal(read.results[0]?.metadata.validations[0]?.outcome, "failed");
+  assert.equal(f.service.coordinationView().readTask(taskId).results.length, 1);
   f.runtime.complete(1);
+  await until(
+    () =>
+      f.service.list().find((entry) => entry.workId === w.workId)?.state ===
+      "completed",
+  );
 });
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
 async function previewFixture() {

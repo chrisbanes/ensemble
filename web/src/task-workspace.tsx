@@ -29,6 +29,8 @@ import { Textarea } from "./ui/textarea.js";
 
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
+const sourceGap =
+  "Retained source body and checklist coverage are unavailable. Source fields are retained only up to 16,000 characters; private or missing material may also be unavailable. Consult the external source or ask the lead.";
 const date = (n: number) => new Date(n < 1e12 ? n * 1000 : n).toLocaleString();
 function Literal({ text }: { text: string | null | undefined }) {
   return (
@@ -715,9 +717,11 @@ export function TaskWorkspace({
               state={state}
               changed={changed}
             />
-            <p className="literal-preview">
-              {source.body?.slice(0, 500) ?? "Source text unavailable"}
-            </p>
+            {source.body === null ? (
+              <p>{sourceGap}</p>
+            ) : (
+              <p className="literal-preview">{source.body.slice(0, 500)}</p>
+            )}
             <Button
               variant="secondary"
               onClick={() =>
@@ -731,6 +735,7 @@ export function TaskWorkspace({
             </Button>
           </>
         )}
+        {!source && <p>{sourceGap}</p>}
         {!source && !state.selectedSource && (
           <Literal text={data.task.outcome} />
         )}
@@ -1333,12 +1338,20 @@ function ReviewEvidence({
   if (!metadata) return null;
   return (
     <>
-      <h4>Supplied criteria</h4>
-      {!s?.criteria.length && (
-        <p>
-          No literal checklist records. Consult the supplied brief prose for
-          requirements.
-        </p>
+      <h4>
+        {!s || s.body === null
+          ? "Supplied criteria — coverage unavailable"
+          : "Supplied criteria"}
+      </h4>
+      {!s || s.body === null ? (
+        <p>{sourceGap}</p>
+      ) : (
+        !s.criteria.length && (
+          <p>
+            No literal checklist records. Consult the supplied brief prose for
+            requirements.
+          </p>
+        )
       )}
       {s?.criteria.map((c) => {
         const outcomes = metadata.criteria.filter(

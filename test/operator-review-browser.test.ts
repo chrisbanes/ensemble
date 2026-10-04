@@ -8,6 +8,7 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { OperatorApi } from "../src/standalone/operator-api.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-review");
 test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, comparison identities and local artifact feedback on desktop and phone", async (_t, j) => {
@@ -355,4 +356,198 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   assert.equal(message?.reference?.sourceId, a.source.sourceId);
   assert.equal(f.service.domain().task(a.taskId).state, "open");
   assert.equal(f.runtime.turns, 0);
+});
+
+test("ordinary oversized GitHub body retains identity but shows unavailable brief and checklist coverage without a prefix", async (_t, j) => {
+  const issue = {
+    providerInstance: "github.com" as const,
+    nodeId: "I_LARGE",
+    repositoryId: "R1",
+    repositoryName: "org/repo",
+    number: 1,
+    title: "Large retained task",
+    body:
+      "Prefix requirement " + "x".repeat(17000) + "\n- [ ] Tail requirement",
+    state: "open" as const,
+    labels: ["ready"],
+    projectFields: [],
+  };
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(
+      null,
+      () => ({
+        async readSelection() {
+          return { complete: true, issues: [issue], reason: null };
+        },
+        async readBlockers() {
+          return { complete: true, blockers: [], reason: null };
+        },
+        async readIssueStatus() {
+          return { status: "open" };
+        },
+      }),
+      undefined,
+      j.fixtureOptions,
+    ),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f),
+    d = f.service.domain();
+  d.execute({
+    type: "github.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    expectedVersion: 1,
+    credentialRef: "env:FIXTURE_SOURCE",
+    selections: [
+      {
+        id: "repo",
+        kind: "repository",
+        repositoryId: "R1",
+        owner: "org",
+        name: "repo",
+      },
+    ],
+    readiness: { mode: "any", conditions: [{ kind: "label", name: "ready" }] },
+    repositories: [],
+  });
+  d.execute({
+    type: "github.activate",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    selectionId: "repo",
+    expectedVersion: 2,
+  });
+  await f.service.refreshGitHub();
+  const taskId = String(f.service.githubSources().issue(issue.nodeId)?.taskId),
+    source = f.service.taskReview().sources(taskId).at(-1);
+  assert.ok(source);
+  assert.equal(source.body, null);
+  assert.deepEqual(source.criteria, []);
+  assert.ok(!JSON.stringify(source).includes("Prefix requirement"));
+  await f.service.provisionTask(taskId);
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: a.projectId,
+    expectedVersion: Number(d.project(a.projectId).version),
+    paused: false,
+  });
+  for (
+    let n = 0;
+    n < 100 && !f.service.list().some((w) => w.state === "running");
+    n++
+  )
+    await new Promise((r) => setTimeout(r, 10));
+  const w = f.service.list().find((w) => w.state === "running");
+  assert.ok(w?.threadId && w.turnId);
+  assert.equal(
+    (
+      await f.runtime.callTool({
+        threadId: w.threadId,
+        turnId: w.turnId,
+        callId: randomUUID(),
+        tool: "ensemble_report_result",
+        arguments: {
+          summary: "Reported source coverage gap",
+          review: { sourceId: source.sourceId },
+        },
+      })
+    ).success,
+    true,
+  );
+  const api = new OperatorApi(f.service, [f.directory]);
+  assert.equal(
+    (await api.readTask(taskId)).data.review?.sources[0]?.body,
+    null,
+  );
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({ query: "Large retained task", type: "task" }),
+      )
+    ).data.matches[0]?.sourceId,
+    source.sourceId,
+  );
+  assert.equal(
+    (await api.readSearch(new URLSearchParams({ query: "Tail requirement" })))
+      .data.matches.length,
+    0,
+  );
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(`${web.origin}/app/tasks/${taskId}`);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const brief = page.locator("#brief"),
+    gap = /Retained source body and checklist coverage are unavailable/;
+  await brief.getByText(gap).waitFor();
+  const disclosure = brief.locator("details");
+  assert.equal(await disclosure.getAttribute("open"), null);
+  assert.equal(
+    await brief.getByText(/Prefix requirement|Tail requirement/).count(),
+    0,
+  );
+  await disclosure.locator("summary").click();
+  await brief.getByText(gap).waitFor();
+  assert.equal(
+    await disclosure
+      .getByText("Unavailable or redacted", { exact: true })
+      .count(),
+    1,
+  );
+  await page
+    .getByRole("heading", {
+      name: "Supplied criteria — coverage unavailable",
+      exact: true,
+    })
+    .waitFor({ state: "attached" });
+  assert.equal(await page.getByText(/No literal checklist records/).count(), 0);
+  assert.equal(
+    await brief
+      .getByRole("link", { name: "Open GitHub to edit source", exact: true })
+      .count(),
+    1,
+  );
+  assert.equal(
+    await brief
+      .getByRole("button", { name: "Ask lead about brief", exact: true })
+      .count(),
+    1,
+  );
+  await captureBrowserEvidence(page, "1366-omitted-source-coverage");
+  issue.body += " changed tail";
+  await f.service.refreshGitHub();
+  const next = f.service.taskReview().sources(taskId).at(-1);
+  assert.ok(next);
+  assert.notEqual(next.sourceId, source.sourceId);
+  assert.notEqual(next.digest, source.digest);
+  assert.equal(next.body, null);
+  assert.deepEqual(next.criteria, []);
+  await page.getByRole("button", { name: "Refresh task", exact: true }).click();
+  await brief
+    .getByText(`github source revision ${next.revision} · ${next.sourceId}`, {
+      exact: true,
+    })
+    .waitFor();
+  await brief.getByText(gap).waitFor();
+  assert.equal(
+    await brief.getByText(/Prefix requirement|Tail requirement/).count(),
+    0,
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await captureBrowserEvidence(page, "390-omitted-source-coverage");
 });

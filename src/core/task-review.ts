@@ -283,8 +283,8 @@ export class TaskReviewStore {
     if (!t) throw Error("Review task unavailable");
     const originalTitle = supplied?.title ?? String(t.title),
       originalBody = supplied?.body ?? String(t.outcome),
-      title = this.safe(originalTitle),
-      body = this.safe(originalBody);
+      title = originalTitle.length > 16000 ? null : this.safe(originalTitle),
+      body = originalBody.length > 16000 ? null : this.safe(originalBody);
     const digest = createHash("sha256")
       .update(
         JSON.stringify({ kind, title: originalTitle, body: originalBody }),
@@ -504,15 +504,27 @@ export class TaskReviewStore {
       )
         throw Error("Artifact identity already recorded");
     }
-    // Private material is rejected before it can enter durable review/search records.
-    const validateText = (v: unknown): void => {
-      if (typeof v === "string" && this.safe(v) !== v)
-        throw Error("Review metadata contains excluded material");
-      if (Array.isArray(v)) v.forEach(validateText);
-      else if (v && typeof v === "object")
-        Object.values(v).forEach(validateText);
-    };
-    validateText(metadata);
+    // Validate supplied prose and paths, not structural enums/identities.
+    const suppliedText = [
+      ...metadata.criteria.flatMap((c) => [c.scope, c.provenance]),
+      ...metadata.validations.flatMap((v) => [v.label, v.scope, v.provenance]),
+      ...metadata.artifacts.flatMap((a) => [
+        a.label,
+        a.url,
+        a.file?.relativePath,
+      ]),
+      ...(metadata.changes?.files ?? []),
+      metadata.changes?.diff,
+      metadata.changes?.reference,
+      ...(metadata.changes?.findings.map((f) => f.finding) ?? []),
+      ...metadata.decisions.flatMap((d) => [d.text, d.attribution]),
+    ];
+    if (
+      suppliedText.some(
+        (value) => value !== undefined && this.safe(value) !== value,
+      )
+    )
+      throw Error("Review metadata contains excluded material");
     const record = resultReviewSchema.parse({
       resultId: result.resultId,
       taskId: result.taskId,
