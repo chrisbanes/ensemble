@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-842 deterministic tests with zero skips. Existing lint warnings remain warnings.
+843 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -65,12 +65,13 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
-| 15 | full npm check 842/842; fake changed callback harness 6/6; one live callback passed |
+| 15 | repaired full npm check 843/843; fake changed callback harness 6/6; historical one live callback transport passed at a21e6046 |
 
-The final full-check log is `/tmp/ui04-check-final.log`; proportional slice logs
+The repaired full-check log is `/tmp/ui04-repair-check.log` (843/843). The earlier
+`/tmp/ui04-check-final.log` (842/842) belongs to the historical qualification source; proportional slice logs
 are `/tmp/ui04-t2.log` (36/36), `/tmp/ui04-t3.log` (38/38),
 `/tmp/ui04-t4.log` (32/32) and `/tmp/ui04-t5-t7.log` (22/22).
-The final full check includes all later repairs and six deterministic T8 harness tests.
+The repaired full check includes all ten independent-review repairs and six deterministic T8 harness tests.
 Those tests cover delayed report callback, assertion failure with retained Stop
 hold/result/context across service restart, atomic consumed-marker replay rejection,
 delayed browser creation cleanup, failed late cleanup remaining unverified, and malformed callback rejection causing
@@ -141,11 +142,12 @@ consumed. Root independently verified the same process absent on the same boot a
 `/tmp/ui04-independent-cleanup.json` retains that independent proof.
 There was no retry or replacement turn.
 
-## Inspected screenshot identities
+## Historical qualification screenshot identities
 
-All fixture screenshots use the production bundle SHA256
+The historical qualification fixture screenshots use the production bundle SHA256
 `b1e4084821fb02b4bf09b5ce7ae56c301604b4863a2c4ec4491a396d7a125245`.
-The source candidate above binds the final check's fixture state and bundle.
+The historical candidate above binds those original fixture states and bundle. They
+are not evidence of the later repaired UI.
 Private screenshot paths and completed cleanup manifests are retained in the
 handoff ledger; the table records file identity without copying private runtime state.
 
@@ -160,3 +162,62 @@ handoff ledger; the table records file identity without copying private runtime 
 | 1366-cross-project-search.png | `2de9f2671df6181d8afa77d2c016482b38e6635f67b2d10bcc21d70fde7dae1e` |
 | 390-shared-search.png | `18cf7e3e3e3998e9b6ad81b806dba9829588662a2a6960a2ce55d39193816821` |
 | runtime-review.png (real callback) | `db21c6cab597264bde543cd9720ebf089cfc7ec0309f5a8c5d64ca21ac917f4c` |
+
+
+## Independent review repairs
+
+The repaired code candidate is `dc73e0e97e32a53f8b652d58c30ba12adfb7c9ca`,
+tree `ebf347605ff192a4863c953eb4b005a54586fe74`. Documentation follows that
+code without changing the tested behavior. All ten confirmed findings from the
+fresh review of `2adc7c5f527c2347c1351cb295df50e976c249a8` were repaired:
+
+| Finding | Repair and deterministic evidence |
+| --- | --- |
+| R1 | Ordinary preparation supplies captured source/revision/criterion IDs in the runtime prompt. task-review-service reports from those supplied IDs after newer requirements arrive. No new read tool was added. |
+| R2 | Viewing records only the exact opened historical source/result; review browser leaves newer records unseen. Missing legacy result context never substitutes the current source. |
+| R3 | Artifact references resolve their unique retained result owner and reject partial source/criterion/work contradictions atomically; task-feedback proves zero command effects. |
+| R4 | Actual coordination precommit anchor rejection returns conflict and preserves an editable browser draft. Existing operator-api postcommit callback failure remains unknown with one committed message and original-key reconciliation. |
+| R5 | Supplied assignment brief, requester, destination, disposition, wait reason or unknown and exact result remain distinct for two same-profile assignments in the workspace browser. |
+| R6 | Earlier loaded page boundaries are retained and all pages revalidated. Workspace browser asserts refresh/navigation reading position within four pixels and focused summary, then verifies changed profile exclusions remove earlier private text. Visibility revisions prevent merging pages across material changes. |
+| R7 | Search revalidates current task version/project/query eligibility after awaits. Actual delayed github.place rejects the former-project match; final eligible record identities are calculated once. |
+| R8 | Owned links, selects and date inputs use minimum 36-pixel desktop and 44-pixel phone geometry, asserted on actual browser bounds. |
+| R9 | Comparisons group by recorded pair ID and role regardless of input order. Missing/unpaired/legacy duplicate identities are explicit; new duplicate artifact IDs reject atomically. |
+| R10 | Authentication expiry purges Search query/navigation scope. Late responses, fresh login and old Back/Forward entries cannot restore private queries or matches in the browser regression. |
+
+The focused repair log `/tmp/ui04-repair-focused.log` passed 32/32 before the
+final reading-position strengthening. `/tmp/ui04-repair-history.log` then passed
+that strengthened case. The final required check supersedes both for this candidate.
+The first complete repaired run, `/tmp/ui04-repair-check-first.log`, passed 842/843
+and failed an unchanged native fixture's immediate anomaly observation. Isolation
+passed in `/tmp/ui04-repair-native.log`. Root authorized a test-only repair using
+its existing `nativeUntil` two-second bound to observe the actual response rather
+than relying on a 10ms pause; runtime, fixture, outcome and ordering contracts did
+not change. Earlier focused fixture/assertion corrections and the lint-only startup
+failure are recorded in the handoff ledger. No qualification requirement was weakened.
+
+The sole live grant remains consumed and its canonical lock released. The live
+proof at `a21e6046` used fixed JSON to qualify the changed callback transport; it
+did not prove ordinary runtime discovery of review references. R1's ordinary
+preparation discovery and newer-source behavior are now proved deterministically.
+No later live turn, retry or provider probe was run.
+
+## Repaired screenshot identities
+
+Fresh screenshots from the repaired full check use production bundle SHA256
+`6c1675f776f81f47c7730b3791bde50bdef6499fe2d4edea3f763442baee2b59`
+and code candidate `dc73e0e9` above. Desktop review, 390-pixel Search and the
+390×480 reply viewport were inspected. All three fixture manifests record
+completed execution and cleanup. Reduced-height Chromium approximates the keyboard
+viewport; it does not establish a physical phone/OS keyboard result. Artifact preview
+remains the one-pixel deterministic fixture proof described above.
+
+| Screenshot | SHA256 |
+| --- | --- |
+| 1366-task-failed-refresh.png | `af16ee3dbea91643c93b77c8f6ed657a71207c3c617b65580fc139305b3883e7` |
+| 390-reply-with-anchor.png | `bb2a06f65297d649eb6207d4d5d9793dd53fe26da063a709d4bca8fc6bbe4ab5` |
+| 390-keyboard-reply.png | `359aaf7865ebdf961764c4a53edde9c4d163f235b62305aa2ebcb04fc8c96759` |
+| 390-uncertain-reply.png | `23debd4f7fd30068b30aac4860b3705314d5bf06962a55aca20c0b18f7b69ee9` |
+| 1366-original-review.png | `45152b91f89f0cd0df988294b2c12dce82dfa5e67087e8b65ff23d8f2b88c752` |
+| 390-original-comparison.png | `d363324d4ac19d1ae11061969b070b19a3fd630c1144fba3f45a87d73fc04559` |
+| 390-shared-search.png | `7997d2d8ec66c90b91c4e9828732d7bb0ecd55945f265de4f77af21aad5634c8` |
+| 1366-cross-project-search.png | `f77ac958e148b847bab08654063536062475e93db0bb13c739925a39440e71be` |
