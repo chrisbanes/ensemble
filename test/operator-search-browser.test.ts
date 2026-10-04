@@ -206,16 +206,27 @@ test("shared Search preserves exact historical target, dates, selected focus and
     "",
   );
   assert.equal(await page.locator("[data-search-record]").count(), 0);
+  let documentReplacements = 0,
+    lostEvaluationResponses = 0;
   const traversePrivateHistory = async (direction: "back" | "forward") => {
     // Observe the browser's actual traversal, including document replacement,
     // rather than depending on CDP history-command cancellation error strings.
-    await Promise.all([
+    const previousDocument = await page.evaluate(() => performance.timeOrigin);
+    const [navigation, evaluation] = await Promise.allSettled([
       page.waitForEvent("framenavigated", {
         predicate: (frame) => frame === page.mainFrame(),
         timeout: 5000,
       }),
       page.evaluate((next) => history[next](), direction),
     ]);
+    if (navigation.status === "rejected") throw navigation.reason;
+    if (evaluation.status === "rejected") {
+      assert.ok(evaluation.reason instanceof Error);
+      assert.equal(
+        evaluation.reason.message,
+        "page.evaluate: Execution context was destroyed, most likely because of a navigation.",
+      );
+    }
     const pathname = new URL(page.url()).pathname;
     assert.ok(
       ["/app/search", "/app/tasks", `/app/projects/${b.projectId}`].includes(
@@ -243,6 +254,16 @@ test("shared Search preserves exact historical target, dates, selected focus and
         })
         .waitFor();
     }
+    const currentDocument = await page.evaluate(() => performance.timeOrigin);
+    const replaced = currentDocument !== previousDocument;
+    if (replaced) documentReplacements++;
+    if (evaluation.status === "rejected") {
+      assert.ok(
+        replaced,
+        "A lost evaluation response requires an observed replacement document",
+      );
+      lostEvaluationResponses++;
+    }
     return pathname;
   };
   const privateHistory = [];
@@ -250,6 +271,13 @@ test("shared Search preserves exact historical target, dates, selected focus and
     privateHistory.push(await traversePrivateHistory("back"));
   const forwardDestination = await traversePrivateHistory("forward");
   assert.equal(forwardDestination, privateHistory[1]);
+  assert.ok(
+    documentReplacements > 0,
+    "Private history journey must traverse an actual replacement document",
+  );
+  console.log(
+    `private-history traversals=4 documentReplacements=${documentReplacements} lostEvaluationResponses=${lostEvaluationResponses}`,
+  );
   for (const unknown of [false, true]) {
     await page
       .getByRole("link", { name: "Search", exact: true })
