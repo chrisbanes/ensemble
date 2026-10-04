@@ -1344,6 +1344,14 @@ export class LocalOperatorHttp {
           artifact[1] ?? "",
           artifact[2] ?? "",
         );
+        const current = session && this.auth.getSession(session.id);
+        if (
+          !current?.authenticated ||
+          current.csrfToken !== session?.csrfToken
+        ) {
+          deny(401, "unauthenticated");
+          return true;
+        }
         response.writeHead(200, {
           ...headers,
           "content-type": data.type,

@@ -194,6 +194,150 @@ export class TaskReviewStore {
  CREATE INDEX IF NOT EXISTS task_review_contexts_task ON task_review_contexts(taskId);
  CREATE INDEX IF NOT EXISTS task_review_results_task ON task_review_results(taskId);`);
   }
+  // CoordinationStore owns the surrounding migration transaction after all input schemas exist.
+  populateMissingWithinTransaction() {
+    const externalAvailable = !!this.db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='github_external_issues'",
+      )
+      .get();
+    let cursor = 0;
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          "SELECT rowid AS cursor,id FROM domain_tasks WHERE rowid>? ORDER BY rowid LIMIT 64",
+        )
+        .all(cursor) as Row[];
+      for (const row of rows) {
+        const taskId = String(row.id);
+        if (
+          !this.db
+            .prepare("SELECT 1 FROM task_review_sources WHERE taskId=? LIMIT 1")
+            .get(taskId)
+        ) {
+          const imported = this.db
+            .prepare("SELECT 1 FROM github_imported_tasks WHERE taskId=?")
+            .get(taskId);
+          if (!imported) this.captureSource(taskId);
+          else if (externalAvailable) {
+            const observed = this.db
+              .prepare(
+                "SELECT observedTitle,observedBody FROM github_external_issues WHERE taskId=?",
+              )
+              .get(taskId) as Row | undefined;
+            if (observed)
+              this.captureSource(taskId, "github", {
+                title: String(observed.observedTitle),
+                body: String(observed.observedBody),
+              });
+          }
+        }
+        cursor = Number(row.cursor);
+      }
+      if (rows.length < 64) break;
+    }
+    cursor = 0;
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          "SELECT s.rowid AS cursor,s.recordJson FROM task_review_sources s WHERE s.rowid>? AND NOT EXISTS(SELECT 1 FROM task_review_search i WHERE i.recordId=s.sourceId) ORDER BY s.rowid LIMIT 64",
+        )
+        .all(cursor) as Row[];
+      for (const row of rows) {
+        const source = sourceSnapshotSchema.parse(
+          JSON.parse(String(row.recordJson)),
+        );
+        this.db
+          .prepare(
+            "INSERT OR IGNORE INTO task_review_search VALUES(?,?,?,?,?,?,?,?)",
+          )
+          .run(
+            source.sourceId,
+            source.taskId,
+            source.projectId,
+            "task",
+            source.sourceId,
+            null,
+            `${source.title === null ? "" : (this.safe(source.title) ?? "")}\n${source.body === null ? "" : (this.safe(source.body) ?? "")}`.slice(
+              0,
+              16000,
+            ),
+            source.createdAt,
+          );
+        cursor = Number(row.cursor);
+      }
+      if (rows.length < 64) break;
+    }
+    cursor = 0;
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          "SELECT r.rowid AS cursor,r.*,t.projectId FROM coordination_results r JOIN domain_tasks t ON t.id=r.taskId WHERE r.rowid>? ORDER BY r.rowid LIMIT 64",
+        )
+        .all(cursor) as Row[];
+      for (const row of rows) {
+        const existing = this.db
+          .prepare(
+            "SELECT recordJson FROM task_review_results WHERE resultId=?",
+          )
+          .get(String(row.resultId)) as Row | undefined;
+        const review = existing
+          ? resultReviewSchema.parse(JSON.parse(String(existing.recordJson)))
+          : resultReviewSchema.parse({
+              resultId: row.resultId,
+              taskId: row.taskId,
+              assignmentId: row.assignmentId,
+              workId: row.workId,
+              workRevision: row.workRevision,
+              metadata: {},
+            });
+        if (
+          review.resultId !== row.resultId ||
+          review.taskId !== row.taskId ||
+          review.assignmentId !== row.assignmentId ||
+          review.workId !== row.workId ||
+          review.workRevision !== row.workRevision
+        )
+          throw Error("Retained result review identity mismatch");
+        if (!existing)
+          this.db
+            .prepare("INSERT INTO task_review_results VALUES(?,?,?)")
+            .run(
+              String(row.resultId),
+              String(row.taskId),
+              JSON.stringify(review),
+            );
+        this.indexResult(
+          String(row.resultId),
+          String(row.taskId),
+          String(row.projectId),
+          this.safe(String(row.summary)) ?? "",
+          Number(row.createdAt) * 1000,
+        );
+        review.metadata.decisions.forEach((decision, index) => {
+          const attribution = this.safe(decision.attribution),
+            text = this.safe(decision.text);
+          if (attribution === null || text === null) return;
+          this.db
+            .prepare(
+              "INSERT OR IGNORE INTO task_review_search VALUES(?,?,?,?,?,?,?,?)",
+            )
+            .run(
+              `${row.resultId}:decision:${index}`,
+              String(row.taskId),
+              String(row.projectId),
+              "decision",
+              review.metadata.sourceId ?? null,
+              String(row.resultId),
+              `${attribution}: ${text}`.slice(0, 16000),
+              Number(row.createdAt) * 1000,
+            );
+        });
+        cursor = Number(row.cursor);
+      }
+      if (rows.length < 64) break;
+    }
+  }
   private safe(value: string): string | null {
     const rows = this.db
       .prepare(

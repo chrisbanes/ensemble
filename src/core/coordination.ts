@@ -635,6 +635,7 @@ export class CoordinationStore {
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_routing_fallback
         ON coordination_inbox_events(routingOperationId)
         WHERE routingOperationId IS NOT NULL;`);
+      new TaskReviewStore(this.db).populateMissingWithinTransaction();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

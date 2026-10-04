@@ -12,6 +12,7 @@ import {
   sourceSnapshotSchema,
   TaskReviewStore,
 } from "../src/core/task-review.js";
+import { GitHubSourceStore } from "../src/core/github-source.js";
 import { ExecutionState } from "../src/standalone/state.js";
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "ui04-review-")),
@@ -404,6 +405,166 @@ test("claimed result sources require one exact retained work context; absent cla
     assert.equal(
       sourceSnapshotSchema.parse(historical).criteriaOmittedCount,
       null,
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("upgrade atomically populates only missing retained sources and result indexes without rewriting existing bytes", async () => {
+  const f = fixture();
+  try {
+    const w = f.work();
+    const saved = f.stores.c.recordResult({
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: {
+        summary: "Retained prior result",
+        review: {
+          decisions: [{ attribution: "Lead", text: "Retained prior decision" }],
+        },
+      },
+    });
+    const result = saved.result;
+    const originalSource = f.db
+      .prepare("SELECT recordJson FROM task_review_sources WHERE taskId=?")
+      .get(f.taskId)?.recordJson;
+    const originalReview = f.db
+      .prepare("SELECT recordJson FROM task_review_results WHERE resultId=?")
+      .get(result.resultId)?.recordJson;
+    f.db.exec("DELETE FROM task_review_search");
+    f.stores.c.migrate();
+    assert.equal(
+      f.db
+        .prepare("SELECT recordJson FROM task_review_sources WHERE taskId=?")
+        .get(f.taskId)?.recordJson,
+      originalSource,
+    );
+    assert.equal(
+      f.db
+        .prepare("SELECT recordJson FROM task_review_results WHERE resultId=?")
+        .get(result.resultId)?.recordJson,
+      originalReview,
+    );
+    assert.equal(
+      (
+        await f.stores.review.search({
+          query: "Retained prior",
+          historical: true,
+          limit: 50,
+        })
+      ).length,
+      2,
+    );
+    const before = f.db
+      .prepare("SELECT * FROM task_review_search ORDER BY recordId")
+      .all();
+    f.reopen();
+    assert.deepEqual(
+      f.db.prepare("SELECT * FROM task_review_search ORDER BY recordId").all(),
+      before,
+    );
+
+    new GitHubSourceStore(f.db).migrate();
+    f.stores.d.markImportedTask(f.taskId, "imported-node", "repo");
+    f.db
+      .prepare(
+        "INSERT INTO github_external_issues VALUES('github.com','imported-node',?,'repo','owner/repo',7,'Observed imported title','- [ ] Observed imported body','open','[]')",
+      )
+      .run(f.taskId);
+    f.db.exec(
+      "DELETE FROM task_review_search; DELETE FROM task_review_results; DELETE FROM task_review_contexts; DELETE FROM task_review_sources",
+    );
+    const started = Date.now();
+    f.stores.c.migrate();
+    const source = f.stores.review.sources(f.taskId)[0]!;
+    assert.equal(source.kind, "github");
+    assert.equal(source.title, "Observed imported title");
+    assert.equal(source.body, "- [ ] Observed imported body");
+    assert.ok(source.createdAt >= started);
+    const review = f.stores.review.result(f.taskId, result.resultId)!;
+    assert.equal(review.workId, w.workId);
+    assert.deepEqual(review.metadata, {
+      criteria: [],
+      validations: [],
+      artifacts: [],
+      decisions: [],
+    });
+    assert.equal(f.stores.review.read(f.taskId).contexts.length, 0);
+    const indexed = (
+      await f.stores.review.search({
+        query: "Retained prior result",
+        type: "result",
+        historical: true,
+        limit: 50,
+      })
+    )[0]!;
+    assert.equal(indexed.recordId, result.resultId);
+    assert.equal(
+      indexed.createdAt,
+      Number(
+        f.db
+          .prepare(
+            "SELECT createdAt FROM coordination_results WHERE resultId=?",
+          )
+          .get(result.resultId)?.createdAt,
+      ) * 1000,
+    );
+    const retained = f.db.prepare("SELECT * FROM task_review_sources").all();
+    f.reopen();
+    assert.deepEqual(
+      f.db.prepare("SELECT * FROM task_review_sources").all(),
+      retained,
+    );
+    f.db.exec(
+      "DELETE FROM task_review_search; DELETE FROM task_review_sources; DELETE FROM github_external_issues",
+    );
+    f.stores.c.migrate();
+    assert.equal(f.stores.review.sources(f.taskId).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test("upgrade population rolls back missing source and review/index writes then retries without duplicates", () => {
+  const f = fixture();
+  try {
+    const w = f.work();
+    const result = f.stores.c.recordResult({
+      threadId: w.threadId,
+      turnId: w.turnId,
+      callId: randomUUID(),
+      tool: "ensemble_report_result",
+      arguments: { summary: "PRIVATE INSTRUCTIONS hidden result" },
+    }).result;
+    f.db.exec(
+      "DELETE FROM task_review_search; DELETE FROM task_review_results; DELETE FROM task_review_contexts; DELETE FROM task_review_sources; CREATE TRIGGER reject_upgrade BEFORE INSERT ON task_review_results BEGIN SELECT RAISE(ABORT,'injected upgrade failure'); END;",
+    );
+    assert.throws(() => f.stores.c.migrate(), /injected upgrade failure/);
+    assert.equal(
+      f.db.prepare("SELECT COUNT(*) AS n FROM task_review_sources").get()?.n,
+      0,
+    );
+    assert.equal(
+      f.db.prepare("SELECT COUNT(*) AS n FROM task_review_search").get()?.n,
+      0,
+    );
+    f.db.exec("DROP TRIGGER reject_upgrade");
+    f.stores.c.migrate();
+    f.stores.c.migrate();
+    assert.equal(f.stores.review.sources(f.taskId).length, 1);
+    assert.equal(f.stores.review.read(f.taskId).results.length, 1);
+    assert.equal(
+      f.stores.review.result(f.taskId, result.resultId)?.metadata.sourceId,
+      undefined,
+    );
+    assert.equal(
+      f.db
+        .prepare("SELECT excerpt FROM task_review_search WHERE recordId=?")
+        .get(result.resultId)?.excerpt,
+      "",
     );
   } finally {
     f.close();

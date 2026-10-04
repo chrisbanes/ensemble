@@ -436,3 +436,96 @@ test("ordinary source retention bounds sanitized representation without clipping
   assert.deepEqual(unavailable.criteria, []);
   assert.notEqual(unavailable.sourceId, a.source.sourceId);
 });
+
+test("awaited actual recorded artifact GET revalidates exact session on logout and expiry before image headers", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f),
+    workspace = await f.service.taskWorkspace(task.taskId);
+  assert.ok(workspace);
+  const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    artifactId = randomUUID();
+  await writeFile(join(workspace.path, "session.png"), bytes);
+  task.result("Session artifact", {
+    sourceId: task.source.sourceId,
+    artifacts: [
+      {
+        artifactId,
+        label: "Session image",
+        role: "evidence",
+        revision: 1,
+        availability: "available",
+        file: {
+          relativePath: "session.png",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          mime: "image/png",
+          size: bytes.length,
+        },
+      },
+    ],
+  });
+  const web = await f.startWeb(),
+    route = `${web.origin}/api/operator/tasks/${task.taskId}/artifacts/${artifactId}`;
+  const original = OperatorApi.prototype.readArtifact;
+  t.after(() => {
+    OperatorApi.prototype.readArtifact = original;
+  });
+  for (const mode of ["logout", "expiry"] as const) {
+    const anonymous = await fetch(`${web.origin}/api/operator/session`),
+      anon = (await anonymous.json()) as { csrfToken: string };
+    const login = await fetch(`${web.origin}/api/operator/login`, {
+      method: "POST",
+      headers: {
+        cookie: anonymous.headers.get("set-cookie")!.split(";")[0]!,
+        origin: web.origin,
+        "content-type": "application/json",
+        "x-csrf-token": anon.csrfToken,
+      },
+      body: JSON.stringify({ password: web.password }),
+    });
+    assert.equal(login.status, 200);
+    const session = (await login.json()) as { csrfToken: string },
+      cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const valid = await fetch(route, { headers: { cookie } });
+    assert.equal(valid.status, 200);
+    assert.equal(valid.headers.get("content-type"), "image/png");
+    assert.deepEqual(Buffer.from(await valid.arrayBuffer()), bytes);
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>((r) => (release = r)),
+      arrival = new Promise<void>((r) => (entered = r));
+    OperatorApi.prototype.readArtifact = async function (taskId, id) {
+      const data = await original.call(this, taskId, id);
+      entered();
+      await barrier;
+      return data;
+    };
+    const pending = fetch(route, { headers: { cookie } });
+    try {
+      await arrival;
+      if (mode === "logout") {
+        const response = await fetch(`${web.origin}/api/operator/logout`, {
+          method: "POST",
+          headers: {
+            cookie,
+            origin: web.origin,
+            "content-type": "application/json",
+            "x-csrf-token": session.csrfToken,
+          },
+          body: "{}",
+        });
+        assert.equal(response.status, 200);
+      } else f.advanceClock(60000);
+      release();
+      const response = await pending;
+      assert.equal(response.status, 401);
+      assert.notEqual(response.headers.get("content-type"), "image/png");
+      const body = Buffer.from(await response.arrayBuffer());
+      assert.ok(!body.equals(bytes));
+      assert.match(body.toString(), /unauthenticated/);
+    } finally {
+      release();
+      await pending;
+      OperatorApi.prototype.readArtifact = original;
+    }
+  }
+});

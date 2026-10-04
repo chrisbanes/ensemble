@@ -862,3 +862,105 @@ test("held actual Search GET rechecks its exact session after logout and emits n
     await pending;
   }
 });
+
+test("ordinary service upgrade from missing review tables exposes retained source and exact historical results without fabricated context", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(
+    f,
+    "Upgrade project",
+    "Upgrade current title",
+    "- [ ] Retained current requirement",
+  );
+  const old = task.result("Upgrade historical result"),
+    latest = task.result("Upgrade latest result");
+  await f.service.stop();
+  f.seedPersistedState((db) => {
+    for (const name of [
+      "task_review_search",
+      "task_review_results",
+      "task_review_contexts",
+      "task_review_viewed",
+      "task_review_view_receipts",
+      "task_review_sources",
+    ])
+      db.exec(`DROP TABLE ${name}`);
+  });
+  await f.service.start();
+  const api = new OperatorApi(f.service, [f.directory]);
+  const source = f.service.taskReview().sources(task.taskId)[0]!;
+  assert.equal(source.kind, "local");
+  assert.equal(source.title, "Upgrade current title");
+  assert.equal(source.body, "- [ ] Retained current requirement");
+  const results = await api.readSearch(
+    new URLSearchParams({
+      query: "Upgrade",
+      type: "result",
+      historical: "true",
+    }),
+  );
+  assert.deepEqual(
+    new Map(results.data.matches.map((m) => [m.resultId, m.historical])),
+    new Map([
+      [old.resultId, true],
+      [latest.resultId, false],
+    ]),
+  );
+  const current = await api.readSearch(
+    new URLSearchParams({
+      query: "Upgrade",
+      type: "result",
+      historical: "false",
+    }),
+  );
+  assert.equal(current.data.matches.length, 1);
+  assert.equal(current.data.matches[0]?.resultId, latest.resultId);
+  const sources = await api.readSearch(
+    new URLSearchParams({
+      query: "Upgrade current title",
+      type: "task",
+      historical: "false",
+    }),
+  );
+  assert.equal(sources.data.matches[0]?.sourceId, source.sourceId);
+  const exact = await api.readTask(task.taskId, { resultId: old.resultId });
+  assert.ok(
+    exact.data.review?.results.some(
+      (r) =>
+        r.resultId === old.resultId &&
+        r.workId === old.workId &&
+        r.metadata.sourceId === undefined,
+    ),
+  );
+  assert.equal(exact.data.review?.contexts.length, 0);
+  assert.deepEqual(
+    (
+      await api.readReview(task.taskId, { resultId: old.resultId })
+    ).data.results.find((r) => r.resultId === old.resultId)?.metadata,
+    { criteria: [], validations: [], artifacts: [], decisions: [] },
+  );
+  let bytes: unknown;
+  f.seedPersistedState((db) => {
+    bytes = db.prepare("SELECT * FROM task_review_sources").all();
+  });
+  await f.service.stop();
+  await f.service.start();
+  f.seedPersistedState((db) =>
+    assert.deepEqual(
+      db.prepare("SELECT * FROM task_review_sources").all(),
+      bytes,
+    ),
+  );
+  assert.equal(
+    (
+      await api.readSearch(
+        new URLSearchParams({
+          query: "Upgrade",
+          type: "result",
+          historical: "true",
+        }),
+      )
+    ).data.matches.length,
+    2,
+  );
+});
