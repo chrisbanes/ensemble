@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { type Browser, chromium } from "playwright";
+import { type Browser, type Request, chromium } from "playwright";
 import {
   browserSuite,
   captureBrowserEvidence,
@@ -525,78 +525,323 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   );
   issue.body = "Supplied GitHub brief";
   await f.service.refreshGitHub();
-  const restoredTaskRead = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
-  );
-  await page
-    .getByRole("button", { name: "Refresh task", exact: true })
-    .evaluate((el) => (el as HTMLElement).click());
-  await (await restoredTaskRead).finished();
-  await settleRender();
-  await page
-    .getByRole("button", { name: "Set viewing reference", exact: true })
-    .click();
-  await page.getByText(/source unchanged/).waitFor();
-  await page.route(
-    "**/api/operator/source-refresh",
-    async (route) => {
-      const response = await route.fetch();
-      const observation = await response.json();
-      observation.data.projects
-        .find((p: { projectId: string }) => p.projectId === projectId)
-        .selections.push({
-          selectionId: "unrelated-partial-selection",
-          state: "partial",
-          lastAttemptAt: null,
-          lastSuccessfulAt: null,
+  const milestones: {
+    atMs: number;
+    step: string;
+    stage: string;
+    method: string | undefined;
+    pathname: string | undefined;
+    status: number | undefined;
+  }[] = [];
+  let omittedMilestones = 0,
+    step = "restored-task";
+  const started = performance.now();
+  const taskPath = `/api/operator/tasks/${taskId}`;
+  const mark = (
+    stage: string,
+    method?: string,
+    pathname?: string,
+    status?: number,
+  ) => {
+    const event = {
+      atMs: Math.round(performance.now() - started),
+      step,
+      stage,
+      method,
+      pathname,
+      status,
+    };
+    if (milestones.length < 64) milestones.push(event);
+    else omittedMilestones++;
+  };
+  const observeRequest = (request: Request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === taskPath)
+      mark("task-get-started", request.method(), pathname);
+    else if (pathname === "/api/operator/source-refresh")
+      mark("source-post-request", request.method(), pathname);
+  };
+  const observeFailure = (request: Request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === taskPath)
+      mark("task-get-requestfailed", request.method(), pathname);
+  };
+  page.on("request", observeRequest);
+  page.on("requestfailed", observeFailure);
+  const removeObservers = () => {
+    page.off("request", observeRequest);
+    page.off("requestfailed", observeFailure);
+  };
+  // Each action owns its actual request, acknowledgement and first task request
+  // started after that acknowledgement; a prior view GET cannot satisfy source.
+  const settleAction = async (action: "view" | "source" | "task") => {
+    let sent: Request | undefined, task: Request | undefined;
+    let acknowledged = action === "task";
+    const post =
+      action === "task"
+        ? null
+        : page.waitForResponse((response) => {
+            if (response.request() !== sent) return false;
+            acknowledged = true;
+            mark(
+              action === "view"
+                ? "view-command-recorded"
+                : "source-post-response",
+              "POST",
+              new URL(response.url()).pathname,
+              response.status(),
+            );
+            return true;
+          });
+    const request = page.waitForRequest((request) => {
+      if (request.method() !== (action === "task" ? "GET" : "POST"))
+        return false;
+      const pathname = new URL(request.url()).pathname;
+      const matches =
+        action === "task"
+          ? pathname === taskPath
+          : action === "source"
+            ? pathname === "/api/operator/source-refresh"
+            : pathname === "/api/operator/commands" &&
+              request.postDataJSON().type === "review.view" &&
+              request.postDataJSON().taskId === taskId;
+      if (matches) {
+        sent = request;
+        if (action === "view") mark("view-command-entered", "POST", pathname);
+        if (action === "task") task = request;
+      }
+      return matches;
+    });
+    const taskRequest =
+      action === "task"
+        ? request
+        : page.waitForRequest((request) => {
+            if (
+              !acknowledged ||
+              request.method() !== "GET" ||
+              new URL(request.url()).pathname !== taskPath
+            )
+              return false;
+            task = request;
+            return true;
+          });
+    const taskRead = page.waitForResponse(
+      (response) => response.request() === task,
+    );
+    const outcomes = await Promise.allSettled([
+      post ?? Promise.resolve(null),
+      request,
+      taskRequest,
+      taskRead,
+      page
+        .getByRole("button", {
+          name:
+            action === "view"
+              ? "Set viewing reference"
+              : action === "source"
+                ? "Refresh source observation"
+                : "Refresh task",
+          exact: true,
+        })
+        .click(),
+    ]);
+    // All waiters are owned immediately, even if actionability or an assertion fails.
+    const [acknowledgement, originating, nextRequest, currentRead, click] =
+      outcomes;
+    for (const outcome of [
+      click,
+      originating,
+      acknowledgement,
+      nextRequest,
+      currentRead,
+    ])
+      if (outcome.status === "rejected") throw outcome.reason;
+    if (
+      originating.status !== "fulfilled" ||
+      acknowledgement.status !== "fulfilled" ||
+      currentRead.status !== "fulfilled"
+    )
+      throw Error("Action settlement unavailable");
+    if (acknowledgement.value) {
+      const receipt = acknowledgement.value;
+      await receipt.finished();
+      assert.equal(receipt.status(), 200);
+      const value = await receipt.json();
+      if (action === "view") {
+        const command = originating.value.postDataJSON();
+        assert.deepEqual(value, {
+          kind: "review",
+          key: command.key,
+          recorded: true,
+          taskId,
+          operation: "review.view",
         });
-      await route.fulfill({ response, json: observation });
-    },
-    { times: 1 },
-  );
-  const partialTaskRead = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
-  );
-  await page
-    .getByRole("button", { name: "Refresh source observation", exact: true })
-    .evaluate((el) => (el as HTMLElement).click());
-  await (await partialTaskRead).finished();
-  await settleRender();
-  await page
-    .getByText(/source comparison unknown; current observation unavailable/)
-    .waitFor();
-  assert.equal(
+      } else
+        assert.ok(
+          value.data.projects.some(
+            (p: { projectId: string }) => p.projectId === projectId,
+          ),
+        );
+    }
+    const response = currentRead.value;
+    await response.finished();
+    assert.equal(response.status(), 200);
+    const currentTask = await response.json();
+    assert.equal(currentTask.data.task.id, taskId);
+    mark(
+      action === "view" ? "view-followup-read" : "task-get-response",
+      "GET",
+      taskPath,
+      response.status(),
+    );
     await page
-      .getByText(
-        /source unchanged|source requirements changed|Source refresh failed/,
-      )
-      .count(),
-    0,
-  );
-  const ordinaryTaskRead = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
-  );
-  await page
-    .getByRole("button", { name: "Refresh task", exact: true })
-    .evaluate((el) => (el as HTMLElement).click());
-  await (await ordinaryTaskRead).finished();
-  await settleRender();
-  await page
-    .getByText(/source comparison unknown; current observation unavailable/)
-    .waitFor();
-  assert.equal(
+      .getByText("Refreshing. Showing the last fetched data.", { exact: true })
+      .waitFor({ state: "detached" });
+    return action === "view"
+      ? (originating.value.postDataJSON().key as string)
+      : null;
+  };
+  let releaseView!: () => void, viewEntered!: () => void;
+  const viewBarrier = new Promise<void>((resolve) => (releaseView = resolve));
+  const viewEntry = new Promise<void>((resolve) => (viewEntered = resolve));
+  j.cleanup(async () => {
+    releaseView();
+    removeObservers();
+  }, "source-segment.release");
+  try {
+    await settleAction("task");
+    step = "restored-view";
+    const restoredViewKey = await settleAction("view");
+    await page.getByText(/source unchanged/).waitFor();
+    const restoredIdentity = f.service
+      .taskReview()
+      .sources(taskId)
+      .at(-1)!.sourceId;
+    const restoredVersion = d.task(taskId).version;
+    step = "held-repeat-view";
+    await page.route(
+      "**/api/operator/commands",
+      async (route) => {
+        assert.equal(route.request().postDataJSON().type, "review.view");
+        const response = await route.fetch();
+        assert.equal(response.status(), 200);
+        mark("view-server-committed", "POST", "/api/operator/commands", 200);
+        viewEntered();
+        await viewBarrier;
+        await route.fulfill({ response });
+      },
+      { times: 1 },
+    );
+    const repeatView = settleAction("view").then(
+      (value) => ({ state: "fulfilled" as const, value }),
+      (error) => ({ state: "rejected" as const, error }),
+    );
+    try {
+      await viewEntry;
+      assert.ok(await page.getByText(/source unchanged/).count());
+      assert.equal(
+        milestones.filter(
+          (event) =>
+            event.step === "held-repeat-view" &&
+            event.stage === "view-command-recorded",
+        ).length,
+        0,
+      );
+      mark("old-comparison-not-receipt");
+    } finally {
+      releaseView();
+    }
+    const repeated = await repeatView;
+    if (repeated.state === "rejected") throw repeated.error;
+    assert.notEqual(repeated.value, restoredViewKey);
+    assert.equal(
+      f.service.taskReview().sources(taskId).at(-1)!.sourceId,
+      restoredIdentity,
+    );
+    assert.equal(d.task(taskId).version, restoredVersion);
+    await page.getByText(/source unchanged/).waitFor();
+    step = "partial-source";
+    await page.route(
+      "**/api/operator/source-refresh",
+      async (route) => {
+        mark("source-route-entered", "POST", "/api/operator/source-refresh");
+        const response = await route.fetch();
+        mark(
+          "source-route-fetchcompleted",
+          "POST",
+          "/api/operator/source-refresh",
+          response.status(),
+        );
+        const observation = await response.json();
+        observation.data.projects
+          .find((p: { projectId: string }) => p.projectId === projectId)
+          .selections.push({
+            selectionId: "unrelated-partial-selection",
+            state: "partial",
+            lastAttemptAt: null,
+            lastSuccessfulAt: null,
+          });
+        await route.fulfill({ response, json: observation });
+        mark(
+          "source-route-fulfilled",
+          "POST",
+          "/api/operator/source-refresh",
+          response.status(),
+        );
+      },
+      { times: 1 },
+    );
+    await settleAction("source");
     await page
-      .getByText(/source unchanged|source requirements changed/)
-      .count(),
-    0,
-  );
-  await page
-    .getByRole("button", { name: "Refresh source observation", exact: true })
-    .evaluate((el) => (el as HTMLElement).click());
-  await page.getByText(/source unchanged/).waitFor();
+      .getByText(/source comparison unknown; current observation unavailable/)
+      .waitFor();
+    assert.equal(
+      await page
+        .getByText(
+          /source unchanged|source requirements changed|Source refresh failed/,
+        )
+        .count(),
+      0,
+    );
+    step = "ordinary-task";
+    await settleAction("task");
+    await page
+      .getByText(/source comparison unknown; current observation unavailable/)
+      .waitFor();
+    assert.equal(
+      await page
+        .getByText(/source unchanged|source requirements changed/)
+        .count(),
+      0,
+    );
+    step = "complete-source";
+    await settleAction("source");
+    await page.getByText(/source unchanged/).waitFor();
+    mark("comparison-unchanged");
+  } catch (error) {
+    const comparison = await page
+      .evaluate(() => {
+        const text = document.body.textContent ?? "";
+        return {
+          unknown: text.includes("source comparison unknown"),
+          pending: text.includes("source comparison pending"),
+          unchanged: text.includes("source unchanged"),
+          changed: text.includes("source requirements changed"),
+          sourceRefreshFailed: text.includes("Source refresh failed"),
+          unknownNotice: text.includes("unknown:"),
+        };
+      })
+      .catch(() => ({ unavailable: true }));
+    console.log("source-segment-final-state", JSON.stringify(comparison));
+    throw error;
+  } finally {
+    releaseView();
+    removeObservers();
+    console.log(
+      "source-segment-milestones",
+      JSON.stringify({ events: milestones, omitted: omittedMilestones }),
+    );
+  }
   let releaseSource!: () => void, enterSource!: () => void;
   const sourceBarrier = new Promise<void>((r) => (releaseSource = r)),
     sourceEntry = new Promise<void>((r) => (enterSource = r));
