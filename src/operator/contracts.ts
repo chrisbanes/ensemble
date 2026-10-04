@@ -445,6 +445,8 @@ export const deliveryReadSchema = z
     mode: z.enum(["reviewable-pr", "through-merge"]),
     policyVersion: revision,
     blockers: z.array(text).max(128),
+    omittedBlockerCount: z.number().int().nonnegative(),
+    omittedActionCount: z.number().int().nonnegative(),
     binding: z
       .object({
         revision,
@@ -454,6 +456,8 @@ export const deliveryReadSchema = z
         state: z.enum(["OPEN", "CLOSED", "MERGED"]),
         observedAt: time,
         readError: safeText,
+        omittedCheckCount: z.number().int().nonnegative(),
+        omittedFeedbackCount: z.number().int().nonnegative(),
         checks: z
           .array(
             z

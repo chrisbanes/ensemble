@@ -9,6 +9,7 @@ export class TaskWorkspaceState {
   expanded = new Set<string>();
   chronological = false;
   sourceObservation: "known" | "pending" | "unknown" = "known";
+  sourceRefreshFailed = false;
   private drafts = { lead: "", github: "" };
   get draft() {
     return this.drafts[this.destination];

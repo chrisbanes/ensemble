@@ -225,7 +225,7 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
   await page
     .getByRole("button", { name: "Set viewing reference", exact: true })
     .click();
-  await page.getByText(/1 new result/).waitFor();
+  await page.getByText(/1 new result.*source requirements changed/).waitFor();
   assert.deepEqual(f.service.taskReview().read(a.taskId).viewed?.resultIds, [
     r2.resultId,
   ]);

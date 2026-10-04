@@ -123,7 +123,6 @@ export function TaskWorkspace({
   state: TaskWorkspaceState;
 }) {
   const [auxNotice, setAuxNotice] = useState("");
-  const sourceObservation = state.sourceObservation;
   const setSourceObservation = (value: "known" | "pending" | "unknown") => {
     state.sourceObservation = value;
     changed();
@@ -177,6 +176,19 @@ export function TaskWorkspace({
       loader,
     ),
     data = resource.state.data?.data;
+  const completeSourceObservation =
+    !data?.source ||
+    (data.source.memberships.length > 0 &&
+      data.source.memberships.every((m) => m.sync.complete === true));
+  const sourceObservation =
+    state.sourceObservation === "pending"
+      ? "pending"
+      : state.sourceRefreshFailed ||
+          resource.state.status !== "fresh" ||
+          resource.state.error ||
+          !completeSourceObservation
+        ? "unknown"
+        : "known";
   const sourceRequest = useRef(0);
   const sourceRead = useRef<{
     request: number;
@@ -190,6 +202,7 @@ export function TaskWorkspace({
       return;
     }
     if (resource.state.error) {
+      state.sourceRefreshFailed = true;
       sourceRead.current = null;
       setSourceObservation("unknown");
     } else if (
@@ -197,11 +210,8 @@ export function TaskWorkspace({
       resource.state.data !== sourceRead.current.previous
     ) {
       sourceRead.current = null;
-      setSourceObservation(
-        data?.source?.memberships.some((m) => m.sync.complete !== true)
-          ? "unknown"
-          : "known",
-      );
+      state.sourceRefreshFailed = false;
+      setSourceObservation(completeSourceObservation ? "known" : "unknown");
     }
   }, [resource.state.data, resource.state.error, resource.state.status]);
 
@@ -287,8 +297,10 @@ export function TaskWorkspace({
       scope.current = false;
       sourceRequest.current++;
       sourceRead.current = null;
-      if (state.sourceObservation === "pending")
+      if (state.sourceObservation === "pending") {
+        state.sourceRefreshFailed = true;
         state.sourceObservation = "unknown";
+      }
       clearInterval(timer);
       document.removeEventListener("click", leave, true);
       document.removeEventListener("focusin", intentionalFocus);
@@ -711,7 +723,7 @@ export function TaskWorkspace({
     ) ?? [];
   const newestViewed = Math.max(-1, ...viewedIndexes);
   const changes = review?.viewed
-    ? `${newestViewed >= 0 ? `${data.results.length - newestViewed - 1} new result(s)` : "Newer results unknown; no retained viewed result ordering"}; ${sourceObservation === "pending" ? "source comparison pending" : sourceObservation === "unknown" ? "source comparison unknown; refresh failed" : review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
+    ? `${newestViewed >= 0 ? `${data.results.length - newestViewed - 1} new result(s)` : "Newer results unknown; no retained viewed result ordering"}; ${sourceObservation === "pending" ? "source comparison pending" : sourceObservation === "unknown" ? "source comparison unknown; current observation unavailable" : review.viewed.sourceId !== latestSource?.sourceId ? "source requirements changed" : "source unchanged"}`
     : "No viewing baseline. Comparison with previously viewed material is unknown.";
   return (
     <article className="task-workspace" aria-label="Task workspace">
@@ -914,9 +926,10 @@ export function TaskWorkspace({
                   if (
                     !selections?.length ||
                     selections.some((s) => s.state !== "complete")
-                  )
+                  ) {
+                    state.sourceRefreshFailed = true;
                     setSourceObservation("unknown");
-                  else
+                  } else
                     sourceRead.current = {
                       request,
                       previous: resource.state.data,
@@ -924,6 +937,7 @@ export function TaskWorkspace({
                   refresh();
                 } catch {
                   if (!owned()) return;
+                  state.sourceRefreshFailed = true;
                   setSourceObservation("unknown");
                   state.notice =
                     "Source refresh failed. Last successful source retained.";
@@ -1804,12 +1818,26 @@ function Changes({
               ? "Stale / failed read"
               : "last successful observation"}
           </p>
+          {d.binding.omittedCheckCount > 0 && (
+            <p>
+              Provider check coverage is partial; {d.binding.omittedCheckCount}{" "}
+              additional retained{" "}
+              {d.binding.omittedCheckCount === 1 ? "check is" : "checks are"}{" "}
+              omitted. Omitted checks may be pending or failed.
+            </p>
+          )}
           {d.binding.checks.map((c) => (
             <p key={`${c.name}:${c.sha}`}>
               {c.name}: {c.status} · head {c.sha}{" "}
               {c.sha !== d.binding?.headSha ? "stale checked head" : ""}
             </p>
           ))}
+          {d.binding.omittedFeedbackCount > 0 && (
+            <p>
+              {d.binding.omittedFeedbackCount} retained provider feedback
+              records omitted; feedback coverage is partial.
+            </p>
+          )}
           {d.binding.feedback.map((f) => (
             <div key={f.nodeId}>
               <p>
@@ -1830,6 +1858,12 @@ function Changes({
       ) : (
         <p>No bound PR. Provider checks and repair ownership unavailable.</p>
       )}
+      {d && d.omittedBlockerCount > 0 && (
+        <p>
+          {d.omittedBlockerCount} retained delivery blockers omitted; blocker
+          coverage is partial.
+        </p>
+      )}
       {d?.blockers.map((b) => (
         <p key={b}>{b}</p>
       ))}
@@ -1840,6 +1874,12 @@ function Changes({
         Refresh reads provider state; it does not post, approve, merge or clear
         a hold.
       </p>
+      {d && d.omittedActionCount > 0 && (
+        <p>
+          {d.omittedActionCount} earlier retained delivery actions omitted;
+          action history is partial.
+        </p>
+      )}
       {d?.actions.map((a) => (
         <p key={a.operationId}>
           {a.kind}: {a.state} · {a.reason ?? "receipt recorded"} · operation{" "}

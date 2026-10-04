@@ -22,13 +22,20 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     projectFields: [],
   };
   let effects = 0,
-    settled = false;
+    settled = false,
+    sourceComplete = true;
   const f = await j.start("fixture.create", () =>
     createOperatorFixture(
       null,
       () => ({
         async readSelection() {
-          return { complete: true, issues: [issue], reason: null };
+          return sourceComplete
+            ? { complete: true as const, issues: [issue], reason: null }
+            : {
+                complete: false as const,
+                issues: [issue],
+                reason: "partial-retained-observation",
+              };
         },
         async readBlockers() {
           return { complete: true, blockers: [], reason: null };
@@ -284,6 +291,138 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   );
   assert.equal(await page.getByLabel("Editable reply").inputValue(), "");
   assert.ok(await page.getByText(/source unchanged/).count());
+  const settleRender = () =>
+    page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+  const retainedSource = f.service
+    .taskReview()
+    .sources(taskId)
+    .at(-1)!.sourceId;
+  const retainedBaseline = f.service.taskReview().read(taskId).viewed;
+  sourceComplete = false;
+  await f.service.refreshGitHub();
+  assert.equal(
+    f.service.taskReview().sources(taskId).at(-1)!.sourceId,
+    retainedSource,
+  );
+  await page.goto(`${web.origin}/app/tasks/${taskId}`);
+  await page
+    .getByText(/source comparison unknown; current observation unavailable/)
+    .waitFor();
+  assert.deepEqual(
+    f.service.taskReview().read(taskId).viewed,
+    retainedBaseline,
+  );
+  assert.equal(
+    await page
+      .getByText(/source unchanged|source requirements changed|refresh failed/)
+      .count(),
+    0,
+  );
+  await page.locator("#review").scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "1366-retained-partial-source", {
+    fullPage: false,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#review").scrollIntoViewIfNeeded();
+  await captureBrowserEvidence(page, "390-retained-partial-source", {
+    fullPage: false,
+  });
+  await page.setViewportSize({ width: 1366, height: 900 });
+  sourceComplete = true;
+  await f.service.refreshGitHub();
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.getByText(/source unchanged/).waitFor();
+  issue.body += "\nNew complete source observation";
+  await f.service.refreshGitHub();
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.getByText(/source requirements changed/).waitFor();
+  assert.deepEqual(
+    f.service.taskReview().read(taskId).viewed,
+    retainedBaseline,
+  );
+  issue.body = "Supplied GitHub brief";
+  await f.service.refreshGitHub();
+  const restoredTaskRead = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
+  );
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await (await restoredTaskRead).finished();
+  await settleRender();
+  await page
+    .getByRole("button", { name: "Set viewing reference", exact: true })
+    .click();
+  await page.getByText(/source unchanged/).waitFor();
+  await page.route(
+    "**/api/operator/source-refresh",
+    async (route) => {
+      const response = await route.fetch();
+      const observation = await response.json();
+      observation.data.projects
+        .find((p: { projectId: string }) => p.projectId === projectId)
+        .selections.push({
+          selectionId: "unrelated-partial-selection",
+          state: "partial",
+          lastAttemptAt: null,
+          lastSuccessfulAt: null,
+        });
+      await route.fulfill({ response, json: observation });
+    },
+    { times: 1 },
+  );
+  const partialTaskRead = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
+  );
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await (await partialTaskRead).finished();
+  await settleRender();
+  await page
+    .getByText(/source comparison unknown; current observation unavailable/)
+    .waitFor();
+  assert.equal(
+    await page
+      .getByText(
+        /source unchanged|source requirements changed|Source refresh failed/,
+      )
+      .count(),
+    0,
+  );
+  const ordinaryTaskRead = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `/api/operator/tasks/${taskId}`,
+  );
+  await page
+    .getByRole("button", { name: "Refresh task", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await (await ordinaryTaskRead).finished();
+  await settleRender();
+  await page
+    .getByText(/source comparison unknown; current observation unavailable/)
+    .waitFor();
+  assert.equal(
+    await page
+      .getByText(/source unchanged|source requirements changed/)
+      .count(),
+    0,
+  );
+  await page
+    .getByRole("button", { name: "Refresh source observation", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.getByText(/source unchanged/).waitFor();
   let releaseSource!: () => void, enterSource!: () => void;
   const sourceBarrier = new Promise<void>((r) => (releaseSource = r)),
     sourceEntry = new Promise<void>((r) => (enterSource = r));
@@ -311,7 +450,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   );
   releaseSource();
   await page
-    .getByText(/source comparison unknown; refresh failed/)
+    .getByText(/source comparison unknown; current observation unavailable/)
     .waitFor({ state: "attached" });
   assert.equal(
     await page
@@ -329,7 +468,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     .getByRole("button", { name: "Back to originating workspace", exact: true })
     .click();
   await page
-    .getByText(/source comparison unknown; refresh failed/)
+    .getByText(/source comparison unknown; current observation unavailable/)
     .waitFor({ state: "attached" });
   await page.unroute("**/api/operator/source-refresh");
   await page.route("**/api/operator/tasks/*", (route) =>
@@ -343,7 +482,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     .getByRole("button", { name: "Refresh source observation", exact: true })
     .evaluate((el) => (el as HTMLElement).click());
   await page
-    .getByText(/source comparison unknown; refresh failed/)
+    .getByText(/source comparison unknown; current observation unavailable/)
     .waitFor({ state: "attached" });
   await page
     .getByText("Refresh failed. Showing the last fetched data.", {
@@ -385,7 +524,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     });
   const assertUnknown = async () => {
     await page
-      .getByText(/source comparison unknown; refresh failed/)
+      .getByText(/source comparison unknown; current observation unavailable/)
       .waitFor({ state: "attached" });
     assert.equal(
       await page
@@ -394,13 +533,6 @@ test("approval-mode exact operator review and unknown remote comment retain orig
       0,
     );
   };
-  const settleRender = () =>
-    page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        ),
-    );
   await refreshSource();
   await readEntry;
   await page.route("**/api/operator/source-refresh", failSource);

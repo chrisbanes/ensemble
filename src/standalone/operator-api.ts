@@ -1272,6 +1272,8 @@ export class OperatorApi {
       mode: v.mode,
       policyVersion: v.policyVersion,
       blockers: v.blockers.slice(0, 128),
+      omittedBlockerCount: Math.max(0, v.blockers.length - 128),
+      omittedActionCount: Math.max(0, v.actions.length - 128),
       binding: b
         ? {
             revision: b.revision,
@@ -1283,6 +1285,11 @@ export class OperatorApi {
             state: b.observation.state,
             observedAt: b.observedAt,
             readError: this.safe(b.readError, excluded),
+            omittedCheckCount: Math.max(0, b.observation.checks.length - 128),
+            omittedFeedbackCount: Math.max(
+              0,
+              (b.observation.feedback?.length ?? 0) - 128,
+            ),
             checks: b.observation.checks.slice(0, 128).map((c) => ({
               name: this.safe(c.name, excluded),
               sha: c.sha,
