@@ -797,3 +797,174 @@ test("artifact identity migration preserves bytes, rolls back conflicting owners
     f.close();
   }
 });
+
+test("ordinary GitHub selection capture shares one fresh exclusion snapshot and rolls back a failed later index", () => {
+  const f = fixture();
+  try {
+    const d = f.stores.d,
+      sources = new GitHubSourceStore(f.db);
+    sources.migrate();
+    d.execute({
+      type: "github.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: f.projectId,
+      expectedVersion: 1,
+      credentialRef: "env:UI04_BATCH_GITHUB",
+      selections: [
+        {
+          id: "batch",
+          kind: "repository",
+          repositoryId: "R_BATCH",
+          owner: "org",
+          name: "batch",
+        },
+      ],
+      readiness: {
+        mode: "any",
+        conditions: [{ kind: "label", name: "ready" }],
+      },
+      repositories: [],
+    });
+    d.execute({
+      type: "github.activate",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: f.projectId,
+      selectionId: "batch",
+      expectedVersion: 2,
+    });
+    const issues = Array.from({ length: 50 }, (_, i) => ({
+      providerInstance: "github.com" as const,
+      nodeId: `I_BATCH_${i}`,
+      repositoryId: "R_BATCH",
+      repositoryName: "org/batch",
+      number: i + 1,
+      title: `Batch issue ${i}`,
+      body: `- [ ] batch-protected requirement ${i}`,
+      state: "open" as const,
+      labels: ["ready"],
+      projectFields: [],
+    }));
+    const prepare = f.db.prepare.bind(f.db);
+    let discoveries = 0;
+    f.db.prepare = (sql) => {
+      if (
+        sql.includes(
+          "UNION ALL SELECT instructions FROM project_instruction_revisions",
+        )
+      )
+        discoveries++;
+      return prepare(sql);
+    };
+    sources.reconcileSelection(f.projectId, "batch", {
+      complete: true,
+      reason: null,
+      issues,
+    });
+    assert.equal(discoveries, 1);
+    const initial = issues.map((issue) => {
+      const taskId = String(sources.issue(issue.nodeId)!.taskId);
+      const source = f.stores.review.sources(taskId)[0]!;
+      assert.equal(source.body, issue.body);
+      assert.equal(source.criteria.length, 1);
+      assert.equal(
+        f.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM task_review_search WHERE sourceId=?",
+          )
+          .get(source.sourceId)?.n,
+        1,
+      );
+      return { taskId, source };
+    });
+    discoveries = 0;
+    sources.reconcileSelection(f.projectId, "batch", {
+      complete: true,
+      reason: null,
+      issues: [...issues, issues[0]!],
+    });
+    assert.equal(discoveries, 1);
+    for (const { taskId, source } of initial)
+      assert.deepEqual(f.stores.review.sources(taskId), [source]);
+    const profileId = String(d.assignment(f.assignmentId).profileId);
+    d.execute({
+      type: "profile.configure",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      expectedVersion: 1,
+      instructions: "batch-protected",
+    });
+    const changed = issues.map((issue) => ({
+      ...issue,
+      body: issue.body + " changed",
+    }));
+    discoveries = 0;
+    sources.reconcileSelection(f.projectId, "batch", {
+      complete: true,
+      reason: null,
+      issues: changed,
+    });
+    assert.equal(discoveries, 1);
+    for (const { taskId, source } of initial) {
+      const next = f.stores.review.sources(taskId).at(-1)!;
+      assert.equal(next.body, null);
+      assert.equal(next.criteriaOmittedCount, null);
+      assert.deepEqual(next.criteria, []);
+      assert.notEqual(next.digest, source.digest);
+      assert.equal(next.revision, 2);
+    }
+    const counts = () =>
+      [
+        "tasks",
+        "github_external_issues",
+        "github_memberships",
+        "task_review_sources",
+        "task_review_search",
+      ].map(
+        (name) => f.db.prepare(`SELECT COUNT(*) AS n FROM ${name}`).get()!.n,
+      );
+    const before = counts();
+    f.db.exec(
+      "CREATE TEMP TRIGGER reject_late_source BEFORE INSERT ON task_review_search WHEN NEW.excerpt LIKE '%late-index-failure%' BEGIN SELECT RAISE(ABORT,'late-index-failure'); END",
+    );
+    const later = issues.slice(0, 3).map((issue, i) => ({
+      ...issue,
+      nodeId: `I_NEW_${i}`,
+      title: i === 2 ? "late-index-failure" : "New retained source",
+      body: "- [ ] Safe new criterion",
+    }));
+    assert.throws(
+      () =>
+        sources.reconcileSelection(f.projectId, "batch", {
+          complete: false,
+          reason: "fixture-partial",
+          issues: later,
+        }),
+      /late-index-failure/,
+    );
+    assert.deepEqual(counts(), before);
+    assert.equal(sources.issue("I_NEW_0"), undefined);
+    f.db.exec("DROP TRIGGER reject_late_source");
+    sources.reconcileSelection(f.projectId, "batch", {
+      complete: false,
+      reason: "fixture-partial",
+      issues: later,
+    });
+    for (const issue of later)
+      assert.equal(
+        f.stores.review.sources(String(sources.issue(issue.nodeId)!.taskId))
+          .length,
+        1,
+      );
+    discoveries = 0;
+    f.stores.review.captureSource(f.taskId);
+    assert.equal(discoveries, 1);
+    discoveries = 0;
+    assert.deepEqual(f.stores.review.captureSources([]), []);
+    assert.equal(discoveries, 0);
+  } finally {
+    f.close();
+  }
+});

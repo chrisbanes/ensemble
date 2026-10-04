@@ -506,6 +506,11 @@ export class GitHubSourceStore {
         throw new Error("Unknown GitHub selection");
       const previousSync = this.syncState(projectId, selectionId);
       const seen = new Set<string>();
+      const sourceCaptures: {
+        taskId: string;
+        kind: "github";
+        supplied: { title: string; body: string };
+      }[] = [];
       for (const issue of snapshot.issues) {
         if (issue.providerInstance !== "github.com")
           throw new Error("Provider identity mismatch");
@@ -605,12 +610,14 @@ export class GitHubSourceStore {
             issue.nodeId,
             JSON.stringify(issue.projectFields),
           );
-        new TaskReviewStore(this.db).captureSource(taskId, "github", {
-          title: issue.title,
-          body: issue.body,
+        sourceCaptures.push({
+          taskId,
+          kind: "github",
+          supplied: { title: issue.title, body: issue.body },
         });
         this.updateReadiness(taskId);
       }
+      new TaskReviewStore(this.db).captureSources(sourceCaptures);
       if (snapshot.complete) {
         const old = this.db
           .prepare(

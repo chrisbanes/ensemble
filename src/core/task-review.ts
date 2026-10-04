@@ -434,10 +434,38 @@ export class TaskReviewStore {
       .join("");
     return sanitized.length > 16000 ? null : sanitized;
   }
+  captureSources(
+    entries: readonly {
+      taskId: string;
+      kind: "local" | "github";
+      supplied?: { title: string; body: string };
+    }[],
+  ) {
+    if (!entries.length) return [];
+    const snapshot = { excluded: this.exclusions() };
+    return entries.map((entry) =>
+      this.captureSourceWithSnapshot(
+        entry.taskId,
+        entry.kind,
+        entry.supplied,
+        snapshot,
+      ),
+    );
+  }
   captureSource(
     taskId: string,
     kind: "local" | "github" = "local",
     supplied?: { title: string; body: string },
+  ) {
+    return this.captureSourceWithSnapshot(taskId, kind, supplied, {
+      excluded: this.exclusions(),
+    });
+  }
+  private captureSourceWithSnapshot(
+    taskId: string,
+    kind: "local" | "github" = "local",
+    supplied: { title: string; body: string } | undefined,
+    snapshot: { excluded: readonly string[] | undefined },
   ) {
     const t = this.db
       .prepare(
@@ -447,8 +475,12 @@ export class TaskReviewStore {
     if (!t) throw Error("Review task unavailable");
     const originalTitle = supplied?.title ?? String(t.title),
       originalBody = supplied?.body ?? String(t.outcome),
-      title = originalTitle.length > 16000 ? null : this.safe(originalTitle),
-      body = originalBody.length > 16000 ? null : this.safe(originalBody);
+      title =
+        originalTitle.length > 16000
+          ? null
+          : this.safe(originalTitle, snapshot),
+      body =
+        originalBody.length > 16000 ? null : this.safe(originalBody, snapshot);
     const digest = createHash("sha256")
       .update(
         JSON.stringify({ kind, title: originalTitle, body: originalBody }),

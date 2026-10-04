@@ -170,7 +170,11 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
     const stream = readingStream(response.url());
     if (stream) trace({ event: "response", stream, status: response.status() });
   });
-  await page.clock.install();
+  if (counterpart) {
+    const clockStart = new Date("2026-10-04T00:00:00Z");
+    await page.clock.install({ time: clockStart });
+    await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
+  } else await page.clock.install();
   page.setDefaultTimeout(5000);
   await page.goto(`${web.origin}/app/search`);
   await page.getByLabel("Password").fill(web.password);

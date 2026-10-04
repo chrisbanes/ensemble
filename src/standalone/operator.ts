@@ -1015,7 +1015,8 @@ export class LocalOperatorHttp {
             response,
             session,
           );
-          if (!authorized) return;
+          if (!authorized || !this.requireCurrentSession(response, authorized))
+            return;
           const parts =
             url.pathname === "/" ? [] : url.pathname.slice(1).split("/");
           const kind = parts[0] ?? "";
@@ -1103,6 +1104,7 @@ export class LocalOperatorHttp {
             return;
           }
           await this.ui.submit(fields);
+          if (!this.requireCurrentSession(response, authorized)) return;
           response.writeHead(303, { ...RESPONSE_HEADERS, location: "/" }).end();
           return;
         }
@@ -1165,11 +1167,24 @@ export class LocalOperatorHttp {
       );
   }
 
+  private currentSession(session: OperatorSession | undefined): boolean {
+    const current = session && this.auth.getSession(session.id);
+    return !!current?.authenticated && current.csrfToken === session?.csrfToken;
+  }
+  private requireCurrentSession(
+    response: ServerResponse,
+    session: OperatorSession,
+  ): boolean {
+    if (this.currentSession(session)) return true;
+    writeHtml(response, 401, "<main><h1>Sign in required</h1></main>");
+    return false;
+  }
   private writeRouteResult(
     response: ServerResponse,
     result: OperatorRouteResult,
     session: OperatorSession,
   ): void {
+    if (!this.requireCurrentSession(response, session)) return;
     if (result.kind === "redirect") {
       if (!isSafeRedirect(result.location)) throw new Error();
       response
@@ -1328,10 +1343,20 @@ export class LocalOperatorHttp {
         }
         if (path === "/api/operator/source-refresh") {
           z.object({}).strict().parse(body);
-          json(200, await web.api.refreshSources());
+          const data = await web.api.refreshSources();
+          if (!this.currentSession(session)) {
+            deny(401, "unauthenticated");
+            return true;
+          }
+          json(200, data);
           return true;
         }
-        json(200, await web.api.execute(body));
+        const data = await web.api.execute(body);
+        if (!this.currentSession(session)) {
+          deny(401, "unauthenticated");
+          return true;
+        }
+        json(200, data);
         return true;
       }
       const artifact = path.match(
@@ -1344,11 +1369,7 @@ export class LocalOperatorHttp {
           artifact[1] ?? "",
           artifact[2] ?? "",
         );
-        const current = session && this.auth.getSession(session.id);
-        if (
-          !current?.authenticated ||
-          current.csrfToken !== session?.csrfToken
-        ) {
+        if (!this.currentSession(session)) {
           deny(401, "unauthenticated");
           return true;
         }
@@ -1361,15 +1382,9 @@ export class LocalOperatorHttp {
         return true;
       }
       const data = await web.read(path, url.searchParams);
-      if (path === "/api/operator/search") {
-        const current = session && this.auth.getSession(session.id);
-        if (
-          !current?.authenticated ||
-          current.csrfToken !== session?.csrfToken
-        ) {
-          deny(401, "unauthenticated");
-          return true;
-        }
+      if (!this.currentSession(session)) {
+        deny(401, "unauthenticated");
+        return true;
       }
       if (data === undefined) deny(404, "not-found");
       else json(200, data);
