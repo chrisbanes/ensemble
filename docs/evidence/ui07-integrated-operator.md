@@ -24,7 +24,7 @@ process identities and grants are excluded from this packet.
 
 ## Connected walkthrough
 
-1. Sign in, open New task, select the disposable project and assignee, enter the
+1. Sign in, open New task, select the disposable project and Default project lead allocation, enter the
    title and desired outcome, then explicitly choose Create and start. Task Ready
    is a creation receipt; execution status remains an independent observation.
 2. Open the task's exact request. The shared form preserves the requesting
@@ -62,6 +62,9 @@ Shutdown could close SQLite while an asynchronous scheduler admission still
 finished. The service now stops scheduling, stops the runtime, and settles the
 existing scheduler drain while storage remains open before clearing active state.
 Failed-start cleanup applies the same accounting and preserves the primary error.
+A request still awaiting workspace or process identity remains queued when shutdown
+ends its runtime generation; restart can admit it normally. Actual admitted/active
+uncertainty and storage failures retain their holds.
 Offline faults retain exact fixture/hold evidence and restart with zero new turns.
 Successful cleanup verifies the exact owned child; it does not establish descendant
 containment.

@@ -296,86 +296,112 @@ test("stopped scheduler settlement waits for deferred admission while SQLite rem
   }
 });
 
-test("service shutdown waits for real deferred workspace admission before closing SQLite and never starts a late turn", async () => {
-  const f = await createOperatorFixture();
-  const projectId = randomUUID(),
-    profileId = randomUUID(),
-    taskId = randomUUID();
-  const run = (body: Record<string, unknown>) =>
-    f.service
-      .domain()
-      .execute({ actor: "operator", key: randomUUID(), ...body } as never);
-  const manager = (
-    f.service as unknown as {
-      workspaces: { forExecution(id: string): Promise<unknown> };
-    }
-  ).workspaces;
-  const forExecution = manager.forExecution.bind(manager);
-  let entered!: () => void, release!: () => void;
-  const entering = new Promise<void>((r) => {
-    entered = r;
-  });
-  const gate = new Promise<void>((r) => {
-    release = r;
-  });
-  manager.forExecution = async (id) => {
-    entered();
-    await gate;
-    return forExecution(id);
-  };
-  try {
-    run({
-      type: "profile.create",
-      profileId,
-      name: "Deferred lead",
-      instructions: "Local work",
-      capabilities: "local",
+for (const phase of ["workspace", "processIdentity"] as const) {
+  test(`service shutdown waits for deferred ${phase} admission before closing SQLite and reopens its queued request without a late turn`, async () => {
+    const f = await createOperatorFixture();
+    const projectId = randomUUID(),
+      profileId = randomUUID(),
+      taskId = randomUUID();
+    const run = (body: Record<string, unknown>) =>
+      f.service
+        .domain()
+        .execute({ actor: "operator", key: randomUUID(), ...body } as never);
+    const manager = (
+      f.service as unknown as {
+        workspaces: { forExecution(id: string): Promise<unknown> };
+      }
+    ).workspaces;
+    const forExecution = manager.forExecution.bind(manager);
+    let entered!: () => void, release!: () => void;
+    const entering = new Promise<void>((r) => {
+      entered = r;
     });
-    run({
-      type: "project.create",
-      projectId,
-      name: "Deferred project",
-      leadProfileId: profileId,
+    const gate = new Promise<void>((r) => {
+      release = r;
     });
-    run({
-      type: "project.configure",
-      projectId,
-      expectedVersion: 1,
-      paused: false,
-    });
-    run({
-      type: "task.create",
-      projectId,
-      taskId,
-      title: "Deferred initial task",
-      outcome: "No late dispatch",
-      ready: true,
-    });
-    await entering;
-    let stopped = false;
-    const stopping = f.service.stop().then(() => {
-      stopped = true;
-    });
-    await new Promise<void>((r) => setImmediate(r));
-    assert.equal(stopped, false);
-    release();
-    await stopping;
-    assert.equal(f.runtime.turns, 0);
-    const reader = new DatabaseSync(
-      join(f.directory, "data", "standalone.sqlite"),
-      { readOnly: true },
-    );
+    if (phase === "workspace")
+      manager.forExecution = async (id) => {
+        entered();
+        await gate;
+        return forExecution(id);
+      };
+    else
+      (
+        f.runtime as unknown as { processIdentity(): Promise<null> }
+      ).processIdentity = async () => {
+        entered();
+        await gate;
+        return null;
+      };
     try {
-      const request = reader
-        .prepare("SELECT state, reason FROM turn_requests WHERE taskId=?")
-        .get(taskId);
-      assert.equal(request?.state, "held");
-      assert.match(String(request?.reason), /Runtime unavailable/);
+      run({
+        type: "profile.create",
+        profileId,
+        name: "Deferred lead",
+        instructions: "Local work",
+        capabilities: "local",
+      });
+      run({
+        type: "project.create",
+        projectId,
+        name: "Deferred project",
+        leadProfileId: profileId,
+      });
+      run({
+        type: "project.configure",
+        projectId,
+        expectedVersion: 1,
+        paused: false,
+      });
+      run({
+        type: "task.create",
+        projectId,
+        taskId,
+        title: "Deferred initial task",
+        outcome: "No late dispatch",
+        ready: true,
+      });
+      await entering;
+      let stopped = false;
+      const stopping = f.service.stop().then(() => {
+        stopped = true;
+      });
+      await new Promise<void>((r) => setImmediate(r));
+      assert.equal(stopped, false);
+      release();
+      await stopping;
+      assert.equal(f.runtime.turns, 0);
+      const reader = new DatabaseSync(
+        join(f.directory, "data", "standalone.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        const request = reader
+          .prepare("SELECT state, reason FROM turn_requests WHERE taskId=?")
+          .get(taskId);
+        assert.equal(request?.state, "queued");
+        assert.doesNotMatch(String(request?.reason), /Runtime unavailable/);
+      } finally {
+        reader.close();
+      }
+      const runtime = new OperatorFixtureRuntime();
+      const restarted = new StandaloneService(
+        join(f.directory, "data"),
+        () => runtime,
+        undefined,
+        { power: { enabled: false } },
+      );
+      try {
+        await restarted.start();
+        await until(() => runtime.turns === 1);
+        assert.equal(restarted.taskHold(taskId), undefined);
+        await restarted.stopTask(taskId);
+      } finally {
+        await restarted.stop();
+      }
     } finally {
-      reader.close();
+      release();
+      await f.close();
     }
-  } finally {
-    release();
-    await f.close();
-  }
-});
+  });
+}

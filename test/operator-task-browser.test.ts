@@ -722,6 +722,7 @@ async function seedCatalog(
     projectOverrides: { [projectId]: occupied },
   });
   const ready = task("Ready selected", true);
+  await f.service.provisionTask(ready);
   await until(() =>
     f.service
       .turnRequests()
@@ -918,7 +919,17 @@ for (const viewport of [
       name: "Ready for first task",
       leadProfileId: null,
     });
+    const emptyRead = page.waitForResponse(
+      (response) =>
+        response.url() === `${web.origin}/api/operator/task-list` &&
+        response.request().method() === "GET",
+    );
     await page.goto(`${web.origin}/app/projects/${emptyProject}`);
+    assert.equal(
+      (await emptyRead).status(),
+      200,
+      "exact task catalog read for empty-project route succeeds",
+    );
     await page
       .getByText(
         "Ready for your first task. Create an outcome or save a draft.",

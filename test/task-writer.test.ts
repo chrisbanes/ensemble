@@ -245,7 +245,7 @@ test("eligibility changes during workspace admission prevent execution", async (
           taskId: blockerTaskId,
           title: "Blocker",
           outcome: "Deliver",
-          ready: true,
+          ready: false,
         });
         f.execute({
           type: "dependency.add",

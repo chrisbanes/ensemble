@@ -2560,11 +2560,15 @@ export class StandaloneService {
       priorBinding?.conversationRevision !== binding.conversationRevision
     )
       previous = undefined;
+    // Shutdown may finish while workspace or process admission is awaiting.
+    // A request with no admitted effect remains queued for ordinary restart.
+    const runtime = this.runtime;
+    if (!runtime) return;
     try {
-      const runtime = this.requireRuntime();
       const processIdentity = await Promise.resolve(
         runtime.processIdentity?.() ?? null,
       ).catch(() => null);
+      if (this.runtime !== runtime) return;
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),
