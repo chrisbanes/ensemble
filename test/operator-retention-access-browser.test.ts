@@ -346,8 +346,11 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
     oldId: `turn-omission:${a.old.workId}:${a.old.workId}:${a.old.workId}`,
     expectedY: y,
   };
-  const readingDiagnostic = async (phase: string) => {
-    lastReading = await page.evaluate(inspectReading, readingArgs);
+  const readingDiagnostic = async (phase: string, expectedY = y) => {
+    lastReading = await page.evaluate(inspectReading, {
+      ...readingArgs,
+      expectedY,
+    });
     j.diagnostics.push(
       JSON.stringify({
         phase,
@@ -571,17 +574,98 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
     fullPage: false,
   });
   stage("phone-capture-complete");
+  const phoneReadingY = await oldRecord.evaluate(
+    (el) => el.getBoundingClientRect().top,
+  );
+  let releaseHeadHistory!: () => void, headHistoryEntered!: () => void;
+  const headHistory = new Promise<void>((resolve) => {
+    releaseHeadHistory = resolve;
+  });
+  const headHistoryArrival = new Promise<void>((resolve) => {
+    headHistoryEntered = resolve;
+  });
+  await page.route(
+    `**/api/operator/assignments/${a.assignmentId}/history**`,
+    async (route) => {
+      headHistoryEntered();
+      await headHistory;
+      await route.continue();
+    },
+    { times: 1 },
+  );
   stage("bound-head-read-begin");
   f.service.delivery().recordPrReadFailure(a.taskId);
-  await page
-    .getByRole("button", { name: "Refresh task", exact: true })
-    .evaluate((el) => (el as HTMLButtonElement).click());
-  await page
-    .locator("#review")
-    .getByText(
-      /Historical check:.*Head comparison unknown; current bound head unavailable/,
-    )
-    .waitFor();
+  try {
+    await page
+      .getByRole("button", { name: "Refresh task", exact: true })
+      .evaluate((el) => (el as HTMLButtonElement).click());
+    await headHistoryArrival;
+    await page
+      .locator("#review")
+      .getByText(
+        /Historical check:.*Head comparison unknown; current bound head unavailable/,
+      )
+      .waitFor();
+    const gap = await page.evaluate(
+      ({ itemId }) => ({
+        items: document.querySelectorAll(`[data-record-id="${itemId}"]`).length,
+        omissions: document.querySelectorAll(
+          '[data-record-id^="turn-omission:"]',
+        ).length,
+        draft: (
+          document.querySelector(
+            "#workspace-reply",
+          ) as HTMLTextAreaElement | null
+        )?.value,
+      }),
+      readingArgs,
+    );
+    assert.equal(gap.items, 0);
+    assert.equal(gap.omissions, 0);
+    assert.equal(gap.draft, "Retained exact old draft");
+    j.diagnostics.push(
+      JSON.stringify({
+        phase: "bound-head-label-ready-history-held",
+        snapshot: gap,
+        requests: [...readingRequests],
+      }),
+    );
+  } finally {
+    releaseHeadHistory();
+  }
+  try {
+    await page.waitForFunction(
+      ({ itemId, oldId, expectedY }) => {
+        const items = document.querySelectorAll(`[data-record-id="${itemId}"]`),
+          omissions = [
+            ...document.querySelectorAll('[data-record-id^="turn-omission:"]'),
+          ],
+          old = document.querySelector(`[data-record-id="${oldId}"]`),
+          summary = old?.querySelector("summary");
+        return (
+          items.length === 1 &&
+          omissions.length === 272 &&
+          new Set(omissions.map((el) => el.getAttribute("data-record-id")))
+            .size === 272 &&
+          (
+            document.querySelector(
+              "#workspace-reply",
+            ) as HTMLTextAreaElement | null
+          )?.value === "Retained exact old draft" &&
+          summary?.isConnected &&
+          Math.abs(old!.getBoundingClientRect().top - expectedY) < 4
+        );
+      },
+      { ...readingArgs, expectedY: phoneReadingY },
+    );
+  } catch (error) {
+    await readingDiagnostic(
+      "bound-head-history-settlement-failed",
+      phoneReadingY,
+    );
+    throw error;
+  }
+  await readingDiagnostic("bound-head-history-settled", phoneReadingY);
   assert.equal(
     await page
       .locator("#review")
@@ -592,11 +676,16 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
   assert.equal(
     await page.getByLabel("Editable reply").inputValue(),
     "Retained exact old draft",
-  ); // An intentional new focus during the same pending gap must disarm restoration.
+  );
   stage("bound-head-read-complete");
   stage("intentional-scroll-begin");
-  await oldRecord.scrollIntoViewIfNeeded();
-  await oldRecord.locator("summary").focus();
+  const oldSummary = oldRecord.locator("summary");
+  await oldSummary.scrollIntoViewIfNeeded();
+  await oldSummary.focus();
+  assert.equal(
+    await oldSummary.evaluate((el) => el === document.activeElement),
+    true,
+  );
   stage("intentional-scroll-complete");
   let releaseIntentionalHistory!: () => void;
   const intentionalHistory = new Promise<void>((resolve) => {
