@@ -299,11 +299,74 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     JSON.stringify(phoneBounds),
   );
   await captureBrowserEvidence(page, "390-original-comparison");
-  await pair
+  const reply = page.getByLabel("Editable reply");
+  const criterionAsk = page
+    .getByRole("button", { name: "Ask lead about criterion", exact: true })
+    .first();
+  const artifactAsk = pair
     .locator('[data-artifact-role="before"]')
     .getByRole("button", { name: "Ask lead about artifact", exact: true })
-    .first()
-    .click();
+    .first();
+  const retainedNotice = page.getByText(
+    "Existing lead draft and reference retained. Finish or clear it before starting a new contextual reply.",
+    { exact: true },
+  );
+  await reply.fill("Unfinished ordinary lead message");
+  for (const ask of [criterionAsk, artifactAsk]) {
+    await ask.click();
+    await retainedNotice.waitFor();
+    await page.waitForFunction(
+      () => document.activeElement?.id === "workspace-reply",
+    );
+    assert.equal(await reply.inputValue(), "Unfinished ordinary lead message");
+    assert.equal(await page.getByText(/^Immutable reference:/).count(), 0);
+    assert.equal(
+      await reply.evaluate((el) => el === document.activeElement),
+      true,
+    );
+  }
+  await reply.fill("");
+  await criterionAsk.click();
+  const criterionReference = await page
+    .getByText(/^Immutable reference:/)
+    .textContent();
+  assert.ok(criterionReference?.includes(a.source.criteria[0]!.criterionId));
+  await reply.fill("Edited contextual criterion A reply");
+  // Selecting the same or a different anchor never retargets unfinished text.
+  for (const ask of [criterionAsk, artifactAsk]) {
+    await ask.click();
+    await retainedNotice.waitFor();
+    await page.waitForFunction(
+      () => document.activeElement?.id === "workspace-reply",
+    );
+    assert.equal(
+      await reply.inputValue(),
+      "Edited contextual criterion A reply",
+    );
+    assert.equal(
+      await page.getByText(/^Immutable reference:/).textContent(),
+      criterionReference,
+    );
+    assert.equal(
+      await reply.evaluate((el) => el === document.activeElement),
+      true,
+    );
+  }
+  await captureBrowserEvidence(page, "390-retained-contextual-draft", {
+    fullPage: false,
+  });
+  await reply.fill("");
+  await artifactAsk.click();
+  assert.equal(
+    await reply.inputValue(),
+    "Please review before artifact Before focus.",
+  );
+  assert.ok(
+    (await page.getByText(/^Immutable reference:/).textContent())?.includes(
+      before,
+    ),
+  );
+
   await page
     .getByLabel("Editable reply")
     .fill("Check this exact before artifact");

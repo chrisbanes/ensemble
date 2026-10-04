@@ -615,9 +615,15 @@ export function TaskWorkspace({
   }
   const ask = (reference: Reference, label: string) => {
     if (state.uncertain || pending) return;
-    state.reference = reference;
     state.destination = "lead";
-    state.draft = `Please review ${label}.`;
+    if (state.draft.length) {
+      state.notice =
+        "Existing lead draft and reference retained. Finish or clear it before starting a new contextual reply.";
+    } else {
+      state.reference = reference;
+      state.draft = `Please review ${label}.`;
+      state.notice = "";
+    }
     changed();
     requestAnimationFrame(() =>
       document.getElementById("workspace-reply")?.focus(),

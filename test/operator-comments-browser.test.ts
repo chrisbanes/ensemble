@@ -157,6 +157,68 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     .getByRole("button", { name: "Post GitHub comment", exact: true })
     .click();
   await page.getByLabel("Editable reply").fill("Exact operator comment body");
+  await page
+    .getByRole("button", { name: "Message task lead", exact: true })
+    .click();
+  await page
+    .getByLabel("Editable reply")
+    .fill("Unfinished local message beside GitHub draft");
+  await page
+    .getByRole("button", { name: "Post GitHub comment", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Ask lead about brief", exact: true })
+    .click();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Unfinished local message beside GitHub draft",
+  );
+  assert.equal(await page.getByText(/^Immutable reference:/).count(), 0);
+  await page
+    .getByText(
+      "Existing lead draft and reference retained. Finish or clear it before starting a new contextual reply.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(
+    await page
+      .getByLabel("Editable reply")
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await page
+    .getByRole("button", { name: "Post GitHub comment", exact: true })
+    .click();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Exact operator comment body",
+  );
+  await page
+    .getByRole("button", { name: "Message task lead", exact: true })
+    .click();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Unfinished local message beside GitHub draft",
+  );
+  await page.getByLabel("Editable reply").fill("");
+  await page
+    .getByRole("button", { name: "Ask lead about brief", exact: true })
+    .click();
+  assert.deepEqual(
+    JSON.parse(
+      (await page.getByText(/^Immutable reference:/).textContent())!.slice(
+        "Immutable reference: ".length,
+      ),
+    ),
+    { sourceId: f.service.taskReview().sources(taskId).at(-1)!.sourceId },
+  );
+  await page
+    .getByRole("button", { name: "Post GitHub comment", exact: true })
+    .click();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Exact operator comment body",
+  );
   assert.equal(
     await page
       .getByRole("button", { name: "Post comment", exact: true })

@@ -390,6 +390,8 @@ test("production workspace retains literal history, pending request, focused rep
   assert.ok(
     await page.getByText("Which focus target?", { exact: true }).isVisible(),
   );
+  // The restored navigation draft has been checked; explicitly finish that intent.
+  await page.getByLabel("Editable reply").fill("");
   await page
     .getByRole("button", { name: "Ask lead about result", exact: true })
     .click();
