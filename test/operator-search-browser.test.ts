@@ -321,3 +321,267 @@ test("shared Search preserves exact historical target, dates, selected focus and
       assert.equal(new URL(page.url()).search, "");
   }
 });
+
+test("same-task historical Search entries preserve manual origin selections and shared replies while fresh task links use latest", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f, "Entry ownership", "Entry task");
+  const old = a.result("Entry ancient result", { sourceId: a.source.sourceId });
+  const d = f.service.domain();
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: crypto.randomUUID(),
+    projectId: a.projectId,
+    taskId: a.taskId,
+    expectedVersion: Number(d.task(a.taskId).version),
+    outcome: "- [ ] Entry newer source",
+  });
+  const source = f.service.taskReview().sources(a.taskId).at(-1)!;
+  const manual = a.result("Entry manually selected result", {
+    sourceId: source.sourceId,
+  });
+  const latest = a.result("Entry latest result", { sourceId: source.sourceId });
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(
+    `${web.origin}/app/tasks/${a.taskId}?result=${old.resultId}&source=${a.source.sourceId}&assignment=${a.assignmentId}`,
+  );
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByText("Entry ancient result", { exact: true }).waitFor();
+  await page.getByLabel("Result revision").selectOption(manual.resultId);
+  await page
+    .getByLabel("Retained source revision")
+    .selectOption(source.sourceId);
+  await page
+    .getByText("Entry manually selected result", { exact: true })
+    .waitFor();
+  await page.getByLabel("Editable reply").fill("Shared unfinished entry reply");
+  const assignmentDisclosure = page.locator(
+    `#history details[data-record-id="${a.assignmentId}"]`,
+  );
+  assert.equal(
+    await assignmentDisclosure.evaluate(
+      (el) => (el as HTMLDetailsElement).open,
+    ),
+    true,
+  );
+  await assignmentDisclosure.locator(":scope > summary").click();
+
+  const brief = page.locator(`#brief [data-record-id="${source.sourceId}"]`);
+  await brief.locator("summary").click();
+  await brief.evaluate((el) => el.scrollIntoView());
+  await brief.locator("summary").focus();
+  const y = await brief.evaluate((el) => el.getBoundingClientRect().top);
+  await page
+    .getByRole("link", { name: "Search", exact: true })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page
+    .getByLabel("Search retained task, decision and result records")
+    .fill("Entry ancient result");
+  await page.getByLabel("Include historical records").check();
+  await page.getByLabel("Record type", { exact: true }).selectOption("result");
+  await page
+    .getByRole("button", { name: "Search records", exact: true })
+    .click();
+  await page.locator(`[data-search-record="${old.resultId}"] a`).click();
+  await page.getByText("Entry ancient result", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Shared unfinished entry reply",
+  );
+  await page.goBack();
+  await page.locator(`[data-search-record="${old.resultId}"]`).waitFor();
+  await page.goBack();
+  await page.getByRole("heading", { name: "Search", exact: true }).waitFor();
+  await page.goBack();
+  await page
+    .getByText("Entry manually selected result", { exact: true })
+    .waitFor();
+  await page.waitForFunction(
+    ({ id, y }) => {
+      const el = document.querySelector(`[data-record-id="${id}"]`);
+      return (
+        el instanceof HTMLDetailsElement &&
+        el.open &&
+        Math.abs(el.getBoundingClientRect().top - y) < 4 &&
+        document.activeElement === el.querySelector("summary")
+      );
+    },
+    { id: source.sourceId, y },
+  );
+  assert.equal(
+    await page.getByLabel("Result revision").inputValue(),
+    manual.resultId,
+  );
+  assert.equal(
+    await page.getByLabel("Retained source revision").inputValue(),
+    source.sourceId,
+  );
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Shared unfinished entry reply",
+  );
+  assert.equal(
+    await assignmentDisclosure.evaluate(
+      (el) => (el as HTMLDetailsElement).open,
+    ),
+    false,
+  );
+  await captureBrowserEvidence(page, "1366-restored-manual-task-entry");
+  await page.goForward();
+  await page.getByRole("heading", { name: "Search", exact: true }).waitFor();
+  await page.goForward();
+  await page.locator(`[data-search-record="${old.resultId}"]`).waitFor();
+  await page.goForward();
+  await page.getByText("Entry ancient result", { exact: true }).waitFor();
+  await page.getByRole("link", { name: "All tasks", exact: true }).click();
+  await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
+  await page.getByRole("link", { name: "Entry task", exact: true }).click();
+  await page.getByText("Entry latest result", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Result revision").inputValue(), "");
+  assert.equal(
+    await page.getByLabel("Retained source revision").inputValue(),
+    "",
+  );
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Shared unfinished entry reply",
+  );
+  assert.equal(
+    latest.resultId,
+    f.service.taskReview().read(a.taskId).results.at(-1)?.resultId,
+  );
+  await page.getByRole("link", { name: "Search", exact: true }).click();
+  await page
+    .getByLabel("Search retained task, decision and result records")
+    .fill("Entry ancient result");
+  await page.getByLabel("Include historical records").check();
+  await page.getByLabel("Record type", { exact: true }).selectOption("result");
+  await page
+    .getByRole("button", { name: "Search records", exact: true })
+    .click();
+  await page.locator(`[data-search-record="${old.resultId}"] a`).click();
+  await page.getByText("Entry ancient result", { exact: true }).waitFor();
+  await page.goBack();
+  await page.locator(`[data-search-record="${old.resultId}"]`).waitFor();
+  await page.goBack();
+  await page.getByRole("heading", { name: "Search", exact: true }).waitFor();
+  await page.goBack();
+  await page.getByText("Entry latest result", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Result revision").inputValue(), "");
+  assert.equal(
+    await page.getByLabel("Retained source revision").inputValue(),
+    "",
+  );
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "Shared unfinished entry reply",
+  );
+});
+
+test("in-flight exact reply becomes original-key reconciliation across same-task entry disposal", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f, "Reply entry", "Pending entry task");
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage();
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(`${web.origin}/app/tasks/${a.taskId}`);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByLabel("Editable reply").fill("Exact in-flight reply");
+  let release!: () => void, entered!: () => void, settled!: () => void;
+  const barrier = new Promise<void>((r) => (release = r)),
+    arrival = new Promise<void>((r) => (entered = r)),
+    done = new Promise<void>((r) => (settled = r));
+  let originalKey = "";
+  await page.route("**/api/operator/commands", async (route) => {
+    const input = route.request().postDataJSON();
+    if (input.type !== "message" || originalKey) {
+      await route.continue();
+      return;
+    }
+    originalKey = input.key;
+    const response = await route.fetch();
+    entered();
+    await barrier;
+    await route.fulfill({ response });
+    settled();
+  });
+  try {
+    await page
+      .getByRole("button", { name: "Send to task lead", exact: true })
+      .click();
+    await arrival;
+    await page.getByRole("link", { name: "All tasks", exact: true }).click();
+    await page
+      .getByRole("heading", { name: "All tasks", exact: true })
+      .waitFor();
+    await page
+      .getByRole("link", { name: "Pending entry task", exact: true })
+      .click();
+    await page
+      .getByRole("button", {
+        name: "Reconcile original operation",
+        exact: true,
+      })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel("Editable reply").inputValue(),
+      "Exact in-flight reply",
+    );
+    assert.equal(await page.getByLabel("Editable reply").isDisabled(), true);
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Message task lead", exact: true })
+        .isDisabled(),
+      true,
+    );
+    release();
+    await done;
+    assert.equal(
+      await page.getByLabel("Editable reply").inputValue(),
+      "Exact in-flight reply",
+    );
+    await page
+      .getByRole("button", {
+        name: "Reconcile original operation",
+        exact: true,
+      })
+      .click();
+    await page.getByText(new RegExp(`Receipt key ${originalKey}`)).waitFor();
+    assert.equal(await page.getByLabel("Editable reply").inputValue(), "");
+    assert.equal(
+      f.service
+        .coordinationView()
+        .readTask(a.taskId)
+        .messages.filter((m) => m.text === "Exact in-flight reply").length,
+      1,
+    );
+  } finally {
+    release();
+  }
+});

@@ -585,8 +585,10 @@ export class TaskReviewStore {
         throw Error("Unsafe artifact path");
       if (
         this.db
-          .prepare("SELECT 1 FROM task_review_results WHERE recordJson LIKE ?")
-          .get(`%${artifact.artifactId}%`)
+          .prepare(
+            "SELECT 1 FROM task_review_results r, json_each(r.recordJson,'$.metadata.artifacts') a WHERE json_extract(a.value,'$.artifactId')=? LIMIT 1",
+          )
+          .get(artifact.artifactId)
       )
         throw Error("Artifact identity already recorded");
     }

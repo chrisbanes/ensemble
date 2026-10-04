@@ -139,6 +139,7 @@ export function TaskWorkspace({
       historyRequests.current.set(id, revision + 1);
     setHistory({});
   };
+  const replyInFlight = useRef<string | null>(null);
   const scope = useRef(true),
     anchor = useRef<{ id: string; y: number } | null>(null),
     bottom = useRef(false),
@@ -151,10 +152,13 @@ export function TaskWorkspace({
   const selectedPath = useRef<string | null>(null);
   if (selectedPath.current !== path) {
     selectedPath.current = path;
-    if (params.has("result")) state.selectedResult = params.get("result");
-    if (params.has("source")) state.selectedSource = params.get("source");
-    if (params.has("assignment"))
-      state.expanded.add(params.get("assignment") ?? "");
+    if (!state.selectionInitialized) {
+      state.selectionInitialized = true;
+      state.selectedResult = params.get("result");
+      state.selectedSource = params.get("source");
+      if (params.has("assignment"))
+        state.expanded.add(params.get("assignment") ?? "");
+    }
   }
   const selectionQuery = new URLSearchParams();
   if (state.selectedResult)
@@ -248,6 +252,10 @@ export function TaskWorkspace({
     capturedHistoryFocus.current = Boolean(
       capturedFocus.current?.closest("#history"),
     );
+    state.focusHref =
+      capturedFocus.current instanceof HTMLAnchorElement
+        ? capturedFocus.current.getAttribute("href")
+        : null;
     state.focusRecord =
       (capturedFocus.current?.closest("[data-record-id]") as HTMLElement | null)
         ?.dataset.recordId ?? null;
@@ -295,6 +303,14 @@ export function TaskWorkspace({
     const timer = setInterval(() => refreshRef.current(), 15000);
     return () => {
       scope.current = false;
+      if (
+        replyInFlight.current &&
+        state.frozen?.key === replyInFlight.current
+      ) {
+        state.uncertain = true;
+        state.notice =
+          "Reply outcome unknown after navigation; original operation retained for reconciliation.";
+      }
       sourceRequest.current++;
       sourceRead.current = null;
       if (state.sourceObservation === "pending") {
@@ -306,6 +322,20 @@ export function TaskWorkspace({
       document.removeEventListener("focusin", intentionalFocus);
     };
   }, [state]);
+  const readingFocusTarget = () => {
+    const record = state.focusRecord
+      ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")].find(
+          (e) => e.dataset.recordId === state.focusRecord,
+        )
+      : null;
+    return (
+      (state.focusHref
+        ? [
+            ...(record?.querySelectorAll<HTMLAnchorElement>("a[href]") ?? []),
+          ].find((e) => e.getAttribute("href") === state.focusHref)
+        : null) ?? record?.querySelector<HTMLElement>("summary,button,a")
+    );
+  };
   const layoutPath = useRef(path);
   // biome-ignore lint/correctness/useExhaustiveDependencies: history DOM insertion must restore the previously captured reading anchor.
   useLayoutEffect(() => {
@@ -344,11 +374,7 @@ export function TaskWorkspace({
     if (restoreReadingFocus.current && capturedFocus.current?.isConnected)
       restoreReadingFocus.current = false;
     if (restoreReadingFocus.current) {
-      const target = state.focusRecord
-        ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")]
-            .find((e) => e.dataset.recordId === state.focusRecord)
-            ?.querySelector<HTMLElement>("summary,button,a")
-        : null;
+      const target = readingFocusTarget();
       if (target) {
         target.focus({ preventScroll: true });
         restoreReadingFocus.current = false;
@@ -385,13 +411,18 @@ export function TaskWorkspace({
             ].includes(section)
           ? document.getElementById(section)
           : null;
-      if (target && state.scrollY === 0) target.scrollIntoView();
-      else scrollTo(0, state.scrollY);
+      if (target && state.scrollY === 0) {
+        target.scrollIntoView();
+        if (section && !state.focusRecord && !state.historyAnchor) {
+          const heading = target.querySelector<HTMLElement>("h3,h4");
+          if (heading) {
+            heading.tabIndex = -1;
+            heading.focus({ preventScroll: true });
+          }
+        }
+      } else scrollTo(0, state.scrollY);
       if (state.focusRecord)
-        [...document.querySelectorAll<HTMLElement>("[data-record-id]")]
-          .find((e) => e.dataset.recordId === state.focusRecord)
-          ?.querySelector<HTMLElement>("summary,button,a")
-          ?.focus({ preventScroll: true });
+        readingFocusTarget()?.focus({ preventScroll: true });
       return;
     }
     if (bottom.current) scrollTo(0, document.documentElement.scrollHeight);
@@ -569,10 +600,12 @@ export function TaskWorkspace({
     if (pending) return;
     setPending(true);
     const current = client.captureAuthenticationScope();
+    const reply = input.type === "message" || input.type === "comment.send";
+    if (reply) replyInFlight.current = input.key;
     const outcome = await client.command(input, session.csrfToken);
     if (!scope.current || !current()) return;
     setPending(false);
-    const reply = input.type === "message" || input.type === "comment.send";
+    if (replyInFlight.current === input.key) replyInFlight.current = null;
     if (!reply) {
       if (outcome.state === "recorded") {
         if (outcome.receipt.kind === "comment-review")

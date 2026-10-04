@@ -663,12 +663,15 @@ export function App() {
             />
           ) : /^\/app\/tasks\/[^/]+$/.test(pathname) ? (
             <TaskWorkspace
-              key={`${session.csrfToken}:${pathname}`}
+              key={`${session.csrfToken}:${entryKey}`}
               client={client}
               session={session}
               taskId={pathname.split("/")[3] ?? ""}
               path={path}
-              state={taskStates.current.forTask(pathname.split("/")[3] ?? "")}
+              state={taskStates.current.forTask(
+                pathname.split("/")[3] ?? "",
+                entryKey,
+              )}
             />
           ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
             <TaskViews

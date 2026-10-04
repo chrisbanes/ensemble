@@ -21,6 +21,43 @@ test("historical Search opens exact old evidence and independently pages all ret
     "fixture.close",
     () => f.lifecycle.steps,
   );
+  const journeyStarted = performance.now();
+  let currentStage = "fixture-ready";
+  let lastReading: unknown = null;
+  const stage = (name: string) => {
+    currentStage = name;
+    try {
+      if (j.diagnostics.length < 40)
+        j.diagnostics.push(
+          JSON.stringify({
+            stage: name,
+            elapsedMs: Math.round(performance.now() - journeyStarted),
+          }),
+        );
+    } catch {
+      /* Diagnostics must not replace the primary action failure. */
+    }
+  };
+  const deadlineDiagnostic = setTimeout(() => {
+    try {
+      if (j.diagnostics.length < 40)
+        j.diagnostics.push(
+          JSON.stringify({
+            stage: "execution-deadline-approaching",
+            currentStage,
+            elapsedMs: Math.round(performance.now() - journeyStarted),
+            lastKnownReading: lastReading,
+          }),
+        );
+    } catch {
+      /* Cached diagnostics require no live browser call at the deadline. */
+    }
+  }, 44000);
+  deadlineDiagnostic.unref();
+  j.cleanup(async () => {
+    clearTimeout(deadlineDiagnostic);
+  }, "diagnostic-timer.clear");
+  stage("fixture-ready");
   const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1cAAAAASUVORK5CYII=",
       "base64",
@@ -297,10 +334,11 @@ test("historical Search opens exact old evidence and independently pages all ret
     expectedY: y,
   };
   const readingDiagnostic = async (phase: string) => {
+    lastReading = await page.evaluate(inspectReading, readingArgs);
     j.diagnostics.push(
       JSON.stringify({
         phase,
-        snapshot: await page.evaluate(inspectReading, readingArgs),
+        snapshot: lastReading,
         requests: [...readingRequests],
       }),
     );
@@ -444,33 +482,47 @@ test("historical Search opens exact old evidence and independently pages all ret
     }
   }
   const snapshot = await waitReading("timer-settled");
+  stage("timer-settled");
   assert.ok(snapshot);
+  stage("validation-label-begin");
   await page
     .getByText(
       `Stale validation; checked head ${headA}, current bound head ${headB}`,
       { exact: false },
     )
     .waitFor();
+  stage("validation-label-complete");
   assert.equal(snapshot.items, 1);
   assert.equal(snapshot.omissions, 272);
   assert.equal(snapshot.uniqueOmissions, 272);
   assert.equal(snapshot.draft, "Retained exact old draft");
   assert.ok(snapshot.top !== undefined && Math.abs(snapshot.top - y) < 4);
   assert.equal(snapshot.focused, true);
+  stage("validation-scroll-begin");
   await page
     .locator("#review")
     .getByText("Historical check:", { exact: false })
     .scrollIntoViewIfNeeded();
+  stage("validation-scroll-complete");
+  stage("validation-capture-begin");
   await captureBrowserEvidence(page, "1366-validation-head-state", {
     fullPage: false,
   });
+  stage("validation-capture-complete");
+  stage("history-expand-begin");
   await page
     .getByRole("button", { name: "Expand all history", exact: true })
     .click();
+  stage("history-expand-complete");
+  stage("history-scroll-begin");
   await oldRecord.scrollIntoViewIfNeeded();
+  stage("history-scroll-complete");
+  stage("history-capture-begin");
   await captureBrowserEvidence(page, "1366-independent-omission-pages", {
     fullPage: false,
   });
+  stage("history-capture-complete");
+  stage("chronological-begin");
   await page
     .getByRole("button", { name: "Chronological view", exact: true })
     .click();
@@ -486,11 +538,17 @@ test("historical Search opens exact old evidence and independently pages all ret
   await page
     .getByRole("button", { name: "Chronological view", exact: true })
     .click();
+  stage("chronological-complete");
   await page.setViewportSize({ width: 390, height: 844 });
+  stage("phone-scroll-begin");
   await oldRecord.scrollIntoViewIfNeeded();
+  stage("phone-scroll-complete");
+  stage("phone-capture-begin");
   await captureBrowserEvidence(page, "390-independent-omission-pages", {
     fullPage: false,
   });
+  stage("phone-capture-complete");
+  stage("bound-head-read-begin");
   f.service.delivery().recordPrReadFailure(a.taskId);
   await page
     .getByRole("button", { name: "Refresh task", exact: true })
@@ -512,8 +570,11 @@ test("historical Search opens exact old evidence and independently pages all ret
     await page.getByLabel("Editable reply").inputValue(),
     "Retained exact old draft",
   ); // An intentional new focus during the same pending gap must disarm restoration.
+  stage("bound-head-read-complete");
+  stage("intentional-scroll-begin");
   await oldRecord.scrollIntoViewIfNeeded();
   await oldRecord.locator("summary").focus();
+  stage("intentional-scroll-complete");
   let releaseIntentionalHistory!: () => void;
   const intentionalHistory = new Promise<void>((resolve) => {
     releaseIntentionalHistory = resolve;
@@ -531,6 +592,7 @@ test("historical Search opens exact old evidence and independently pages all ret
     },
     { times: 1 },
   );
+  stage("intentional-timer-begin");
   try {
     await page.clock.fastForward(15000);
     await intentionalEntered;
@@ -561,4 +623,5 @@ test("historical Search opens exact old evidence and independently pages all ret
     throw error;
   }
   await readingDiagnostic("intentional-control-focus-settled");
+  stage("journey-complete");
 });

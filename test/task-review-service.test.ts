@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { seedReviewTask } from "./fixtures/task-review.js";
+import { CoordinationStore } from "../src/core/coordination.js";
 import {
   previewRecordedArtifact,
   type PreviewBinding,
@@ -144,6 +146,25 @@ test("production service creates source, assignment and work captures, and real 
       "running",
     );
   }
+  const futureArtifactId = randomUUID(),
+    existingArtifactId = randomUUID();
+  const prior = await seedReviewTask(
+    f,
+    "Prior artifact identifiers",
+    "Unrelated retained task",
+  );
+  prior.result("Unrelated identifiers", {
+    decisions: [{ text: futureArtifactId, attribution: "Task lead" }],
+    artifacts: [
+      {
+        artifactId: existingArtifactId,
+        label: "Already recorded",
+        role: "evidence",
+        revision: 1,
+        availability: "unavailable",
+      },
+    ],
+  });
   const call = {
     threadId: w.threadId,
     turnId: w.turnId,
@@ -153,6 +174,15 @@ test("production service creates source, assignment and work captures, and real 
       summary: "Restored focus",
       review: {
         sourceId: references.sourceId,
+        artifacts: [
+          {
+            artifactId: futureArtifactId,
+            label: "New exact field identity",
+            role: "evidence" as const,
+            revision: 1,
+            availability: "unavailable" as const,
+          },
+        ],
         changes: { reference: "https://example.com/recorded" },
         criteria: [
           {
@@ -287,11 +317,31 @@ test("production service creates source, assignment and work captures, and real 
       "running",
     );
   }
+  const realDuplicate = structuredClone(call);
+  realDuplicate.callId = randomUUID();
+  realDuplicate.arguments.review.artifacts[0]!.artifactId = existingArtifactId;
+  assert.equal((await f.runtime.callTool(realDuplicate)).success, false);
+  f.seedPersistedState((db) =>
+    assert.equal(
+      new CoordinationStore(db, d).receipt(realDuplicate),
+      undefined,
+    ),
+  );
+  assert.equal(f.service.coordinationView().readTask(taskId).results.length, 0);
+  assert.equal(f.service.taskReview().read(taskId).results.length, 0);
+  assert.equal(
+    f.service.list().find((entry) => entry.workId === w.workId)?.state,
+    "running",
+  );
   const result = await f.runtime.callTool(call);
   assert.equal(result.success, true, result.text);
   assert.equal((await f.runtime.callTool(call)).success, true);
   const read = f.service.taskReview().read(taskId);
   assert.equal(read.results.length, 1);
+  assert.equal(
+    read.results[0]?.metadata.artifacts[0]?.artifactId,
+    futureArtifactId,
+  );
   assert.ok(read.contexts.some((c) => c.workId === w.workId));
   assert.equal(read.results[0]?.workId, w.workId);
   assert.ok(!JSON.stringify(read).includes("PRIVATE UI04 instructions"));
