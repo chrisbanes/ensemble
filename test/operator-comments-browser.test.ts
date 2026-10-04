@@ -232,9 +232,146 @@ test("approval-mode exact operator review and unknown remote comment retain orig
       .isEnabled(),
     false,
   );
+  // Lose actual committed review and confirmation responses, retaining normalized
+  // immutable commands independently of the editable whitespace in the draft.
+  await page.getByLabel("Editable reply").fill("x".repeat(16001));
   await page
     .getByRole("button", { name: "Review exact GitHub comment", exact: true })
     .click();
+  await page
+    .getByText(
+      "Invalid command material. Draft retained; correct it before trying again.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(await page.getByLabel("Editable reply").isEnabled(), true);
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "x".repeat(16001),
+  );
+  assert.equal(effects, 0);
+  await page
+    .getByLabel("Editable reply")
+    .fill("  Exact operator comment body  ");
+  const reviewCommands: Record<string, unknown>[] = [];
+  const confirmCommands: Record<string, unknown>[] = [];
+  let holdReplay!: () => void,
+    replayEntered!: () => void,
+    replaySettled!: () => void;
+  const replayBarrier = new Promise<void>((r) => (holdReplay = r));
+  const replayEntry = new Promise<void>((r) => (replayEntered = r));
+  const replayDone = new Promise<void>((r) => (replaySettled = r));
+  j.cleanup(async () => holdReplay(), "review-barrier.release");
+  await page.route("**/api/operator/commands", async (route) => {
+    const command = route.request().postDataJSON() as Record<string, unknown>;
+    if (
+      command.type === "comment.review" ||
+      command.type === "comment.confirm"
+    ) {
+      const commands =
+        command.type === "comment.review" ? reviewCommands : confirmCommands;
+      commands.push(command);
+      const response = await route.fetch();
+      if (commands.length === 1) {
+        await route.abort("failed");
+        return;
+      }
+      if (command.type === "comment.review" && commands.length === 2) {
+        replayEntered();
+        await replayBarrier;
+      }
+      await route.fulfill({ response });
+      if (command.type === "comment.review" && commands.length === 2)
+        replaySettled();
+      return;
+    }
+    await route.continue();
+  });
+  await page
+    .getByRole("button", { name: "Review exact GitHub comment", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .waitFor();
+  const originalReview = reviewCommands[0]!;
+  assert.equal(originalReview.body, "Exact operator comment body");
+  const storedReview = f.service
+    .delivery()
+    .operatorReview(String(originalReview.key));
+  assert.equal(storedReview?.action.kind, "issue.comment");
+  assert.equal(
+    storedReview?.action.kind === "issue.comment"
+      ? storedReview.action.body
+      : null,
+    "Exact operator comment body",
+  );
+  assert.equal(effects, 0);
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "  Exact operator comment body  ",
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Review exact GitHub comment", exact: true })
+      .isEnabled(),
+    false,
+  );
+  await page
+    .getByRole("button", { name: "Set viewing reference", exact: true })
+    .click();
+  await page
+    .getByText("Observation / review receipt recorded", { exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .click();
+  await replayEntry;
+  await page
+    .getByRole("link", { name: "Back to project", exact: true })
+    .click();
+  await page.locator(`a[href="/app/tasks/${taskId}"]`).first().click();
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "  Exact operator comment body  ",
+  );
+  holdReplay();
+  await replayDone;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  assert.equal(
+    await page
+      .getByRole("button", {
+        name: "Reconcile original operation",
+        exact: true,
+      })
+      .isEnabled(),
+    true,
+  );
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .click();
+  assert.deepEqual(reviewCommands[1], originalReview);
+  assert.deepEqual(reviewCommands[2], originalReview);
+  let reviewCount = 0;
+  f.seedPersistedState((db) => {
+    reviewCount = Number(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM delivery_operator_comment_reviews",
+          )
+          .get() as { n: number }
+      ).n,
+    );
+  });
+  assert.equal(reviewCount, 1);
   await page
     .getByRole("heading", {
       name: "Exact operator comment review",
@@ -246,6 +383,43 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   await page
     .getByRole("button", { name: "Confirm exact comment", exact: true })
     .click();
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .waitFor();
+  const originalConfirm = confirmCommands[0]!;
+  const confirmed = f.service
+    .delivery()
+    .operatorReview(String(originalReview.key));
+  assert.equal(confirmed?.revision, 2);
+  assert.equal(confirmed?.decision, "approved");
+  assert.equal(effects, 0);
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Confirm exact comment", exact: true })
+      .isEnabled(),
+    false,
+  );
+  await captureBrowserEvidence(page, "1366-unknown-comment-confirm");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await captureBrowserEvidence(page, "390-unknown-comment-confirm");
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page
+    .getByRole("button", { name: "Reconcile original operation", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Post comment", exact: true })
+    .waitFor({ state: "visible" });
+  assert.deepEqual(confirmCommands[1], originalConfirm);
+  assert.deepEqual(
+    f.service.delivery().operatorReview(String(originalReview.key)),
+    confirmed,
+  );
+  assert.equal(
+    await page.getByLabel("Editable reply").inputValue(),
+    "  Exact operator comment body  ",
+  );
+  await page.unroute("**/api/operator/commands");
+  // Existing send journey uses the same exact normalized approved material.
   await page.getByRole("button", { name: "Post comment", exact: true }).click();
   await page.getByText(/uncertain: response-lost/).waitFor();
   assert.equal(effects, 1);
@@ -275,7 +449,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   assert.equal(effects, 1);
   assert.equal(
     await page.getByLabel("Editable reply").inputValue(),
-    "Exact operator comment body",
+    "  Exact operator comment body  ",
   );
   await page
     .getByRole("button", { name: "Reconcile original operation", exact: true })

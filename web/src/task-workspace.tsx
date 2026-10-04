@@ -11,6 +11,7 @@ import {
   assignmentHistorySchema,
   type CommandReceipt,
   type OperatorCommand,
+  operatorCommandSchema,
   type Session,
   type TaskRead,
   taskSchema,
@@ -309,7 +310,7 @@ export function TaskWorkspace({
       ) {
         state.uncertain = true;
         state.notice =
-          "Reply outcome unknown after navigation; original operation retained for reconciliation.";
+          "Operation outcome unknown after navigation; original operation retained for reconciliation.";
       }
       sourceRequest.current++;
       sourceRead.current = null;
@@ -466,6 +467,7 @@ export function TaskWorkspace({
         let itemActive = true,
           omissionActive = true;
         for (let page = 0; page <= Math.max(itemDepth, omissionDepth); page++) {
+          if (!owned()) return;
           const query = new URLSearchParams();
           if (boundary !== undefined)
             query.set("beforeSequence", String(boundary));
@@ -477,6 +479,7 @@ export function TaskWorkspace({
               assignmentHistorySchema,
             )
           ).data;
+          if (!owned()) return;
           values.push(value);
           boundary = undefined;
           omissionBoundary = undefined;
@@ -598,9 +601,28 @@ export function TaskWorkspace({
   }, [data, loadHistory, resource.state.pending, resource.state.error]);
   async function command(input: OperatorCommand) {
     if (pending) return;
+    const normalized = operatorCommandSchema.safeParse(input);
+    if (!normalized.success) {
+      if (state.frozen?.key === input.key) state.frozen = null;
+      state.notice =
+        "Invalid command material. Draft retained; correct it before trying again.";
+      changed();
+      return;
+    }
+    input = normalized.data;
     setPending(true);
     const current = client.captureAuthenticationScope();
-    const reply = input.type === "message" || input.type === "comment.send";
+    const reviewIntent =
+      input.type === "comment.review" || input.type === "comment.confirm";
+    const reply =
+      input.type === "message" || input.type === "comment.send" || reviewIntent;
+    if (reviewIntent) {
+      if (state.frozen && state.frozen.key !== input.key) {
+        setPending(false);
+        return;
+      }
+      state.frozen = structuredClone(input);
+    }
     if (reply) replyInFlight.current = input.key;
     const outcome = await client.command(input, session.csrfToken);
     if (!scope.current || !current()) return;
@@ -623,6 +645,44 @@ export function TaskWorkspace({
       setAuxNotice(
         "Unrelated reply receipt ignored; original operation retained.",
       );
+      return;
+    }
+    if (reviewIntent) {
+      if (outcome.state === "recorded") {
+        const receipt = outcome.receipt;
+        const matches =
+          receipt.kind === "comment-review" &&
+          receipt.key === input.key &&
+          receipt.taskId === taskId &&
+          (input.type === "comment.review"
+            ? receipt.reviewId === input.key &&
+              receipt.operationId === input.operationId &&
+              receipt.body === input.body &&
+              receipt.taskVersion === input.expectedTaskVersion
+            : input.type === "comment.confirm" &&
+              receipt.reviewId === input.reviewId &&
+              receipt.materialHash === input.materialHash &&
+              receipt.decision === input.decision &&
+              receipt.revision === input.expectedRevision + 1);
+        if (!matches) {
+          state.uncertain = true;
+          state.notice =
+            "Unknown review receipt identity; original operation retained for reconciliation.";
+        } else {
+          state.commentReview = receipt;
+          state.frozen = null;
+          state.uncertain = false;
+          state.notice =
+            "Exact comment review receipt recorded. Draft retained.";
+          setAuxNotice("Observation / review receipt recorded");
+          refresh();
+        }
+      } else {
+        state.uncertain = outcome.state === "unknown";
+        state.notice = `${outcome.state}: ${outcome.code}. ${state.uncertain ? "Draft and original review operation retained for reconciliation." : "Draft retained; operation rejected."}`;
+        if (!state.uncertain) state.frozen = null;
+      }
+      changed();
       return;
     }
     if (
@@ -1438,7 +1498,7 @@ export function TaskWorkspace({
               {state.commentReview && (
                 <CommentReview
                   record={state.commentReview}
-                  disabled={pending}
+                  disabled={pending || state.uncertain}
                   confirm={(decision) => {
                     const review = state.commentReview;
                     if (!review) return;

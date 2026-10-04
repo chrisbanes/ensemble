@@ -555,10 +555,12 @@ test("production workspace retains literal history, pending request, focused rep
     historyEntry = new Promise<void>((r) => (historyEntered = r)),
     historyDone = new Promise<void>((r) => (historySettled = r));
   let delayedHistory = false;
+  const batchRequests: string[] = [];
   const historyRoute = `**/api/operator/assignments/${r.assignmentId}/history*`;
   await page.route(historyRoute, async (route) => {
+    batchRequests.push(route.request().url());
     const response = await route.fetch();
-    if (!delayedHistory && route.request().url().includes("beforeSequence")) {
+    if (!delayedHistory && !route.request().url().includes("beforeSequence")) {
       delayedHistory = true;
       historyEntered();
       await historyBarrier;
@@ -583,6 +585,12 @@ test("production workspace retains literal history, pending request, focused rep
     .getByText("Literal update 0 long supplied text ", { exact: true })
     .waitFor({ state: "detached" });
   await reading.getByText(/\[redacted\]/).waitFor({ state: "attached" });
+  const replacementRequests = [...batchRequests];
+  assert.equal(replacementRequests.length, 3);
+  assert.equal(
+    replacementRequests.filter((url) => url.includes("beforeSequence")).length,
+    1,
+  );
   releaseHistory();
   await historyDone;
   await page.evaluate(
@@ -596,6 +604,15 @@ test("production workspace retains literal history, pending request, focused rep
       .getByText("Literal update 0 long supplied text ", { exact: true })
       .count(),
     0,
+  );
+  assert.deepEqual(
+    batchRequests,
+    replacementRequests,
+    "Superseded recent-page response must not issue its next retained cursor",
+  );
+  assert.equal(
+    await page.locator(`[data-record-id^="${r.workId}:item-"]`).count(),
+    251,
   );
   await page.unroute(historyRoute);
   f.service.domain().execute({
