@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chromium, type Browser } from "playwright";
+import { type Browser, chromium } from "playwright";
 import {
   browserSuite,
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+
 const test = browserSuite("ui04-comments");
 test("approval-mode exact operator review and unknown remote comment retain original intent through viewing and provider read reconciliation", async (_t, j) => {
   const issue = {
@@ -297,6 +298,87 @@ test("approval-mode exact operator review and unknown remote comment retain orig
   await page
     .getByRole("button", { name: "Refresh source observation", exact: true })
     .evaluate((el) => (el as HTMLElement).click());
+  await page.getByText(/source unchanged/).waitFor({ state: "attached" });
+  // A successful observation's delayed task read cannot settle a newer failure.
+  let releaseRead!: () => void, enterRead!: () => void, settleRead!: () => void;
+  const readBarrier = new Promise<void>((r) => (releaseRead = r)),
+    readEntry = new Promise<void>((r) => (enterRead = r)),
+    readSettled = new Promise<void>((r) => (settleRead = r));
+  await page.route("**/api/operator/tasks/*", async (route) => {
+    const response = await route.fetch();
+    enterRead();
+    await readBarrier;
+    await route.fulfill({ response });
+    settleRead();
+  });
+  const refreshSource = () =>
+    page
+      .getByRole("button", { name: "Refresh source observation", exact: true })
+      .evaluate((el) => (el as HTMLElement).click());
+  const failSource = (route: import("playwright").Route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    });
+  const assertUnknown = async () => {
+    await page
+      .getByText(/source comparison unknown; refresh failed/)
+      .waitFor({ state: "attached" });
+    assert.equal(
+      await page
+        .getByText(/source unchanged|source requirements changed/)
+        .count(),
+      0,
+    );
+  };
+  const settleRender = () =>
+    page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+  await refreshSource();
+  await readEntry;
+  await page.route("**/api/operator/source-refresh", failSource);
+  await refreshSource();
+  await assertUnknown();
+  releaseRead();
+  await readSettled;
+  await settleRender();
+  await assertUnknown();
+  await page.unroute("**/api/operator/tasks/*");
+  await page.unroute("**/api/operator/source-refresh");
+  await refreshSource();
+  await page.getByText(/source unchanged/).waitFor({ state: "attached" });
+
+  // A delayed provider completion itself must also belong to the current attempt.
+  let releaseProvider!: () => void,
+    enterProvider!: () => void,
+    settleProvider!: () => void;
+  const providerBarrier = new Promise<void>((r) => (releaseProvider = r)),
+    providerEntry = new Promise<void>((r) => (enterProvider = r)),
+    providerSettled = new Promise<void>((r) => (settleProvider = r));
+  let providerRequests = 0;
+  await page.route("**/api/operator/source-refresh", async (route) => {
+    if (++providerRequests > 1) return failSource(route);
+    const response = await route.fetch();
+    enterProvider();
+    await providerBarrier;
+    await route.fulfill({ response });
+    settleProvider();
+  });
+  await refreshSource();
+  await providerEntry;
+  await refreshSource();
+  await assertUnknown();
+  releaseProvider();
+  await providerSettled;
+  await settleRender();
+  await assertUnknown();
+  await page.unroute("**/api/operator/source-refresh");
+  await refreshSource();
   await page.getByText(/source unchanged/).waitFor({ state: "attached" });
   let releaseLateSource!: () => void, enterLateSource!: () => void;
   const lateSourceBarrier = new Promise<void>((r) => (releaseLateSource = r)),

@@ -5,27 +5,28 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  taskSchema,
-  assignmentHistorySchema,
-  type TaskRead,
-  type Session,
-  type OperatorCommand,
-  type CommandReceipt,
-} from "../../src/operator/contracts.js";
 import type { z } from "zod";
 import type { feedbackReferenceSchema } from "../../src/core/task-review.js";
+import {
+  assignmentHistorySchema,
+  type CommandReceipt,
+  type OperatorCommand,
+  type Session,
+  type TaskRead,
+  taskSchema,
+} from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
-import { useOperatorResource } from "./resource.js";
 import {
   ActionLink,
   Button,
   ResourceStatus,
   StatusBadge,
 } from "./components.js";
-import { Textarea } from "./ui/textarea.js";
+import { useOperatorResource } from "./resource.js";
 import type { TaskWorkspaceState } from "./task-workspace-state.js";
 import { NativeSelect } from "./ui/native-select.js";
+import { Textarea } from "./ui/textarea.js";
+
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
 const date = (n: number) => new Date(n < 1e12 ? n * 1000 : n).toLocaleString();
@@ -110,16 +111,24 @@ export function TaskWorkspace({
       loader,
     ),
     data = resource.state.data?.data;
-  const sourceRead = useRef<typeof resource.state.data>(null);
+  const sourceRequest = useRef(0);
+  const sourceRead = useRef<{
+    request: number;
+    previous: typeof resource.state.data;
+  } | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: only a requested source refresh followed by current task read can settle its comparison.
   useEffect(() => {
     if (!sourceRead.current) return;
+    if (sourceRead.current.request !== sourceRequest.current) {
+      sourceRead.current = null;
+      return;
+    }
     if (resource.state.error) {
       sourceRead.current = null;
       setSourceObservation("unknown");
     } else if (
       resource.state.status === "fresh" &&
-      resource.state.data !== sourceRead.current
+      resource.state.data !== sourceRead.current.previous
     ) {
       sourceRead.current = null;
       setSourceObservation(
@@ -198,6 +207,8 @@ export function TaskWorkspace({
     const timer = setInterval(() => refreshRef.current(), 15000);
     return () => {
       scope.current = false;
+      sourceRequest.current++;
+      sourceRead.current = null;
       if (state.sourceObservation === "pending")
         state.sourceObservation = "unknown";
       clearInterval(timer);
@@ -754,13 +765,19 @@ export function TaskWorkspace({
             <Button
               variant="secondary"
               onClick={async () => {
+                const request = ++sourceRequest.current;
+                sourceRead.current = null;
                 setSourceObservation("pending");
                 const current = client.captureAuthenticationScope();
+                const owned = () =>
+                  scope.current &&
+                  current() &&
+                  request === sourceRequest.current;
                 try {
                   const observation = await client.refreshSources(
                     session.csrfToken,
                   );
-                  if (!scope.current || !current()) return;
+                  if (!owned()) return;
                   const selections = observation.data.projects.find(
                     (p) => p.projectId === data.task.projectId,
                   )?.selections;
@@ -769,10 +786,14 @@ export function TaskWorkspace({
                     selections.some((s) => s.state !== "complete")
                   )
                     setSourceObservation("unknown");
-                  else sourceRead.current = resource.state.data;
+                  else
+                    sourceRead.current = {
+                      request,
+                      previous: resource.state.data,
+                    };
                   refresh();
                 } catch {
-                  if (!scope.current || !current()) return;
+                  if (!owned()) return;
                   setSourceObservation("unknown");
                   state.notice =
                     "Source refresh failed. Last successful source retained.";
