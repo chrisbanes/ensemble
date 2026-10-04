@@ -52,11 +52,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | Row | Concrete evidence |
 | --- | --- |
 | 1 | operator-task-workspace-browser + control-inventory pending requests/collapse/shared routes; mounted Inbox timer/header discoveries and exact request links |
-| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus |
+| 2 | task-review-service + workspace 250 retained items/earlier paging/literal disclosure/chronological; exact turn omissions in assignment/chronological views, omission-only capture and mixed-page dedup; independent item/omission cursors reach 271 turns with zero/one item and preserve loaded depths after insertion; overlapping pending timer refreshes restore exact focus/position while respecting intentional new focus; superseded retained-page responses cannot advance cursors or request another page |
 | 3 | workspace browser focused draft/anchor/refresh plus task-browser Board selected column/scroll/focus round trip; Ask lead preserves unfinished text and exact reference and focuses the existing composer; navigation-entry view state returns manual overrides, disclosure/4px/focus while shared drafts remain per task |
 | 4 | task-review-store/service privacy/exclusion/restart and literal workspace preview; atomic missing upgrade population, rollback/retry and repeated startup preserve retained bytes; same-version workspace/repository binding changes fail closed after all participating awaited reads; every private HTTP publication revalidates its exact authenticated session after awaits |
 | 5 | operator-comments-browser imported source/read-only GitHub refresh and failed sync; operator-task-review stable identity across exclusion updates; ordinary oversized source omission/raw-tail identity and UI coverage gaps; raw-under-limit redaction expansion omits the whole body/count rather than clipping a prefix; fresh/reopened retained partial sync remains an unknown comparison; synchronous source batches share one operation-local exclusion snapshot, with atomic rollback and idempotent replay |
-| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference; in-flight reply disposal preserves the original key for reconciliation without duplication |
+| 6 | task-feedback/operator-comments/store and browser unknown local/remote original-key reconciliation; contextual A-to-B selection preserves A until explicit clear, then B sends with its exact receipt reference; in-flight reply disposal preserves the original key for reconciliation without duplication; committed comment review/confirmation lost responses retain normalized exact commands across SPA entries and replay once without posting |
 | 7 | operator-comments grant/hold/material suite plus viewport keyboard and retained advanced controls |
 | 8 | workspace + comments browsers long update, failed refresh, immutable draft and uncertain writes; separate local/GitHub drafts survive contextual selection and destination switching |
 | 9 | operator-review-browser S1/R2/R3/S2 outcome scope and one-pixel paired artifact preview; omitted source checklist coverage explicitly unavailable; 128-record literal bound reports exact partial count with full retained body; exact old review/preview remains reachable beyond the 128-result window; normalized unique artifact identities preserve atomic duplicate rejection and indexed owner lookup |
@@ -67,7 +67,8 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title/attribution-first bounded excerpts, exact decision material and clip-boundary exclusions; historical Search targets outside recent review/source windows open exact retained material; same-task latest/manual origin Back/Forward and new plain latest entries; indexed 32-row yielding Search batches, finite invocation frontier, final exact eligibility/historical labels and authenticated HTTP readback; ordinary missing-table upgrade Search/exact historical navigation; final per-task workspace binding fingerprint also rejects same-version binding changes after the second scan |
 | 15 | current full npm check 883/883; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-codex15-final-check.log` (883/883).
+The current repaired full-check log is `/tmp/ui04-codex16-check.log` (883/883).
+`/tmp/ui04-codex15-final-check.log` (883/883) retains historical source-batch/session evidence.
 `/tmp/ui04-codex14-row-check-final.log` (878/878) retains historical visibility/context evidence.
 `/tmp/ui04-context-version-check.log` (872/872) retains historical exact-version evidence.
 `/tmp/ui04-upgrade-check.log` (871/871) retains historical upgrade/session evidence.
@@ -1353,3 +1354,80 @@ and tree attribution in `/tmp/ui04-codex14-screenshots.json`; they are reused, n
 retagged. All 15 acceptance rows remain mapped above. Historical live transport
 at `a21e6046`, its consumed grant and released resource are unchanged; no live
 operation, provider probe, harness, runtime or policy change was performed.
+
+
+## Exact comment intent and retained-page ownership repair (Codex 16)
+
+Executable `fd8a7efd660de5439bddf7183674a65fdee297db`, tree
+`176541983bac603a1fc55618e88ae2d71e3faeb0`, resolves findings 4177285609 and
+4177285610. Comment review and confirmation now use the existing task-shared
+frozen operation, uncertainty and original-key reconciliation path. The normalized
+command is retained before dispatch; the editable draft remains separate. Unknown
+or mismatched receipts retain the original command and block new material,
+destination changes and confirmations. Navigation during dispatch retains its
+exact intent, and a late disposed component cannot resolve it. Unrelated viewing
+and delivery observations retain their separate receipt path. Recorded review or
+confirmation updates only its exact review, clears the resolved frozen intent and
+retains the draft; these commands do not post. Definite rejection clears the
+resolved intent with an honest draft-retained notice. Input validation precedes
+pending/freeze: an oversized draft stays editable with an explicit correction
+notice and no dispatch.
+
+Review receipts require exact kind/key/task/review/operation, schema-normalized body
+and task version. Confirmation additionally requires the exact review, material,
+decision and expected revision plus one. The production browser commits a real
+SQLite review before losing its response, retains leading/trailing draft whitespace
+while replaying the trimmed immutable command, holds a replay across actual SPA
+project/task navigation, then settles its old response without clearing the new
+entry's unknown intent. The original key reconciles to one stored review. A real
+approved confirmation also commits before response loss and replays the same key,
+material and revision once. Neither review nor confirmation produces a provider
+effect. Existing task-comments tests retain real denied-confirmation idempotence,
+approval/hold/material behavior and subsequent unknown comment-send reconciliation.
+No durable cross-reload draft storage or new approval authority is claimed.
+
+Each history loop checks current auth/assignment-request ownership before every
+page request and immediately after every awaited read, before accumulation, cursor
+advancement or state publication. The actual browser loads earlier retained pages,
+holds an old recent-page response, replaces it after changed exclusions, and proves
+that only the replacement recent/older requests occur: releasing the old response
+issues no next cursor. The current 251 entries remain exact and redacted, and the
+existing failed-current-read, focus, position and independent omission paging
+assertions remain. All shared task workspace entry points use this handler; the
+legacy advanced controls retain their existing service behavior.
+
+`/tmp/ui04-codex16-spa-focused.log` passes all three affected browser probes, zero
+failures/cancellations/skips, in 6.119 seconds. The final pinned full check
+`/tmp/ui04-codex16-check.log` passes 883/883, zero failures/cancellations/skips,
+in 47.360 seconds, including both original retained-history probes with unchanged
+271/272 corpus, four-pixel assertions, primary natural clock, counterpart controlled
+clock and 45/95/600-second limits. No test timeout, retry, skip or harness changed.
+
+Initial test-only type errors in `/tmp/ui04-codex16-build.log` and
+`/tmp/ui04-codex16-valid-build.log` prevented a same-source web build; their emitted
+stale-bundle `/tmp/ui04-codex16-focused.log` run is invalid validation, not credited
+as current product evidence. The next valid run
+`/tmp/ui04-codex16-valid-focused.log` exposed the fixture's hard page reload, which
+recreated in-memory workspace state. It was corrected to actual SPA links, preserving
+the intended in-app memory-state contract. These failures and dispositions remain
+in both handoff ledgers.
+
+After executable freeze, `/tmp/ui04-codex16-clean-browser.log` passes 3/3 in
+6.019 seconds. All three manifests in `/tmp/ui04-codex16-clean-evidence` record
+completed execution and overall phases, complete cleanup, zero omitted diagnostics,
+screenshots or evidence failures. Console-error markers remain truthful: comments
+has eight (the two intentionally lost responses plus existing failure/auth paths),
+workspace has three (its intentional unknown/failed reads), and Inbox has one
+(existing fixture auth/read path). They are not evidence omissions or unreported
+clean-console claims. Desktop and phone unknown-confirmation screenshots were
+visually inspected: exact pending review and draft remain visible, confirm/edit/
+destination controls are disabled, and original-operation reconciliation is enabled.
+Exact clean-source image/manifest hashes are in `/tmp/ui04-codex16-screenshots.json`.
+
+Current bundle `index-BexsLO1G.js` is SHA256
+`68459fb85c615f2f0727b502d996f5aad52721adad22e8fca938138a7dfea653`.
+These affected captures bind the clean executable above. Unaffected historical
+images retain their original source attribution; no earlier bundle or screenshot
+is retagged. All 15 acceptance rows retain their mapping. Historical `a21e6046`
+live transport remains transport-only, with its sole grant consumed and resource
+released; no new runtime, provider, remote or live operation occurred.
