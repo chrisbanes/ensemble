@@ -684,12 +684,13 @@ test("approval-mode exact operator review and unknown remote comment retain orig
         );
     }
     const response = currentRead.value;
+    mark("task-get-response", "GET", taskPath, response.status());
     await response.finished();
     assert.equal(response.status(), 200);
     const currentTask = await response.json();
     assert.equal(currentTask.data.task.id, taskId);
     mark(
-      action === "view" ? "view-followup-read" : "task-get-response",
+      action === "view" ? "view-followup-read" : "task-read-completed",
       "GET",
       taskPath,
       response.status(),
@@ -832,7 +833,16 @@ test("approval-mode exact operator review and unknown remote comment retain orig
         };
       })
       .catch(() => ({ unavailable: true }));
-    console.log("source-segment-final-state", JSON.stringify(comparison));
+    const errorCategory =
+      error instanceof Error && error.name === "TimeoutError"
+        ? "request-or-response-timeout"
+        : error instanceof Error && error.name === "AssertionError"
+          ? "http-or-identity-assertion"
+          : "unexpected-segment-error";
+    console.log(
+      "source-segment-final-state",
+      JSON.stringify({ errorCategory, ...comparison }),
+    );
     throw error;
   } finally {
     releaseView();
