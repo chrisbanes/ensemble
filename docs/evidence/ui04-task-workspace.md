@@ -45,7 +45,7 @@ duplicate sends.
 
 Pinned Node `24.21.0` and npm `12.2.0` were used. `npm ci` passed once.
 `npm run check` passed type checking, lint, formatting, production builds and all
-847 deterministic tests with zero skips. Existing lint warnings remain warnings.
+849 deterministic tests with zero skips. Existing lint warnings remain warnings.
 Earlier stale route expectations and an incorrect Draft-column fixture assumption
 were corrected; original failure logs and dispositions remain in the handoff ledger.
 
@@ -64,10 +64,11 @@ were corrected; original failure logs and dispositions remain in the handoff led
 | 11 | operator-task-review viewed snapshot persistence and no polling baseline; review browser stale scope |
 | 12 | task-review-store/service actual producers capture supplier/brief/work/source/profile revisions; context UI |
 | 13 | operator-review-browser recorded changes/repair/no PR; operator-comments read-only provider stale/uncertain counts |
-| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser |
-| 15 | current full npm check 847/847; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
+| 14 | operator-search/service + search browser exact R2 and per-entry URL dates/filter/origin/focus; Board return browser; title-first bounded excerpts and clip-boundary exclusions |
+| 15 | current full npm check 849/849; portable fake harness 7/7; historical one live callback transport passed at a21e6046 |
 
-The current repaired full-check log is `/tmp/ui04-observation-inbox-check.log` (847/847).
+The current repaired full-check log is `/tmp/ui04-source-excerpt-check.log` (849/849).
+`/tmp/ui04-observation-inbox-check.log` (847/847) retains prior source/Inbox repair evidence.
 `/tmp/ui04-ci2-check.log` and `/tmp/ui04-ci-check.log` (845/845) retain prior CI repair evidence.
 `/tmp/ui04-r3-check.log` (843/843) records the earlier focus-repair candidate.
 `/tmp/ui04-r2-check.log` (843/843) records the four-interaction follow-up candidate.
@@ -460,3 +461,39 @@ guarantee is claimed for that historical data. Normal prior safe-equals-original
 digests remain compatible. Stable original-input identity applies to new captures.
 The original `a21e6046` transport-only live qualification, consumed grant and
 released lock remain unchanged. No new live invocation or provider probe occurred.
+
+## Bounded source search excerpt follow-up
+
+Review comment 4176048827 is repaired by code
+`a346d052b1f67278f0d9d8195fa4c2c36a99fb59`, tree
+`eb9ba893050fbda240a25a0527161e20d5267c84`. Individually valid source title/body
+previously produced an oversized combined search row that the read API omitted.
+The indexed source excerpt now keeps title first and caps the combined text at
+16,000 characters. Original source fingerprints and full individually bounded,
+sanitized source records stay unchanged. Search explicitly discloses bounded
+excerpts and partial long-source coverage; text beyond that excerpt is not indexed.
+No general index migration is claimed for unshipped intermediate oversized rows.
+
+Clipping could also leave a fragment of a later-excluded phrase at the boundary.
+The existing read seam now checks non-null full retained source title/body against
+current exclusions before exposing the clipped row. Unsafe retained prose omits
+that row; an already omitted body does not suppress a separately safe title.
+Existing exact source IDs, eligibility/version/project and post-await visibility
+checks remain effective. API regressions prove long-body title discovery, the exact
+16,000-character bound, unindexed tail absence, unchanged source identity, changed
+exclusions crossing the clipping boundary and a safe title with an omitted body.
+
+Affected store/API/Search/browser checks pass 16/16 in
+`/tmp/ui04-source-excerpt-focused.log`. A preliminary nullable-test-excerpt compile
+error is retained at `/tmp/ui04-source-excerpt-build-first-failure.log` and corrected
+with an asserted non-null excerpt before text checks. The final required full check
+passes 849/849 with zero skips in `/tmp/ui04-source-excerpt-check.log`.
+Current bundle SHA256 is
+`b27fe881c7f8bb30e399daa6091219a9ad4d4e61e5588497c7f474b77141e9e9`.
+Current desktop/phone Search images and completed cleanup are bound to that code in
+`/tmp/ui04-source-excerpt-screenshots.json`; both images were inspected. Previous
+unaffected UI images retain their original source attribution. Shared Search
+sidebar/phone/deep-link routes use this same projection and coverage text; no new
+entry point or control was introduced. All 15 acceptance rows retain their earlier
+proof, with rows 14/15 gaining this bounded-coverage evidence. Runtime/harness,
+original transport-only live proof, consumed grant and released resource are unchanged.
