@@ -220,6 +220,8 @@ export async function runQualification(options = {}) {
     projectId = randomUUID(),
     profileId = randomUUID(),
     data = join(root, "data");
+  evidence.taskId = taskId;
+  evidence.projectId = projectId;
   const save = () =>
     writeFileSync(`${root}.json`, JSON.stringify(evidence, null, 2) + "\n", {
       mode: 0o600,
@@ -292,6 +294,13 @@ export async function runQualification(options = {}) {
               "exact-callback-material",
             );
             reportCall = call;
+            evidence.callback = {
+              tool: call.tool,
+              callId: call.callId,
+              threadId: call.threadId,
+              turnId: call.turnId,
+              enteredAt: new Date().toISOString(),
+            };
             callbackPending = true;
             const work = service
               .list()
@@ -315,6 +324,7 @@ export async function runQualification(options = {}) {
             assert.equal(result.success, true);
             callbackPending = false;
             evidence.callbackEnded = true;
+            evidence.callback.endedAt = new Date().toISOString();
             return result;
           });
         return runtime;
@@ -413,6 +423,13 @@ export async function runQualification(options = {}) {
           ),
       "callback-terminal",
     );
+    evidence.terminal = service
+      .list()
+      .find(
+        (i) =>
+          i.threadId === reportCall?.threadId &&
+          i.turnId === reportCall?.turnId,
+      );
     assert.equal(callbackPending, false);
     assert.equal(service.taskHold(taskId), undefined);
     assert.deepEqual(evidence.counts, { threads: 1, turns: 1, reports: 1 });
