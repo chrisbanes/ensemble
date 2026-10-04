@@ -837,7 +837,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
       error instanceof Error && error.name === "TimeoutError"
         ? "request-or-response-timeout"
         : error instanceof Error && error.name === "AssertionError"
-          ? "http-or-identity-assertion"
+          ? "assertion-failed"
           : "unexpected-segment-error";
     console.log(
       "source-segment-final-state",
