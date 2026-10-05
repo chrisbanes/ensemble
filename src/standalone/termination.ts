@@ -35,7 +35,7 @@ async function readText(
 /** macOS boot-session identity; other hosts remain conservatively unverifiable. */
 export async function readHostBootIdentity(): Promise<string | null> {
   if (process.platform !== "darwin") return null;
-  return readText("sysctl", ["-n", "kern.bootsessionuuid"]);
+  return readText("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"]);
 }
 
 export async function readProcessBirthIdentity(

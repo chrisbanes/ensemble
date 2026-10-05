@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { GitHubHttpDeliveryProvider } from "../../src/standalone/github-delivery.js";
+import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
+import type { RuntimeConversationEvent } from "../../src/standalone/codex.js";
 import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
 import type { FixtureLifecycleOptions } from "./fixture-lifecycle.js";
 import {
@@ -12,6 +14,21 @@ import {
 
 class ReleaseRuntime extends OperatorFixtureRuntime {
   private readonly generation = randomUUID();
+  private conversationEvent:
+    | ((event: RuntimeConversationEvent) => void)
+    | undefined;
+  onConversationEvent(listener: (event: RuntimeConversationEvent) => void) {
+    this.conversationEvent = listener;
+  }
+  emitHistory(index: number, text: string) {
+    this.conversationEvent?.({
+      threadId: this.threadFor(index),
+      turnId: this.turnId(index),
+      itemId: randomUUID(),
+      kind: "completed",
+      text,
+    });
+  }
   private readonly terminals = new Map<
     string,
     (value: "completed" | "failed") => void
@@ -68,6 +85,13 @@ export function scriptedDeliveryProvider() {
     sourceBody: "Deliver O",
     sourceReads: 0,
     sourceWait: undefined as Promise<void> | undefined,
+    commentWrites: 0,
+    unknownComment: false,
+    comments: [] as Array<{
+      node_id: string;
+      user: { node_id: string };
+      body: string;
+    }>,
     requests: [] as string[],
   };
   const fetcher: typeof fetch = async (input, init) => {
@@ -87,6 +111,16 @@ export function scriptedDeliveryProvider() {
       if (state.lostResponse || state.unknownEffect)
         throw Error("scripted lost merge response");
       return Response.json({ merged: true });
+    }
+    if (route === "POST /repos/org/repo/issues/1/comments") {
+      state.commentWrites++;
+      if (state.unknownComment) throw Error("scripted unknown comment effect");
+      state.comments.push({
+        node_id: `COMMENT${state.commentWrites}`,
+        user: { node_id: "U1" },
+        body: JSON.parse(String(init?.body)).body,
+      });
+      return Response.json({ id: state.commentWrites });
     }
     if (route === "POST /graphql") {
       const query = JSON.parse(String(init?.body)).query as string;
@@ -201,6 +235,8 @@ export function scriptedDeliveryProvider() {
       case "/repos/org/repo/rules/branches/main":
       case "/repos/org/repo/deployments":
         return Response.json([]);
+      case "/repos/org/repo/issues/1/comments":
+        return Response.json(state.comments);
       case "/repos/org/repo/issues/7/comments":
         return Response.json(
           state.feedback
@@ -233,6 +269,7 @@ export async function createReleaseDeliveryFixture(
   mode: "reviewable-pr" | "through-merge" = "reviewable-pr",
   lifecycleOptions: FixtureLifecycleOptions = {},
   localTask = false,
+  routingClient: RoutingChoiceClient | null = null,
 ) {
   const scripted = scriptedDeliveryProvider();
   const readerFactory: GitHubReaderFactory = () => ({
@@ -268,7 +305,7 @@ export async function createReleaseDeliveryFixture(
     },
   });
   const f = await createOperatorFixture(
-    null,
+    routingClient,
     readerFactory,
     { providerFactory: () => scripted.provider },
     lifecycleOptions,
