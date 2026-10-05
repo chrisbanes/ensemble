@@ -1,7 +1,7 @@
 {
   "version": 1,
   "issues": [745, 697],
-  "status": "UI07 technical evidence complete; root independent integrated review and Chris final human review pending",
+  "status": "UI07 and S07a native gates completed; S07b deterministic release-candidate integration and local checks qualified; independent review and final-head remote gates pending; operational release remains unqualified",
   "baseline": {
     "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
     "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
@@ -320,16 +320,12 @@
   ],
   "remainingGates": [
     {
-      "issue": 736,
-      "status": "Chris final human visual/usability review pending"
-    },
-    {
       "issue": 697,
-      "status": "Additional actual provider/delivery integration blocked by human review736; shares this single accepted journey"
+      "status": "S07b independent integrated review/publication/remote final-head gates; local checks passed; shared finite UI07 journey reused, no new live attempt"
     },
     {
-      "issues": [698, 704, 732, 761],
-      "status": "Operational/physical/cutover gates outside UI07"
+      "issues": [698, 732, 761],
+      "status": "Final operations/recovery/cutover and physical sleep/wake remain outside #697; completed #704 preparation retained separately"
     },
     {
       "epic": 734,
@@ -342,9 +338,18 @@
     "status": "ready-for-root-independent-review",
     "criteria": 11,
     "liveJourneySharedWith": [745, 697],
-    "humanAcceptance": false,
-    "providerIntegrationQualified": false,
-    "cutoverQualified": false
+    "humanAcceptance": true,
+    "providerIntegrationQualified": true,
+    "cutoverQualified": false,
+    "humanGateReadback": {
+      "issue": 736,
+      "state": "CLOSED",
+      "stateReason": "completed",
+      "closedAt": "2026-10-04T20:20:50Z",
+      "fetchedAt": "2026-10-05T13:21:41Z",
+      "provenance": "Root controller GitHub connector fetch_issue; no separate acceptance quote or closing actor available; comments=0"
+    },
+    "providerIntegrationScope": "S07b deterministic production HTTP-provider/service/SQLite/API/React integration; S07a retained bounded real fixture evidence; final review and remote gates pending"
   },
   "recordedQuestionProjection": {
     "sourceHead": "566528decc2cb380ebf08298253bd6f99320164a",
@@ -360,5 +365,538 @@
     "focusedLogSha256": "18c189b938c36618a98c94bd77a05c278bacbf1c344c6f7468e2eea66f38479b",
     "browser": "Production task and Inbox exact request direct links, reload, retained exact committed answer, disabled Submit, zero commands after closure",
     "limits": "Successful transport was run live only on the historical f455 candidate. The old live screenshot is not corrected final UI evidence."
+  },
+  "releaseCandidate": {
+    "issue": 697,
+    "plan": "https://github.com/chrisbanes/ensemble/issues/697#issuecomment-5994598567",
+    "baseHead": "8d8ad5c2c67cf492d82443574f1a426f1540d4c0",
+    "status": "Local assembled integration and full acceptance inventory qualified; controller independent review/publication/final-head gates pending",
+    "nativePrerequisites": {
+      "736": {
+        "state": "CLOSED",
+        "stateReason": "completed",
+        "closedAt": "2026-10-04T20:20:50Z"
+      },
+      "737": {
+        "state": "CLOSED",
+        "stateReason": "completed",
+        "closedAt": "2026-10-03T10:50:22Z"
+      }
+    },
+    "sharedUI07Identity": {
+      "status": "passed",
+      "attempts": 1,
+      "reportBridgeScope": "Exact native answer map consumption and real ensemble_report_result persistence, not ordinary model-authored artifact production",
+      "limits": {
+        "appServers": 1,
+        "threads": 1,
+        "turns": 1,
+        "nativeRequests": 1,
+        "replies": 1,
+        "reports": 1,
+        "retries": 0,
+        "resume": 0,
+        "followup": 0,
+        "requestSeconds": 90,
+        "totalSeconds": 240,
+        "cleanupSeconds": 10,
+        "perActionSeconds": 10
+      },
+      "prompt": "Normal captured production executionPrompt with disposable profile/task outcome instructions; no override",
+      "completion": "Exact successful bound terminal, ended callback, no independent hold, exact counts through inspection and cleanup",
+      "persistence": "Ordinary project pause; independent read-only SQLite answer and command receipt commit before reply; ordinary unpause",
+      "cleanup": "Exact child process identity verification; no descendant containment claim",
+      "manifest": "ui07/live-journey.json",
+      "sourceHead": "f455679ce62f6284fece21d6f8f454b2c4488db4",
+      "sourceTree": "138c7271516d255f43ef4c4ede5d01acc8eea594",
+      "totalMs": 20920,
+      "counts": {
+        "threads": 1,
+        "turns": 1,
+        "requests": 1,
+        "replies": 1,
+        "reports": 1
+      },
+      "receiptOutcome": "confirmed",
+      "settlement": {
+        "exactBoundSuccessfulTerminal": true,
+        "callbackEnded": true,
+        "noOtherHold": true
+      },
+      "cleanupVerified": true,
+      "cleanupMethod": "mac-pid-absent-same-boot",
+      "resourceReleased": true
+    },
+    "s07aReuse": {
+      "document": "docs/evidence/s07a-github-delivery.md",
+      "runtime": "Codex CLI 0.159.0 / existing ChatGPT login / original designated GitHub fixtures",
+      "turnsConsumed": 9,
+      "turnCeiling": 12,
+      "fixtureSquashMerges": 1,
+      "sourceIdentity": "3b4b14756cf09db180d8efefa2f723b647fc2d89",
+      "applicability": "No transport or native protocol changes; new repair affects only never-admitted queued inbox startup ordering. New deterministic production-provider/service/SQLite/API/browser assertions renew that interaction; retained 9/12 turns and 1 merge are not rerun or relabelled as this candidate.",
+      "sourceTree": "ffba3a0eed8863075319595e6d8482086786062f"
+    },
+    "scenarios": [
+      {
+        "id": "A01",
+        "disposition": "Repository-free service/runtime restart and old-session invalidation passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A02",
+        "disposition": "Two-project/shared-profile/instruction setup passed in repository-free journey.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A03",
+        "disposition": "Authenticated creation/edit/readiness/restart journey passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A04",
+        "disposition": "Historical bounded enabled allocation, final-source disabled/explicit paths and repaired UI revision tests passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A05",
+        "disposition": "Nested review, distinct assignment threads and accountable repository completion passed; separate repository-free task conversations passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A06",
+        "disposition": "Exact nested requester return and capacity-one yield/resume/completion passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A07",
+        "disposition": "Exact-key authenticated answer/denial replay after verified restart retained one unchanged receipt/event/revision per interaction.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A08",
+        "disposition": "Partial: bounded S02/S03b lost-launch/recovery and current negative-hold coverage.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s01-minimum-contract-qualification-2026-09-28.md"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A09",
+        "disposition": "Assembled repository-free restart and one-time delivery passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A10",
+        "disposition": "Actual artifacts 41 then 42, nested review, retained-worker follow-up, new review and exact-current-result lead completion passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A11",
+        "disposition": "Explicit apply after actual restart, ordered one-time response delivery and lead completion passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A12",
+        "disposition": "Actual questions, operator answers and exact requester continuation passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A13",
+        "disposition": "Actual UI denial, production authorizationFor rejection for exact current task-bound file material, absent file and exact requester continuation passed. The disclosed fixture action adapter is not a universal action/tool enforcement bus.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A14",
+        "disposition": "Two live projects retained independent pause state across restart; Beta completed while Alpha paused.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "test/s07b-delivery-integration.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A15",
+        "disposition": "Prior real Running/Stop/restart proof reused with current Stop/ownership/recovery regressions.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "test/s07b-delivery-integration.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A16",
+        "disposition": "Full capacity-one delegated/review/follow-up successor journey passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "test/s07b-delivery-integration.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A17",
+        "disposition": "Actual bound workspace artifact/Git diff and retained follow-up identity passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A18",
+        "disposition": "Partial: bounded history generations and stale-report tests.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s01-minimum-contract-qualification-2026-09-28.md",
+          "test/s07b-delivery-integration.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A19",
+        "disposition": "Deterministic S06 issue identity/membership deduplication qualified.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A20",
+        "disposition": "Deterministic S06 complete-selection convergence and incomplete-read hold qualified.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A21",
+        "disposition": "Deterministic S06 exclusion and explicit repository-grant boundary qualified.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A22",
+        "disposition": "Deterministic S06 operator placement/conflict/retained ownership qualified.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A23",
+        "disposition": "Deterministic S06 source withdrawal/readiness/scope holds qualified; S07a and S07b retain exact own-closure exception.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A24",
+        "disposition": "Production HTTP-provider/file-SQLite/API/React connected lost-response readback, uncertain hold and zero-replay assertions qualified deterministically; bounded S07a real effect evidence reused.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s07a-github-delivery.md",
+          "docs/evidence/s07b-release-candidate.md",
+          "test/s07b-delivery-integration.test.ts",
+          "test/operator-delivery-integration-browser.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A25",
+        "disposition": "Partial: actual ordinary artifact effects, stream, selected policy and unexpected callback denial passed. Ordinary edit/shell class attribution is unproved; accepted broad-read/ambient-access and S01 escalation limits remain.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s01-minimum-contract-qualification-2026-09-28.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A26",
+        "disposition": "Connected handback, through-merge, literal feedback, paused restart/resume, terminal completion and exact effect counts qualified deterministically; bounded real S07a delivery and UI07 native journey reused.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s07a-github-delivery.md",
+          "docs/evidence/s07b-release-candidate.md",
+          "test/s07b-delivery-integration.test.ts",
+          "test/operator-delivery-integration-browser.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "A27",
+        "disposition": "Actual capacity-one journey passed alongside deterministic default caps/retry/inactivity.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A28",
+        "disposition": "Actual authenticated edge/replay, open/cancelled blocker gates, real Done release, retained independent Stop and UI Resume/completion passed. GitHub/native-dependency portion: S06 deterministic complete/incomplete read and independent gate coverage retained.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A29",
+        "disposition": "Deterministic S06 native blockers outside selection qualified; no task or repository grant inferred.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-service.test.ts",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Production behavior outside the bounded startup inbox repair is unchanged; original source/runtime/provider identities and partial outcomes are retained, with final deterministic full-suite coverage."
+      },
+      {
+        "id": "A30",
+        "disposition": "Deterministic dependency completeness coverage passed; real GitHub is S06. GitHub/native-dependency portion: S06 deterministic complete/incomplete read and independent gate coverage retained.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s06-github-discovery.md",
+          "test/github-dependencies.test.ts"
+        ],
+        "applicability": "Original live/component identities and accepted limits remain in referenced reports; final deterministic checks renew changed startup/queued-feedback and operator fixture interactions."
+      },
+      {
+        "id": "R01",
+        "disposition": "Existing runtime login and assembled repository-free restart passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s07b-release-candidate.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R02",
+        "disposition": "Full actual capacity-one journey and deterministic default/lowered limits passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R03",
+        "disposition": "Deferred/unproved physical sleep/wake #732; deterministic power assertions do not substitute for physical proof or authorize operational release.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/s03b-live-runtime-2026-09-29.md",
+          "test/power.test.ts"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R04",
+        "disposition": "Prior same-host private HTTPS proof plus current history HTTP/browser guards apply. No separate-device reachability claim.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s07b-release-candidate.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R05",
+        "disposition": "Actual repository-free restart, captured histories, private UI and explicit revision continuation passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s07b-release-candidate.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R06",
+        "disposition": "Fresh-database separation qualified in S02/S05; #704 S08a backup/restore preparation retained separately. Final operations/recovery/cutover #698/#761 remain outside #697 and unqualified here.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/s02-bootstrap-2026-09-28.md",
+          "docs/evidence/s08a-operations-2026-09-30.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R07",
+        "disposition": "Supplemental current-source enabled routing and disabled/explicit live paths passed; current deterministic tests cover the changed interaction.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R08",
+        "disposition": "Retained implementer repair and actual lead completion passed; deterministic fallback/busy/admission checks passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R09",
+        "disposition": "Exact nested requester, capacity-one scheduling, both reviews and lead completion passed; repository-free restart and simultaneous histories passed.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md",
+          "docs/evidence/ui07-integrated-operator.md",
+          "docs/evidence/s07b-release-candidate.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      },
+      {
+        "id": "R10",
+        "disposition": "Partial: current deterministic routing races/failures plus bounded current and historical live telemetry; not statistical routing-quality evidence.",
+        "references": [
+          "docs/acceptance.md",
+          "docs/evidence/s05-local-qualification.md"
+        ],
+        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+      }
+    ],
+    "releaseReady": false,
+    "deferredScope": "Physical R03 #732; final R06 #698/#761; X01-X08 remain deferred/paused and do not gate this slice.",
+    "sourceTree": "06233a4718d4373c18d34083cd0860bea6e55e6c",
+    "sourceTreeScope": "Exact staged seven owned source/test paths plus baseline documentation; final evidence/status follow-up is documentation only",
+    "sourceInputs": {
+      "src/core/coordination.ts": "17d3424c22361e1c2177595eb37bace85838a3004e4ad1eab936df120e4098d9",
+      "src/standalone/inbox-startup.ts": "d325dc28a69dcdb27e7ec01bf9299e67e668829d36ddef5227975a3e55def1e9",
+      "src/standalone/service.ts": "e19c36d1dda525c5e6b089a8ec967af4c5b27ab446e01c099772988def4788fd",
+      "test/fixtures/operator-web.ts": "b2deafe5069026c6a780daa5f1c5bf10ea9e5e6cc5b15c5b13472332dece8ce0",
+      "test/fixtures/s07b-delivery.ts": "158ffbff12ccfef972ca69dd4075011861cb0a418829f0db8d96c289b9f56605",
+      "test/operator-delivery-integration-browser.test.ts": "f4cfc5d67ca81881a3b712cf128c334f51f3c3baf53dd45cadfc9d374097f3af",
+      "test/s07b-delivery-integration.test.ts": "f3ac5e0f46556edbf110cc07795bf8a13fab2e433c81b83957cf1962f12162c1"
+    },
+    "validation": {
+      "node": "24.21.0",
+      "npm": "12.2.0",
+      "installation": "passed",
+      "fixturePreflight": {
+        "tests": 3,
+        "passed": 3
+      },
+      "fullCheck": {
+        "tests": 955,
+        "passed": 955,
+        "failed": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "durationMs": 64673.582167
+      },
+      "focusedService": {
+        "tests": 19,
+        "passed": 19
+      },
+      "checkedSourceTree": "06233a4718d4373c18d34083cd0860bea6e55e6c",
+      "documentationFollowUpOnly": true
+    }
   }
 }

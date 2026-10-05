@@ -1,3 +1,4 @@
+import { InboxStartupReconciliation } from "./inbox-startup.js";
 import { createHash } from "node:crypto";
 import {
   materialDigest,
@@ -193,6 +194,7 @@ export class StandaloneService {
   private workspaces: WorkspaceManager | undefined;
   private workspaceBindings: SqliteWorkspaceBindingStore | undefined;
   private schedulerStore: SchedulerStore | undefined;
+  private inboxStartup: InboxStartupReconciliation | undefined;
   private scheduler: TurnScheduler | undefined;
   private supervisor: ExecutionSupervisor | undefined;
   private power: ExecutionPower | undefined;
@@ -321,6 +323,7 @@ export class StandaloneService {
             : undefined,
       );
       coordination.migrate();
+      this.inboxStartup = new InboxStartupReconciliation(db, domain);
       coordination.invalidateRuntimeQuestions(
         "Service restarted; native endpoints cannot be reconstructed",
       );
@@ -533,6 +536,9 @@ export class StandaloneService {
       await this.reconcileOwnDeliveryClosures();
       await this.githubSynchronizer.refresh();
       this.emitSourceHoldNotices();
+      // The scheduler is deliberately absent until provider reconciliation and
+      // queued-inbox supersession finish; domain notifications cannot admit work.
+      this.inboxStartup.reconcile();
       const powerOptions = this.options.power;
       const powerEnabled =
         powerOptions?.enabled ??
@@ -2290,6 +2296,7 @@ export class StandaloneService {
         { requestKey: repair.repairWorkId, workId: repair.repairWorkId },
       );
     }
+    for (const queued of store.queued()) this.inboxStartup?.capture(queued);
     await scheduler.wake();
     if (refusalRebindPass === 0 && withdrawStaleRefusedDeliveries() > 0)
       await this.wakeScheduler(1);

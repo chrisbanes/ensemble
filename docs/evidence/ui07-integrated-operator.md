@@ -3,8 +3,9 @@
 The integrated browser path now creates a local task, records its exact native
 answer, and inspects the bound result using the production UI, authenticated
 service and persistent SQLite. Offline qualification uses a fake App Server.
-The sole finite live attempt passed in 20.920 seconds with verified cleanup. Chris's final
-visual/usability acceptance remains pending on [#736](https://github.com/chrisbanes/ensemble/issues/736).
+The sole finite live attempt passed in 20.920 seconds with verified cleanup. The native UI gate [#736](https://github.com/chrisbanes/ensemble/issues/736) is
+closed/completed as of 4 October 2026 at 20:20:50 UTC (controller readback
+5 October 2026, 13:21:41 UTC). No separate acceptance quote is recorded.
 
 ## Candidate and evidence boundary
 
@@ -114,7 +115,7 @@ containment.
 | AC3 forms, List/Board, imported content, histories and expiry | `operator-question-browser`, `structured-question-store/service`, `operator-task-browser`, `operator-task-workspace-browser`, `operator-api` and `operator-web-browser`. |
 | AC4 keyboard/focus/layout/captures | Question, task, review, search, foundation and settings production browser suites; selected laptop/phone/reduced-height captures below. |
 | AC5 runtime/version/continuation/limits | UI01's unchanged native codec evidence and UI07's passed finite assembled native/browser proof. |
-| AC6 defects/blockers/human review | Repairs above, retained failed fixtures and current gate states in inventory; Chris review remains pending. |
+| AC6 defects/blockers/human review | Repairs above, retained failed fixtures and current gate states in inventory; the #736 native gate is closed/completed; original technical evidence retains its limits. |
 | AC7 attributable evidence/context/feedback/delivery | `operator-review-browser`, `task-review-store/service`, `delivery-operator/service`; real local bytes/receipts, recorded provider observations. |
 | AC8 search origins/history/return/errors | `operator-search-browser`, workspace/task browser suites; exact historical destinations and shared draft/selection restoration. |
 | AC9 approvals/independent holds/source/destinations | `operator-inbox`, `operator-api`, `runtime-question-service`, `s05-runtime-integration`, delivery suites and retained exact approval controls. Viewing grants no approval; merge grants no task completion. |
@@ -181,6 +182,8 @@ at 10 seconds or the earlier global deadline. Missing/unsupported/foreign materi
 unexpected operations, early terminal, missing receipt/report, drift or unresolved
 cleanup block qualification and preserve the consumed attempt.
 
-Technical proof does not close #736's human review, #697's additional provider
-integration, #698/#704/#732/#761 operational/physical/cutover work or paused X01–X08.
+The #736 gate is closed/completed. #697's assembled provider integration is
+recorded in [S07b](s07b-release-candidate.md); final operations/physical/cutover
+#698/#732/#761 and paused X01–X08 remain separate. Completed #704 preparation
+is retained in its original evidence.
 No deployment or installed Haze cutover was performed.

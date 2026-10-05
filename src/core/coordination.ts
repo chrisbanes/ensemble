@@ -2981,7 +2981,28 @@ export class CoordinationStore {
   isHistoricalWorkResolved(workId: string): boolean {
     return Boolean(
       this.isNeverAdmittedRefusedAssignmentWork?.(workId) ||
-        this.hasRecoveryContinuation(workId),
+        this.hasRecoveryContinuation(workId) ||
+        (this.one(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_request_supersessions'",
+        ) &&
+          this.one(
+            `WITH RECURSIVE successor(newWorkId,batchId,sourceId,sourceDigest) AS (
+            SELECT s.newWorkId,s.batchId,s.sourceId,s.sourceDigest
+            FROM inbox_request_supersessions s JOIN execution_intents i ON i.workId=s.oldWorkId
+            WHERE s.oldWorkId=? AND i.state='reconciled' AND i.threadId IS NULL AND i.turnId IS NULL
+            UNION
+            SELECT s.newWorkId,s.batchId,s.sourceId,s.sourceDigest
+            FROM successor prior JOIN inbox_request_supersessions s ON s.oldWorkId=prior.newWorkId
+            JOIN execution_intents i ON i.workId=s.oldWorkId
+            WHERE s.batchId=prior.batchId AND s.sourceId=prior.sourceId AND s.sourceDigest=prior.sourceDigest
+              AND i.state='reconciled' AND i.threadId IS NULL AND i.turnId IS NULL
+          ) SELECT 1 FROM successor
+          JOIN turn_requests request ON request.workId=successor.newWorkId
+          JOIN coordination_delivery_batches batch ON batch.batchId=successor.batchId
+          WHERE batch.deliveryWorkId=request.workId AND batch.taskId=request.taskId
+            AND batch.recipientAssignmentId=request.assignmentId LIMIT 1`,
+            workId,
+          )),
     );
   }
 
