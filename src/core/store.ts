@@ -13,32 +13,23 @@ export interface Database {
   };
 }
 
+export function transaction<T>(db: Database, action: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = action();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve the migration or command error that triggered rollback.
+    }
+    throw error;
+  }
+}
+
 const schemaVersion = 6;
-const taskSchema = z.object({
-  id: z.string(),
-  projectId: z.string(),
-  title: z.string(),
-});
-const assignmentSchema = z.object({
-  id: z.string(),
-  taskId: z.string(),
-  projectId: z.string(),
-  brief: z.string(),
-  state: z.enum(["pending", "launching", "running", "completed"]),
-  instructions: z.string().nullable(),
-  result: z.string().nullable(),
-});
-const projectBindingSchema = z.object({
-  projectId: z.string(),
-  hostKey: z.string().uuid(),
-  externalProjectId: z.string(),
-  coordinatorConversationId: z.string().nullable(),
-});
-const conversationBindingSchema = z.object({
-  assignmentId: z.string(),
-  hostKey: z.string().uuid(),
-  externalConversationId: z.string(),
-});
 const hostInstallationSchema = z.object({
   hostKind: z.string(),
   hostKey: z.string().uuid(),
@@ -69,7 +60,7 @@ export class Store {
         );
       this.migrateExecutionStateToV6();
     }
-    const hostKey = this.transaction(() => {
+    const hostKey = transaction(this.db, () => {
       const currentVersion = schemaVersionSchema.parse(
         this.db.prepare("PRAGMA user_version").get(),
       ).user_version;
@@ -106,7 +97,6 @@ export class Store {
             "INSERT INTO host_installation (singleton, hostKind, hostKey) VALUES (1, ?, ?)",
           )
           .run(host.hostKind, host.hostKey);
-        this.validatePersistedRows();
         this.db.exec(`PRAGMA user_version = ${schemaVersion}`);
         return host.hostKey;
       }
@@ -129,22 +119,6 @@ export class Store {
       return host.hostKey;
     });
     return hostKey;
-  }
-
-  private transaction<T>(action: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = action();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-        // Preserve the migration or command error that triggered rollback.
-      }
-      throw error;
-    }
   }
 
   private createTables(): void {
@@ -205,7 +179,7 @@ export class Store {
   private migrateExecutionStateToV6(): void {
     this.db.exec("PRAGMA foreign_keys = OFF");
     try {
-      this.transaction(() => {
+      transaction(this.db, () => {
         this.db.exec(`CREATE TABLE execution_intents_v6 (
           id TEXT PRIMARY KEY,
           workId TEXT NOT NULL UNIQUE,
@@ -229,31 +203,5 @@ export class Store {
     } finally {
       this.db.exec("PRAGMA foreign_keys = ON");
     }
-  }
-
-  private validatePersistedRows(): void {
-    const tasks = this.db
-      .prepare("SELECT id, projectId, title FROM tasks")
-      .all();
-    for (const task of tasks) taskSchema.parse(task);
-    const assignments = this.db
-      .prepare(
-        "SELECT id, taskId, projectId, brief, state, instructions, result FROM assignments",
-      )
-      .all();
-    for (const assignment of assignments) assignmentSchema.parse(assignment);
-    const projects = this.db
-      .prepare(
-        "SELECT projectId, hostKey, externalProjectId, coordinatorConversationId FROM project_host_bindings",
-      )
-      .all();
-    for (const binding of projects) projectBindingSchema.parse(binding);
-    const conversations = this.db
-      .prepare(
-        "SELECT assignmentId, hostKey, externalConversationId FROM conversation_bindings",
-      )
-      .all();
-    for (const binding of conversations)
-      conversationBindingSchema.parse(binding);
   }
 }

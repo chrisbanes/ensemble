@@ -159,7 +159,7 @@ export function MobileNavigation({
       <SheetTrigger asChild>
         <Button variant="secondary">Projects and navigation</Button>
       </SheetTrigger>
-      <SheetContent className="drawer" showClose={false}>
+      <SheetContent className="drawer">
         <SheetHeader>
           <SheetTitle className="section-heading">
             Projects and navigation

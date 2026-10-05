@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   chmodSync,
   realpathSync,
   rmSync,
@@ -220,8 +221,11 @@ export async function runQualification(options = {}) {
         "test/ui07/runtime-contract.mjs",
         "test/ui07/fake-app-server.mjs",
         "test/ui04/runtime-contract.mjs",
-        "dist/operator/assets/index-CsF3lIED.js",
-        "dist/operator/assets/index-QXFEB72c.css",
+        "dist/operator/index.html",
+        ...readdirSync(join(rootDir, "dist/operator/assets"))
+          .filter((name) => /\.(js|css)$/.test(name))
+          .sort()
+          .map((name) => `dist/operator/assets/${name}`),
       ].map((path) => [path, hash(readFileSync(join(rootDir, path)))]),
     ),
     timing: [],
