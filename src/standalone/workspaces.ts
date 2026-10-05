@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { z } from "zod";
-import type { Database } from "../core/store.js";
+import { transaction, type Database } from "../core/store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -170,7 +170,7 @@ export class SqliteWorkspaceBindingStore implements WorkspaceBindingStore {
     gitCommonDir: string,
     commit: string,
   ): TaskWorkspaceBinding {
-    return this.transaction(() => {
+    return transaction(this.db, () => {
       const binding = this.get(taskId);
       if (!binding) throw new Error(`No task workspace for ${taskId}`);
       const index = binding.repositories.findIndex(
@@ -214,22 +214,6 @@ export class SqliteWorkspaceBindingStore implements WorkspaceBindingStore {
       ...stored,
       repositories: JSON.parse(stored.repositories),
     });
-  }
-
-  private transaction<T>(operation: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = operation();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-        // Keep the storage error that caused rollback.
-      }
-      throw error;
-    }
   }
 
   private invalidRow(): never {

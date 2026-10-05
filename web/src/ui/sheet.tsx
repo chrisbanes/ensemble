@@ -1,6 +1,5 @@
 import type * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
 import { cn } from "../lib/utils.js";
 
 const Sheet = DialogPrimitive.Root;
@@ -24,34 +23,20 @@ function SheetOverlay({
 function SheetContent({
   className,
   children,
-  side = "left",
-  showClose = true,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & {
-  side?: "left" | "right";
-  showClose?: boolean;
-}) {
+}: React.ComponentProps<typeof DialogPrimitive.Content>) {
   return (
     <SheetPortal>
       <SheetOverlay />
       <DialogPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          "fixed inset-y-0 z-50 flex h-full w-[min(20rem,calc(100%-1.5rem))] flex-col gap-4 overflow-y-auto border-border bg-sidebar p-6 text-sidebar-foreground shadow-lg outline-none",
-          side === "left" ? "left-0 border-r" : "right-0 border-l",
+          "fixed inset-y-0 z-50 flex h-full w-[min(20rem,calc(100%-1.5rem))] flex-col gap-4 overflow-y-auto border-border bg-sidebar p-6 text-sidebar-foreground shadow-lg outline-none left-0 border-r",
           className,
         )}
         {...props}
       >
         {children}
-        {showClose && (
-          <DialogPrimitive.Close
-            className="absolute right-4 top-4 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Close navigation"
-          >
-            <X aria-hidden="true" className="size-4" />
-          </DialogPrimitive.Close>
-        )}
       </DialogPrimitive.Content>
     </SheetPortal>
   );
