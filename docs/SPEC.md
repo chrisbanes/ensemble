@@ -773,11 +773,24 @@ without that proof, independent holds and changed source text remain held. Expli
 issue closure requires observed open before the effect; a concurrent independent
 closure between that read and write remains an attribution limit.
 
-This implementation has deterministic service/provider/operator coverage. Required
-real GitHub/Codex/browser delivery journeys remain unrun without a named resource,
-operation, credential, runtime-turn and cleanup grant. See the
-[S07a evidence inventory](evidence/s07a-github-delivery.md). S07a is incomplete;
-release, operations, redesigned UI and cutover are separate gates.
+This implementation has deterministic service/provider/operator coverage. The bounded
+real GitHub/Codex/browser handback and through-merge journeys and cleanup are
+qualified in the [S07a evidence inventory](evidence/s07a-github-delivery.md);
+its original limits and failed checkpoints remain visible. The native UI gate
+#736 is closed/completed. [S07b](evidence/s07b-release-candidate.md) assembles
+the candidate inventory and deterministic production-provider/UI integration;
+physical sleep/wake, final operations and cutover remain separate gates.
+
+On startup, after complete provider/source reconciliation and before scheduler
+admission, a queued inbox request may receive one durable fresh generation when
+only provider-derived task versions changed. The exact ready intent must never
+have been admitted; captured source identity/digest, assignment/instruction/profile
+revisions, immutable task-control command receipts and nonderived policy/repository snapshots must match. Independent
+Stop/ownership, unfinished execution, effect or recovery evidence prevents this
+supersession. The old captured request/context material remains immutable and historical, with an
+explicit old-to-new receipt; retirement is not a successful terminal. Legacy
+requests lacking the required anchor fail closed. Held or admitted work still
+requires its existing recovery path.
 
 ## Review checkpoint
 
@@ -805,8 +818,8 @@ acceptance scenario**. That scenario remains unproved; no native availability is
 claimed. Delivery [UI03 #741](https://github.com/chrisbanes/ensemble/issues/741)
 adds attention overview, shared List/Board and atomic local composer, with
 [contract](design/ui03-tasks.md) and [service/browser evidence](evidence/ui03-tasks.md).
-UI01/UI04–UI07 screens, runtime-question integration and parent #736
-final acceptance remain separate. Existing controls stay available. This
+UI01/UI04–UI07 screens and runtime-question integration retain their own
+qualified evidence; parent #736 is closed/completed as of 4 October 2026. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
 
 Delivery [UI06 #744](https://github.com/chrisbanes/ensemble/issues/744) implements the [configuration/recovery presentation contract](design/ui06-configuration.md), retaining exact private editors and operational destinations. Production-bundle integration is qualified with disposable SQLite and deterministic runtime/provider fixtures; this does not replace live-runtime, provider or release evidence.

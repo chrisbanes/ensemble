@@ -86,11 +86,14 @@ interface OwnedWeb {
   closeSteps: Map<string, FixtureStep>;
 }
 
-export async function createOperatorFixture(
+export async function createOperatorFixture<
+  R extends OperatorFixtureRuntime = OperatorFixtureRuntime,
+>(
   routingClient: RoutingChoiceClient | null = null,
   readerFactory?: GitHubReaderFactory,
   delivery?: StandaloneServiceOptions["delivery"],
   lifecycleOptions: FixtureLifecycleOptions = {},
+  runtimeFactory?: () => R,
 ) {
   const lifecycle = new FixtureLifecycle(lifecycleOptions);
   const fixtureDeadline = performance.now() + lifecycle.startupTimeoutMs;
@@ -138,18 +141,17 @@ export async function createOperatorFixture(
       fixture: directoryOwner,
     });
   }
-  const runtime = new OperatorFixtureRuntime();
-  const service = new StandaloneService(
-    join(directory, "data"),
-    () => runtime,
-    undefined,
-    {
+  let runtime = runtimeFactory
+    ? runtimeFactory()
+    : (new OperatorFixtureRuntime() as R);
+  const makeService = () =>
+    new StandaloneService(join(directory, "data"), () => runtime, undefined, {
       power: { enabled: false },
       routingClient,
       ...(delivery ? { delivery } : {}),
       ...(readerFactory ? { github: { readerFactory } } : {}),
-    },
-  );
+    });
+  let service = makeService();
   const listeners = new Map<number, OwnedWeb>();
   let listenerSequence = 0;
   let ownedBrowser: Browser | undefined;
@@ -215,8 +217,24 @@ export async function createOperatorFixture(
   };
   const fixture = {
     directory,
-    runtime,
-    service,
+    get runtime() {
+      return runtime;
+    },
+    get service() {
+      return service;
+    },
+    async reopen() {
+      if (listeners.size)
+        throw Error("Close web clients/listeners before reopening");
+      if (service.list().some((i) => i.state === "running"))
+        throw Error("Settle active work before reopening");
+      await service.stop();
+      runtime = runtimeFactory
+        ? runtimeFactory()
+        : (new OperatorFixtureRuntime() as R);
+      service = makeService();
+      await service.start();
+    },
     lifecycle,
     seedPersistedState(seed: (db: DatabaseSync) => void) {
       const db = new DatabaseSync(join(directory, "data", "standalone.sqlite"));
