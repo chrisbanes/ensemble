@@ -67,3 +67,25 @@ _Avoid_: Assignment identity when referring only to an execution session
 **Task workspace**:
 The working files allocated to a task, retained independently of its conversations.
 _Avoid_: Conversation when referring to a task's working files
+
+**Current workspace contents**:
+The files observed in a task workspace at an identified inspection time. They may
+change as work continues and do not represent a historical result.
+_Avoid_: Result revision when referring to the files currently present
+
+**Retained result evidence**:
+The bounded file contents and diffs preserved for a particular recorded result,
+remaining attributable to it after the task workspace changes or is removed.
+It is not a snapshot of the whole task workspace.
+_Avoid_: Workspace snapshot when referring only to result-linked evidence
+
+**Code review**:
+A batch of operator line comments and an optional summary sent together to a
+task's accountable project lead. It is local feedback, not a GitHub review or
+an approval or completion decision.
+_Avoid_: Approval when referring to submitted review feedback
+
+**Review anchor**:
+The exact task, repository/file content, line range and applicable diff side
+that a review comment addresses. Later file changes do not move the anchor.
+_Avoid_: Current line number when referring to historical reviewed content
