@@ -208,6 +208,42 @@ layouts, keyboard access, readable text and distinguishable task titles.
 | UX04 | Open a task containing several assignments and conversations, then inspect its history as updates arrive | The initial view explains the outcome, current situation, next actor or unknown responsibility, unresolved decisions and relevant evidence. Lead accountability and assignment/conversation identities remain distinct. Recorded facts and attributed excerpts suffice without reading runtime output; omissions/staleness remain visible. Updates preserve reading position, disclosure and unfinished replies | UI + service |
 | UX05 | Create a task with optional context, references, assignee and dependencies, collapse/reopen those controls, then submit with a validation error or capacity wait | Project, title and outcome remain prominent; supplied optional settings have a visible summary and retain values through disclosure. Errors remain discoverable. Create and start / Save draft retain their semantics; confirmed creation and execution waiting are distinct. Existing draft and unknown-outcome reconciliation guarantees remain effective | UI + service + SQLite |
 
+## Post-MVP task workspace inspection
+
+Chris confirmed this #776 scope on 6 October 2026. These are requirements for
+post-MVP workspace inspection, not passing evidence or additions to #649's
+release/cutover gates. Preserve completed #742 behaviour and the #734 pause.
+
+| ID | Scenario | Required outcome |
+| --- | --- | --- |
+| WI01 | Browse repository-free and multiple-repository task workspaces | Files and generated outputs are inspectable with explicit task/repository identity. Ignored clutter is hidden initially and can be revealed; excluded sensitive content remains inaccessible. Missing/removed workspaces are explicit. |
+| WI02 | Open text/code, Markdown, raster images, PDF, binary and oversized files | Supported previews are bounded and usable; unsupported, excluded and oversized states give truthful limits. No download/export action is provided. Inspected active content cannot execute with application authority. |
+| WI03 | Attempt traversal, absolute-path injection, symlink escape, cross-task access and file replacement during reads/capture | Service-side validation prevents access outside the authorised task scope and applies the same exclusions to listings, previews, captures and retained evidence. Inconsistent reads fail with an explicit gap rather than false exactness. |
+| WI04 | Select Branch and Uncommitted in a workspace with committed, staged, unstaged, untracked, deleted and renamed changes | Branch compares against the merge base with the identified task base branch; Uncommitted offers staged/unstaged filters. Display the exact baseline and observation time; binary and unsupported entries remain visible. Each repository has its own baseline. Git targets are unavailable for repository-free workspaces. |
+| WI05 | Base branch is unknown or a selected local branch has no usable baseline | Explain the missing baseline and allow local base selection. No implicit guessed baseline, fetch or checkout occurs. An unusable comparison stays unavailable. |
+| WI06 | Complete successive real agent turns, then observe a failed/interrupted/uncertain turn | Last turn is bound to the actual turn/agent and bounded before/after observation, not a result revision. Only the latest turn capture is retained as turn history; result evidence survives replacement. Partial/unknown observations disclose identity, outcome, time and uncertainty without clearing holds or asserting writes have ended. Older tasks with no capture remain unavailable. |
+| WI07 | Report a result, change its files, replace the latest turn capture, restart, then remove the workspace | Successfully retained result-linked file bytes and diffs remain attributable and inspectable as the original evidence. No whole-workspace snapshot is implied. Capture exclusions, size limits and failures are recorded without rejecting the result or replacing historical bytes with later contents. |
+| WI08 | Work continues while an operator reads a file/diff and later refreshes | Keep the displayed read stable until explicit refresh, show observation time and known changes, preserve selection/reading position where still valid and represent deletion/unavailability honestly. Inspection neither pauses work nor changes execution, approval or ownership state. |
+| WI09 | Reach inspection from task, result/evidence and applicable direct links on desktop and phone | Preserve exact current/result/turn context, return navigation, disclosures and unfinished replies. Keyboard navigation and long files/diffs remain usable. Review applicable List/Board, Overview, Inbox and existing advanced routes for consistent task navigation; document absent entry points rather than adding unrelated ones. |
+
+The approved local code review amendment adds these scenarios:
+
+| ID | Scenario | Required outcome |
+| --- | --- | --- |
+| WI10 | Select single lines and ranges in text previews and both diff sides, including deleted lines; collect comments across files | Draft comments can be added, edited and removed, with an optional review summary. Exact task/repository/content/range/side and comparison/result/turn context remain attached. Cross-task, invalid-range and excluded-content anchors are rejected. |
+| WI11 | Change, rename or delete reviewed files, replace the latest turn capture, restart or remove the workspace | Bounded retained review context remains tied to original content. Affected comments show outdated status; missing or unknown comparison remains explicit. No automatic retargeting, newer-byte substitution or implied whole-workspace history occurs. |
+| WI12 | Inspect a draft and send, retry a confirmed failure, or reconcile an uncertain submission | One logical review containing the exact comments and summary reaches the named accountable lead with a receipt. Confirmed failures preserve editable drafts; unknown outcomes retain the original operation for reconciliation without duplicate delivery. No GitHub call, approval, readiness/completion change, merge authority or hold release occurs. |
+| WI13 | Navigate among files, diffs and exact result evidence while drafting on desktop, phone and keyboard | Draft content and anchors survive navigation/refresh under session privacy rules. Sent feedback remains inspectable with its original context. Existing contextual feedback is preserved; no unrelated thread-resolution or retraction workflow is introduced. |
+
+Use production service APIs, real filesystem/Git and SQLite fixtures for the
+deterministic cases, including bounded sizes, process restart and cleanup.
+Qualify the changed turn-capture boundary with a bounded real-runtime journey
+after deterministic coverage, then verify the integrated production UI on
+desktop and phone. Record source/runtime identity, observed captures, limits and
+exact resource cleanup; reuse unaffected runtime and #742 evidence. The
+implementation owner runs validation. Review the Pen interaction/state handoff
+before UI implementation and retain final integrated usability review.
+
 ## Implemented service and integration proofs
 
 These are later S02–S07 integration obligations (GitHub coverage starts in S06).
