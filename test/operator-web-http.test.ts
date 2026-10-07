@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { mkdir, writeFile, symlink, unlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, symlink, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import {
   OperatorWebBundle,
@@ -16,6 +16,7 @@ import {
 } from "../src/standalone/operator.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { createControlledPasswordDeriver } from "./fixtures/operator-auth-concurrency.js";
 test("one guarded listener serves shell and authenticated JSON with rotated CSRF", async (t) => {
   const f = await createOperatorFixture();
   t.after(() => f.close());
@@ -376,6 +377,180 @@ test("HTTPS configured origin retains Secure host-only cookie and rejects loopba
       body: JSON.stringify({ password: "fixture password" }),
     });
     assert.equal(login.status, requestOrigin === configured ? 200 : 403);
+  }
+});
+
+test("JSON login settles concurrent, duplicate, and stale attempts with generic responses", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const bundlePath = join(f.directory, "auth-concurrency-bundle");
+  await mkdir(join(bundlePath, "assets"), { recursive: true });
+  await writeFile(join(bundlePath, "index.html"), "<html></html>");
+  const authFile = join(f.directory, "auth-concurrency.json");
+  const configuredOrigin = "https://ensemble.fixture.ts.net";
+  const correctPassword = "JSON-PASSWORD-SENTINEL";
+  await OperatorAuth.initialize(authFile, correctPassword);
+  const record = JSON.parse(await readFile(authFile, "utf8")) as {
+    verifier: string;
+  };
+  const deriver = createControlledPasswordDeriver(
+    correctPassword,
+    Buffer.from(record.verifier, "base64url"),
+  );
+  let now = 1_000;
+  const auth = await OperatorAuth.open({
+    authFile,
+    origin: configuredOrigin,
+    now: () => now,
+    idleTimeoutMs: 1_000,
+    absoluteTimeoutMs: 5_000,
+    loginFailureLimit: 1,
+    loginLockoutMs: 1_000,
+    derivePassword: deriver.derivePassword,
+  });
+  const bundle = await OperatorWebBundle.open(bundlePath);
+  const http = new LocalOperatorHttp(
+    new LocalOperatorUi(f.service.domain()),
+    auth,
+    {
+      web: new OperatorWebBoundary(
+        bundle,
+        new OperatorApi(f.service, [f.directory]),
+      ),
+    },
+  );
+  const pendingRequests: Promise<Response>[] = [];
+  try {
+    const port = await http.start();
+    const localOrigin = `http://127.0.0.1:${port}`;
+    const anonymous = async () => {
+      const response = await fetch(`${localOrigin}/api/operator/session`);
+      assert.equal(response.status, 200);
+      const setCookie = response.headers.get("set-cookie") ?? "";
+      assert.match(setCookie, /HttpOnly/);
+      assert.match(setCookie, /SameSite=Strict/);
+      assert.match(setCookie, /Secure/);
+      assert.doesNotMatch(setCookie, /Domain=/i);
+      const session = (await response.json()) as { csrfToken: string };
+      return {
+        cookie: setCookie.split(";", 1)[0] ?? "",
+        csrfToken: session.csrfToken,
+      };
+    };
+    const postLogin = (
+      session: { cookie: string; csrfToken: string },
+      password: string,
+      requestOrigin: string | null = configuredOrigin,
+      csrfToken: string = session.csrfToken,
+    ) => {
+      const headers: Record<string, string> = {
+        cookie: session.cookie,
+        "content-type": "application/json",
+        "x-csrf-token": csrfToken,
+      };
+      if (requestOrigin !== null) headers.origin = requestOrigin;
+      const request = fetch(`${localOrigin}/api/operator/login`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ password }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      pendingRequests.push(request);
+      return request;
+    };
+    const assertGenericFailure = async (response: Response) => {
+      assert.equal(response.status, 401);
+      const body = await response.text();
+      assert.match(body, /unauthenticated/);
+      assert.equal(response.headers.get("set-cookie"), null);
+      assert.doesNotMatch(body, /JSON-PASSWORD-SENTINEL|WRONG-JSON-PASSWORD/);
+      assert.doesNotMatch(body, new RegExp(record.verifier));
+      return body;
+    };
+
+    const guarded = await anonymous();
+    for (const [requestOrigin, csrfToken] of [
+      ["https://foreign.fixture.ts.net", guarded.csrfToken],
+      [configuredOrigin, "wrong-csrf-sentinel"],
+    ] as const) {
+      const denied = await postLogin(
+        guarded,
+        "JSON-PASSWORD-SENTINEL",
+        requestOrigin,
+        csrfToken,
+      );
+      assert.equal(denied.status, 403);
+      await denied.text();
+      assert.equal(deriver.calls.length, 0, "guards run before derivation");
+    }
+
+    const wrong = await anonymous();
+    const correct = await anonymous();
+    const wrongResponse = postLogin(wrong, "WRONG-JSON-PASSWORD");
+    await deriver.waitForCalls(1);
+    const correctResponse = postLogin(correct, correctPassword);
+    await deriver.waitForCalls(2);
+    deriver.release(0);
+    await assertGenericFailure(await wrongResponse);
+    deriver.release(1);
+    await assertGenericFailure(await correctResponse);
+
+    now += 1_001;
+    const duplicate = await anonymous();
+    const first = postLogin(duplicate, correctPassword);
+    await deriver.waitForCalls(3);
+    await assertGenericFailure(await postLogin(duplicate, correctPassword));
+    assert.equal(deriver.calls.length, 3, "same-cookie duplicate is rejected");
+    deriver.release(2);
+    const success = await first;
+    assert.equal(success.status, 200);
+    const rotatedCookie = success.headers.get("set-cookie") ?? "";
+    assert.match(rotatedCookie, /HttpOnly/);
+    assert.match(rotatedCookie, /SameSite=Strict/);
+    assert.match(rotatedCookie, /Secure/);
+    assert.doesNotMatch(rotatedCookie, /Domain=/i);
+    const session = (await success.json()) as {
+      authenticated: boolean;
+      csrfToken: string;
+    };
+    assert.equal(session.authenticated, true);
+    assert.notEqual(session.csrfToken, duplicate.csrfToken);
+    const rotatedPair = rotatedCookie.split(";", 1)[0] ?? "";
+    const rotatedId = rotatedPair.split("=", 2)[1] ?? "";
+    const oldId = duplicate.cookie.split("=", 2)[1] ?? "";
+    assert.notEqual(rotatedPair, duplicate.cookie);
+    assert.equal(auth.getSession(rotatedId)?.authenticated, true);
+    assert.equal(auth.getSession(oldId), undefined);
+    const replay = await postLogin(duplicate, correctPassword);
+    assert.equal(replay.status, 403);
+    await replay.text();
+    assert.equal(deriver.calls.length, 3, "rotated session cannot replay");
+
+    const loggedOut = await anonymous();
+    const logoutPending = postLogin(loggedOut, correctPassword);
+    await deriver.waitForCalls(4);
+    auth.logout(loggedOut.cookie.split("=", 2)[1] ?? "");
+    deriver.release(3);
+    await assertGenericFailure(await logoutPending);
+
+    const expired = await anonymous();
+    const expiryPending = postLogin(expired, correctPassword);
+    await deriver.waitForCalls(5);
+    now += 1_001;
+    deriver.release(4);
+    await assertGenericFailure(await expiryPending);
+
+    const closed = await anonymous();
+    const closePending = postLogin(closed, correctPassword);
+    await deriver.waitForCalls(6);
+    auth.close();
+    deriver.release(5);
+    await assertGenericFailure(await closePending);
+  } finally {
+    deriver.releaseAll();
+    await Promise.allSettled(pendingRequests);
+    await http.stop();
+    auth.close();
   }
 });
 

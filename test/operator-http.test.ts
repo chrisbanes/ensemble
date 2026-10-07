@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -22,6 +22,7 @@ import { coordinationOperatorRoutes } from "../src/standalone/operator-coordinat
 import { OperatorRouteRegistry } from "../src/standalone/operator-routes.js";
 import { runtimeOperatorRoutes } from "../src/standalone/operator-runtime.js";
 import { StandaloneService } from "../src/standalone/service.js";
+import { createControlledPasswordDeriver } from "./fixtures/operator-auth-concurrency.js";
 
 const password = "test operator password";
 
@@ -764,6 +765,177 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
     assert.ok(!forgedCoordinationHost.body.includes("Coordination slot"));
   } finally {
     await http?.stop();
+    auth?.close();
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("HTML login settles concurrent and stale attempts through the shared auth boundary", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "ensemble-operator-auth-concurrency-"),
+  );
+  chmodSync(directory, 0o700);
+  const authFile = join(directory, "operator-auth.json");
+  const db = new DatabaseSync(":memory:");
+  let auth: OperatorAuth | undefined;
+  let http: LocalOperatorHttp | undefined;
+  let deriver: ReturnType<typeof createControlledPasswordDeriver> | undefined;
+  const pendingResponses: Promise<Response>[] = [];
+  let now = 1_000;
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    new Store(db).ensureHost("test");
+    const domain = new DomainStore(db);
+    domain.migrate();
+    const configuredOrigin = "https://ensemble.fixture.ts.net";
+    const localPort = await unusedPort();
+    const localOrigin = `http://127.0.0.1:${localPort}`;
+    await OperatorAuth.initialize(authFile, password);
+    const verifier = (
+      JSON.parse(readFileSync(authFile, "utf8")) as { verifier: string }
+    ).verifier;
+    deriver = createControlledPasswordDeriver(
+      "HTML-PASSWORD-SENTINEL",
+      Buffer.from(verifier, "base64url"),
+    );
+    const openedAuth = await OperatorAuth.open({
+      authFile,
+      origin: configuredOrigin,
+      now: () => now,
+      idleTimeoutMs: 1_000,
+      absoluteTimeoutMs: 5_000,
+      loginFailureLimit: 1,
+      loginLockoutMs: 1_000,
+      derivePassword: deriver.derivePassword,
+    });
+    auth = openedAuth;
+    http = new LocalOperatorHttp(new LocalOperatorUi(domain), openedAuth);
+    await http.start(localPort);
+
+    const anonymous = async () => {
+      const response = await fetch(`${localOrigin}/login`);
+      assert.equal(response.status, 200);
+      const setCookie = response.headers.get("set-cookie") ?? "";
+      assert.match(setCookie, /HttpOnly/);
+      assert.match(setCookie, /SameSite=Strict/);
+      assert.match(setCookie, /Secure/);
+      assert.doesNotMatch(setCookie, /Domain=/i);
+      const body = await response.text();
+      return {
+        cookie: cookiePair(response),
+        csrfToken: csrfFrom(body),
+      };
+    };
+    const postLogin = (
+      session: { cookie: string; csrfToken: string },
+      submittedPassword: string,
+      requestOrigin: string | null = configuredOrigin,
+      csrfToken: string = session.csrfToken,
+    ) => {
+      const headers: Record<string, string> = {
+        cookie: session.cookie,
+        "content-type": "application/x-www-form-urlencoded",
+      };
+      if (requestOrigin !== null) headers.origin = requestOrigin;
+      const request = fetch(`${localOrigin}/login`, {
+        method: "POST",
+        headers,
+        body: new URLSearchParams({
+          password: submittedPassword,
+          csrfToken,
+        }),
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+      pendingResponses.push(request);
+      return request;
+    };
+    const assertGenericFailure = async (response: Response) => {
+      assert.equal(response.status, 401);
+      const body = await response.text();
+      assert.match(body, /Sign in failed/);
+      assert.equal(response.headers.get("set-cookie"), null);
+      assert.doesNotMatch(
+        body,
+        /HTML-PASSWORD-SENTINEL|WRONG-HTML-PASSWORD-SENTINEL/,
+      );
+      assert.doesNotMatch(body, new RegExp(verifier));
+      return body;
+    };
+
+    const guarded = await anonymous();
+    for (const [requestOrigin, csrfToken] of [
+      ["https://foreign.fixture.ts.net", guarded.csrfToken],
+      [null, guarded.csrfToken],
+      [configuredOrigin, "wrong-csrf-sentinel"],
+    ] as const) {
+      const denied = await postLogin(
+        guarded,
+        "HTML-PASSWORD-SENTINEL",
+        requestOrigin,
+        csrfToken,
+      );
+      assert.equal(denied.status, 403);
+      await denied.text();
+      assert.equal(deriver.calls.length, 0, "guards run before derivation");
+    }
+
+    const wrong = await anonymous();
+    const correct = await anonymous();
+    const wrongResponse = postLogin(wrong, "WRONG-HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(1);
+    const correctResponse = postLogin(correct, "HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(2);
+    deriver.release(0);
+    await assertGenericFailure(await wrongResponse);
+    deriver.release(1);
+    const correctFailure = await correctResponse;
+    await assertGenericFailure(correctFailure);
+
+    now += 1_001;
+    const duplicate = await anonymous();
+    const first = postLogin(duplicate, "HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(3);
+    await assertGenericFailure(
+      await postLogin(duplicate, "HTML-PASSWORD-SENTINEL"),
+    );
+    assert.equal(deriver.calls.length, 3, "same-cookie duplicate is rejected");
+    deriver.release(2);
+    const success = await first;
+    assert.equal(success.status, 303);
+    assert.equal(success.headers.get("location"), "/");
+    const rotatedCookie = success.headers.get("set-cookie") ?? "";
+    assert.match(rotatedCookie, /HttpOnly/);
+    assert.match(rotatedCookie, /SameSite=Strict/);
+    assert.match(rotatedCookie, /Secure/);
+    assert.doesNotMatch(rotatedCookie, /Domain=/i);
+    const authenticatedPair = cookiePair(success);
+    assert.notEqual(authenticatedPair, duplicate.cookie);
+    const authenticatedId = authenticatedPair.split("=", 2)[1] ?? "";
+    assert.equal(openedAuth.getSession(authenticatedId)?.authenticated, true);
+    assert.equal(
+      openedAuth.getSession(duplicate.cookie.split("=", 2)[1] ?? ""),
+      undefined,
+    );
+
+    const afterLogout = await anonymous();
+    const logoutPending = postLogin(afterLogout, "HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(4);
+    openedAuth.logout(afterLogout.cookie.split("=", 2)[1] ?? "");
+    deriver.release(3);
+    await assertGenericFailure(await logoutPending);
+
+    const afterExpiry = await anonymous();
+    const expiryPending = postLogin(afterExpiry, "HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(5);
+    now += 1_001;
+    deriver.release(4);
+    await assertGenericFailure(await expiryPending);
+  } finally {
+    deriver?.releaseAll();
+    await Promise.allSettled(pendingResponses);
+    if (http) await http.stop();
     auth?.close();
     db.close();
     rmSync(directory, { recursive: true, force: true });

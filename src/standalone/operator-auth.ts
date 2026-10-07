@@ -18,6 +18,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 const DEFAULT_LOGIN_FAILURE_LIMIT = 5;
 const DEFAULT_LOGIN_LOCKOUT_MS = 60 * 1_000;
+const MAX_ACTIVE_DERIVATIONS = 4;
 const MAX_SESSIONS = 256;
 const MAX_AUTH_FILE_BYTES = 4_096;
 
@@ -53,6 +54,7 @@ export type OperatorAuthOptions = {
   origin: string;
   now?: () => number;
   randomBytes?: RandomBytes;
+  derivePassword?: (password: string) => Promise<Buffer>;
   idleTimeoutMs?: number;
   absoluteTimeoutMs?: number;
   loginFailureLimit?: number;
@@ -208,12 +210,15 @@ export class OperatorAuth {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly now: () => number;
   private readonly randomBytes: RandomBytes;
+  private readonly derivePassword: (password: string) => Promise<Buffer>;
   private readonly idleTimeoutMs: number;
   private readonly absoluteTimeoutMs: number;
   private readonly loginFailureLimit: number;
   private readonly loginLockoutMs: number;
   private readonly salt: Buffer;
   private readonly verifier: Buffer;
+  private readonly derivingSessions = new Set<SessionRecord>();
+  private activeDerivations = 0;
   private failedLogins = 0;
   private lockedUntil = 0;
   private closed = false;
@@ -242,6 +247,9 @@ export class OperatorAuth {
     }
     this.salt = decodeBase64Url(record.salt, SALT_LENGTH);
     this.verifier = decodeBase64Url(record.verifier, KEY_LENGTH);
+    this.derivePassword =
+      options.derivePassword ??
+      ((password) => deriveVerifier(password, this.salt));
   }
 
   static async initialize(
@@ -333,26 +341,57 @@ export class OperatorAuth {
   ): Promise<OperatorSession | undefined> {
     if (this.closed || this.now() < this.lockedUntil) return undefined;
     const current = this.lookup(id);
-    if (!current || current.authenticated || typeof password !== "string")
+    if (
+      !current ||
+      current.authenticated ||
+      typeof password !== "string" ||
+      this.derivingSessions.has(current) ||
+      this.activeDerivations >= MAX_ACTIVE_DERIVATIONS
+    ) {
       return undefined;
-    let candidate: Buffer;
+    }
+    this.derivingSessions.add(current);
+    this.activeDerivations += 1;
     try {
-      candidate = await deriveVerifier(password, this.salt);
-    } catch {
-      return undefined;
-    }
-    if (!timingSafeEqual(candidate, this.verifier)) {
-      this.failedLogins += 1;
-      if (this.failedLogins >= this.loginFailureLimit) {
-        this.failedLogins = 0;
-        this.lockedUntil = this.now() + this.loginLockoutMs;
+      let candidate: Buffer;
+      try {
+        candidate = await this.derivePassword(password);
+      } catch {
+        return undefined;
       }
-      return undefined;
+      if (
+        this.closed ||
+        this.now() < this.lockedUntil ||
+        !Buffer.isBuffer(candidate) ||
+        candidate.length !== this.verifier.length
+      ) {
+        return undefined;
+      }
+      if (!timingSafeEqual(candidate, this.verifier)) {
+        this.failedLogins += 1;
+        if (this.failedLogins >= this.loginFailureLimit) {
+          this.failedLogins = 0;
+          this.lockedUntil = this.now() + this.loginLockoutMs;
+        }
+        return undefined;
+      }
+      const latest = this.lookup(id);
+      if (
+        this.closed ||
+        this.now() < this.lockedUntil ||
+        latest !== current ||
+        latest.authenticated
+      ) {
+        return undefined;
+      }
+      this.failedLogins = 0;
+      this.lockedUntil = 0;
+      this.deleteSession(id);
+      return this.createSession(true);
+    } finally {
+      this.derivingSessions.delete(current);
+      this.activeDerivations -= 1;
     }
-    this.failedLogins = 0;
-    this.lockedUntil = 0;
-    this.deleteSession(id);
-    return this.createSession(true);
   }
 
   getSession(id: string): OperatorSession | undefined {
