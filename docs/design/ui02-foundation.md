@@ -41,6 +41,8 @@ Each semicolon-separated control is individually retained at the listed destinat
 | all views | navigation | delivered overview/project List/Board/composer; retained task/profile/assignment/Runtime/Coordination destinations | UI03 #741 delivered / UI04 #742 | curated reads |
 | `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
 
+The delivery rows record the existing S07a controls and the ownership in the [reviewed UI06 revision 2 plan](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5948676415): UI06 retains the exact policy/authority editor, while UI04 owns the task delivery facts, guarded handback settlement and observation refresh. These controls have no JSON delivery adapter in this foundation. Settlement records an operator decision; refresh requests provider observations. Neither action alone completes the local task.
+
 Advanced authenticated recovery routes added for the approved #737 pre-turn
 recovery boundary have no rendered form or new React control. The host operator
 supplies the reviewed evidence and exact command material under the existing
