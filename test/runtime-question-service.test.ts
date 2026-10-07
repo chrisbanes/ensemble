@@ -5,6 +5,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "./temp.js";
 import { test } from "node:test";
+import {
+  CoordinationStore,
+  type RuntimeQuestionRecord,
+} from "../src/core/coordination.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import type { Runtime, UnexpectedRequest } from "../src/standalone/codex.js";
@@ -19,9 +23,21 @@ function required<T>(value: T | null | undefined): T {
   assert.ok(value !== undefined && value !== null);
   return value;
 }
-function runtimeQuestion(service: StandaloneService, taskId: string) {
-  return required(
+function runtimeQuestion(
+  service: StandaloneService,
+  taskId: string,
+): RuntimeQuestionRecord {
+  const projected = required(
     service.coordinationView().readTask(taskId).runtimeQuestions?.[0],
+  );
+  const { coordination } = service as unknown as {
+    coordination: CoordinationStore;
+  };
+  return required(
+    coordination.runtimeQuestionByInteractionId(
+      projected.interactionId,
+      taskId,
+    ),
   );
 }
 function deferred<T>() {
@@ -49,6 +65,7 @@ class NativeRuntime implements Runtime {
   >();
   replies = 0;
   interrupts = 0;
+  readonly cancelled: NativeInputEndpointIdentity[] = [];
   onRequest?: (call: RuntimeUserInputRequest) => void;
   onOutcome?: (outcome: RuntimeUserInputOutcome) => void;
   readonly terminal = deferred<"completed" | "failed">();
@@ -164,6 +181,7 @@ class NativeRuntime implements Runtime {
     });
   }
   cancelUserInput(identity: NativeInputEndpointIdentity, reason: string) {
+    this.cancelled.push(identity);
     this.onOutcome?.({
       ...identity,
       ...this.receipt,
@@ -471,7 +489,11 @@ test("failed durable native receipt commit keeps the callback and ownership held
       answers: { q: { answers: ["Local"] } },
     });
     await until(() => f.runtime.replies === 1);
-    assert.equal(runtimeQuestion(f.service, f.taskId).deliveryState, "sending");
+    const question = runtimeQuestion(f.service, f.taskId);
+    assert.equal(question.deliveryState, "uncertain");
+    assert.equal(question.requestState, "unavailable");
+    assert.equal(question.replyIntentId, f.runtime.receipt?.replyIntentId);
+    assert.equal(question.answerDigest, f.runtime.receipt?.answerDigest);
     assert.equal(f.service.list()[0]?.state, "held");
     f.runtime.terminal.resolve("completed");
     await until(() => Boolean(f.service.list()[0]?.reason));
@@ -742,16 +764,141 @@ for (const confounder of ["stop", "generation"] as const)
   test(`early native start response after ${confounder} cannot revive prebound work`, async () => {
     const f = await fixture({ early: true });
     try {
+      let unrelatedWorkId: string | undefined,
+        unrelatedQuestionId: string | undefined;
+      if (confounder === "generation") {
+        const internals = f.service as unknown as {
+          state: ExecutionState;
+          coordination: CoordinationStore;
+        };
+        const unrelatedTaskId = randomUUID();
+        command(f.service, {
+          type: "task.create",
+          actor: "operator",
+          projectId: f.projectId,
+          taskId: unrelatedTaskId,
+          title: "Unrelated native work",
+          outcome: "Remain untouched",
+          ready: false,
+        });
+        const assignment = required(
+          f.service.domain().ensureLeadAssignment(unrelatedTaskId),
+        );
+        const assignmentId = String(assignment.id);
+        unrelatedWorkId = randomUUID();
+        const intent = internals.state.create(
+          unrelatedWorkId,
+          "Unrelated native work",
+          join(f.root, "unrelated-workspace"),
+        );
+        internals.state.bindTask(unrelatedWorkId, {
+          taskId: unrelatedTaskId,
+          assignmentId,
+          assignmentVersion: Number(assignment.version),
+          instructionsRevision: Number(assignment.instructionsRevision),
+          profileRevision: Number(assignment.profileRevision),
+        });
+        assert.equal(
+          internals.state.begin(intent.id, {
+            projectId: f.projectId,
+            requestSequence: 2,
+            processIdentity: f.runtime.processIdentity(),
+          }),
+          true,
+        );
+        assert.equal(internals.state.bindThread(intent.id, "thread"), true);
+        assert.equal(
+          internals.state.bindTurn(intent.id, "unrelated-turn", "generation"),
+          true,
+        );
+        const original = runtimeQuestion(f.service, f.taskId);
+        f.runtime.onRequest?.({
+          identity: {
+            ...original.identity,
+            requestId: 77,
+            turnId: "unrelated-turn",
+            itemId: "unrelated-item",
+          },
+          request: {
+            ...original.request,
+            turnId: "unrelated-turn",
+            itemId: "unrelated-item",
+          },
+          qualification: original.qualification,
+        });
+        const persisted =
+          internals.coordination.runtimeQuestionsForWork(unrelatedWorkId);
+        assert.equal(persisted.length, 1);
+        unrelatedQuestionId = persisted[0]?.interactionId;
+      }
       if (confounder === "stop") void f.service.stopTask(f.taskId);
       else f.runtime.generation = "replacement";
       f.runtime.startResponse.resolve("turn");
       await until(() => f.service.list()[0]?.state === "held");
       assert.equal(f.runtime.replies, 0);
       assert.equal(f.runtime.turns, 1);
+      if (confounder === "generation")
+        assert.deepEqual(
+          f.runtime.cancelled.map(
+            ({ threadId, turnId, runtimeGeneration }) => ({
+              threadId,
+              turnId,
+              runtimeGeneration,
+            }),
+          ),
+          [
+            {
+              threadId: "thread",
+              turnId: "turn",
+              runtimeGeneration: "generation",
+            },
+          ],
+          JSON.stringify({
+            questions: (
+              f.service as unknown as { coordination: CoordinationStore }
+            ).coordination.runtimeQuestionsForWork(
+              f.service.list()[0]?.workId ?? "",
+            ),
+            execution: f.service.list()[0],
+          }),
+        );
       assert.equal(
         runtimeQuestion(f.service, f.taskId).deliveryState,
         "unavailable",
       );
+      if (unrelatedWorkId && unrelatedQuestionId) {
+        const internals = f.service as unknown as {
+          state: ExecutionState;
+          coordination: CoordinationStore;
+        };
+        const unrelated =
+          internals.coordination.runtimeQuestionsForWork(unrelatedWorkId)[0];
+        assert.equal(unrelated?.interactionId, unrelatedQuestionId);
+        assert.equal(unrelated?.identity.threadId, "thread");
+        assert.equal(unrelated?.identity.turnId, "unrelated-turn");
+        assert.equal(unrelated?.deliveryState, "unanswered");
+        assert.equal(unrelated?.requestState, "available");
+        assert.equal(
+          internals.state.byWorkId(unrelatedWorkId)?.state,
+          "running",
+        );
+        assert.deepEqual(
+          f.runtime.cancelled.map(
+            ({ threadId, turnId, runtimeGeneration }) => ({
+              threadId,
+              turnId,
+              runtimeGeneration,
+            }),
+          ),
+          [
+            {
+              threadId: "thread",
+              turnId: "turn",
+              runtimeGeneration: "generation",
+            },
+          ],
+        );
+      }
     } finally {
       await f.close();
     }

@@ -110,6 +110,44 @@ test("UI07 setup deadline closes late browser and records failed cleanup without
   assert.equal(r.cleanup.lateResources[0].state, "failed");
   assert.equal(r.counts.turns, 0);
 });
+
+test("UI07 timed-out service startup keeps its late service-stop owner without racing runtime shutdown", async () => {
+  const r = await harness.runQualification({
+    fixture: { delayRuntimeStart: 3000, totalMs: 4500 },
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.failure.reason, /service-start-deadline/);
+  assert.equal(r.counts.threads, 0);
+  assert.equal(r.counts.turns, 0);
+  assert.equal(r.cleanup.operations["pending-setup-settlement"], "settled");
+  assert.equal(r.cleanup.operations["exact-runtime-stop"], undefined);
+  assert.equal(r.cleanup.operations["service-close"], undefined);
+  assert.deepEqual(
+    r.cleanup.lateResources.map(
+      ({
+        identity,
+        state,
+        settledWithinCleanupDeadline,
+      }: {
+        identity: string;
+        state: string;
+        settledWithinCleanupDeadline: boolean;
+      }) => ({
+        identity,
+        state,
+        settledWithinCleanupDeadline,
+      }),
+    ),
+    [
+      {
+        identity: "service-start:1",
+        state: "settled",
+        settledWithinCleanupDeadline: true,
+      },
+    ],
+  );
+  assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
+});
 test("UI07 delayed HTTP setup and shutdown failure retain incomplete cleanup evidence", async () => {
   const r = await harness.runQualification({
     fixture: { delayHttp: true, shutdownFailure: true, totalMs: 4500 },

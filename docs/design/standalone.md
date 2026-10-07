@@ -194,6 +194,89 @@ broader enabled-tool policy checks belong to S02–S05 integration. Keep the ear
 unexplained file effect as a diagnostic finding, without relabelling it a pass or
 making its explanation a prerequisite for all implementation.
 
+## Runtime retention and durable safety evidence
+
+The Codex adapter separates operational object lifetime from safety-evidence
+lifetime. Bounded memory may retire settled payloads; it never makes an old turn
+successful, a replay fresh, an unresolved execution safe, or a retained hold
+releasable. SQLite is authoritative for decisions that must survive cache eviction
+or service restart. These rules govern the current Codex adapter and do not add a
+second reply authority or a disk-history deletion policy.
+
+Before a terminal can resolve `waitForTurn()` or permit the service's normal
+completion path, persist its exact `(threadId, turnId)` decision in
+`runtime_terminal_evidence`. The key is independent of runtime generation so a
+current child reporting the same bound identity can still conflict with an earlier
+report; generation remains diagnostic and old-child messages are rejected before
+they reach this evidence path. Retain the first observed `completed` or `failed`
+status, a sticky conflict flag, the exact associated `workId` when known, and the
+first/last generation and observation time. A same-status duplicate preserves the
+first observation. An opposite status atomically marks the identity conflicted and
+uses the existing anomaly/retraction path; no later status can overwrite that
+conflict with success. The execution binding must be exact and unambiguous before
+a terminal can authorize completion or retraction of work and successors.
+
+Older execution rows without a terminal receipt migrate to an explicit unknown
+receipt; their execution state does not prove which terminal status was observed.
+A missing, unknown, corrupt, ambiguous or unreadable receipt, or a failed write,
+does not authorize completion. Preserve the existing hold and report a bounded
+failure. A valid current-child terminal that arrives before its `turn/start`
+response may be stored without a work binding, but it has no completion authority
+until the exact binding is established. Reconcile that same identity when binding
+arrives. Do not treat an absent row or an evicted cache entry as evidence that an
+identity is new.
+
+Native request and reply facts extend the existing
+`coordination_runtime_questions` record. Its exact endpoint identity, request
+digest, qualification snapshot, answer, reply intent and ordered final/uncertain
+outcome remain the sole durable reply history. Backfilled identity fields retain
+runtime generation, thread, turn, item and the RPC identifier's JSON type and
+value, so numeric and string IDs remain distinct. Exact endpoint lookups use the
+existing endpoint key; ambiguity among reused typed IDs is held rather than guessed.
+Pending-answer and per-work queries are indexed for background dispatch and
+cancellation. `CoordinationStore.beginRuntimeReply()` remains the only transaction
+that records reply intent before stdin write; no parallel native-reply ledger is
+introduced. A missing or inconsistent expected row, failed before-write intent,
+or uncertain post-write outcome does not create another answer opportunity or
+permit a retry.
+
+Keep a callable native endpoint and raw readback only while the current turn,
+callback, reply write or other operational owner needs them. Pending, writing,
+sent-unconfirmed and uncertain replies stay pinned until matching resolution and
+callback processing end, or a durable unavailable/uncertain outcome records the
+limitation. The existing single identical replay remains available only for its
+active same-child request. After retirement, an unchanged, changed, reused-ID or
+old-generation request is checked against durable identity and digest; it cannot
+become a fresh prompt or a second reply. Direct active indexes by exact endpoint,
+generation/thread/typed RPC ID and thread/turn serve cancellation and replay
+matching without scans over settled endpoint payloads.
+
+Persist each resumable thread's exact registered tool-definition digest and its
+first successfully qualified runtime version/hash, provider, model, effort, tier
+and developer-instruction digest. Never replace that baseline with current values.
+On resume, missing legacy facts or changed tool/settings readback withholds native
+qualification and retains the existing hold; current settings do not prove what a
+prior thread used. Other per-thread and per-turn maps are retired only after their
+last consumer has recorded its required durable disposition.
+
+The initial settled-cache budgets are 256 terminal entries/64 KiB, up to 16
+retired native entries/512 KiB if a payload cache is needed, and 128 thread
+qualification/tool entries/256 KiB. Account for count and actual UTF-8 key/value
+payload bytes together; zero settled native payload cache is acceptable when
+indexed lookups meet measured bounds. Report active pins separately and tie each
+to its actual callback, reply, turn or held-work owner. Eviction affects only
+settled memory. Do not prune durable evidence by age, add a force-unlock path, or
+claim that retained execution holds are resolved by cache retirement.
+
+Use exact indexed lookups or bounded cursor reads for durable evidence. Do not
+populate runtime caches from a full history load at service start. Existing
+execution-state reconciliation may still traverse the records it needs to restore
+workspace normalization and holds; any such traversal remains distinct from a
+terminal/native cache fill and must preserve its current hold checks. Prove the
+retention budgets, cold indexed lookup, direct cancellation and memory deltas with
+deterministic real-SQLite fixtures. These workload measurements establish the
+tested bounds only, not a universal latency or heap guarantee.
+
 ## Default execution policy
 
 Select supported App Server `workspaceWrite` controls with task working directory

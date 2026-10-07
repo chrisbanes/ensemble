@@ -5,6 +5,7 @@ type SqlValue = string | number | null;
 
 // The storage contract is deliberately limited to the SQLite operations used here.
 export interface Database {
+  readonly isTransaction?: boolean;
   exec(sql: string): unknown;
   prepare(sql: string): {
     run(...parameters: SqlValue[]): unknown;

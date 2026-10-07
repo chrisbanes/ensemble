@@ -22,6 +22,12 @@ import type {
   VerifiedTermination,
 } from "./recovery-types.js";
 import type { ConversationHistoryBinding } from "./conversation-history.js";
+import type {
+  RuntimeTerminalEvidence,
+  RuntimeTerminalObservation,
+  RuntimeThreadQualification,
+  RuntimeThreadQualificationEvidence,
+} from "./runtime-retention.js";
 
 const recoveryReceiptColumns = `(
       id TEXT PRIMARY KEY,
@@ -91,6 +97,11 @@ export interface NativeTurnPrebinding extends TaskExecutionBinding {
   processIdentity: RuntimeProcessIdentity;
 }
 
+export type NativeTurnStartReconciliation =
+  | { status: "matched" }
+  | { status: "absent" }
+  | { status: "rejected"; prebinding: NativeTurnPrebinding };
+
 export interface StopTarget {
   taskId: string;
   workId: string;
@@ -117,6 +128,56 @@ export interface TaskTurnRequest {
   sequence: number;
   state: "queued" | "active" | "completed" | "held";
 }
+
+export interface WorkspaceNormalizationRow {
+  cursor: number;
+  id: string;
+  workId: string;
+  workspace: string;
+  taskId: string | null;
+  workspaceId: string | null;
+  workspacePath: string | null;
+}
+
+const runtimeTerminalEvidenceSchema = z
+  .object({
+    threadId: z.string().min(1).max(512),
+    turnId: z.string().min(1).max(512),
+    firstStatus: z.enum(["completed", "failed"]).nullable(),
+    conflicted: z
+      .number()
+      .int()
+      .refine((value) => value === 0 || value === 1),
+    workId: z.string().min(1).nullable(),
+    firstRuntimeGeneration: z.string().min(1).nullable(),
+    lastRuntimeGeneration: z.string().min(1).nullable(),
+    firstObservedAt: z.number().int().nonnegative().nullable(),
+    lastObservedAt: z.number().int().nonnegative().nullable(),
+  })
+  .strict();
+
+const runtimeThreadQualificationSchema = z
+  .object({
+    threadId: z.string().min(1).max(512),
+    toolDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    codexVersion: z.string().min(1).max(128).nullable(),
+    executableHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    model: z.string().min(1).max(256).nullable(),
+    modelProvider: z.string().min(1).max(256).nullable(),
+    reasoningEffort: z.string().max(128).nullable(),
+    serviceTier: z.string().max(128).nullable(),
+    developerInstructionsDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+  })
+  .strict();
 
 export interface PowerEventCursor {
   version: 1;
@@ -371,11 +432,50 @@ export class ExecutionState {
       bootId TEXT,
       threadId TEXT,
       turnId TEXT,
+      runtimeGeneration TEXT,
+      terminalEvidenceObserved INTEGER NOT NULL DEFAULT 0
+        CHECK(terminalEvidenceObserved IN (0,1)),
       inspectionKind TEXT,
       terminalStatus TEXT CHECK(terminalStatus IS NULL OR terminalStatus IN ('completed','failed')),
       CHECK((processId IS NULL AND processStartedAt IS NULL AND bootId IS NULL)
         OR (processId IS NOT NULL AND processStartedAt IS NOT NULL AND bootId IS NOT NULL))
     );
+    CREATE TABLE IF NOT EXISTS runtime_terminal_evidence (
+      threadId TEXT NOT NULL CHECK(length(threadId) BETWEEN 1 AND 512),
+      turnId TEXT NOT NULL CHECK(length(turnId) BETWEEN 1 AND 512),
+      firstStatus TEXT CHECK(firstStatus IS NULL OR firstStatus IN ('completed','failed')),
+      conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),
+      workId TEXT REFERENCES execution_intents(workId),
+      firstRuntimeGeneration TEXT,
+      lastRuntimeGeneration TEXT,
+      firstObservedAt INTEGER,
+      lastObservedAt INTEGER,
+      PRIMARY KEY(threadId, turnId),
+      CHECK((firstStatus IS NULL AND firstRuntimeGeneration IS NULL AND
+        firstObservedAt IS NULL) OR (firstStatus IS NOT NULL AND
+        firstRuntimeGeneration IS NOT NULL AND lastRuntimeGeneration IS NOT NULL AND
+        firstObservedAt IS NOT NULL AND lastObservedAt IS NOT NULL)),
+      CHECK((lastRuntimeGeneration IS NULL AND lastObservedAt IS NULL) OR
+        (lastRuntimeGeneration IS NOT NULL AND lastObservedAt IS NOT NULL))
+    );
+    CREATE TABLE IF NOT EXISTS runtime_thread_qualification (
+      threadId TEXT PRIMARY KEY CHECK(length(threadId) BETWEEN 1 AND 512),
+      toolDigest TEXT,
+      codexVersion TEXT,
+      executableHash TEXT,
+      model TEXT,
+      modelProvider TEXT,
+      reasoningEffort TEXT,
+      serviceTier TEXT,
+      developerInstructionsDigest TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runtime_retention_migrations (
+      migrationId TEXT PRIMARY KEY
+    );
+    CREATE INDEX IF NOT EXISTS execution_intents_thread_turn_idx
+      ON execution_intents(threadId, turnId);
+    CREATE INDEX IF NOT EXISTS execution_intents_thread_state_idx
+      ON execution_intents(threadId, state, turnId);
     CREATE TABLE IF NOT EXISTS execution_recovery_observations (
       id TEXT PRIMARY KEY,
       workId TEXT NOT NULL REFERENCES execution_intents(workId),
@@ -405,6 +505,24 @@ export class ExecutionState {
     INSERT OR IGNORE INTO execution_power_supervision (singleton) VALUES (1);
     INSERT OR IGNORE INTO scheduler_capacity_limits (singleton, globalLimit)
       VALUES (1, 4)`);
+    const recoveryIdentityColumns = this.db
+      .prepare("PRAGMA table_info(execution_recovery_identities)")
+      .all() as Array<{ name: string }>;
+    if (
+      !recoveryIdentityColumns.some(({ name }) => name === "runtimeGeneration")
+    )
+      this.db.exec(
+        "ALTER TABLE execution_recovery_identities ADD COLUMN runtimeGeneration TEXT",
+      );
+    if (
+      !recoveryIdentityColumns.some(
+        ({ name }) => name === "terminalEvidenceObserved",
+      )
+    )
+      this.db.exec(`ALTER TABLE execution_recovery_identities
+        ADD COLUMN terminalEvidenceObserved INTEGER NOT NULL DEFAULT 0
+        CHECK(terminalEvidenceObserved IN (0,1))`);
+    this.migrateRuntimeRetention();
     this.migratePreTurnReceipts();
     // Workspace recovery runs before this state is opened. Keep the archival
     // hold only when bounded Git work recorded unresolved filesystem effects.
@@ -972,12 +1090,12 @@ export class ExecutionState {
     turnId: string,
     runtimeGeneration: string,
   ): NativeTurnPrebinding | undefined {
-    const matches = this.list().filter(
-      (intent) =>
-        intent.threadId === threadId &&
-        intent.state === "submitting" &&
-        intent.turnId === null,
-    );
+    const matches = this.db
+      .prepare(`SELECT * FROM execution_intents
+        WHERE threadId = ? AND state = 'submitting' AND turnId IS NULL
+        ORDER BY rowid LIMIT 2`)
+      .all(z.string().min(1).max(512).parse(threadId))
+      .map((row) => intentSchema.parse(row));
     if (matches.length !== 1) return undefined;
     const intent = matches[0];
     if (!intent) return undefined;
@@ -1015,7 +1133,11 @@ export class ExecutionState {
         this.db.exec("COMMIT");
         return false;
       }
-      const bound = this.bindTurn(input.intentId, input.turnId);
+      const bound = this.bindTurn(
+        input.intentId,
+        input.turnId,
+        input.runtimeGeneration,
+      );
       if (bound && !this.runtimeQuestionBinding(input.threadId, input.turnId))
         throw new Error("Native prebinding revisions changed");
       if (bound)
@@ -1033,9 +1155,9 @@ export class ExecutionState {
     threadId: string;
     turnId: string;
     runtimeGeneration: string | undefined;
-  }): "matched" | "absent" | "rejected" {
+  }): NativeTurnStartReconciliation {
     const proof = this.nativePrebindings.get(input.workId);
-    if (!proof) return "absent";
+    if (!proof) return { status: "absent" };
     this.nativePrebindings.delete(input.workId);
     const intent = this.byWorkId(input.workId);
     const binding = this.runtimeQuestionBinding(input.threadId, input.turnId);
@@ -1068,8 +1190,8 @@ export class ExecutionState {
       this.powerAdmissionState().held ||
       this.stopTarget(input.workId)
     )
-      return "rejected";
-    return "matched";
+      return { status: "rejected", prebinding: proof };
+    return { status: "matched" };
   }
 
   coordinationBinding(
@@ -1295,6 +1417,415 @@ export class ExecutionState {
   }
 
   /** Rebuild only the recognized receipt schema without changing legacy material. */
+  private migrateRuntimeRetention(): void {
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 FROM runtime_retention_migrations WHERE migrationId = ?",
+        )
+        .get("runtime-retention-v1")
+    )
+      return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (
+        !this.db
+          .prepare(
+            "SELECT 1 FROM runtime_retention_migrations WHERE migrationId = ?",
+          )
+          .get("runtime-retention-v1")
+      ) {
+        this.db.exec(`INSERT INTO runtime_terminal_evidence
+          (threadId, turnId, firstStatus, conflicted, workId,
+            firstRuntimeGeneration, lastRuntimeGeneration,
+            firstObservedAt, lastObservedAt)
+          SELECT threadId, turnId, NULL,
+            CASE WHEN COUNT(*) = 1 THEN 0 ELSE 1 END,
+            CASE WHEN COUNT(*) = 1 THEN MIN(workId) ELSE NULL END,
+            NULL, NULL, NULL, NULL
+          FROM execution_intents
+          WHERE threadId IS NOT NULL AND turnId IS NOT NULL
+          GROUP BY threadId, turnId;
+          INSERT OR IGNORE INTO runtime_thread_qualification (threadId)
+          SELECT DISTINCT threadId FROM execution_intents
+          WHERE threadId IS NOT NULL;
+          INSERT INTO runtime_retention_migrations (migrationId)
+          VALUES ('runtime-retention-v1')`);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private noteBoundRuntimeTurn(id: string, turnId: string): void {
+    const row = this.db
+      .prepare("SELECT workId, threadId FROM execution_intents WHERE id = ?")
+      .get(id) as { workId: string; threadId: string | null } | undefined;
+    if (!row?.threadId) return;
+    const evidence = this.db
+      .prepare(
+        "SELECT * FROM runtime_terminal_evidence WHERE threadId = ? AND turnId = ?",
+      )
+      .get(row.threadId, turnId);
+    if (evidence === undefined) return;
+    const parsed = runtimeTerminalEvidenceSchema.parse(evidence);
+    const matches = this.db
+      .prepare(
+        "SELECT workId FROM execution_intents WHERE threadId = ? AND turnId = ? LIMIT 2",
+      )
+      .all(row.threadId, turnId) as Array<{ workId: string }>;
+    const ambiguous = matches.length !== 1 || matches[0]?.workId !== row.workId;
+    this.db
+      .prepare(
+        `UPDATE runtime_terminal_evidence SET
+          workId = COALESCE(workId, ?), conflicted = CASE WHEN ? THEN 1 ELSE conflicted END
+          WHERE threadId = ? AND turnId = ?`,
+      )
+      .run(row.workId, Number(ambiguous), row.threadId, turnId);
+    this.db
+      .prepare(`UPDATE execution_recovery_identities SET terminalEvidenceObserved = 1
+        WHERE workId = ? AND threadId = ? AND turnId = ?`)
+      .run(row.workId, row.threadId, turnId);
+    if (parsed.workId !== null && parsed.workId !== row.workId)
+      this.db
+        .prepare(
+          "UPDATE runtime_terminal_evidence SET conflicted = 1 WHERE threadId = ? AND turnId = ?",
+        )
+        .run(row.threadId, turnId);
+  }
+
+  runtimeTerminal(
+    threadId: string,
+    turnId: string,
+    runtimeGeneration: string,
+  ): RuntimeTerminalEvidence | null {
+    const key = {
+      threadId: z.string().min(1).max(512).parse(threadId),
+      turnId: z.string().min(1).max(512).parse(turnId),
+      runtimeGeneration: z.string().min(1).max(128).parse(runtimeGeneration),
+    };
+    const row = this.db
+      .prepare(
+        "SELECT * FROM runtime_terminal_evidence WHERE threadId = ? AND turnId = ?",
+      )
+      .get(key.threadId, key.turnId);
+    if (row === undefined) {
+      const matches = this.db
+        .prepare(`SELECT identity.runtimeGeneration,
+          identity.terminalEvidenceObserved
+          FROM execution_intents intent
+          LEFT JOIN execution_recovery_identities identity
+            ON identity.workId = intent.workId
+          WHERE intent.threadId = ? AND intent.turnId = ? LIMIT 2`)
+        .all(key.threadId, key.turnId) as Array<{
+        runtimeGeneration: string | null;
+        terminalEvidenceObserved: number | null;
+      }>;
+      if (
+        matches.length > 0 &&
+        (matches.length !== 1 ||
+          matches[0]?.runtimeGeneration !== key.runtimeGeneration ||
+          matches[0]?.terminalEvidenceObserved !== 0)
+      )
+        throw new Error(
+          "Runtime terminal evidence is missing for a bound turn",
+        );
+      return null;
+    }
+    const evidence = runtimeTerminalEvidenceSchema.parse(row);
+    const matches = this.db
+      .prepare(`SELECT intent.workId, identity.runtimeGeneration,
+        identity.terminalEvidenceObserved
+        FROM execution_intents intent
+        LEFT JOIN execution_recovery_identities identity
+          ON identity.workId = intent.workId
+        WHERE intent.threadId = ? AND intent.turnId = ? LIMIT 2`)
+      .all(key.threadId, key.turnId) as Array<{
+      workId: string;
+      runtimeGeneration: string | null;
+      terminalEvidenceObserved: number | null;
+    }>;
+    if (matches.length > 1)
+      throw new Error("Runtime terminal binding is ambiguous");
+    if (
+      (matches.length === 1 && evidence.workId !== matches[0]?.workId) ||
+      (matches.length === 1 && evidence.workId === null) ||
+      (matches.length === 0 && evidence.workId !== null) ||
+      (matches.length === 1 &&
+        evidence.firstStatus !== null &&
+        matches[0]?.terminalEvidenceObserved !== 1)
+    )
+      throw new Error("Runtime terminal evidence binding is inconsistent");
+    return { ...evidence, conflicted: evidence.conflicted === 1 };
+  }
+
+  runtimeTerminalForWait(
+    threadId: string,
+    turnId: string,
+    runtimeGeneration: string,
+  ): RuntimeTerminalEvidence | null {
+    const evidence = this.runtimeTerminal(threadId, turnId, runtimeGeneration);
+    if (evidence) {
+      if (evidence.workId === null)
+        throw new Error("Runtime terminal evidence is not bound to work");
+      return evidence;
+    }
+    this.assertRuntimeTerminalCanWait(threadId, turnId, runtimeGeneration);
+    return null;
+  }
+
+  private assertRuntimeTerminalCanWait(
+    threadId: string,
+    turnId: string,
+    runtimeGeneration: string,
+  ): void {
+    const rows = this.db
+      .prepare(`SELECT intent.workId, identity.runtimeGeneration,
+        identity.terminalEvidenceObserved
+        FROM execution_intents intent
+        LEFT JOIN execution_recovery_identities identity
+          ON identity.workId = intent.workId
+        WHERE intent.threadId = ? AND intent.turnId = ? LIMIT 2`)
+      .all(threadId, turnId) as Array<{
+      workId: string;
+      runtimeGeneration: string | null;
+      terminalEvidenceObserved: number | null;
+    }>;
+    if (
+      rows.length !== 1 ||
+      rows[0]?.runtimeGeneration !== runtimeGeneration ||
+      rows[0]?.terminalEvidenceObserved !== 0
+    )
+      throw new Error("Runtime terminal evidence is missing for a bound turn");
+  }
+
+  recordRuntimeTerminal(
+    input: RuntimeTerminalObservation,
+  ): RuntimeTerminalEvidence {
+    const value = z
+      .object({
+        threadId: z.string().min(1).max(512),
+        turnId: z.string().min(1).max(512),
+        status: z.enum(["completed", "failed"]),
+        runtimeGeneration: z.string().min(1).max(128),
+      })
+      .strict()
+      .parse(input);
+    const observedAt = Date.now();
+    if (!Number.isSafeInteger(observedAt) || observedAt < 0)
+      throw new Error("Runtime terminal evidence timestamp unavailable");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const matches = this.db
+        .prepare(
+          `SELECT intent.workId, identity.runtimeGeneration,
+            identity.terminalEvidenceObserved
+          FROM execution_intents intent
+          LEFT JOIN execution_recovery_identities identity ON identity.workId = intent.workId
+          WHERE intent.threadId = ? AND intent.turnId = ? LIMIT 2`,
+        )
+        .all(value.threadId, value.turnId) as Array<{
+        workId: string;
+        runtimeGeneration: string | null;
+        terminalEvidenceObserved: number | null;
+      }>;
+      const workId = matches.length === 1 ? (matches[0]?.workId ?? null) : null;
+      const ambiguous = matches.length > 1;
+      const rawPrior = this.db
+        .prepare(
+          "SELECT * FROM runtime_terminal_evidence WHERE threadId = ? AND turnId = ?",
+        )
+        .get(value.threadId, value.turnId);
+      if (rawPrior === undefined) {
+        if (matches.length > 0 && matches.length !== 1)
+          throw new Error("Runtime terminal binding is ambiguous");
+        if (
+          matches.length === 1 &&
+          (matches[0]?.runtimeGeneration !== value.runtimeGeneration ||
+            matches[0]?.terminalEvidenceObserved !== 0)
+        )
+          throw new Error(
+            "Runtime terminal evidence is missing for a bound turn",
+          );
+        this.db
+          .prepare(`INSERT INTO runtime_terminal_evidence
+            (threadId, turnId, firstStatus, conflicted, workId,
+              firstRuntimeGeneration, lastRuntimeGeneration,
+              firstObservedAt, lastObservedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(
+            value.threadId,
+            value.turnId,
+            value.status,
+            Number(ambiguous),
+            workId,
+            value.runtimeGeneration,
+            value.runtimeGeneration,
+            observedAt,
+            observedAt,
+          );
+        if (matches.length === 1) {
+          const marked = this.db
+            .prepare(`UPDATE execution_recovery_identities
+              SET terminalEvidenceObserved = 1
+              WHERE workId = ? AND runtimeGeneration = ?
+                AND terminalEvidenceObserved = 0`)
+            .run(workId, value.runtimeGeneration) as { changes: number };
+          if (marked.changes !== 1)
+            throw new Error("Runtime terminal evidence binding changed");
+        }
+      } else {
+        const prior = runtimeTerminalEvidenceSchema.parse(rawPrior);
+        const bindingMismatch =
+          (matches.length > 1 && prior.workId !== null) ||
+          (workId !== null && prior.workId !== null && workId !== prior.workId);
+        const conflict =
+          prior.conflicted === 1 ||
+          prior.firstStatus === null ||
+          prior.firstStatus !== value.status ||
+          ambiguous ||
+          bindingMismatch;
+        this.db
+          .prepare(`UPDATE runtime_terminal_evidence SET
+            conflicted = ?, workId = COALESCE(workId, ?),
+            lastRuntimeGeneration = ?, lastObservedAt = ?
+            WHERE threadId = ? AND turnId = ?`)
+          .run(
+            Number(conflict),
+            workId,
+            value.runtimeGeneration,
+            observedAt,
+            value.threadId,
+            value.turnId,
+          );
+        if (matches.length === 1 && workId !== null)
+          this.db
+            .prepare(`UPDATE execution_recovery_identities
+              SET terminalEvidenceObserved = 1
+              WHERE workId = ? AND threadId = ? AND turnId = ?`)
+            .run(workId, value.threadId, value.turnId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    const record = this.db
+      .prepare(
+        "SELECT * FROM runtime_terminal_evidence WHERE threadId = ? AND turnId = ?",
+      )
+      .get(value.threadId, value.turnId);
+    if (record === undefined)
+      throw new Error("Runtime terminal evidence is unavailable");
+    const parsed = runtimeTerminalEvidenceSchema.parse(record);
+    return { ...parsed, conflicted: parsed.conflicted === 1 };
+  }
+
+  registerRuntimeThreadTools(threadId: string, toolDigest: string): void {
+    const id = z.string().min(1).max(512).parse(threadId);
+    const digest = z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .parse(toolDigest);
+    const inserted = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO runtime_thread_qualification (threadId, toolDigest) VALUES (?, ?)",
+      )
+      .run(id, digest) as { changes: number };
+    if (inserted.changes === 0) {
+      const existing = this.runtimeThreadQualification(id);
+      if (!existing || existing.toolDigest !== digest)
+        throw new Error("Runtime thread tool baseline conflicts");
+    }
+  }
+
+  runtimeThreadQualification(
+    threadId: string,
+  ): RuntimeThreadQualification | null {
+    const row = this.db
+      .prepare(
+        "SELECT threadId, toolDigest, codexVersion, executableHash, model, modelProvider, reasoningEffort, serviceTier, developerInstructionsDigest FROM runtime_thread_qualification WHERE threadId = ?",
+      )
+      .get(z.string().min(1).max(512).parse(threadId));
+    return row === undefined
+      ? null
+      : runtimeThreadQualificationSchema.parse(row);
+  }
+
+  recordRuntimeThreadQualification(
+    input: RuntimeThreadQualificationEvidence,
+  ): void {
+    const value = z
+      .object({
+        threadId: z.string().min(1).max(512),
+        toolDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        codexVersion: z.string().min(1).max(128),
+        executableHash: z.string().regex(/^[a-f0-9]{64}$/),
+        model: z.string().min(1).max(256),
+        modelProvider: z.string().min(1).max(256),
+        reasoningEffort: z.string().max(128).nullable(),
+        serviceTier: z.string().max(128).nullable(),
+        developerInstructionsDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .parse(input);
+    const prior = this.runtimeThreadQualification(value.threadId);
+    if (!prior || prior.toolDigest !== value.toolDigest)
+      throw new Error("Runtime thread tool baseline unavailable");
+    const qualification = {
+      codexVersion: value.codexVersion,
+      executableHash: value.executableHash,
+      model: value.model,
+      modelProvider: value.modelProvider,
+      reasoningEffort: value.reasoningEffort,
+      serviceTier: value.serviceTier,
+      developerInstructionsDigest: value.developerInstructionsDigest,
+    };
+    const existing = {
+      codexVersion: prior.codexVersion,
+      executableHash: prior.executableHash,
+      model: prior.model,
+      modelProvider: prior.modelProvider,
+      reasoningEffort: prior.reasoningEffort,
+      serviceTier: prior.serviceTier,
+      developerInstructionsDigest: prior.developerInstructionsDigest,
+    };
+    if (Object.values(existing).some((field) => field !== null)) {
+      if (JSON.stringify(existing) !== JSON.stringify(qualification))
+        throw new Error("Runtime thread qualification baseline conflicts");
+      return;
+    }
+    this.db
+      .prepare(`UPDATE runtime_thread_qualification SET
+        codexVersion = ?, executableHash = ?, model = ?, modelProvider = ?,
+        reasoningEffort = ?, serviceTier = ?, developerInstructionsDigest = ?
+        WHERE threadId = ? AND toolDigest = ? AND codexVersion IS NULL`)
+      .run(
+        value.codexVersion,
+        value.executableHash,
+        value.model,
+        value.modelProvider,
+        value.reasoningEffort,
+        value.serviceTier,
+        value.developerInstructionsDigest,
+        value.threadId,
+        value.toolDigest,
+      );
+    const after = this.runtimeThreadQualification(value.threadId);
+    if (
+      !after ||
+      JSON.stringify(after) !==
+        JSON.stringify({
+          threadId: value.threadId,
+          toolDigest: value.toolDigest,
+          ...qualification,
+        })
+    )
+      throw new Error("Runtime thread qualification could not be persisted");
+  }
+
   private migratePreTurnReceipts(): void {
     const columns = this.db
       .prepare("PRAGMA table_info(execution_recovery_receipts)")
@@ -2151,6 +2682,116 @@ export class ExecutionState {
     return row === undefined ? undefined : intentSchema.parse(row);
   }
 
+  workspaceNormalizationPage(
+    afterRowId: number,
+    limit = 64,
+  ): WorkspaceNormalizationRow[] {
+    const cursor = z.number().int().nonnegative().safe().parse(afterRowId);
+    const pageSize = z.number().int().min(1).max(128).parse(limit);
+    return this.db
+      .prepare(`SELECT intent.rowid AS cursor, intent.id, intent.workId,
+        intent.workspace, binding.taskId, workspace.workspaceId,
+        workspace.path AS workspacePath
+        FROM execution_intents intent
+        LEFT JOIN task_execution_bindings binding ON binding.workId = intent.workId
+        LEFT JOIN task_workspace_bindings workspace ON workspace.taskId = binding.taskId
+        WHERE intent.rowid > ? ORDER BY intent.rowid LIMIT ?`)
+      .all(cursor, pageSize)
+      .map((row) => {
+        const value = z
+          .object({
+            cursor: z.number().int().positive().safe(),
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            workspace: z.string().min(1),
+            taskId: z.string().uuid().nullable(),
+            workspaceId: z.string().uuid().nullable(),
+            workspacePath: z.string().min(1).nullable(),
+          })
+          .strict()
+          .parse(row);
+        return value;
+      });
+  }
+
+  executionsForRuntimeIdentity(
+    threadId: string,
+    turnId: string,
+  ): ExecutionIntent[] {
+    return this.db
+      .prepare(`SELECT * FROM execution_intents
+        WHERE threadId = ? AND (turnId = ? OR turnId IS NULL)
+        ORDER BY rowid LIMIT 16`)
+      .all(
+        z.string().min(1).max(512).parse(threadId),
+        z.string().min(1).max(512).parse(turnId),
+      )
+      .map((row) => intentSchema.parse(row));
+  }
+
+  executionsForTerminalIdentity(
+    threadId: string,
+    turnId: string,
+  ): ExecutionIntent[] {
+    return this.db
+      .prepare(`SELECT * FROM execution_intents
+        WHERE threadId = ? AND turnId = ? ORDER BY rowid`)
+      .all(
+        z.string().min(1).max(512).parse(threadId),
+        z.string().min(1).max(512).parse(turnId),
+      )
+      .map((row) => intentSchema.parse(row));
+  }
+
+  activeExecutions(): ExecutionIntent[] {
+    return this.db
+      .prepare(`SELECT * FROM execution_intents
+        WHERE state IN ('submitting','running') ORDER BY rowid`)
+      .all()
+      .map((row) => intentSchema.parse(row));
+  }
+
+  activeOrLastCompleted(lastCompletedWorkId?: string): ExecutionIntent[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM execution_intents
+        WHERE state IN ('submitting','running')
+          OR (state = 'completed' AND workId = ?)
+        ORDER BY rowid`)
+      .all(lastCompletedWorkId ?? "")
+      .map((row) => intentSchema.parse(row));
+    return rows;
+  }
+
+  hasCompetingTaskExecution(taskId: string, excludingWorkId: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM task_execution_bindings binding
+          JOIN execution_intents intent ON intent.workId = binding.workId
+          WHERE binding.taskId = ? AND intent.workId <> ?
+            AND intent.state IN ('submitting','running','held') LIMIT 1`)
+        .get(z.string().uuid().parse(taskId), excludingWorkId) !== undefined
+    );
+  }
+
+  runtimeQuestionFailureTarget(
+    threadId: string,
+    turnId: string,
+  ): ExecutionIntent | undefined {
+    return this.executionsForRuntimeIdentity(threadId, turnId)[0];
+  }
+
+  holdReadyOnStartupFailure(reason: string): void {
+    this.db
+      .prepare(`UPDATE execution_intents SET state = 'held', reason = ?
+        WHERE state = 'ready'`)
+      .run(z.string().min(1).max(1024).parse(reason));
+    if (this.hasTurnRequests)
+      this.db
+        .prepare(`UPDATE turn_requests SET state = 'held', reason = ?
+          WHERE state = 'queued'`)
+        .run(reason);
+  }
+
   list(): ExecutionIntent[] {
     return this.db
       .prepare("SELECT * FROM execution_intents ORDER BY rowid")
@@ -2878,13 +3519,13 @@ export class ExecutionState {
     if (!admission) {
       const writer = this.byWorkId(workId);
       return writer
-        ? this.list().filter(
-            (item) =>
-              item.workspace === writer.workspace &&
-              (item.state === "completed" ||
-                item.state === "submitting" ||
-                item.state === "running"),
-          )
+        ? this.db
+            .prepare(`SELECT * FROM execution_intents
+              WHERE workspace = ?
+                AND state IN ('completed','submitting','running')
+              ORDER BY rowid`)
+            .all(writer.workspace)
+            .map((row) => intentSchema.parse(row))
         : [];
     }
     return this.db
@@ -3279,61 +3920,75 @@ export class ExecutionState {
     return false;
   }
 
-  bindTurn(id: string, turnId: string): boolean {
-    if (
-      this.db
-        .prepare(
-          "UPDATE execution_intents SET state = 'running', turnId = ? WHERE id = ? AND state = 'submitting' AND turnId IS NULL RETURNING id",
-        )
-        .get(turnId, id) !== undefined
-    ) {
-      this.db
-        .prepare(
-          "UPDATE execution_recovery_identities SET turnId = ? WHERE workId = (SELECT workId FROM execution_intents WHERE id = ?)",
-        )
-        .run(turnId, id);
-      return true;
-    }
-    const stoppedThreadId = this.get(id).threadId;
-    if (stoppedThreadId) {
-      const stopped = this.db
-        .prepare(`UPDATE execution_intents SET turnId = ? WHERE id = ? AND state = 'held'
+  bindTurn(id: string, turnId: string, runtimeGeneration?: string): boolean {
+    const ownsTransaction = !this.db.isTransaction;
+    if (ownsTransaction) this.db.exec("BEGIN IMMEDIATE");
+    const finish = (result: boolean): boolean => {
+      if (ownsTransaction) this.db.exec("COMMIT");
+      return result;
+    };
+    try {
+      if (
+        this.db
+          .prepare(
+            "UPDATE execution_intents SET state = 'running', turnId = ? WHERE id = ? AND state = 'submitting' AND turnId IS NULL RETURNING id",
+          )
+          .get(turnId, id) !== undefined
+      ) {
+        this.db
+          .prepare(
+            "UPDATE execution_recovery_identities SET turnId = ?, runtimeGeneration = COALESCE(?, runtimeGeneration) WHERE workId = (SELECT workId FROM execution_intents WHERE id = ?)",
+          )
+          .run(turnId, runtimeGeneration ?? null, id);
+        this.noteBoundRuntimeTurn(id, turnId);
+        return finish(true);
+      }
+      const stoppedThreadId = this.get(id).threadId;
+      if (stoppedThreadId) {
+        const stopped = this.db
+          .prepare(`UPDATE execution_intents SET turnId = ? WHERE id = ? AND state = 'held'
           AND threadId = ? AND turnId IS NULL AND EXISTS (
             SELECT 1 FROM execution_stop_targets s WHERE s.workId = execution_intents.workId
           ) RETURNING workId`)
-        .get(turnId, id, stoppedThreadId) as { workId: string } | undefined;
-      if (stopped) {
+          .get(turnId, id, stoppedThreadId) as { workId: string } | undefined;
+        if (stopped) {
+          this.db
+            .prepare(
+              "UPDATE execution_recovery_identities SET turnId = ?, runtimeGeneration = COALESCE(?, runtimeGeneration) WHERE workId = ?",
+            )
+            .run(turnId, runtimeGeneration ?? null, stopped.workId);
+          this.noteBoundRuntimeTurn(id, turnId);
+          this.bindStopIdentity(stopped.workId, stoppedThreadId, turnId);
+          return finish(false);
+        }
+      }
+      // The server may return after a callback has held this submission. Record
+      // the server turn identity without reviving the writer or admitting work.
+      if (
         this.db
           .prepare(
-            "UPDATE execution_recovery_identities SET turnId = ? WHERE workId = ?",
+            "UPDATE execution_intents SET turnId = ? WHERE id = ? AND state = 'held' AND threadId IS NOT NULL AND turnId IS NULL RETURNING id",
           )
-          .run(turnId, stopped.workId);
-        this.bindStopIdentity(stopped.workId, stoppedThreadId, turnId);
-        return false;
+          .get(turnId, id) !== undefined
+      ) {
+        this.db
+          .prepare(
+            "UPDATE execution_recovery_identities SET turnId = ?, runtimeGeneration = COALESCE(?, runtimeGeneration) WHERE workId = (SELECT workId FROM execution_intents WHERE id = ?)",
+          )
+          .run(turnId, runtimeGeneration ?? null, id);
+        this.noteBoundRuntimeTurn(id, turnId);
+        return finish(false);
       }
-    }
-    // The server may return after a callback has held this submission. Record
-    // the server turn identity without reviving the writer or admitting work.
-    if (
       this.db
         .prepare(
-          "UPDATE execution_intents SET turnId = ? WHERE id = ? AND state = 'held' AND threadId IS NOT NULL AND turnId IS NULL RETURNING id",
+          "UPDATE execution_intents SET reason = COALESCE(reason, '') || '; conflicting turn/start response: ' || ? WHERE id = ? AND state = 'held' AND turnId IS NOT NULL AND turnId != ?",
         )
-        .get(turnId, id) !== undefined
-    ) {
-      this.db
-        .prepare(
-          "UPDATE execution_recovery_identities SET turnId = ? WHERE workId = (SELECT workId FROM execution_intents WHERE id = ?)",
-        )
-        .run(turnId, id);
-      return false;
+        .run(turnId, id, turnId);
+      return finish(false);
+    } catch (error) {
+      if (ownsTransaction && this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw error;
     }
-    this.db
-      .prepare(
-        "UPDATE execution_intents SET reason = COALESCE(reason, '') || '; conflicting turn/start response: ' || ? WHERE id = ? AND state = 'held' AND turnId IS NOT NULL AND turnId != ?",
-      )
-      .run(turnId, id, turnId);
-    return false;
   }
 
   holdPendingTurn(

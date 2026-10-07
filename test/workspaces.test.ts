@@ -440,7 +440,10 @@ test("a completed worktree add followed by a bounded stall is retained without r
       childExitObserved: true,
       childExitSignal: "SIGKILL",
     });
-    assert.ok(controlled.events().some(({ event }) => event === "term"));
+    assert.ok(
+      controlled.events().some(({ event }) => event === "term"),
+      `controlled Git signal events: ${JSON.stringify(controlled.events())}`,
+    );
 
     const launchesBeforeReopen = controlled
       .events()
@@ -610,12 +613,20 @@ test("output overflow and sticky cancellation settle safely and retain uncertain
         binding.reason ?? "",
         /secret-task-id|secret-repository-id|secret-output-source|stderr-secret-shaped-output/,
       );
-      assert.deepEqual(failureObservations.at(-1), {
-        operation: "repository-identity",
-        kind: "output-limit",
-        childExitObserved: true,
-        childExitSignal: "SIGTERM",
-      });
+      assert.deepEqual(
+        failureObservations.at(-1),
+        {
+          operation: "repository-identity",
+          kind: "output-limit",
+          childExitObserved: true,
+          childExitSignal: "SIGTERM",
+        },
+        `controlled Git events: ${JSON.stringify(controlled.events())}`,
+      );
+      assert.ok(
+        controlled.events().some(({ event }) => event === "term"),
+        `controlled Git signal events: ${JSON.stringify(controlled.events())}`,
+      );
     } finally {
       try {
         await controlled.cleanup();

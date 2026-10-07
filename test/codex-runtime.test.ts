@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { structuredAnswerDigest } from "../src/core/structured-questions.js";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import {
@@ -16,9 +16,156 @@ import {
   CodexRuntime,
   type RuntimeConversationEvent,
 } from "../src/standalone/codex.js";
+import {
+  closeRuntimeSafetyFixtures,
+  persistRuntimeOutcome,
+  persistRuntimeQuestion,
+  runtimeSafetyFixture,
+} from "./fixtures/runtime-safety.js";
+
+type TestRuntimeOptions = Omit<
+  NonNullable<ConstructorParameters<typeof CodexRuntime>[1]>,
+  "safety"
+>;
+type TestRuntimeSafety = ReturnType<typeof runtimeSafetyFixture>["safety"];
+type TerminalRecord = {
+  input: Parameters<TestRuntimeSafety["recordTerminal"]>[0];
+  result: ReturnType<TestRuntimeSafety["recordTerminal"]>;
+};
+const runtimeFixtures = new WeakMap<
+  CodexRuntime,
+  {
+    fixture: ReturnType<typeof runtimeSafetyFixture>;
+    safetyPort: TestRuntimeSafety;
+    bindTurn: (threadId: string, turnId: string, generation: string) => string;
+    terminalRecords: () => TerminalRecord[];
+  }
+>();
+
+function newTestRuntime(
+  executable?: string,
+  options: TestRuntimeOptions = {},
+): CodexRuntime {
+  const fixture = runtimeSafetyFixture();
+  const terminalRecords: TerminalRecord[] = [];
+  const safety = {
+    ...fixture.safety,
+    recordTerminal: (
+      input: Parameters<typeof fixture.safety.recordTerminal>[0],
+    ) => {
+      const result = fixture.safety.recordTerminal(input);
+      terminalRecords.push({ input, result });
+      return result;
+    },
+  };
+  const runtime = new CodexRuntime(executable, {
+    ...options,
+    safety,
+  });
+  const onUserInputRequest = runtime.onUserInputRequest.bind(runtime);
+  runtime.onUserInputRequest = (listener) =>
+    onUserInputRequest((request) => {
+      persistRuntimeQuestion(fixture, request);
+      listener(request);
+    });
+  const onUserInputOutcome = runtime.onUserInputOutcome.bind(runtime);
+  runtime.onUserInputOutcome = (listener) =>
+    onUserInputOutcome((outcome) => {
+      persistRuntimeOutcome(fixture, outcome);
+      listener(outcome);
+    });
+  const replyUserInput = runtime.replyUserInput.bind(runtime);
+  runtime.replyUserInput = (identity, reply, beforeWrite) =>
+    replyUserInput(identity, reply, () => {
+      beforeWrite();
+      const question = fixture.coordination.runtimeQuestionByEndpoint(identity);
+      if (!question) throw new Error("Runtime test question was not persisted");
+      if (!question.answers)
+        fixture.coordination.answerRuntimeQuestion({
+          actor: "operator",
+          key: randomUUID(),
+          taskId: question.taskId,
+          interactionId: question.interactionId,
+          expectedRevision: question.revision,
+          answers: reply.answers,
+        });
+      return fixture.coordination.beginRuntimeReply(
+        question.interactionId,
+        identity,
+      );
+    });
+  const boundTurns = new Set<string>();
+  const bindTurn = (threadId: string, turnId: string, generation: string) => {
+    const key = `${threadId}\u0000${turnId}`;
+    if (boundTurns.has(key)) return "already-bound";
+    const workId = fixture.bindTurn(threadId, turnId, generation);
+    boundTurns.add(key);
+    return workId;
+  };
+  runtimeFixtures.set(runtime, {
+    fixture,
+    safetyPort: safety,
+    bindTurn,
+    terminalRecords: () => terminalRecords.map((entry) => ({ ...entry })),
+  });
+  // Direct receive tests model the current owned child without spawning it.
+  (runtime as unknown as { nativeGeneration: string }).nativeGeneration =
+    "runtime-test-generation";
+  const startTurn = runtime.startTurn.bind(runtime);
+  runtime.startTurn = async (threadId, workspace, prompt) => {
+    const turnId = await startTurn(threadId, workspace, prompt);
+    const generation = (runtime as unknown as { nativeGeneration?: string })
+      .nativeGeneration;
+    if (!generation) throw new Error("Runtime test generation unavailable");
+    bindTurn(threadId, turnId, generation);
+    return turnId;
+  };
+  const internal = runtime as unknown as {
+    child?: ChildProcessWithoutNullStreams;
+    nativeGeneration?: string;
+    receive(child: ChildProcessWithoutNullStreams, line: string): void;
+  };
+  const receive = internal.receive.bind(runtime);
+  internal.receive = (child, line) => {
+    if (child === internal.child && internal.nativeGeneration) {
+      try {
+        const message = JSON.parse(line) as {
+          method?: string;
+          params?: { threadId?: unknown; turnId?: unknown };
+        };
+        if (
+          message.method === "item/tool/requestUserInput" &&
+          typeof message.params?.threadId === "string" &&
+          typeof message.params.turnId === "string"
+        )
+          bindTurn(
+            message.params.threadId,
+            message.params.turnId,
+            internal.nativeGeneration,
+          );
+      } catch {
+        // Let the production parser report malformed test input.
+      }
+    }
+    receive(child, line);
+  };
+  return runtime;
+}
+
+function bindTestTurn(runtime: CodexRuntime, threadId: string, turnId: string) {
+  const generation = (runtime as unknown as { nativeGeneration?: string })
+    .nativeGeneration;
+  if (!generation) throw new Error("Runtime test generation unavailable");
+  const fixture = runtimeFixtures.get(runtime);
+  if (!fixture) throw new Error("Runtime test safety fixture unavailable");
+  return fixture.bindTurn(threadId, turnId, generation);
+}
+
+test.after(closeRuntimeSafetyFixtures);
 
 test("conflicting and identity-free terminal reports are surfaced as anomalies", async () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread", "turn");
   const anomalies: string[] = [];
   runtime.onTerminalAnomaly((event) => anomalies.push(event.reason));
   const child = {} as ChildProcessWithoutNullStreams;
@@ -46,11 +193,11 @@ test("conflicting and identity-free terminal reports are surfaced as anomalies",
     "Conflicting terminal status",
     "Missing terminal identity or status",
   ]);
-  assert.equal(await runtime.waitForTurn("thread", "turn"), "failed");
+  await assert.rejects(runtime.waitForTurn("thread", "turn"), /uncertain/);
 });
 
 test("failure evidence is exact-turn-bound and only classifies the retry allowlist", () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
   const child = {} as ChildProcessWithoutNullStreams;
   (runtime as unknown as { child: ChildProcessWithoutNullStreams }).child =
     child;
@@ -123,7 +270,9 @@ test("failure evidence is exact-turn-bound and only classifies the retry allowli
 });
 
 test("error notifications do not settle an exact turn before its terminal", async () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread-completed", "turn-completed");
+  bindTestTurn(runtime, "thread-failed", "turn-failed");
   const child = {} as ChildProcessWithoutNullStreams;
   const internal = runtime as unknown as {
     child: ChildProcessWithoutNullStreams;
@@ -309,29 +458,43 @@ async function captureTwoTurns(
   writeFileSync(executable, source);
   chmodSync(executable, 0o700);
 
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const captured: RuntimeConversationEvent[] = [];
+  const anomalies: unknown[] = [];
+  let stage = "runtime-start";
   runtime.onConversationEvent?.((event) => captured.push(event));
+  runtime.onTerminalAnomaly((anomaly) => anomalies.push(anomaly));
   try {
     await bounded(runtime.start(), 3000);
+    stage = "thread-start";
     assert.equal(await bounded(runtime.startThread(root), 3000), "thread-1");
+    stage = "first-turn-start";
     assert.equal(
       await bounded(runtime.startTurn("thread-1", root, "first"), 3000),
       firstTurnId,
     );
+    stage = "first-turn-wait";
     const firstStatus = await bounded(
       runtime.waitForTurn("thread-1", firstTurnId),
       3000,
     );
+    stage = "second-turn-start";
     assert.equal(
       await bounded(runtime.startTurn("thread-1", root, "second"), 3000),
       secondTurnId,
     );
+    stage = "second-turn-wait";
     const secondStatus = await bounded(
       runtime.waitForTurn("thread-1", secondTurnId),
       3000,
     );
     return { firstStatus, secondStatus, captured };
+  } catch (error) {
+    const records = runtimeFixtures.get(runtime)?.terminalRecords() ?? [];
+    throw new Error(
+      `conversation fixture failed at ${stage}; terminalRecords=${JSON.stringify(records)}; anomalies=${JSON.stringify(anomalies)}`,
+      { cause: error },
+    );
   } finally {
     await runtime.stop();
     rmSync(root, { recursive: true, force: true });
@@ -767,7 +930,7 @@ test("App Server projects only complete bounded agent-message history", {
   ].join("\n");
   writeFileSync(executable, source);
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const captured: RuntimeConversationEvent[] = [];
   let listenerFailures = 0;
   runtime.onConversationEvent?.((event) => {
@@ -980,7 +1143,7 @@ test("conversation projection bounds completed items and ignores post-terminal r
   ].join("\n");
   writeFileSync(executable, source);
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const captured: RuntimeConversationEvent[] = [];
   runtime.onConversationEvent?.((event) => captured.push(event));
   try {
@@ -1058,7 +1221,7 @@ for await (const line of lines) {
 `,
   );
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const started = runtime.start();
   try {
     await bounded(started, 5000);
@@ -1107,7 +1270,7 @@ for await (const line of createInterface({input: process.stdin})) {
 `,
   );
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   try {
     await bounded(runtime.start(), 3000);
     await bounded(
@@ -1139,7 +1302,7 @@ exec sleep 10
 `,
   );
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   try {
     await assert.rejects(
       bounded(runtime.start(), 3000),
@@ -1173,7 +1336,7 @@ for await (const line of createInterface({input: process.stdin})) {
 `,
   );
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const processRef = runtime as unknown as {
     child?: ChildProcessWithoutNullStreams;
   };
@@ -1203,7 +1366,7 @@ for await (const line of createInterface({input: process.stdin})) {
 });
 
 test("dynamic tool registration is passed to thread/start", async () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
   const request = runtime as unknown as {
     request(method: string, params: unknown): Promise<unknown>;
     startThread(workspace: string, tools: unknown[]): Promise<string>;
@@ -1273,7 +1436,7 @@ test("App Server dynamic callbacks use the registered function and server identi
   ].join("\n");
   writeFileSync(executable, source);
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable);
+  const runtime = newTestRuntime(executable);
   const calls: unknown[] = [];
   runtime.onToolCall?.(async (call) => {
     calls.push(call);
@@ -1305,6 +1468,7 @@ test("App Server dynamic callbacks use the registered function and server identi
       2000,
     );
     assert.equal(threadId, "thread-1");
+    bindTestTurn(runtime, threadId, turnId);
     assert.equal(
       await bounded(runtime.waitForTurn(threadId, turnId), 2000),
       "completed",
@@ -1336,7 +1500,7 @@ test("App Server dynamic callbacks use the registered function and server identi
 });
 
 test("unregistered and malformed callbacks fail closed while approvals stay denied", async () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
   const child = {
     exitCode: null,
     signalCode: null,
@@ -1414,7 +1578,7 @@ test("unregistered and malformed callbacks fail closed while approvals stay deni
 });
 
 test("handler rejection is bounded and response-pipe failure fails the runtime", async () => {
-  const runtime = new CodexRuntime();
+  const runtime = newTestRuntime();
   let kills = 0;
   const child = {
     exitCode: null,
@@ -1499,7 +1663,7 @@ test("delivery spawn snapshot excludes configured key and exact-value aliases wh
     ENSEMBLE_S07A_DELIVERY_SENTINEL: "S07A_NON_SECRET_TEST_MARKER",
     S07A_ALIAS: "S07A_NON_SECRET_TEST_MARKER",
   };
-  const runtime = new CodexRuntime(executable, {
+  const runtime = newTestRuntime(executable, {
     spawnEnvironment: () =>
       deliveryRuntimeEnvironment(environment, [
         {
@@ -1530,7 +1694,7 @@ test("delivery spawn snapshot excludes configured key and exact-value aliases wh
 });
 
 test("qualified native runtime waits for one exact reply and confirms only its ordered receipt", async () => {
-  const runtime = new CodexRuntime(
+  const runtime = newTestRuntime(
     join(process.cwd(), "test/ui01/native-runtime-fixture.mjs"),
     {
       qualifiedExecutableHash: createHash("sha256")
@@ -1609,16 +1773,29 @@ async function nativeTransport(mode: string) {
     process.cwd(),
     "test/ui01/native-runtime-fixture.mjs",
   );
-  const runtime = new CodexRuntime(executable, {
+  let processInstance = 0;
+  const runtime = newTestRuntime(executable, {
     qualifiedExecutableHash: createHash("sha256")
       .update(readFileSync(executable))
       .digest("hex"),
-    spawnEnvironment: () => ({
-      ...process.env,
-      ENSEMBLE_UI01_NATIVE_TRANSPORT_FIXTURE: mode,
-    }),
+    spawnEnvironment: () => {
+      return {
+        ...process.env,
+        ENSEMBLE_UI01_NATIVE_TRANSPORT_FIXTURE: mode,
+        ENSEMBLE_UI01_NATIVE_TRANSPORT_INSTANCE: String(processInstance),
+      };
+    },
   });
+  const startRuntime = runtime.start.bind(runtime);
+  runtime.start = async () => {
+    processInstance++;
+    await startRuntime();
+  };
   let call!: import("../src/standalone/native-input.js").RuntimeUserInputRequest;
+  let requestCallbacks = 0;
+  let replyAttempts = 0;
+  let terminalEvents = 0;
+  let terminalEventData: unknown;
   let resolve!: () => void;
   const received = new Promise<void>((done) => {
     resolve = done;
@@ -1628,6 +1805,7 @@ async function nativeTransport(mode: string) {
   const anomalies: string[] = [];
   runtime.onUserInputRequest((request) => {
     call = request;
+    requestCallbacks++;
     resolve();
   });
   runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
@@ -1637,32 +1815,109 @@ async function nativeTransport(mode: string) {
     anomalies.push(request.method);
     unexpected.push(request);
   });
+  const terminalAnomalies: string[] = [];
+  runtime.onTerminalAnomaly((anomaly) =>
+    terminalAnomalies.push(anomaly.reason),
+  );
   await runtime.start();
   const threadId = await runtime.startThread(process.cwd());
   await runtime.startTurn(threadId, process.cwd(), "fixture");
   await received;
+  const internal = runtime as unknown as {
+    events: { on(event: string, listener: (data: unknown) => void): void };
+  };
+  internal.events.on("turn/completed", (data) => {
+    terminalEvents++;
+    terminalEventData = data;
+  });
+  const fixture = runtimeFixtures.get(runtime);
+  if (!fixture) throw new Error("Runtime test safety fixture unavailable");
   return {
     runtime,
     call,
     outcomes,
     anomalies,
     unexpected,
-    reply: () =>
-      runtime.replyUserInput(
+    get requestCallbacks() {
+      return requestCallbacks;
+    },
+    get replyAttempts() {
+      return replyAttempts;
+    },
+    get terminalEvents() {
+      return terminalEvents;
+    },
+    get terminalEventData() {
+      return terminalEventData;
+    },
+    get terminalRecords() {
+      return fixture.terminalRecords();
+    },
+    terminalEvidence: () => {
+      const generation = runtime.currentUserInputGeneration();
+      if (!generation) return "runtime generation missing";
+      try {
+        return fixture.safetyPort.terminal(
+          threadId,
+          call.identity.turnId,
+          generation,
+        );
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
+    terminalAnomalies,
+    fixtureStoragePath: fixture.fixture.storagePath,
+    safetyPortMatchesFixtureTerminal:
+      fixture.safetyPort.terminal === fixture.fixture.safety.terminal,
+    reply: () => {
+      replyAttempts++;
+      return runtime.replyUserInput(
         call.identity,
         { answers: { q: { answers: ["Local"] } } },
         () => ({
           replyIntentId: "intent",
           answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
         }),
-      ),
+      );
+    },
   };
 }
-async function nativeUntil(predicate: () => boolean) {
+async function nativeUntil(
+  predicate: () => boolean,
+  diagnostics: () => unknown = () => undefined,
+) {
   const deadline = Date.now() + 2000;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("Native receipt deadline");
+    if (Date.now() > deadline)
+      throw new Error(
+        `Native receipt deadline: ${JSON.stringify(diagnostics())}`,
+      );
     await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+async function nativeDeadline<T>(
+  label: string,
+  action: Promise<T>,
+  diagnostics: () => unknown,
+  timeoutMs = 2000,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      action,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`${label} deadline: ${JSON.stringify(diagnostics())}`),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 test("native early resolution makes an unanswered endpoint unavailable with zero reply effects", async () => {
@@ -1710,6 +1965,7 @@ for (const mode of [
   "buffered",
   "write-error",
   "cancelled",
+  "resolved-cancelled",
   "wrong-thread",
   "wrong-type",
 ] as const)
@@ -1735,6 +1991,13 @@ for (const mode of [
       sent.catch(() => {});
       await nativeUntil(() => writeComplete);
       await new Promise((resolve) => setTimeout(resolve, 10));
+      const fixture = runtimeFixtures.get(f.runtime)?.fixture;
+      assert.ok(fixture, "Runtime test safety fixture unavailable");
+      const persistedBeforeAck = fixture.coordination.runtimeQuestionByEndpoint(
+        f.call.identity,
+      );
+      assert.equal(persistedBeforeAck?.deliveryState, "sending");
+      assert.ok(persistedBeforeAck?.replyIntentId);
       assert.equal(
         f.outcomes.filter((o) => o.outcome === "confirmed").length,
         0,
@@ -1743,6 +2006,11 @@ for (const mode of [
         f.runtime.cancelUserInput(
           f.call.identity,
           "Stop before acknowledgement",
+        );
+      if (mode === "resolved-cancelled")
+        f.runtime.cancelUserInput(
+          f.call.identity,
+          "Stop after acknowledgement before write callback",
         );
       assert.ok(callback);
       callback(
@@ -1753,11 +2021,19 @@ for (const mode of [
       if (mode === "write-error" || mode === "cancelled")
         await assert.rejects(sent);
       else await sent;
-      if (mode === "buffered") {
+      const persistedAfterAck = fixture.coordination.runtimeQuestionByEndpoint(
+        f.call.identity,
+      );
+      assert.equal(
+        persistedAfterAck?.replyIntentId,
+        persistedBeforeAck.replyIntentId,
+      );
+      if (mode === "buffered" || mode === "resolved-cancelled") {
         assert.deepEqual(
           f.outcomes.map((o) => o.outcome),
           ["confirmed"],
         );
+        assert.equal(persistedAfterAck?.deliveryState, "confirmed");
         const receiptOrder = f.outcomes[0]?.orderedReceipt;
         assert.ok(
           receiptOrder?.stdinSucceeded && receiptOrder.matchingResolution,
@@ -1768,10 +2044,12 @@ for (const mode of [
         assert.ok(
           receiptOrder.matchingResolution < receiptOrder.stdinSucceeded,
         );
-        f.runtime.cancelUserInput(f.call.identity, "Stop after confirmation");
+        if (mode === "buffered")
+          f.runtime.cancelUserInput(f.call.identity, "Stop after confirmation");
         assert.equal(f.outcomes.length, 1);
       } else if (mode === "write-error" || mode === "cancelled") {
         assert.equal(f.outcomes.at(-1)?.outcome, "uncertain");
+        assert.equal(persistedAfterAck?.deliveryState, "uncertain");
       } else {
         assert.deepEqual(
           f.outcomes.map((o) => o.outcome),
@@ -1797,7 +2075,22 @@ for (const mode of [
   test(`native ${mode} preserves one reply and distinguishes retransmission from conflict`, async () => {
     const f = await nativeTransport(mode);
     try {
-      await f.reply();
+      const diagnostics = () => ({
+        requestCallbacks: f.requestCallbacks,
+        replyAttempts: f.replyAttempts,
+        identity: f.call.identity,
+        outcomes: f.outcomes.map((outcome) => outcome.outcome),
+        anomalies: f.anomalies,
+        calls: f.unexpected.length,
+        terminalEvents: f.terminalEvents,
+        terminalEventData: f.terminalEventData,
+        terminalRecords: f.terminalRecords,
+        terminalEvidence: f.terminalEvidence(),
+        terminalAnomalies: f.terminalAnomalies,
+        fixtureStoragePath: f.fixtureStoragePath,
+        safetyPortMatchesFixtureTerminal: f.safetyPortMatchesFixtureTerminal,
+      });
+      await nativeDeadline("native reply", f.reply(), diagnostics);
       const rejected =
         mode === "reply-replay-changed" ||
         mode === "reply-replay-excess" ||
@@ -1813,9 +2106,13 @@ for (const mode of [
       );
       if (mode === "reply-replay-confirmed")
         assert.equal(
-          await f.runtime.waitForTurn(
-            f.call.identity.threadId,
-            f.call.identity.turnId,
+          await nativeDeadline(
+            "native terminal wait",
+            f.runtime.waitForTurn(
+              f.call.identity.threadId,
+              f.call.identity.turnId,
+            ),
+            diagnostics,
           ),
           "completed",
         );
@@ -1853,7 +2150,24 @@ for (const mode of [
       );
       assert.equal(gates, 0);
     } finally {
-      await f.runtime.stop();
+      await nativeDeadline(
+        "native runtime stop",
+        f.runtime.stop(),
+        () => ({
+          requestCallbacks: f.requestCallbacks,
+          replyAttempts: f.replyAttempts,
+          outcomes: f.outcomes.map((outcome) => outcome.outcome),
+          anomalies: f.anomalies,
+          terminalEvents: f.terminalEvents,
+          terminalEventData: f.terminalEventData,
+          terminalRecords: f.terminalRecords,
+          terminalEvidence: f.terminalEvidence(),
+          terminalAnomalies: f.terminalAnomalies,
+          fixtureStoragePath: f.fixtureStoragePath,
+          safetyPortMatchesFixtureTerminal: f.safetyPortMatchesFixtureTerminal,
+        }),
+        2000,
+      );
     }
   });
 for (const control of ["cancel", "interrupt"] as const)
@@ -1964,10 +2278,25 @@ test("replacement process reusing a typed RPC ID cannot receive an old answer", 
     await f.runtime.startTurn(thread, process.cwd(), "replacement fixture");
     await received;
     assert.equal(next.identity.requestId, f.call.identity.requestId);
+    assert.equal(next.identity.turnId, "native-turn-replacement");
+    assert.notEqual(next.identity.turnId, f.call.identity.turnId);
     assert.notEqual(
       next.identity.runtimeGeneration,
       f.call.identity.runtimeGeneration,
     );
+    const fixture = runtimeFixtures.get(f.runtime)?.fixture;
+    assert.ok(fixture);
+    const previousWork = fixture.bindTurn(
+      f.call.identity.threadId,
+      f.call.identity.turnId,
+      f.call.identity.runtimeGeneration,
+    );
+    const replacementWork = fixture.bindTurn(
+      next.identity.threadId,
+      next.identity.turnId,
+      next.identity.runtimeGeneration,
+    );
+    assert.notEqual(replacementWork, previousWork);
     let gates = 0;
     await assert.rejects(
       f.runtime.replyUserInput(
@@ -1999,7 +2328,7 @@ for (const mode of [
       process.cwd(),
       "test/ui01/native-runtime-fixture.mjs",
     );
-    const runtime = new CodexRuntime(executable, {
+    const runtime = newTestRuntime(executable, {
       qualifiedExecutableHash:
         mode === "wrong-hash"
           ? "0".repeat(64)
@@ -2042,7 +2371,7 @@ for (const mode of [
       process.cwd(),
       "test/ui01/native-runtime-fixture.mjs",
     );
-    const runtime = new CodexRuntime(executable, {
+    const runtime = newTestRuntime(executable, {
       qualifiedExecutableHash: createHash("sha256")
         .update(readFileSync(executable))
         .digest("hex"),
@@ -2056,6 +2385,7 @@ for (const mode of [
     const outcomes: import("../src/standalone/native-input.js").RuntimeUserInputOutcome[] =
       [];
     const anomalies: string[] = [];
+    const terminalAnomalies: string[] = [];
     let secondResponseBound = false;
     runtime.onUserInputRequest((call) => {
       if (calls.length === 1)
@@ -2068,7 +2398,12 @@ for (const mode of [
     });
     runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
     runtime.onUnexpectedRequest((request) => anomalies.push(request.method));
+    runtime.onTerminalAnomaly((anomaly) =>
+      terminalAnomalies.push(anomaly.reason),
+    );
+    let replyAttempts = 0;
     const reply = (index: number) => {
+      replyAttempts++;
       const call = calls[index];
       assert.ok(call);
       return runtime.replyUserInput(
@@ -2149,9 +2484,93 @@ for (const mode of [
           1,
         );
       } else {
-        await nativeUntil(() => calls.length === 2);
+        await nativeUntil(
+          () => calls.length === 2,
+          () => {
+            const internals = runtime as unknown as {
+              nativeTurns: Map<string, string>;
+              nativeReadbacks: Map<
+                string,
+                {
+                  input: unknown;
+                  id: string | number;
+                  requested: boolean;
+                  responded: boolean;
+                  replays: number;
+                  invalid: boolean;
+                }
+              >;
+              nativeQualifications: Map<string, unknown>;
+            };
+            const generation = runtime.currentUserInputGeneration();
+            const fixture = runtimeFixtures.get(runtime)?.fixture;
+            const terminal = (turnId: string) => {
+              if (!generation || !fixture) return "fixture unavailable";
+              try {
+                return fixture.safety.terminal(thread, turnId, generation);
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+              }
+            };
+            const pending = internals.nativeReadbacks.get(thread);
+            return {
+              secondTurn,
+              calls: calls.map((call) => call.identity),
+              replyAttempts,
+              outcomes: outcomes.map((outcome) => outcome.outcome),
+              anomalies,
+              terminalAnomalies,
+              currentTurn: internals.nativeTurns.get(thread),
+              qualificationPresent: internals.nativeQualifications.has(thread),
+              pending: pending
+                ? {
+                    input: pending.input,
+                    id: pending.id,
+                    requested: pending.requested,
+                    responded: pending.responded,
+                    replays: pending.replays,
+                    invalid: pending.invalid,
+                  }
+                : null,
+              firstTerminal: terminal(firstTurn),
+              secondTerminal: terminal(secondTurn),
+            };
+          },
+        );
         assert.equal(calls[1]?.identity.turnId, secondTurn);
         assert.equal(calls[1]?.identity.requestId, 702);
+        const threadState = runtime as unknown as {
+          nativeQualifications: Map<string, unknown>;
+          threadTools: Map<string, unknown>;
+        };
+        assert.ok(threadState.nativeQualifications.has(thread));
+        assert.ok(threadState.threadTools.has(thread));
+        const fixture = runtimeFixtures.get(runtime)?.fixture;
+        assert.ok(fixture);
+        const previousWork = fixture.bindTurn(
+          thread,
+          firstTurn,
+          firstReceipt.runtimeGeneration,
+        );
+        const replacementWork = fixture.bindTurn(
+          thread,
+          secondTurn,
+          calls[1]!.identity.runtimeGeneration,
+        );
+        assert.notEqual(previousWork, replacementWork);
+        assert.equal(
+          fixture.safety.terminal(
+            thread,
+            firstTurn,
+            firstReceipt.runtimeGeneration,
+          )?.workId,
+          previousWork,
+        );
+        assert.equal(
+          fixture.coordination.runtimeQuestionByEndpoint(calls[0]!.identity)
+            ?.deliveryState,
+          "confirmed",
+        );
         await reply(1);
         assert.equal(
           await runtime.waitForTurn(thread, secondTurn),
@@ -2171,7 +2590,13 @@ for (const mode of [
       );
       await assert.rejects(reply(0), /unavailable/);
     } finally {
-      await runtime.stop();
+      await nativeDeadline("two-turn runtime stop", runtime.stop(), () => ({
+        calls: calls.map((call) => call.identity),
+        replyAttempts,
+        outcomes: outcomes.map((outcome) => outcome.outcome),
+        anomalies,
+        terminalAnomalies,
+      }));
     }
   });
 
@@ -2194,7 +2619,7 @@ test("archived resume rejection retains its exact correlated request and process
     ].join("\n"),
   );
   chmodSync(executable, 0o700);
-  const runtime = new CodexRuntime(executable, {
+  const runtime = newTestRuntime(executable, {
     captureProcessIdentity: async () => ({
       processId: "synthetic-123",
       processStartedAt: "synthetic-birth",
@@ -2268,7 +2693,7 @@ test("archived RPC text cannot qualify wrong methods, identities or malformed re
         ].join("\n"),
       );
       chmodSync(executable, 0o700);
-      const runtime = new CodexRuntime(executable, {
+      const runtime = newTestRuntime(executable, {
         captureProcessIdentity: async () => ({
           processId: "synthetic-123",
           processStartedAt: "synthetic-birth",

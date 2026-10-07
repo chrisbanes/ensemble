@@ -208,7 +208,7 @@ export async function runQualification(options = {}) {
     limits: { totalMs, cleanupMs },
     counts: { threads: 0, turns: 0, reports: 0 },
     callbackEnded: false,
-    cleanup: { operations: {}, lateResources: [], verified: false },
+    cleanup: { operations: {}, stages: [], lateResources: [], verified: false },
     screenshots: [],
   };
   let service,
@@ -222,8 +222,9 @@ export async function runQualification(options = {}) {
     callbackPending = false,
     callbackFailure;
   let finishing = false,
-    probe;
-  const pendingSteps = new Set();
+    probe,
+    cleanupDeadline;
+  const pendingSteps = new Map();
   const step = (action, label, lateCleanup) => {
     const promise = Promise.resolve()
       .then(action)
@@ -233,21 +234,51 @@ export async function runQualification(options = {}) {
             identity: `${label}:${evidence.cleanup.lateResources.length + 1}`,
             kind: value?.constructor?.name ?? label,
             state: "pending",
+            createdAt: new Date().toISOString(),
+            createdMs: Date.now() - start,
+            closeStartedAt: new Date().toISOString(),
+            closeStartedMs: Date.now() - start,
+            cleanupRemainingMsAtStart: Math.max(
+              0,
+              cleanupDeadline - Date.now(),
+            ),
           };
           evidence.cleanup.lateResources.push(record);
           try {
             await lateCleanup(value);
             record.state = "settled";
+            record.closeEndedAt = new Date().toISOString();
+            record.closeEndedMs = Date.now() - start;
+            record.cleanupRemainingMsAtEnd = Math.max(
+              0,
+              cleanupDeadline - Date.now(),
+            );
+            record.settledWithinCleanupDeadline = Date.now() <= cleanupDeadline;
+            if (label === "service-start")
+              evidence.cleanup.lateVerification = fixtureChild?.verify() ?? {
+                kind: "unknown",
+                reason: "no-owned-fixture-child",
+                method: "fixture-owned-child-exit",
+              };
+            save();
           } catch (error) {
             record.state = "failed";
             record.reason = String(error.message).slice(0, 512);
+            record.closeEndedAt = new Date().toISOString();
+            record.closeEndedMs = Date.now() - start;
+            record.cleanupRemainingMsAtEnd = Math.max(
+              0,
+              cleanupDeadline - Date.now(),
+            );
+            record.settledWithinCleanupDeadline = Date.now() <= cleanupDeadline;
+            save();
             throw error;
           }
           throw Error(`${label}-late-creation-cleaned`);
         }
         return value;
       });
-    pendingSteps.add(promise);
+    pendingSteps.set(promise, label);
     promise.then(
       () => pendingSteps.delete(promise),
       () => pendingSteps.delete(promise),
@@ -313,6 +344,15 @@ export async function runQualification(options = {}) {
               }
             : {}),
         });
+        if (fixture?.delayRuntimeStart) {
+          const startRuntime = runtime.start.bind(runtime);
+          runtime.start = async () => {
+            await new Promise((resolve) =>
+              setTimeout(resolve, fixture.delayRuntimeStart),
+            );
+            return startRuntime();
+          };
+        }
         const startThread = runtime.startThread.bind(runtime),
           startTurn = runtime.startTurn.bind(runtime),
           onTool = runtime.onToolCall.bind(runtime);
@@ -629,30 +669,94 @@ export async function runQualification(options = {}) {
   } finally {
     finishing = true;
     evidence.process ??= runtime?.processIdentity();
-    const cleanupDeadline = Math.min(start + totalMs, Date.now() + cleanupMs);
+    cleanupDeadline = Math.min(start + totalMs, Date.now() + cleanupMs);
     async function clean(name, action) {
+      const stage = {
+        operation: name,
+        state: "pending",
+        startedAt: new Date().toISOString(),
+        startedMs: Date.now() - start,
+        remainingMsAtStart: Math.max(0, cleanupDeadline - Date.now()),
+      };
+      evidence.cleanup.stages.push(stage);
+      let outcome;
+      const operation = Promise.resolve()
+        .then(action)
+        .then(
+          () => {
+            outcome = { state: "settled", settledMs: Date.now() - start };
+            return outcome;
+          },
+          (error) => {
+            outcome = {
+              state: "failed",
+              reason: String(error.message).slice(0, 512),
+              settledMs: Date.now() - start,
+            };
+            return outcome;
+          },
+        );
+      const recordLateSettlement = (outcome) => {
+        if (
+          stage.state !== "unresolved" ||
+          outcome.settledMs <= cleanupDeadline - start ||
+          stage.lateSettlement
+        )
+          return;
+        stage.lateSettlement = {
+          state: outcome.state,
+          settledAt: new Date(start + outcome.settledMs).toISOString(),
+          settledMs: outcome.settledMs,
+          remainingMs: Math.max(0, cleanupDeadline - start - outcome.settledMs),
+          withinCleanupDeadline: false,
+          ...(outcome.reason ? { reason: outcome.reason } : {}),
+        };
+        save();
+      };
+      void operation.then(recordLateSettlement);
       try {
-        await bounded(action, cleanupDeadline, name);
+        const outcome = await bounded(() => operation, cleanupDeadline, name);
+        if (outcome.state === "failed") throw Error(outcome.reason);
+        stage.state = "settled";
         evidence.cleanup.operations[name] = "settled";
-      } catch {
+      } catch (error) {
+        stage.state = "unresolved";
+        stage.reason = String(error.message).slice(0, 512);
         evidence.cleanup.operations[name] = "unresolved";
         evidence.status = "failed";
       }
+      stage.endedAt = new Date().toISOString();
+      stage.endedMs = Date.now() - start;
+      stage.elapsedMs = stage.endedMs - stage.startedMs;
+      stage.remainingMsAtEnd = Math.max(0, cleanupDeadline - Date.now());
+      if (outcome) recordLateSettlement(outcome);
     }
-    if (pendingSteps.size)
-      await clean("pending-setup-settlement", () =>
-        Promise.allSettled([...pendingSteps]),
-      );
-    if (probe?.listening)
-      await clean("port-close", () => new Promise((r) => probe.close(r)));
-    if (evidence.status !== "passed" && service) {
-      await clean("exact-runtime-stop", () => runtime?.stop());
-      await clean("task-stop-hold", () => service.stopTask(taskId));
-    }
-    if (browser) await clean("browser-close", () => browser.close());
+    const serviceStartPending = [...pendingSteps.values()].includes(
+      "service-start",
+    );
+    const pendingSetup = pendingSteps.size
+      ? clean("pending-setup-settlement", () =>
+          Promise.allSettled([...pendingSteps.keys()]),
+        )
+      : Promise.resolve();
+    const closePort = probe?.listening
+      ? clean("port-close", () => new Promise((r) => probe.close(r)))
+      : Promise.resolve();
+    const closeBrowser = browser
+      ? clean("browser-close", () => browser.close())
+      : Promise.resolve();
+    const holdTask = evidence.status !== "passed";
+    const stopExecution = (async () => {
+      if (service && !serviceStartPending)
+        await clean("exact-runtime-stop", () => runtime?.stop());
+      if (holdTask && service && !serviceStartPending)
+        await clean("task-stop-hold", () => service.stopTask(taskId));
+    })();
+    await Promise.all([pendingSetup, closePort, closeBrowser, stopExecution]);
     if (http) await clean("operator-close", () => http.stop());
     if (auth) await clean("auth-close", () => auth.close());
-    if (service) await clean("service-close", () => service.stop());
+    if (service && !serviceStartPending)
+      await clean("service-close", () => service.stop());
     try {
       evidence.cleanup.verification = fixture
         ? (fixtureChild?.verify() ?? {

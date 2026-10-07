@@ -521,6 +521,9 @@ export class CoordinationStore {
         interactionId TEXT PRIMARY KEY REFERENCES coordination_interactions(interactionId),
         endpointKey TEXT NOT NULL UNIQUE, identityJson TEXT NOT NULL, requestJson TEXT NOT NULL,
         qualificationJson TEXT NOT NULL, requestDigest TEXT NOT NULL,
+        runtimeGeneration TEXT, threadId TEXT, turnId TEXT, itemId TEXT,
+        rpcIdKind TEXT CHECK(rpcIdKind IS NULL OR rpcIdKind IN ('number','string')),
+        rpcIdValue TEXT,
         answerJson TEXT, answerDigest TEXT, replyIntentId TEXT UNIQUE,
         requestState TEXT NOT NULL CHECK(requestState IN ('available','unavailable')),
         deliveryState TEXT NOT NULL CHECK(deliveryState IN ('unanswered','recorded','held','sending','sent-unconfirmed','confirmed','unavailable','uncertain')),
@@ -535,6 +538,9 @@ export class CoordinationStore {
         revision INTEGER NOT NULL CHECK(revision > 0),
         createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
         resolvedAt INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS coordination_runtime_migrations (
+        migrationId TEXT PRIMARY KEY
       );
       CREATE TABLE IF NOT EXISTS coordination_operator_receipts (
         scope TEXT NOT NULL,
@@ -643,6 +649,7 @@ export class CoordinationStore {
         this.db.exec(
           "ALTER TABLE coordination_interactions ADD COLUMN materialJson TEXT",
         );
+      this.migrateRuntimeQuestionIdentity();
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_interaction_event
         ON coordination_inbox_events(interactionId) WHERE interactionId IS NOT NULL;`);
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_routing_fallback
@@ -654,6 +661,86 @@ export class CoordinationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private migrateRuntimeQuestionIdentity(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(coordination_runtime_questions)")
+      .all() as Row[];
+    const names = new Set(columns.map((column) => String(column.name)));
+    for (const [name, definition] of [
+      ["runtimeGeneration", "TEXT"],
+      ["threadId", "TEXT"],
+      ["turnId", "TEXT"],
+      ["itemId", "TEXT"],
+      [
+        "rpcIdKind",
+        "TEXT CHECK(rpcIdKind IS NULL OR rpcIdKind IN ('number','string'))",
+      ],
+      ["rpcIdValue", "TEXT"],
+    ] as const)
+      if (!names.has(name))
+        this.db.exec(
+          `ALTER TABLE coordination_runtime_questions ADD COLUMN ${name} ${definition}`,
+        );
+
+    if (
+      !this.db
+        .prepare(
+          "SELECT 1 FROM coordination_runtime_migrations WHERE migrationId = ?",
+        )
+        .get("runtime-question-identity-v1")
+    ) {
+      let cursor = 0;
+      for (;;) {
+        const rows = this.db
+          .prepare(`SELECT rowid AS cursor, interactionId, identityJson, endpointKey
+            FROM coordination_runtime_questions WHERE rowid > ?
+            ORDER BY rowid LIMIT 128`)
+          .all(cursor) as Row[];
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          const rowCursor = z
+            .number()
+            .int()
+            .positive()
+            .safe()
+            .parse(row.cursor);
+          const identity = nativeInputEndpointIdentitySchema.parse(
+            JSON.parse(z.string().parse(row.identityJson)),
+          );
+          if (String(row.endpointKey) !== nativeEndpointKey(identity))
+            throw new Error("Stored native endpoint identity is inconsistent");
+          const rpcId = identity.requestId;
+          this.db
+            .prepare(`UPDATE coordination_runtime_questions SET
+              runtimeGeneration = ?, threadId = ?, turnId = ?, itemId = ?,
+              rpcIdKind = ?, rpcIdValue = ? WHERE interactionId = ?`)
+            .run(
+              identity.runtimeGeneration,
+              identity.threadId,
+              identity.turnId,
+              identity.itemId,
+              typeof rpcId,
+              String(rpcId),
+              z.string().uuid().parse(row.interactionId),
+            );
+          cursor = rowCursor;
+        }
+      }
+      this.db
+        .prepare(
+          "INSERT INTO coordination_runtime_migrations (migrationId) VALUES (?)",
+        )
+        .run("runtime-question-identity-v1");
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS coordination_runtime_typed_rpc
+        ON coordination_runtime_questions(runtimeGeneration,threadId,rpcIdKind,rpcIdValue);
+      CREATE INDEX IF NOT EXISTS coordination_runtime_pending_generation_answers
+        ON coordination_runtime_questions(runtimeGeneration,requestState,interactionId)
+        WHERE answerDigest IS NOT NULL AND replyIntentId IS NULL;
+      CREATE INDEX IF NOT EXISTS coordination_interactions_requesting_work
+        ON coordination_interactions(requestingWorkId,interactionId)`);
   }
 
   ensureDeliveryEventWithinTransaction(
@@ -1108,6 +1195,54 @@ export class CoordinationStore {
       throw error;
     }
   }
+  private parseRuntimeQuestion(row: Row): RuntimeQuestionRecord {
+    const identity = nativeInputEndpointIdentitySchema.parse(
+      JSON.parse(String(row.identityJson)),
+    );
+    const qualification = JSON.parse(
+      String(row.qualificationJson),
+    ) as RuntimeUserInputRequest["qualification"];
+    const request = parseNativeInputRequest(
+      JSON.parse(String(row.requestJson)),
+      qualification,
+    );
+    const answers =
+      row.answerJson === null
+        ? null
+        : validateStructuredAnswers(
+            request.questions,
+            JSON.parse(String(row.answerJson)),
+          );
+    return {
+      interactionId: String(row.interactionId),
+      taskId: String(row.taskId),
+      requestingAssignmentId: String(row.requestingAssignmentId),
+      requestingWorkId: String(row.requestingWorkId),
+      revision: Number(row.revision),
+      identity,
+      request,
+      qualification,
+      answers,
+      answerDigest: row.answerDigest === null ? null : String(row.answerDigest),
+      replyIntentId:
+        row.replyIntentId === null ? null : String(row.replyIntentId),
+      deliveryState: runtimeAnswerReceiptSchema.shape.deliveryState.parse(
+        row.deliveryState,
+      ),
+      requestState: z
+        .enum(["available", "unavailable"])
+        .parse(row.requestState),
+      reason: row.reason === null ? null : String(row.reason),
+    };
+  }
+
+  private runtimeQuestionSelect(): string {
+    return `SELECT runtime.*,interaction.taskId,interaction.requestingAssignmentId,
+      interaction.requestingWorkId,interaction.revision
+      FROM coordination_runtime_questions runtime
+      JOIN coordination_interactions interaction USING(interactionId)`;
+  }
+
   runtimeQuestions(taskId?: string): RuntimeQuestionRecord[] {
     const sql = `SELECT runtime.*,interaction.taskId,interaction.requestingAssignmentId,interaction.requestingWorkId,interaction.revision FROM coordination_runtime_questions runtime JOIN coordination_interactions interaction USING(interactionId)${taskId ? " WHERE interaction.taskId = ?" : ""} ORDER BY interaction.createdAt,interaction.interactionId`;
     const rows = (
@@ -1115,55 +1250,143 @@ export class CoordinationStore {
         ? this.db.prepare(sql).all(uuid.parse(taskId))
         : this.db.prepare(sql).all()
     ) as Row[];
-    return rows.map((row) => {
-      const identity = nativeInputEndpointIdentitySchema.parse(
+    return rows.map((row) => this.parseRuntimeQuestion(row));
+  }
+
+  runtimeQuestionByInteractionId(
+    interactionId: string,
+    taskId?: string,
+  ): RuntimeQuestionRecord | undefined {
+    const row = this.db
+      .prepare(`${this.runtimeQuestionSelect()}
+        WHERE runtime.interactionId = ?${taskId ? " AND interaction.taskId = ?" : ""}`)
+      .get(
+        uuid.parse(interactionId),
+        ...(taskId ? [uuid.parse(taskId)] : []),
+      ) as Row | undefined;
+    return row ? this.parseRuntimeQuestion(row) : undefined;
+  }
+
+  runtimeQuestionByEndpoint(
+    identity: NativeInputEndpointIdentity,
+  ): RuntimeQuestionRecord | undefined {
+    const endpoint = nativeInputEndpointIdentitySchema.parse(identity);
+    const row = this.db
+      .prepare(`${this.runtimeQuestionSelect()} WHERE runtime.endpointKey = ?`)
+      .get(nativeEndpointKey(endpoint)) as Row | undefined;
+    if (!row) return undefined;
+    const record = this.parseRuntimeQuestion(row);
+    if (nativeEndpointKey(record.identity) !== nativeEndpointKey(endpoint))
+      throw new Error("Stored native endpoint identity is inconsistent");
+    return record;
+  }
+
+  runtimeQuestionsForWork(
+    workId: string,
+    activeOnly = false,
+    runtimeGeneration?: string,
+  ): RuntimeQuestionRecord[] {
+    if (activeOnly && !runtimeGeneration)
+      throw new Error("Active native questions require a runtime generation");
+    const activeFilter = activeOnly
+      ? ` AND runtime.requestState = 'available'
+          AND runtime.deliveryState IN ('unanswered','recorded','held','sending','sent-unconfirmed','uncertain')${runtimeGeneration ? " AND runtime.runtimeGeneration = ?" : ""}`
+      : "";
+    const rows = this.db
+      .prepare(`${this.runtimeQuestionSelect()}
+        WHERE interaction.requestingWorkId = ?${activeFilter}
+        ORDER BY runtime.interactionId`)
+      .all(
+        z.string().min(1).parse(workId),
+        ...(activeOnly && runtimeGeneration
+          ? [z.string().min(1).max(128).parse(runtimeGeneration)]
+          : []),
+      ) as Row[];
+    return rows.map((row) => this.parseRuntimeQuestion(row));
+  }
+
+  pendingRuntimeAnswersPage(
+    runtimeGeneration: string,
+    afterInteractionId: string,
+    limit = 64,
+  ): RuntimeQuestionRecord[] {
+    const pageSize = z.number().int().min(1).max(128).parse(limit);
+    const rows = this.db
+      .prepare(`${this.runtimeQuestionSelect()}
+        WHERE runtime.runtimeGeneration = ?
+          AND runtime.requestState = 'available'
+          AND runtime.answerDigest IS NOT NULL
+          AND runtime.replyIntentId IS NULL
+          AND runtime.interactionId > ?
+        ORDER BY runtime.interactionId LIMIT ?`)
+      .all(
+        z.string().min(1).max(128).parse(runtimeGeneration),
+        z.string().max(128).parse(afterInteractionId),
+        pageSize,
+      ) as Row[];
+    return rows.map((row) => this.parseRuntimeQuestion(row));
+  }
+
+  runtimeNativeEndpointHistory(
+    identity: NativeInputEndpointIdentity,
+  ): "new" | "exact-identity-seen" | "typed-id-reused" {
+    const endpoint = nativeInputEndpointIdentitySchema.parse(identity);
+    const endpointKey = nativeEndpointKey(endpoint);
+    const exact = this.db
+      .prepare(`SELECT identityJson, endpointKey, runtimeGeneration, threadId,
+        turnId, itemId, rpcIdKind, rpcIdValue
+        FROM coordination_runtime_questions WHERE endpointKey = ? LIMIT 2`)
+      .all(endpointKey) as Row[];
+    if (exact.length > 1)
+      throw new Error("Stored native endpoint identity is ambiguous");
+    if (exact.length === 1) {
+      const row = exact[0]!;
+      const stored = nativeInputEndpointIdentitySchema.parse(
         JSON.parse(String(row.identityJson)),
       );
-      const qualification = JSON.parse(
-        String(row.qualificationJson),
-      ) as RuntimeUserInputRequest["qualification"];
-      const request = parseNativeInputRequest(
-        JSON.parse(String(row.requestJson)),
-        qualification,
-      );
-      const answers =
-        row.answerJson === null
-          ? null
-          : validateStructuredAnswers(
-              request.questions,
-              JSON.parse(String(row.answerJson)),
-            );
-      return {
-        interactionId: String(row.interactionId),
-        taskId: String(row.taskId),
-        requestingAssignmentId: String(row.requestingAssignmentId),
-        requestingWorkId: String(row.requestingWorkId),
-        revision: Number(row.revision),
-        identity,
-        request,
-        qualification,
-        answers,
-        answerDigest:
-          row.answerDigest === null ? null : String(row.answerDigest),
-        replyIntentId:
-          row.replyIntentId === null ? null : String(row.replyIntentId),
-        deliveryState: runtimeAnswerReceiptSchema.shape.deliveryState.parse(
-          row.deliveryState,
-        ),
-        requestState: z
-          .enum(["available", "unavailable"])
-          .parse(row.requestState),
-        reason: row.reason === null ? null : String(row.reason),
-      };
-    });
+      if (
+        nativeEndpointKey(stored) !== endpointKey ||
+        row.runtimeGeneration !== stored.runtimeGeneration ||
+        row.threadId !== stored.threadId ||
+        row.turnId !== stored.turnId ||
+        row.itemId !== stored.itemId ||
+        row.rpcIdKind !== typeof stored.requestId ||
+        row.rpcIdValue !== String(stored.requestId)
+      )
+        throw new Error("Stored native endpoint index is inconsistent");
+      return "exact-identity-seen";
+    }
+    const reused = this.db
+      .prepare(`SELECT identityJson, runtimeGeneration, threadId, turnId, itemId,
+        rpcIdKind, rpcIdValue FROM coordination_runtime_questions
+        WHERE runtimeGeneration = ? AND threadId = ?
+          AND rpcIdKind = ? AND rpcIdValue = ? LIMIT 1`)
+      .get(
+        endpoint.runtimeGeneration,
+        endpoint.threadId,
+        typeof endpoint.requestId,
+        String(endpoint.requestId),
+      ) as Row | undefined;
+    if (!reused) return "new";
+    const stored = nativeInputEndpointIdentitySchema.parse(
+      JSON.parse(String(reused.identityJson)),
+    );
+    if (
+      reused.runtimeGeneration !== stored.runtimeGeneration ||
+      reused.threadId !== stored.threadId ||
+      reused.turnId !== stored.turnId ||
+      reused.itemId !== stored.itemId ||
+      reused.rpcIdKind !== typeof stored.requestId ||
+      reused.rpcIdValue !== String(stored.requestId)
+    )
+      throw new Error("Stored native endpoint index is inconsistent");
+    return "typed-id-reused";
   }
   private requiredRuntimeQuestion(
     interactionId: string,
     taskId?: string,
   ): RuntimeQuestionRecord {
-    const record = this.runtimeQuestions(taskId).find(
-      (q) => q.interactionId === interactionId,
-    );
+    const record = this.runtimeQuestionByInteractionId(interactionId, taskId);
     if (!record) throw new Error("Persisted native question is unavailable");
     return record;
   }
@@ -1187,8 +1410,14 @@ export class CoordinationStore {
       if (prior) {
         if (prior.requestDigest !== digest)
           throw new Error("Conflicting native request replay");
+        if (
+          this.runtimeNativeEndpointHistory(identity) !== "exact-identity-seen"
+        )
+          throw new Error("Stored native endpoint identity is inconsistent");
         return this.requiredRuntimeQuestion(String(prior.interactionId));
       }
+      if (this.runtimeNativeEndpointHistory(identity) !== "new")
+        throw new Error("Native RPC identity was already used");
       const binding = this.currentBinding(identity.threadId, identity.turnId);
       if (!binding)
         throw new Error("Native request is not bound to running work");
@@ -1209,7 +1438,11 @@ export class CoordinationStore {
         );
       this.db
         .prepare(
-          `INSERT INTO coordination_runtime_questions (interactionId,endpointKey,identityJson,requestJson,qualificationJson,requestDigest,requestState,deliveryState) VALUES (?,?,?,?,?,?,'available','unanswered')`,
+          `INSERT INTO coordination_runtime_questions
+          (interactionId,endpointKey,identityJson,requestJson,qualificationJson,
+            requestDigest,runtimeGeneration,threadId,turnId,itemId,rpcIdKind,
+            rpcIdValue,requestState,deliveryState)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'available','unanswered')`,
         )
         .run(
           interactionId,
@@ -1218,6 +1451,12 @@ export class CoordinationStore {
           JSON.stringify(request),
           JSON.stringify(input.qualification),
           digest,
+          identity.runtimeGeneration,
+          identity.threadId,
+          identity.turnId,
+          identity.itemId,
+          typeof identity.requestId,
+          String(identity.requestId),
         );
       this.db
         .prepare(
@@ -1247,8 +1486,9 @@ export class CoordinationStore {
           JSON.parse(String(prior.result)),
         );
       }
-      const question = this.runtimeQuestions(command.taskId).find(
-        (q) => q.interactionId === command.interactionId,
+      const question = this.runtimeQuestionByInteractionId(
+        command.interactionId,
+        command.taskId,
       );
       if (
         question?.requestState !== "available" ||
@@ -1308,9 +1548,7 @@ export class CoordinationStore {
     identity: NativeInputEndpointIdentity,
   ): RuntimeReplyIntent {
     return this.runtimeTransaction(() => {
-      const question = this.runtimeQuestions().find(
-        (q) => q.interactionId === interactionId,
-      );
+      const question = this.runtimeQuestionByInteractionId(interactionId);
       if (
         !question ||
         nativeEndpointKey(question.identity) !== nativeEndpointKey(identity) ||
@@ -1338,12 +1576,11 @@ export class CoordinationStore {
       reason: _reason,
       replyIntentId: _intent,
       answerDigest: _digest,
+      orderedReceipt: _receipt,
       ...identity
     } = outcome;
     return this.runtimeTransaction(() => {
-      const question = this.runtimeQuestions().find(
-        (q) => nativeEndpointKey(q.identity) === nativeEndpointKey(identity),
-      );
+      const question = this.runtimeQuestionByEndpoint(identity);
       if (!question) throw new Error("Unknown native outcome identity");
       if (
         question.replyIntentId !== (outcome.replyIntentId ?? null) ||
@@ -3775,8 +4012,12 @@ export class CoordinationStore {
   ): string[] {
     const reasons: string[] = [];
     if (
-      this.runtimeQuestions(request.taskId).some(
-        (q) => q.deliveryState !== "confirmed",
+      this.one(
+        `SELECT 1 FROM coordination_runtime_questions runtime
+        JOIN coordination_interactions interaction USING(interactionId)
+        WHERE interaction.taskId = ? AND runtime.deliveryState <> 'confirmed'
+        LIMIT 1`,
+        request.taskId,
       )
     )
       reasons.push("unresolved-native-delivery");

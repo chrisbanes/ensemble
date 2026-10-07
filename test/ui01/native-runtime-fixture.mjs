@@ -29,7 +29,10 @@ const terminal = () =>
     method: "turn/completed",
     params: {
       threadId: "native-thread",
-      turn: { id: "native-turn", status: "completed" },
+      turn: {
+        id: lastNative?.params.turnId ?? "native-turn",
+        status: "completed",
+      },
     },
   });
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -159,13 +162,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (m.method === "turn/start") {
-    send({ id: m.id, result: { turn: { id: "native-turn" } } });
+    const turnId =
+      process.env.ENSEMBLE_UI01_NATIVE_TRANSPORT_INSTANCE === "2"
+        ? "native-turn-replacement"
+        : "native-turn";
+    send({ id: m.id, result: { turn: { id: turnId } } });
     if (transport === "async-before")
       send({
         method: "item/started",
         params: {
           threadId: "native-thread",
-          turnId: "native-turn",
+          turnId,
           item: { type: "toolCall", name: "request_user_input_async" },
         },
       });
@@ -174,7 +181,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       method: "item/tool/requestUserInput",
       params: {
         threadId: "native-thread",
-        turnId: "native-turn",
+        turnId,
         itemId: "native-item",
         isBlocking: false,
         autoResolutionMs: null,
@@ -215,7 +222,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     if (
       transport !== "no-resolution" &&
-      transport !== "reply-replay-no-resolution"
+      transport !== "reply-replay-no-resolution" &&
+      transport !== "cancelled"
     )
       send({
         method: "serverRequest/resolved",

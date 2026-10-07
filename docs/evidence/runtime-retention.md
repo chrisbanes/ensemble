@@ -1,0 +1,150 @@
+# Runtime retention and indexed evidence
+
+This report records the deterministic longevity run for #790. It measures the
+production `CodexRuntime.receive()` path, `StandaloneService` callback and
+coordination wiring, and the real SQLite stores. The fixture injects a
+synthetic child and transport; it does not launch Codex or qualify a live
+native protocol. Existing UI01/S05 protocol and bounded-conversation evidence
+remains the protocol qualification evidence.
+
+## Workload and method
+
+The terminal workload delivered 10,000 settled `turn/completed` events through
+`CodexRuntime.receive()` into a service-owned SQLite database. After the
+cohort, it replayed turn 0 with the same status and then the opposite status.
+The duplicate stayed non-conflicting; the opposite status persisted a sticky
+conflict, held the exact writer and same-workspace successor, and left an
+unrelated completed execution unchanged. The test then exercised the exact
+indexed lookup for 1,000 turns.
+
+The native workload drove 2,000 requests through the adapter, service waiter
+and callback path, real coordination view, and SQLite-backed reply-intent
+transaction. Each synthetic stdin reply checked that the matching durable
+question already held a `replyIntentId` in `sending` state before the fixture
+emitted its resolution. All 2,000 observations met that ordering; there were
+zero violations. The test retired each request in cohorts of 250, checked
+runtime collection counts and UTF-8 payload bytes after every cohort, and
+reopened the same service database under a different runtime generation. The
+confirmed answers stayed confirmed and prior terminal evidence remained
+readable after reopen.
+
+For both workloads, the test enumerated the settled terminal and native
+payload caches, native qualifications, active endpoints and both indexes,
+thread settings and tools, native turns, invalid turns, readbacks, failures,
+conversation turns, pending RPCs, service waiters/callbacks/active/background
+work/captures, and state prebindings. Every settled collection had count 0
+and UTF-8 payload bytes 0. At one active native request, the test separately
+observed one endpoint, turn and RPC index, readback, turn, qualification,
+settings, tools, service waiter and callback. The raw request was 304 bytes;
+the enumerated active payloads were: qualification 400 bytes, endpoint 1,034,
+turn index 170, RPC index 180, settings 98, tools 25, turn 48, readback 370,
+waiter 193, and callback key 23. Active child/stream/timer/function handles
+are not converted into payload bytes; their ownership and lifecycle are
+tested separately.
+
+The measurements use pinned Node.js 24.21.0 and npm 12.2.0 on macOS arm64,
+MacBook Pro 18,2 with Apple M1 Max (10 cores). Heap samples call explicit GC
+before reading `process.memoryUsage().heapUsed`; heap values are workload
+observations, not a universal memory bound. Lookup and cancellation timings
+use `process.hrtime.bigint()` for fixed sets of 1,000 synchronous iterations.
+The timing harness retains at most 1,000 samples per operation. To report
+durable question payload bytes, it also materializes 2,000 question rows
+(2,119,123 bytes) in the test harness; that measurement allocation is not
+production runtime retention.
+
+## Results
+
+| Workload | Durable rows and payload | Post-GC heap samples | Indexed lookup / cancellation | Settled in-memory payloads |
+| --- | --- | --- | --- | --- |
+| 10,000 terminal turns | 10,000 rows; 1,027,780 UTF-8 bytes | 5,000: 16,406,312 bytes; 10,000: 16,437,120 bytes; delta 30,808 | Terminal lookup, 1,000 iterations: median 0.047375 ms, p95 0.06875 ms, max 0.42225 ms | Every enumerated collection: 0 entries / 0 bytes |
+| 2,000 native questions | 2,000 question rows; 2,119,123 UTF-8 bytes; qualification rows: 2,000 / 530,890 bytes | 1,000: 18,992,016 bytes; 2,000: 19,275,936 bytes; delta 283,920 | Terminal lookup: 0.046584 / 0.060375 / 0.24175 ms; native endpoint lookup: 0.043375 / 0.061917 / 0.24275 ms; settled direct cancellation lookup: 0.000625 / 0.000958 / 0.081833 ms (median / p95 / max, each 1,000 iterations) | Every enumerated collection: 0 entries / 0 bytes |
+
+SQLite used the `runtime_terminal_evidence` composite primary-key index for
+terminal lookups and the `coordination_runtime_questions` unique endpoint
+index for native lookups. The 2,000 native callbacks observed durable
+write-intent state before resolution (`observations: 2000`, `violations: 0`).
+After reopening with a new runtime generation, each checked question remained
+confirmed and old terminal evidence remained readable.
+
+The focused matrix also verified changed settings, missing legacy settings,
+and changed tools remain unqualified; missing expected evidence, corrupt
+evidence, and a rejected evidence write cannot authorize completion; and
+legacy bound turns migrate to unknown evidence rather than inferred
+completion. The existing adapter tests continue to cover unchanged, changed,
+typed-ID reuse, old-generation replay, callback/write/ack ordering, and
+uncertain delivery. Cache retirement does not clear the durable receipt or
+turn a replay into a new reply.
+
+## Validation and limits
+
+The measured focused command was:
+
+```sh
+PATH=/private/tmp/node-v24.21.0-darwin-arm64/bin:$PATH \
+  node --expose-gc --unhandled-rejections=strict --test dist/test/runtime-retention.test.js
+```
+
+It passed 5/5 tests with 0 failures and 0 skips. The qualification, corruption,
+missing-record, write-failure, and legacy-migration matrix passed 3/3 tests.
+Raw captured output is in `/private/tmp/ensemble-790-runtime-retention-final-focused.log`
+and `/private/tmp/ensemble-790-runtime-retention-final-focused-v2.log`, with
+the separate matrix in `/private/tmp/ensemble-790-runtime-retention-matrix-focused.log`;
+those machine-local logs are not repository artifacts.
+
+The final pinned full check ran with Node.js v24.21.0 and npm 12.2.0. It
+completed type checking, lint, formatting, build, and 1,026 tests with 1,026
+passes and no failures or skips (81,726 ms for the test suite). The captured
+full output is `/private/tmp/ensemble-790-full-check-ui-cleanup-final-retry.log`.
+The first sandbox attempt is retained separately at
+`/private/tmp/ensemble-790-full-check-ui-cleanup-final.log`; it reached the
+test build but the sandbox denied writes to ignored `dist/` outputs. The exact
+check passed with the necessary filesystem permission.
+
+The renewed UI04/UI07 cleanup matrix passed 9/9 focused cases, including
+successful qualification, delayed browser creation, late cleanup failure,
+active-callback failure, delayed HTTP setup, and delayed runtime startup. Its
+captured output is `/private/tmp/ensemble-790-ui-cleanup-focused-final-retry.log`.
+The harness records per-stage start/end times, elapsed time and remaining
+budget, plus late resource creation and closure. Independent browser and probe
+closure now start alongside pending setup settlement and exact runtime stop;
+the existing task hold still follows runtime stop, and HTTP, auth, and service
+closure remain ordered afterward. If `service.start()` is still pending, its
+tracked late `service.stop()` remains the sole shutdown owner and cleanup does
+not issue competing runtime, task, or service stops.
+
+The UI04 delayed-start case deliberately remains unresolved at the original
+5-second total / 1-second cleanup cutoff. The test asserts that unresolved
+status and that direct shutdown stages are absent, then observes the retained
+late stop owner settle and the exact fixture child's exit under a separate
+bounded test observation. The cutoff `cleanup.verified` value remains false.
+UI07's delayed-start case settles the same owner within its original
+4.5-second total / 2-second cleanup budget. Neither case changes the
+qualification budgets or treats late settlement as an in-budget success.
+
+The full-suite output-overflow failure was traced to the controlled-Git
+fixture's SIGTERM handler logging and suppressing the default exit for the
+normal overflow operation. The fixture now removes that handler and signals
+its own process only for the exact overflow behavior, so the production
+graceful-then-force path observes SIGTERM. The stall and inherited-pipe
+descendant behaviors remain unchanged. Focused output-overflow and sticky
+cancellation checks passed 3/3 in
+`/private/tmp/ensemble-790-output-overflow-repair-focused.log`; the separate
+inherited-pipe check is in
+`/private/tmp/ensemble-790-output-overflow-inherited-pipe-focused.log`.
+The full run records the bounded worktree-add case at 977 ms against its
+1,000 ms timeout, with a 20 ms TERM grace and 40 ms observation window; its
+inherited-pipe descendant was still alive at parent settlement and was cleaned
+by the fixture's exact-identity cleanup.
+
+The initial conversation-capture timeout did not recur in the final suite: the
+bounded capture test passed in 1,358 ms. A focused run and a concurrent run
+alongside the 2,000-waiter service workload also passed; the diagnostic logs
+are `/private/tmp/ensemble-790-conversation-diagnostic-focused.log` and
+`/private/tmp/ensemble-790-conversation-concurrent-retention-diagnostic.log`.
+
+These synthetic results prove the exercised adapter/service/SQLite lifecycle
+and deterministic retention assertions. They do not establish a production
+latency or heap SLA, live Codex behavior, complete process/OS memory
+accounting, or a universal bound for collections outside the enumerated
+runtime/service/state ownership. No database history is pruned, and an absent,
+corrupt, unreadable, or legacy-unknown safety row remains fail-closed.
