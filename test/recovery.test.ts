@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import { Store } from "../src/core/store.js";
+import { DomainStore } from "../src/core/domain.js";
 import { StandaloneService } from "../src/standalone/service.js";
+import { ExecutionState } from "../src/standalone/state.js";
+import {
+  SqliteWorkspaceBindingStore,
+  WorkspaceManager,
+} from "../src/standalone/workspaces.js";
 import type {
   Runtime,
   RuntimeToolCall,
@@ -44,6 +52,43 @@ interface ServiceOptions {
 function recoveryApi(service: StandaloneService): RecoveryApi {
   return service as unknown as RecoveryApi;
 }
+
+test("legacy interrupted archive recovery clears its ordinary transient hold", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-archive-recovery-"));
+  const workspaceRoot = join(root, "workspaces");
+  const database = new DatabaseSync(join(root, "standalone.sqlite"));
+  try {
+    mkdirSync(workspaceRoot);
+    new Store(database).ensureHost("recovery-test");
+    new DomainStore(database).migrate();
+    const state = new ExecutionState(database);
+    const bindings = new SqliteWorkspaceBindingStore(database);
+    const taskId = randomUUID();
+    const workspaceId = randomUUID();
+    const workspacePath = join(workspaceRoot, workspaceId);
+    mkdirSync(workspacePath);
+    const created = bindings.createOrGet(
+      taskId,
+      workspaceId,
+      workspacePath,
+      [],
+    );
+    assert.equal(created.gitUncertain, false);
+    bindings.update(taskId, "archiving", "Workspace cleanup in progress");
+    assert.equal(state.beginArchive(taskId), true);
+
+    await new WorkspaceManager(bindings, workspaceRoot).recover();
+    const recovered = bindings.get(taskId);
+    assert.equal(recovered?.state, "held");
+    assert.equal(recovered?.gitUncertain, false);
+
+    const reopenedState = new ExecutionState(database);
+    assert.equal(reopenedState.isArchiveHeld(taskId), false);
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

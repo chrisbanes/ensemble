@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import {
+  controlledGit,
+  type ControlledGitEvent,
+} from "./fixtures/controlled-git.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import {
   ExecutionState,
@@ -16,7 +21,11 @@ import type {
   RuntimeToolResult,
   UnexpectedRequest,
 } from "../src/standalone/codex.js";
-import type { WorkspaceManager } from "../src/standalone/workspaces.js";
+import type {
+  TaskWorkspaceRepositoryInput,
+  WorkspaceManager,
+  WorkspaceManagerOptions,
+} from "../src/standalone/workspaces.js";
 
 class RuntimeFixture implements Runtime {
   starts = 0;
@@ -90,6 +99,7 @@ interface SupervisorTestClock {
 
 interface SupervisorTestOptions {
   supervisor?: { clock: SupervisorTestClock; observationMs: number };
+  workspaceManager?: WorkspaceManagerOptions;
 }
 
 function deferred() {
@@ -100,7 +110,43 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(options?: SupervisorTestOptions) {
+function sourceRepository(root: string, name: string): string {
+  const path = join(root, name);
+  execFileSync("git", ["init", "--quiet", path]);
+  execFileSync("git", ["-C", path, "config", "user.name", "Task Writer Test"]);
+  execFileSync("git", [
+    "-C",
+    path,
+    "config",
+    "user.email",
+    "task-writer@example.invalid",
+  ]);
+  writeFileSync(join(path, "README.md"), `${name}\n`);
+  execFileSync("git", ["-C", path, "add", "README.md"]);
+  execFileSync("git", ["-C", path, "commit", "--quiet", "-m", "initial"]);
+  return path;
+}
+
+async function waitForControlledGitEvent(
+  controlled: ReturnType<typeof controlledGit>,
+  predicate: (event: ControlledGitEvent) => boolean,
+  timeoutMs = 2000,
+): Promise<ControlledGitEvent> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const event = controlled.events().find(predicate);
+    if (event) return event;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(
+    "Task-writer test Git child did not reach the expected state",
+  );
+}
+
+async function fixture(
+  options?: SupervisorTestOptions,
+  repositories: TaskWorkspaceRepositoryInput[] = [],
+) {
   const root = mkdtempSync(join(tmpdir(), "ensemble-task-writer-"));
   const runtime = new RuntimeFixture();
   const ServiceWithOptions = StandaloneService as unknown as new (
@@ -164,7 +210,7 @@ async function fixture(options?: SupervisorTestOptions) {
     resultDestination: "lead",
     requesterAssignmentId: null,
   });
-  const workspace = await service.provisionTask(taskId);
+  const workspace = await service.provisionTask(taskId, repositories);
   assert.equal(workspace.state, "ready");
   const firstIntent = `assignment:${assignmentId}:initial`;
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -1285,6 +1331,289 @@ test("archival hold prevents writer admission after workspace validation", async
     released.close();
   } finally {
     await f.close();
+  }
+});
+
+test("uncertain archive status keeps its archival hold across restart", async (t) => {
+  const repositoryRoot = mkdtempSync(
+    join(tmpdir(), "ensemble-archive-source-"),
+  );
+  const source = sourceRepository(repositoryRoot, "source");
+  const controlled = controlledGit();
+  const failures: Parameters<
+    NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+  >[0][] = [];
+  const serviceOptions = {
+    workspaceManager: {
+      gitExecutable: controlled.executable,
+      gitTimeoutMs: { "archive-status": 400 },
+      gitTerminationGraceMs: 20,
+      gitTerminationObservationMs: 40,
+      gitFailureObserver: (failure: (typeof failures)[number]) =>
+        failures.push(failure),
+    },
+  };
+  const f = await fixture(serviceOptions, [
+    { repositoryId: "repo", path: source },
+  ]);
+  let recovered: StandaloneService | undefined;
+  try {
+    const binding = await f.service.taskWorkspace(f.taskId);
+    const repositoryBinding = binding?.repositories[0];
+    assert.ok(repositoryBinding);
+    const serviceWithWake = f.service as unknown as {
+      wakeScheduler: () => Promise<void>;
+    };
+    const wakeScheduler = serviceWithWake.wakeScheduler.bind(f.service);
+    let archiveWakeCount = 0;
+    serviceWithWake.wakeScheduler = async () => {
+      archiveWakeCount++;
+      await wakeScheduler();
+    };
+    controlled.setRule({
+      commandPrefix: "status --porcelain=v1 --untracked-files=all",
+      behavior: "stall",
+      holdPipe: true,
+    });
+    const archival = f.service.archiveTask(f.taskId, {
+      deliveryConfirmed: true,
+      writerOwnershipResolved: true,
+      handoffsPreserved: true,
+      reconciliationEvidencePreserved: true,
+      workspaceContentsPreserved: true,
+    });
+    const ready = await waitForControlledGitEvent(
+      controlled,
+      ({ event, operation }) =>
+        event === "ready" && operation === "archive-status",
+    );
+    assert.ok(ready.atMs !== undefined);
+
+    const liveDb = (f.service as unknown as { db: DatabaseSync }).db;
+    assert.equal(
+      (
+        liveDb
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      1,
+    );
+    const result = await archival;
+    const elapsedMs = Date.now() - ready.atMs;
+    assert.ok(elapsedMs < 400 + 20 + 40 + 500, `settled in ${elapsedMs}ms`);
+    t.diagnostic(
+      `bounded-git-archive-evidence ${JSON.stringify({
+        readyToSettleMs: elapsedMs,
+        configuredTimeoutMs: 400,
+        termGraceMs: 20,
+        observationMs: 40,
+        childExitSignal: failures.at(-1)?.childExitSignal,
+      })}`,
+    );
+    assert.equal(result.outcome, "retained");
+    assert.equal(archiveWakeCount, 1);
+    if (result.outcome === "retained") {
+      assert.equal(result.binding.state, "held");
+      assert.equal(result.binding.gitUncertain, true);
+      assert.match(result.reason, /timed-out during archive-status/);
+    }
+    assert.deepEqual(failures.at(-1), {
+      operation: "archive-status",
+      kind: "timed-out",
+      childExitObserved: true,
+      childExitSignal: "SIGKILL",
+    });
+    assert.equal(existsSync(repositoryBinding.workspacePath), true);
+    assert.equal(
+      (
+        liveDb
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      1,
+    );
+
+    const launchesBeforeRestart = controlled
+      .events()
+      .filter(({ event }) => event === "start").length;
+    await f.service.stop();
+    recovered = new StandaloneService(
+      join(f.root, "data"),
+      () => new RuntimeFixture(),
+      undefined,
+      serviceOptions,
+    );
+    await recovered.start();
+    assert.equal(
+      controlled.events().filter(({ event }) => event === "start").length,
+      launchesBeforeRestart,
+    );
+    const afterRestart = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    const recoveredBinding = afterRestart
+      .prepare(
+        "SELECT state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+      )
+      .get(f.taskId) as { state: string; gitUncertain: number } | undefined;
+    assert.equal(recoveredBinding?.state, "held");
+    assert.equal(recoveredBinding?.gitUncertain, 1);
+    assert.equal(
+      (
+        afterRestart
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      1,
+    );
+    afterRestart.close();
+
+    await assert.rejects(
+      recovered.submitTask(
+        "blocked-by-uncertain-archive",
+        f.assignmentId,
+        "Do not admit while archive status is uncertain",
+      ),
+      /Turn request is queued until its task workspace is ready/,
+    );
+    const readback = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    assert.equal(
+      (
+        readback
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_writer_admissions WHERE workId = ?",
+          )
+          .get("blocked-by-uncertain-archive") as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        readback
+          .prepare(
+            "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+          )
+          .get(f.taskId) as { count: number }
+      ).count,
+      1,
+    );
+    readback.close();
+  } finally {
+    try {
+      await recovered?.stop();
+    } finally {
+      try {
+        await f.close();
+      } finally {
+        try {
+          await controlled.cleanup();
+        } finally {
+          rmSync(repositoryRoot, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+});
+
+test("real Git service provisioning, execution lookup, and clean archive stay within measured bounds", async (t) => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "ensemble-git-timing-"));
+  const source = sourceRepository(repositoryRoot, "timing-source");
+  const secondSource = sourceRepository(repositoryRoot, "timing-source-two");
+  const controlled = controlledGit();
+  const f = await fixture(
+    {
+      workspaceManager: {
+        gitExecutable: controlled.executable,
+      },
+    },
+    [
+      { repositoryId: "repo-a", path: source },
+      { repositoryId: "repo-b", path: secondSource },
+    ],
+  );
+  try {
+    const binding = await f.service.taskWorkspace(f.taskId);
+    assert.equal(binding?.state, "ready");
+    assert.equal(binding?.repositories.length, 2);
+    const archived = await f.service.archiveTask(f.taskId, {
+      deliveryConfirmed: true,
+      writerOwnershipResolved: true,
+      handoffsPreserved: true,
+      reconciliationEvidencePreserved: true,
+      workspaceContentsPreserved: true,
+    });
+    assert.equal(archived.outcome, "cleaned");
+    assert.equal(existsSync(binding?.path ?? ""), false);
+    const measurements = new Map<string, number[]>();
+    for (const event of controlled.events()) {
+      if (event.event !== "finish" || event.elapsedMs === undefined) continue;
+      const values = measurements.get(event.operation ?? "other") ?? [];
+      values.push(event.elapsedMs);
+      measurements.set(event.operation ?? "other", values);
+    }
+    const summary = Object.fromEntries(
+      [...measurements.entries()].map(([operation, values]) => {
+        const sorted = [...values].sort((left, right) => left - right);
+        const middle = Math.floor(sorted.length / 2);
+        const medianMs =
+          sorted.length % 2 === 0
+            ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+            : (sorted[middle] ?? 0);
+        return [
+          operation,
+          {
+            count: sorted.length,
+            minMs: sorted[0],
+            medianMs,
+            maxMs: sorted.at(-1),
+          },
+        ];
+      }),
+    );
+    assert.ok(summary["worktree-add"]);
+    assert.ok(summary["archive-status"]);
+    assert.ok(summary["worktree-remove"]);
+    const maximumObservedMs = Math.max(...[...measurements.values()].flat());
+    for (const [operation, values] of measurements) {
+      const limitMs =
+        operation === "repository-identity" ||
+        operation === "ref-resolution" ||
+        operation === "checkout-validation"
+          ? 30_000
+          : 120_000;
+      assert.ok(
+        Math.max(...values) < limitMs,
+        `${operation} exceeded its bound`,
+      );
+    }
+    t.diagnostic(
+      `bounded-git-service-evidence ${JSON.stringify({
+        node: process.version,
+        git: execFileSync("git", ["--version"], { encoding: "utf8" }).trim(),
+        result:
+          "two-repository service provisioning, execution lookup, clean archive",
+        operations: summary,
+        maxObservedMs: maximumObservedMs,
+      })}`,
+    );
+  } finally {
+    try {
+      await f.close();
+    } finally {
+      try {
+        await controlled.cleanup();
+      } finally {
+        rmSync(repositoryRoot, { recursive: true, force: true });
+      }
+    }
   }
 });
 
