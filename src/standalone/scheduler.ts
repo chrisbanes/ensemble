@@ -250,6 +250,11 @@ export class TurnScheduler {
     private readonly store: SchedulerStore,
     private readonly attempt: (request: TurnRequest) => Promise<void>,
     private readonly now: () => number = Date.now,
+    private readonly onBackgroundFailure: (
+      error: unknown,
+    ) => void | Promise<void> = () => {
+      process.stderr.write("Turn scheduler background drain failed\n");
+    },
   ) {}
 
   start(): void {
@@ -282,8 +287,12 @@ export class TurnScheduler {
     const draining = this.drain().finally(() => {
       if (this.draining !== draining) return;
       this.draining = undefined;
-      if (this.wakeAgain && !this.stopped) this.startDrain();
-      else this.scheduleNextWake();
+      if (this.wakeAgain && !this.stopped) {
+        const replacement = this.startDrain();
+        void replacement.catch((error: unknown) =>
+          this.reportBackgroundFailure(error),
+        );
+      } else this.scheduleNextWake();
     });
     this.draining = draining;
     return draining;
@@ -296,7 +305,9 @@ export class TurnScheduler {
     const delay = Math.max(0, Math.min(next - this.now(), 2_147_483_647));
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.wake().catch(() => {});
+      void this.wake().catch((error: unknown) =>
+        this.reportBackgroundFailure(error),
+      );
     }, delay);
     this.timer.unref();
   }
@@ -314,6 +325,14 @@ export class TurnScheduler {
           this.attempting.delete(request.workId);
         }
       }
+    }
+  }
+
+  private reportBackgroundFailure(error: unknown): void {
+    try {
+      void Promise.resolve(this.onBackgroundFailure(error)).catch(() => {});
+    } catch {
+      // A diagnostic observer must never own or alter scheduler failures.
     }
   }
 }
