@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   composerOptionsSchema,
   taskSchema,
@@ -7,7 +7,16 @@ import {
   type Workspace,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
-import { Button, ResourceStatus, StatusBadge } from "./components.js";
+import {
+  ActionLink,
+  Button,
+  ResourceStatus,
+  StatusBadge,
+} from "./components.js";
+import { Alert } from "./ui/alert.js";
+import { Input } from "./ui/input.js";
+import { NativeSelect } from "./ui/native-select.js";
+import { Textarea } from "./ui/textarea.js";
 import { ComposerState, type ComposerInput } from "./composer-state.js";
 import { useOperatorResource } from "./resource.js";
 import { reasonLabels } from "./tasks.js";
@@ -38,6 +47,10 @@ export function TaskComposer({
       s.input = { ...s.input, projectId: initialProject };
     return s;
   });
+  useEffect(() => {
+    state.activate(() => render((n) => n + 1));
+    return () => state.dispose();
+  }, [state]);
   const [resumed, setResumed] = useState(
       !state.recovered || state.phase === "unknown",
     ),
@@ -101,7 +114,9 @@ export function TaskComposer({
         return;
       }
     }
+    const isCurrent = state.captureScope();
     await state.submit(client, session.csrfToken, ready);
+    if (!isCurrent()) return;
     const first = Object.keys(state.errors)[0];
     if (first) document.getElementById(`composer-${first}`)?.focus();
     if (state.phase === "recorded") onRecorded();
@@ -143,12 +158,12 @@ export function TaskComposer({
         <p className="body" role="status">
           {state.notice}
         </p>
-        <a
-          className="control button primary"
-          href={`/task/${state.frozen?.taskId}`}
+        <ActionLink
+          variant="primary"
+          href={`/app/tasks/${state.frozen?.taskId}`}
         >
           Open task
-        </a>
+        </ActionLink>
         <h3 className="small-heading">Current execution</h3>
         <Button
           variant="secondary"
@@ -200,12 +215,12 @@ export function TaskComposer({
         execution remains subject to project policy and existing holds.
       </p>
       {state.notice && (
-        <p
-          className={`body resource-status ${state.phase === "unknown" ? "warning" : "neutral"}`}
+        <Alert
+          className="resource-status"
           role={state.phase === "unknown" ? "alert" : "status"}
         >
           {state.notice}
-        </p>
+        </Alert>
       )}
       {state.phase === "unknown" && (
         <div className="task-actions">
@@ -228,7 +243,7 @@ export function TaskComposer({
         <fieldset disabled={locked} className="composer-fields">
           <label className="field body" htmlFor="composer-projectId">
             Project
-            <select
+            <NativeSelect
               id="composer-projectId"
               aria-label="Project"
               value={input.projectId}
@@ -249,7 +264,7 @@ export function TaskComposer({
                   {p.name ?? "Name unavailable"}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
             {error("projectId")}
           </label>
           {input.projectId && (
@@ -289,7 +304,7 @@ export function TaskComposer({
           )}
           <label className="field body" htmlFor="composer-title">
             Task title
-            <input
+            <Input
               id="composer-title"
               aria-label="Task title"
               className="control"
@@ -301,7 +316,7 @@ export function TaskComposer({
           </label>
           <label className="field body" htmlFor="composer-outcome">
             Desired outcome
-            <textarea
+            <Textarea
               id="composer-outcome"
               aria-label="Desired outcome"
               className="control outcome-input"
@@ -318,7 +333,7 @@ export function TaskComposer({
           </label>
           <label className="field body" htmlFor="composer-context">
             Optional context
-            <textarea
+            <Textarea
               id="composer-context"
               aria-label="Optional context"
               className="control"
@@ -330,7 +345,7 @@ export function TaskComposer({
           </label>
           <label className="field body" htmlFor="composer-links">
             Reference links
-            <textarea
+            <Textarea
               id="composer-links"
               aria-label="Reference links"
               className="control"
@@ -349,7 +364,7 @@ export function TaskComposer({
           </label>
           <label className="field body" htmlFor="composer-profileId">
             Assignee
-            <select
+            <NativeSelect
               id="composer-profileId"
               aria-label="Assignee"
               value={input.profileId}
@@ -366,7 +381,7 @@ export function TaskComposer({
                   {p.name ?? "Name unavailable"}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
             <span className="metadata muted">
               An explicit permitted assignee bypasses routing, while all
               admission holds still apply. The project lead remains accountable.
@@ -384,7 +399,7 @@ export function TaskComposer({
             </p>
             <label className="field body" htmlFor="dependency-search">
               Find dependencies
-              <input
+              <Input
                 id="dependency-search"
                 className="control"
                 value={dependencyQuery}

@@ -7,6 +7,63 @@ const requestId = mode === "numeric-id" ? 71 : "71";
 let nativeReplies = 0;
 let turns = 0;
 let threads = 0;
+let resumes = 0;
+let originalNative;
+function asyncMarker(
+  threadId = "thread-1",
+  turnId = "turn-1",
+  functionOutput = false,
+) {
+  write({
+    method: "item/started",
+    params: {
+      threadId,
+      turnId,
+      item: functionOutput
+        ? {
+            type: "functionCallOutput",
+            id: "async-1",
+            name: "request_user_input_async",
+            namespace: "functions",
+            output: "PRIVATE_ASYNC_OUTPUT",
+          }
+        : {
+            type: "agentMessage",
+            id: "async-1",
+            delivery: "async",
+            questions: [{ title: "PRIVATE_ASYNC_QUESTION", options: null }],
+            text: "PRIVATE_ASYNC_TEXT",
+          },
+    },
+  });
+}
+function replay() {
+  const message = structuredClone(originalNative);
+  if (mode === "replay-changed-body")
+    message.params.questions[0].question = "PRIVATE_REPLAY_BODY";
+  if (mode === "replay-unknown-field")
+    message.params.opaque = "PRIVATE_REPLAY_FIELD";
+  if (mode === "replay-null-absence") delete message.params.autoResolutionMs;
+  if (mode === "replay-array-order")
+    message.params.questions[0].options.reverse();
+  if (mode === "replay-new-id") message.id = "72";
+  if (mode === "replay-id-type") message.id = 71;
+  if (mode === "replay-foreign-thread")
+    message.params.threadId = "foreign-thread";
+  if (mode === "replay-foreign-turn") message.params.turnId = "foreign-turn";
+  if (mode === "replay-foreign-item") message.params.itemId = "foreign-item";
+  if (mode === "replay-reordered-keys")
+    message.params = Object.fromEntries(
+      Object.entries(message.params).reverse(),
+    );
+  write(message);
+}
+const settings = {
+  model: "fixture-model",
+  modelProvider: "fixture-provider",
+  reasoningEffort: "high",
+  serviceTier: null,
+};
 for await (const line of createInterface({ input: process.stdin })) {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
@@ -52,40 +109,208 @@ for await (const line of createInterface({ input: process.stdin })) {
       threads !== 1 ||
       message.params.approvalPolicy !== "never" ||
       message.params.sandbox !== "workspace-write" ||
-      message.params.dynamicTools[0].name !== "ui01_report_answers"
+      message.params.dynamicTools[0].name !== "ui01_report_answers" ||
+      [
+        "model",
+        "modelProvider",
+        "effort",
+        "collaborationMode",
+        "config",
+        "baseInstructions",
+        "developerInstructions",
+      ].some((key) => key in message.params)
     )
       process.exit(4);
     write({
       id: message.id,
       result: {
         thread: { id: "thread-1" },
+        ...settings,
         approvalPolicy: "never",
         sandbox: { type: "workspaceWrite" },
       },
     });
+  } else if (message.method === "thread/resume") {
+    resumes++;
+    if (turns === 0) {
+      write({
+        id: message.id,
+        error: { code: -32600, message: "no rollout found before first turn" },
+      });
+      continue;
+    }
+    if (
+      resumes !== 1 ||
+      turns !== 1 ||
+      nativeReplies !== 0 ||
+      message.params.threadId !== "thread-1" ||
+      Object.keys(message.params).length !== 1
+    )
+      process.exit(4);
+    if (mode === "mode-resume-failed") {
+      write({
+        id: message.id,
+        error: { code: -32600, message: "no rollout found" },
+      });
+      continue;
+    }
+    if (mode === "mode-resume-timeout") continue;
+    if (mode.startsWith("mode-pending-")) {
+      if (mode === "mode-pending-async") asyncMarker();
+      if (mode === "mode-pending-foreign-async") asyncMarker("foreign");
+      if (mode === "mode-pending-resolution")
+        write({
+          method: "serverRequest/resolved",
+          params: { threadId: "thread-1", requestId },
+        });
+      if (mode === "mode-pending-report")
+        write({
+          id: "report-rpc",
+          method: "item/tool/call",
+          params: {
+            tool: "ui01_report_answers",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: "report-1",
+            arguments: { answers: {} },
+          },
+        });
+      if (
+        ["mode-pending-terminal", "mode-pending-foreign-terminal"].includes(
+          mode,
+        )
+      )
+        write({
+          method: "turn/completed",
+          params: {
+            threadId:
+              mode === "mode-pending-foreign-terminal" ? "foreign" : "thread-1",
+            turn: { id: "turn-1", status: "completed" },
+          },
+        });
+      // Leave mode unresolved: the injected confounder must stop before any answer effect.
+      continue;
+    }
+    const response = {
+      thread: { id: mode === "foreign-resume-thread" ? "foreign" : "thread-1" },
+      ...settings,
+      approvalPolicy: "never",
+      sandbox: { type: "workspaceWrite" },
+      collaborationMode: {
+        mode: mode === "plan-mode" ? "plan" : "default",
+        settings: {
+          model: "fixture-model",
+          reasoning_effort: "high",
+          developer_instructions: "PRIVATE_MODE_INSTRUCTIONS_DO_NOT_RETAIN",
+        },
+      },
+    };
+    if (mode === "missing-mode") response.collaborationMode = null;
+    if (mode === "unknown-mode") response.collaborationMode.mode = "unknown";
+    if (mode === "changed-model") response.model = "foreign-model";
+    if (mode === "changed-provider")
+      response.modelProvider = "foreign-provider";
+    if (mode === "changed-effort") response.reasoningEffort = "low";
+    if (mode === "changed-tier") response.serviceTier = "priority";
+    if (mode === "conflicting-mode-settings")
+      response.collaborationMode.settings.model = "foreign-model";
+    if (mode === "missing-instruction-settings")
+      delete response.collaborationMode.settings.developer_instructions;
+    if (mode === "replay-before-response") replay();
+    if (mode === "mode-delayed")
+      setTimeout(() => write({ id: message.id, result: response }), 40);
+    else {
+      write({ id: message.id, result: response });
+      if (
+        mode === "resume-replay" ||
+        (mode.startsWith("replay-") &&
+          ![
+            "replay-before-response",
+            "replay-after-write",
+            "replay-after-confirmed",
+          ].includes(mode))
+      ) {
+        write({
+          method: "thread/status/changed",
+          params: { threadId: "thread-1", status: { type: "active" } },
+        });
+        replay();
+        if (mode === "replay-excess") replay();
+      }
+    }
   } else if (message.method === "turn/start") {
     turns++;
     if (
       turns !== 1 ||
-      message.params.collaborationMode !== undefined ||
+      [
+        "model",
+        "modelProvider",
+        "effort",
+        "collaborationMode",
+        "config",
+        "baseInstructions",
+        "developerInstructions",
+      ].some((key) => key in message.params) ||
       message.params.approvalPolicy !== "never" ||
       message.params.sandboxPolicy.networkAccess !== false ||
       message.params.sandboxPolicy.writableRoots[0] !== message.params.cwd
     )
       process.exit(4);
+    if (mode === "prompt") {
+      const prompt = message.params.input?.[0]?.text ?? "";
+      const lines = prompt.split("\n");
+      const input = lines[1] ?? "";
+      const beforeAnswer = lines[2] ?? "";
+      const afterAnswer = lines[3] ?? "";
+      if (
+        (input.match(/\bfunctions\.request_user_input\b/g) ?? []).length !==
+          1 ||
+        !/^Directly and synchronously call functions\.request_user_input exactly once and await its answer\./.test(
+          input,
+        ) ||
+        !/^Before receiving the native answer, do not use functions\.exec, ALL_TOOLS, tool search\/discovery, async input or nonawaited calls\./.test(
+          beforeAnswer,
+        ) ||
+        !beforeAnswer.includes("Do not substitute plaintext chat") ||
+        !/^After receiving the native answer, use functions\.exec exactly once to run only this awaited known call: await tools\.ui01_report_answers\(\{answers: <exact received answers map>\}\)\./.test(
+          afterAnswer,
+        ) ||
+        !afterAnswer.includes("No discovery or other calls") ||
+        !afterAnswer.includes("then end") ||
+        /UI01 custom|UI01 goal/.test(prompt)
+      )
+        process.exit(4);
+    }
+    if (mode === "input-discovery")
+      write({
+        id: "discovery-rpc",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          tool: "discover_native_input",
+          callId: "discovery-1",
+          arguments: {},
+        },
+      });
     if (mode === "timeout") continue;
     const params = {
       threadId: mode === "wrong-thread" ? "foreign" : "thread-1",
       turnId: "turn-1",
       itemId: "input-1",
-      isBlocking: mode !== "nonblocking",
+      isBlocking: mode === "plan-flag",
       autoResolutionMs: mode === "timed" ? 100 : null,
       questions: [
         {
           id: "delivery",
           header: "Delivery",
           question: "Select delivery",
-          isOther: mode === "custom",
+          isOther: [
+            "custom",
+            "default",
+            "resume-replay",
+            "replay-reordered-keys",
+          ].includes(mode),
           isSecret: mode === "secret",
           options: [
             { label: "Local", description: "Local output" },
@@ -94,6 +319,17 @@ for await (const line of createInterface({ input: process.stdin })) {
         },
       ],
     };
+    if (mode === "free-text-only") params.questions[0].options = null;
+    if (mode === "wrong-question") params.questions[0].id = "formats";
+    if (mode === "free-text-group")
+      params.questions.push({
+        id: "goal",
+        header: "Goal",
+        question: "Name a goal",
+        isOther: false,
+        isSecret: false,
+        options: null,
+      });
     if (mode === "oversized-native")
       params.questions[0].question = "😀".repeat(350_000);
     if (mode === "oversized-unknown")
@@ -101,11 +337,55 @@ for await (const line of createInterface({ input: process.stdin })) {
         method: "unknown/notification",
         params: { padding: "x".repeat(1_048_576) },
       });
-    write({ id: requestId, method: "item/tool/requestUserInput", params });
+    if (mode === "async-before-native") asyncMarker();
+    if (mode === "async-function-output")
+      asyncMarker("thread-1", "turn-1", true);
+    if (mode === "foreign-async-marker") asyncMarker("foreign");
+    if (mode === "async-rpc")
+      write({
+        id: "async-rpc",
+        method: "item/tool/requestUserInputAsync",
+        params,
+      });
+    originalNative = {
+      id: requestId,
+      method: "item/tool/requestUserInput",
+      params,
+    };
+    write(originalNative);
+    if (mode === "async-held") setTimeout(() => asyncMarker(), 5);
     write({
       id: message.id,
       result: { turn: { id: mode === "wrong-turn" ? "foreign" : "turn-1" } },
     });
+    if (mode === "terminal-held")
+      setTimeout(
+        () =>
+          write({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed" },
+            },
+          }),
+        5,
+      );
+    if (mode === "report-held")
+      setTimeout(
+        () =>
+          write({
+            id: "report-rpc",
+            method: "item/tool/call",
+            params: {
+              tool: "ui01_report_answers",
+              threadId: "thread-1",
+              turnId: "turn-1",
+              callId: "report-1",
+              arguments: { answers: {} },
+            },
+          }),
+        5,
+      );
     if (mode === "early-resolution")
       write({
         method: "serverRequest/resolved",
@@ -132,6 +412,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     nativeReplies++;
     if (nativeReplies !== 1 || !message.result?.answers?.delivery)
       process.exit(4);
+    if (mode === "replay-after-write") replay();
+    if (mode === "async-after-write") asyncMarker();
     if (mode !== "no-resolution")
       write({
         method: "serverRequest/resolved",
@@ -140,6 +422,20 @@ for await (const line of createInterface({ input: process.stdin })) {
           requestId: mode === "wrong-id-type" ? 71 : requestId,
         },
       });
+    if (mode === "no-report") {
+      setTimeout(
+        () =>
+          write({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed" },
+            },
+          }),
+        20,
+      );
+      continue;
+    }
     write({
       id: "report-rpc",
       method: "item/tool/call",
@@ -160,6 +456,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       },
     });
   } else if (message.id === "report-rpc") {
+    if (mode === "replay-after-confirmed") replay();
+    if (mode === "async-after-confirmed") asyncMarker();
     write({
       method: "serverRequest/resolved",
       params: { threadId: "thread-1", requestId: "report-rpc" },

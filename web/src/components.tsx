@@ -1,44 +1,99 @@
-import type {
-  ButtonHTMLAttributes,
-  InputHTMLAttributes,
-  ReactNode,
+import {
+  forwardRef,
+  type AnchorHTMLAttributes,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactNode,
 } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
 import type { ResourceState } from "./resource.js";
-export function Button({
+import * as Dialog from "@radix-ui/react-dialog";
+import { cn } from "./lib/utils.js";
+import { Alert, AlertDescription } from "./ui/alert.js";
+import { Badge } from "./ui/badge.js";
+import { Button as PrimitiveButton } from "./ui/button.js";
+import { Input } from "./ui/input.js";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "./ui/sheet.js";
+
+export const Button = forwardRef<
+  HTMLButtonElement,
+  ButtonHTMLAttributes<HTMLButtonElement> & {
+    variant?: "primary" | "secondary";
+  }
+>(function Button({ children, variant = "primary", className, ...props }, ref) {
+  return (
+    <PrimitiveButton
+      ref={ref}
+      variant={variant === "primary" ? "default" : "outline"}
+      className={cn("control", className)}
+      {...props}
+    >
+      {children}
+    </PrimitiveButton>
+  );
+});
+
+export function ActionLink({
   children,
   variant = "primary",
+  className,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
+}: AnchorHTMLAttributes<HTMLAnchorElement> & {
+  children: ReactNode;
   variant?: "primary" | "secondary";
 }) {
   return (
-    <button {...props} className={`control button ${variant}`}>
-      {children}
-    </button>
+    <PrimitiveButton
+      asChild
+      variant={variant === "primary" ? "default" : "outline"}
+      className={cn("control", className)}
+    >
+      <a {...props}>{children}</a>
+    </PrimitiveButton>
   );
 }
-export function TextField({
-  label,
-  id,
-  ...props
-}: InputHTMLAttributes<HTMLInputElement> & { label: string; id: string }) {
+
+export const TextField = forwardRef<
+  HTMLInputElement,
+  InputHTMLAttributes<HTMLInputElement> & { label: string; id: string }
+>(function TextField({ label, id, className, ...props }, ref) {
   return (
     <label className="field body" htmlFor={id}>
       {label}
-      <input {...props} id={id} className="control" />
+      <Input ref={ref} {...props} id={id} className={className} />
     </label>
   );
-}
+});
+
 export function StatusBadge({
   children,
   tone = "neutral",
+  className,
 }: {
   children: ReactNode;
   tone?: "neutral" | "warning" | "error" | "success";
+  className?: string;
 }) {
-  return <span className={`badge metadata ${tone}`}>{children}</span>;
+  const variant =
+    tone === "error"
+      ? "destructive"
+      : tone === "warning"
+        ? "outline"
+        : "secondary";
+  return (
+    <Badge variant={variant} className={cn("metadata", className)}>
+      {children}
+    </Badge>
+  );
 }
+
 export function ResourceStatus<T>({
   state,
   retry,
@@ -55,35 +110,41 @@ export function ResourceStatus<T>({
         {state.fetchedAt ? new Date(state.fetchedAt).toLocaleTimeString() : ""}
       </p>
     );
+  const message =
+    state.error === "not-found"
+      ? `${label} not found.`
+      : state.status === "loading"
+        ? `Loading ${label.toLowerCase()}…`
+        : state.status === "stale"
+          ? state.error
+            ? "Refresh failed. Showing the last fetched data."
+            : "Refreshing. Showing the last fetched data."
+          : state.status === "error"
+            ? `${label} are unavailable. Try again.`
+            : "No data loaded.";
   return (
-    <div
-      className={`resource-status ${state.error ? "error" : "neutral"}`}
+    <Alert
+      className={cn("resource-status", state.error && "resource-status-error")}
+      variant={state.error ? "destructive" : "default"}
       role={state.error ? "alert" : "status"}
     >
-      <p className="body">
-        {state.status === "loading"
-          ? `Loading ${label.toLowerCase()}…`
-          : state.status === "stale"
-            ? state.error
-              ? "Refresh failed. Showing the last fetched data."
-              : "Refreshing. Showing the last fetched data."
-            : state.status === "error"
-              ? `${label} are unavailable. Try again.`
-              : "No data loaded."}
-      </p>
-      {state.fetchedAt && (
-        <p className="metadata">
-          Last fetched {new Date(state.fetchedAt).toLocaleTimeString()}
-        </p>
-      )}
-      {state.error && (
-        <Button variant="secondary" onClick={retry}>
-          Try again
-        </Button>
-      )}
-    </div>
+      <AlertDescription>
+        <p className="body">{message}</p>
+        {state.fetchedAt && (
+          <p className="metadata">
+            Last fetched {new Date(state.fetchedAt).toLocaleTimeString()}
+          </p>
+        )}
+        {state.error && (
+          <Button variant="secondary" onClick={retry}>
+            Try again
+          </Button>
+        )}
+      </AlertDescription>
+    </Alert>
   );
 }
+
 export function MobileNavigation({
   children,
   open,
@@ -94,25 +155,24 @@ export function MobileNavigation({
   onOpenChange: (open: boolean) => void;
 }) {
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Trigger asChild>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetTrigger asChild>
         <Button variant="secondary">Projects and navigation</Button>
-      </Dialog.Trigger>
-      <Dialog.Portal>
-        <Dialog.Overlay className="drawer-overlay" />
-        <Dialog.Content className="drawer">
-          <Dialog.Title className="section-heading">
+      </SheetTrigger>
+      <SheetContent className="drawer">
+        <SheetHeader>
+          <SheetTitle className="section-heading">
             Projects and navigation
-          </Dialog.Title>
-          <Dialog.Description className="body muted">
+          </SheetTitle>
+          <SheetDescription className="body muted">
             Choose a project or operator destination.
-          </Dialog.Description>
-          <Dialog.Close asChild>
-            <Button variant="secondary">Close navigation</Button>
-          </Dialog.Close>
-          {children}
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+          </SheetDescription>
+        </SheetHeader>
+        <SheetClose asChild>
+          <Button variant="secondary">Close navigation</Button>
+        </SheetClose>
+        <Dialog.Close asChild>{children}</Dialog.Close>
+      </SheetContent>
+    </Sheet>
   );
 }

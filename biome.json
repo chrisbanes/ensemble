@@ -1,6 +1,19 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
-  "files": { "includes": ["**", "!dist", "!package-lock.json"] },
-  "formatter": { "indentStyle": "space" },
-  "linter": { "rules": { "preset": "recommended" } }
+  "files": {
+    "includes": ["**", "!dist", "!package-lock.json"]
+  },
+  "formatter": {
+    "indentStyle": "space"
+  },
+  "linter": {
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  }
 }

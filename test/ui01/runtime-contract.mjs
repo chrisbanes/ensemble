@@ -13,10 +13,14 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   captureProcessIdentity,
   MacProcessTerminationVerifier,
 } from "../../dist/src/standalone/termination.js";
+
+import { runService, qualificationResource } from "./service-contract.mjs";
+export { runService } from "./service-contract.mjs";
 
 const bounds = {
   requestMs: 90_000,
@@ -52,9 +56,11 @@ export function validateArguments(args) {
     args.length !== 3 ||
     args[0] !== "--live" ||
     args[1] !== "--phase" ||
-    args[2] !== "protocol"
+    !["protocol", "service"].includes(args[2])
   ) {
-    throw new Error("Protocol probe requires exactly --live --phase protocol");
+    throw new Error(
+      "Protocol probe requires exactly --live --phase protocol or --live --phase service with a finite grant",
+    );
   }
 }
 
@@ -101,21 +107,66 @@ const reportTool = {
 };
 
 const prompt = [
-  "This is a disposable native input capability probe. Use no shell, filesystem, browser, network, delegation or external tools.",
-  "Use the runtime's native user-input tool exactly once. Ask delivery, header Delivery, question Select delivery, with Local (Local output) and Remote (Remote output).",
-  "The installed callback schema has no explicit multiple-choice cardinality or recommendation field. In that same native request include free-text goal, multiple-choice formats with Text/JSON, custom text on delivery, and an explicit recommendation only where the native tool actually exposes explicit support for those semantics. Omit unsupported variants. Do not imply multiple selection from an array or recommendation from a label suffix. Do not substitute ordinary chat if native input is unavailable.",
-  "After the native answer, call ui01_report_answers exactly once with the exact answers received in native response shape {answers: {questionId: {answers: [strings]}}}, then end. Do not guess the answer, ask again or request approval.",
+  "This is a disposable native input capability probe. Use no shell, filesystem, browser, network, delegation or additional external tools.",
+  "Directly and synchronously call functions.request_user_input exactly once and await its answer. Ask one question: id delivery, header Delivery, question Select delivery, options Local (Local output) and Remote (Remote output). Custom text is permitted only when the native request explicitly exposes isOther support.",
+  "Before receiving the native answer, do not use functions.exec, ALL_TOOLS, tool search/discovery, async input or nonawaited calls. Do not request standalone free text, multiple selection or explicit recommendation. Do not substitute plaintext chat if native input is unavailable.",
+  "After receiving the native answer, use functions.exec exactly once to run only this awaited known call: await tools.ui01_report_answers({answers: <exact received answers map>}). Preserve the exact received map {questionId: {answers: [strings]}}. No discovery or other calls; await the report result, then end. Do not guess the answer, ask again or request approval.",
 ].join("\n");
 
-function selectAnswers(params, nonce) {
+function qualifiedSource(source) {
+  return (
+    source.codex === "codex-cli 0.159.0" &&
+    source.executableHash ===
+      "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a"
+  );
+}
+
+function threadProjection(result, includeMode) {
+  const projected = {
+    thread: { id: result.thread?.id },
+    model: result.model,
+    modelProvider: result.modelProvider,
+    reasoningEffort: result.reasoningEffort,
+    serviceTier: result.serviceTier,
+    approvalPolicy: result.approvalPolicy,
+    sandbox: { type: result.sandbox?.type },
+  };
+  if (includeMode) {
+    const mode = result.collaborationMode;
+    const instructions = mode?.settings?.developer_instructions;
+    projected.collaborationMode = {
+      mode: mode?.mode,
+      settings: {
+        model: mode?.settings?.model,
+        reasoningEffort: mode?.settings?.reasoning_effort,
+        developerInstructionsDigest:
+          instructions === null || typeof instructions === "string"
+            ? hash(JSON.stringify(instructions))
+            : undefined,
+      },
+    };
+  }
+  return projected;
+}
+
+function qualifiedDefaultContinuation(source, qualification, params) {
+  return (
+    qualifiedSource(source) &&
+    qualification?.mode === "default" &&
+    qualification.threadId === params.threadId &&
+    text(qualification.runtimeGeneration) &&
+    params.isBlocking === false &&
+    params.autoResolutionMs === null
+  );
+}
+
+function selectAnswers(source, qualification, params, nonce) {
   assert.ok(
-    params.isBlocking === true && params.autoResolutionMs === null,
+    qualifiedDefaultContinuation(source, qualification, params),
     "unsupported-continuation",
   );
   assert.ok(
-    Array.isArray(params.questions) &&
-      params.questions.length > 0 &&
-      params.questions.length <= 3,
+    Array.isArray(params.questions) && params.questions.length === 1,
     "unsupported-question-set",
   );
   const answers = {};
@@ -123,9 +174,7 @@ function selectAnswers(params, nonce) {
   const seen = new Set();
   for (const question of params.questions) {
     assert.ok(
-      object(question) &&
-        ["delivery", "goal", "formats"].includes(question.id) &&
-        !seen.has(question.id),
+      object(question) && question.id === "delivery" && !seen.has(question.id),
       "unsupported-question-identity",
     );
     seen.add(question.id);
@@ -137,10 +186,9 @@ function selectAnswers(params, nonce) {
       "unsupported-or-secret-question",
     );
     assert.ok(
-      question.options === null ||
-        (Array.isArray(question.options) &&
-          question.options.length > 0 &&
-          question.options.length <= 8),
+      Array.isArray(question.options) &&
+        question.options.length > 0 &&
+        question.options.length <= 8,
       "unsupported-options",
     );
     if (question.options !== null) {
@@ -166,13 +214,6 @@ function selectAnswers(params, nonce) {
       };
       shapes.push("single-choice");
       if (question.isOther) shapes.push("custom-text");
-    } else if (question.id === "goal") {
-      assert.equal(question.options, null, "unsupported-goal-shape");
-      answers.goal = { answers: [`UI01 goal ${nonce}`] };
-      shapes.push("free-text");
-    } else {
-      // A string-array response is not evidence of multiple-selection semantics.
-      throw new Error("unproved-multiple-choice-semantics");
     }
   }
   assert.ok(seen.has("delivery"), "fixed-delivery-required");
@@ -215,7 +256,8 @@ export async function runProtocol(options = {}) {
       nativeAvailability: "unproved",
       supported: [],
       unsupported: [
-        "nonblocking",
+        "async-or-nonawaited",
+        "standalone-free-text",
         "timed-auto-resolution",
         "multiple-choice-no-cardinality-field",
         "recommendation-no-explicit-field",
@@ -244,6 +286,9 @@ export async function runProtocol(options = {}) {
   let turnStarting = false;
   let endpoint;
   let native;
+  let resumeRequested = false;
+  let resumeResponded = false;
+  evidence.nativeReplay = { accepted: 0 };
   let terminal;
   let report;
   let reportWriteStarted = false;
@@ -284,6 +329,10 @@ export async function runProtocol(options = {}) {
     });
   }
   async function request(method, params) {
+    if (method === "thread/resume") {
+      assert.equal(resumeRequested, false, "duplicate-resume-request");
+      resumeRequested = true;
+    }
     const rpcId = ++clientId;
     const response = new Promise((resolve, reject) =>
       pending.set(rpcId, { method, resolve, reject }),
@@ -354,23 +403,104 @@ export async function runProtocol(options = {}) {
               sandbox_mode: config?.sandbox_mode,
             },
           });
+        } else if (
+          ["thread/start", "thread/resume"].includes(response.method)
+        ) {
+          // Only the exact pending thread response may establish mode/settings;
+          // project before any caller can retain private instructions or history.
+          if (response.method === "thread/resume") {
+            resumeResponded = true;
+            observe("explicit-resume-response");
+          }
+          response.resolve(
+            threadProjection(
+              message.result,
+              response.method === "thread/resume",
+            ),
+          );
         } else response.resolve(message.result);
         pending.delete(message.id);
         return;
       }
       const params = message.params;
-      if (message.method === "item/tool/requestUserInput") {
-        assert.equal(evidence.counts.requests, 0, "duplicate-native-request");
+      const item = params?.item;
+      if (
+        ["item/started", "item/completed"].includes(message.method) &&
+        ((item?.type === "agentMessage" &&
+          (item.delivery === "async" || item.questions != null)) ||
+          (item?.type === "functionCallOutput" &&
+            [
+              "request_user_input_async",
+              "functions.request_user_input_async",
+            ].includes(item.name)))
+      ) {
         assert.ok(
           turnStarting &&
-            params?.threadId === threadId &&
+            params.threadId === threadId &&
             text(params.turnId) &&
-            text(params.itemId) &&
-            id(message.id),
-          "native-identity-mismatch",
+            (turnId === undefined || turnId === params.turnId),
+          "async-identity-mismatch",
         );
         bindTurn(params.turnId);
-        native = { requestId: message.id, params };
+        observe("unsupported-async-input");
+        throw new Error("unsupported-async-input");
+      }
+      if (message.method === "item/tool/requestUserInput") {
+        // Every delivery is checked, even when a repeated endpoint might be a replay.
+        const validIdentity =
+          turnStarting &&
+          params?.threadId === threadId &&
+          text(params.turnId) &&
+          (turnId === undefined || params.turnId === turnId) &&
+          text(params.itemId) &&
+          id(message.id);
+        if (native) {
+          // Capture only safe identity and an opaque complete-body digest on rejection.
+          const second = {
+            runtimeGeneration: evidence.runtimeGeneration,
+            ...evidence.process,
+            method: message.method,
+            threadId: text(params?.threadId) ? params.threadId : null,
+            turnId: text(params?.turnId) ? params.turnId : null,
+            itemId: text(params?.itemId) ? params.itemId : null,
+            requestId: id(message.id) ? message.id : null,
+            requestIdType: typeof message.id,
+            paramsDigest: hash(JSON.stringify(params) ?? "undefined"),
+          };
+          const sameProcess =
+            native.identity.runtimeGeneration === evidence.runtimeGeneration &&
+            isDeepStrictEqual(native.process, evidence.process);
+          if (
+            validIdentity &&
+            sameProcess &&
+            resumeRequested &&
+            resumeResponded &&
+            !writeStarted &&
+            !resolved &&
+            !report &&
+            !terminal &&
+            evidence.nativeReplay.accepted === 0 &&
+            message.id === native.requestId &&
+            typeof message.id === typeof native.requestId &&
+            message.method === native.method &&
+            isDeepStrictEqual(params, native.params)
+          ) {
+            evidence.nativeReplay.accepted++;
+            observe("native-resume-replay");
+            return;
+          }
+          evidence.nativeReplay.rejected = second;
+          assert.fail("duplicate-native-request");
+        }
+        assert.ok(validIdentity, "native-identity-mismatch");
+        bindTurn(params.turnId);
+        native = {
+          requestId: message.id,
+          method: message.method,
+          params,
+          identity: { runtimeGeneration: evidence.runtimeGeneration },
+          process: { ...evidence.process },
+        };
         evidence.counts.requests++;
         evidence.identity = {
           ...evidence.process,
@@ -432,11 +562,9 @@ export async function runProtocol(options = {}) {
         report = { requestId: message.id, callId: params.callId };
         evidence.counts.reports++;
         evidence.consumption = {
-          kind:
-            endpoint.shapes.includes("custom-text") ||
-            endpoint.shapes.includes("free-text")
-              ? "answer-only-nonce-report"
-              : "selected-answer-report",
+          kind: endpoint.shapes.includes("custom-text")
+            ? "answer-only-nonce-report"
+            : "selected-answer-report",
           callId: params.callId,
           answerDigest: endpoint.answerDigest,
         };
@@ -488,7 +616,7 @@ export async function runProtocol(options = {}) {
     // Reserve scoped cleanup inside the total budget, rather than extending it after a timeout.
     timer(budgets.totalMs - budgets.cleanupMs, "total-budget-exceeded");
     child = spawn(
-      fixture?.executable ?? "codex",
+      fixture?.executable ?? evidence.source.executable,
       fixture?.args ?? [
         "app-server",
         "-c",
@@ -534,6 +662,8 @@ export async function runProtocol(options = {}) {
         config.config.sandbox_mode === "workspace-write",
       "execution-policy-mismatch",
     );
+    stage = "source-qualification";
+    assert.ok(qualifiedSource(evidence.source), "unsupported-runtime-source");
     stage = "disposable-thread";
     const thread = await request("thread/start", {
       cwd: root,
@@ -572,18 +702,60 @@ export async function runProtocol(options = {}) {
     await until(() => native !== undefined);
     // Request deadline has been met. Keep only the total-budget timer.
     clearTimeout(timers.pop());
-    endpoint = selectAnswers(native.params, randomUUID());
+    stage = "effective-mode";
+    observe("effective-mode-readback-started");
+    const resumed = await request("thread/resume", { threadId });
+    const mode = resumed.collaborationMode;
+    assert.ok(
+      resumed.thread.id === threadId &&
+        resumed.approvalPolicy === "never" &&
+        resumed.sandbox.type === "workspaceWrite",
+      "resume-policy-or-identity-mismatch",
+    );
+    assert.ok(mode?.mode === "default", "unsupported-effective-mode");
+    assert.ok(
+      text(thread.model) &&
+        text(thread.modelProvider) &&
+        (thread.reasoningEffort === null || text(thread.reasoningEffort)) &&
+        (thread.serviceTier === null || text(thread.serviceTier)) &&
+        ["model", "modelProvider", "reasoningEffort", "serviceTier"].every(
+          (key) => resumed[key] === thread[key],
+        ) &&
+        mode.settings.model === resumed.model &&
+        mode.settings.reasoningEffort === resumed.reasoningEffort &&
+        /^[a-f0-9]{64}$/.test(mode.settings.developerInstructionsDigest ?? ""),
+      "effective-settings-mismatch",
+    );
+    evidence.qualification = {
+      codexVersion: evidence.source.codex,
+      executableHash: evidence.source.executableHash,
+      runtimeGeneration: evidence.runtimeGeneration,
+      threadId,
+      mode: mode.mode,
+      model: resumed.model,
+      modelProvider: resumed.modelProvider,
+      reasoningEffort: resumed.reasoningEffort,
+      serviceTier: resumed.serviceTier,
+      developerInstructionsDigest: mode.settings.developerInstructionsDigest,
+      continuation: "version-bound-synchronous-route",
+      observedAt: "held-native-callback-before-answer",
+    };
+    observe("effective-default-observed");
+    endpoint = selectAnswers(
+      evidence.source,
+      evidence.qualification,
+      native.params,
+      randomUUID(),
+    );
     evidence.capabilities.nativeAvailability = "observed";
     evidence.capabilities.supported = endpoint.shapes;
-    if (native.params.questions.length > 1)
-      evidence.capabilities.supported.push("grouped-question-set");
-    for (const shape of ["free-text", "custom-text"]) {
+    for (const shape of ["custom-text"]) {
       if (!endpoint.shapes.includes(shape))
         evidence.capabilities.unsupported.push(`${shape}-not-observed`);
     }
     evidence.request = {
-      isBlocking: true,
-      autoResolutionMs: null,
+      isBlocking: native.params.isBlocking,
+      autoResolutionMs: native.params.autoResolutionMs,
       questions: native.params.questions,
     };
     stage = "blocked-checkpoint";
@@ -690,10 +862,7 @@ export async function runProtocol(options = {}) {
         failure ??
         (error instanceof assert.AssertionError
           ? error.message.split("\n")[0]
-          : [
-                "unproved-multiple-choice-semantics",
-                "stdin-write-failed",
-              ].includes(error.message)
+          : ["stdin-write-failed"].includes(error.message)
             ? error.message
             : "protocol-contract-failed"),
     };
@@ -791,9 +960,9 @@ function sourceEvidence() {
         stdio: ["ignore", "pipe", "ignore"],
         timeout: 10_000,
       }).trim();
-    const version = command("codex", ["--version"]);
     const executable = command("which", ["codex"]);
-    command("codex", [
+    const version = command(executable, ["--version"]);
+    command(executable, [
       "app-server",
       "generate-ts",
       "--experimental",
@@ -810,6 +979,13 @@ function sourceEvidence() {
       "InitializeParams.ts",
       "v2/ThreadStartParams.ts",
       "v2/TurnStartParams.ts",
+      "v2/ThreadResumeResponse.ts",
+      "v2/ThreadResumeParams.ts",
+      "CollaborationMode.ts",
+      "Settings.ts",
+      "v2/ThreadItem.ts",
+      "v2/ItemStartedNotification.ts",
+      "v2/AgentMessageDelivery.ts",
     ];
     const schema = Object.fromEntries(
       files.map((file) => [file, hash(readFileSync(join(directory, file)))]),
@@ -825,25 +1001,89 @@ function sourceEvidence() {
       executableHash: hash(readFileSync(executable)),
       codex: version,
       schema,
+      nativeOrigin: {
+        tag: "rust-v0.159.0",
+        synchronousPath:
+          "codex-rs/core/src/tools/handlers/request_user_input.rs",
+        asynchronousPath:
+          "codex-rs/core/src/tools/handlers/request_user_input_async.rs",
+        asynchronousSourceHash:
+          "16be7e521e3f91aaede5bd233a52671e0cd5454ef4d8a4a67eeb71908ab06096",
+        attribution:
+          "inspected-tagged-source; native-RPC-synchronous; async-AgentMessage",
+      },
     };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
+export function consumeServiceGrant(
+  path = process.env.ENSEMBLE_UI01_SERVICE_GRANT,
+) {
+  if (!path)
+    throw new Error(
+      "Service proof requires exactly --live --phase protocol or --live --phase service with a finite root-owned grant",
+    );
+  const grant = JSON.parse(readFileSync(path, "utf8"));
+  assert.ok(
+    typeof grant.grantId === "string" && /^[0-9a-f-]{36}$/.test(grant.grantId),
+    "invalid-finite-grant",
+  );
+  assert.equal(grant.resource, qualificationResource);
+  assert.equal(grant.holder, 739);
+  assert.equal(grant.phase, "service");
+  assert.equal(grant.authority, "root-approved-finite-service-turn");
+  assert.equal(
+    grant.head,
+    execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+  );
+  assert.deepEqual(grant.limits, {
+    threads: 1,
+    turns: 1,
+    requests: 1,
+    replies: 1,
+    reports: 1,
+    requestMs: 90000,
+    totalMs: 240000,
+    cleanupMs: 10000,
+    retries: 0,
+  });
+  writeFileSync(
+    `${path}.consumed`,
+    JSON.stringify({
+      grantId: grant.grantId,
+      resource: grant.resource,
+      holder: grant.holder,
+      head: grant.head,
+      consumedAt: new Date().toISOString(),
+    }) + "\n",
+    { flag: "wx", mode: 0o600 },
+  );
+  return grant;
+}
+
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
+  let serviceGrant;
   try {
     validateArguments(process.argv.slice(2));
+    if (process.argv[4] === "service") serviceGrant = consumeServiceGrant();
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 2;
   }
   if (!process.exitCode) {
     try {
-      const evidence = await runProtocol({ source: sourceEvidence() });
+      const evidence =
+        process.argv[4] === "service"
+          ? await runService({
+              source: sourceEvidence(),
+              grant: serviceGrant,
+            })
+          : await runProtocol({ source: sourceEvidence() });
       process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`);
       process.exitCode = evidence.status === "passed" ? 0 : 1;
     } catch {

@@ -1,18 +1,14 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { test } from "node:test";
+import {
+  browserSuite,
+  captureBrowserEvidence,
+} from "./fixtures/browser-diagnostics.js";
+const test = browserSuite("ui03");
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
-import { tmpdir } from "./temp.js";
-const evidence = join(tmpdir(), `ensemble-ui03-evidence-${process.pid}`);
 async function screenshot(page: Page, name: string) {
-  await mkdir(evidence, { recursive: true });
-  await page.screenshot({
-    path: join(evidence, `${name}.png`),
-    fullPage: true,
-  });
+  return captureBrowserEvidence(page, name);
 }
 async function signIn(
   page: Page,
@@ -25,10 +21,16 @@ async function signIn(
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
 }
-test("List and Board preserve identical filtered task IDs and never submit commands", async (t) => {
-  const f = await createOperatorFixture();
+test("List and Board preserve identical filtered task IDs and never submit commands", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const d = f.service.domain(),
     projectId = randomUUID();
   d.execute({
@@ -51,11 +53,12 @@ test("List and Board preserve identical filtered task IDs and never submit comma
       outcome: "Work",
       ready: false,
     });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web.origin, web.password);
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
@@ -72,7 +75,44 @@ test("List and Board preserve identical filtered task IDs and never submit comma
       })),
     );
   const list = await links();
-  assert.deepEqual(list, [{ id: ids[0], href: `/task/${ids[0]}` }]);
+  assert.deepEqual(list, [{ id: ids[0], href: `/app/tasks/${ids[0]}` }]);
+  const rowGeometry = await page
+    .locator(`[data-task-id="${ids[0]}"]`)
+    .evaluate((el) => ({
+      display: getComputedStyle(el).display,
+      height: el.getBoundingClientRect().height,
+    }));
+  assert.equal(rowGeometry.display, "grid");
+  assert.ok(
+    rowGeometry.height <= 220,
+    `desktop task row is ${rowGeometry.height}px`,
+  );
+  const taskTitleType = await page
+    .locator(`[data-task-id="${ids[0]}"] .task-title`)
+    .evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        decoration: style.textDecorationLine,
+      };
+    });
+  assert.deepEqual(taskTitleType, {
+    fontSize: "14px",
+    fontWeight: "600",
+    decoration: "underline",
+  });
+  const beforeSwitch = await Promise.all(
+    ["List", "Board"].map((name) =>
+      page.getByRole("button", { name, exact: true }).evaluate((el) => ({
+        pressed: el.getAttribute("aria-pressed"),
+        background: getComputedStyle(el).backgroundColor,
+      })),
+    ),
+  );
+  assert.equal(beforeSwitch[0]?.pressed, "true");
+  assert.equal(beforeSwitch[1]?.pressed, "false");
+  assert.notEqual(beforeSwitch[0]?.background, beforeSwitch[1]?.background);
   await page.getByRole("button", { name: "Board", exact: true }).click();
   assert.deepEqual(await links(), list);
   assert.ok(page.url().includes("q=Literal"));
@@ -80,20 +120,59 @@ test("List and Board preserve identical filtered task IDs and never submit comma
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Search tasks").inputValue(), "Literal");
   assert.deepEqual(await links(), list);
+  await page.getByRole("button", { name: "Paused (1)", exact: true }).click();
+  const boardScroll = await page
+    .locator(".board-columns")
+    .evaluate((el) => el.scrollLeft);
+  await page.locator(`[data-task-id="${ids[0]}"] .task-title`).click();
+  await page
+    .getByRole("heading", { name: "Evidence review", exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Back to originating view", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Paused (1)", exact: true })
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.equal(
+    await page.locator(".board-columns").evaluate((el) => el.scrollLeft),
+    boardScroll,
+  );
+  assert.equal(
+    await page
+      .locator(`[data-task-id="${ids[0]}"] .task-title`)
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
   await screenshot(page, "1366-filtered-board");
   assert.equal(posts, 0);
 });
 
-test("Save draft and Create and start record real task outcomes without claiming running", async (t) => {
+test("Save draft and Create and start record real task outcomes without claiming running", async (_t, journey) => {
   let routeCalls = 0;
-  const f = await createOperatorFixture({
-    async choose() {
-      routeCalls++;
-      throw Error("Explicit assignment must bypass routing");
-    },
-  });
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(
+      {
+        async choose() {
+          routeCalls++;
+          throw Error("Explicit assignment must bypass routing");
+        },
+      },
+      undefined,
+      undefined,
+      journey.fixtureOptions,
+    ),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const d = f.service.domain(),
     projectId = randomUUID(),
     profileId = randomUUID(),
@@ -146,11 +225,12 @@ test("Save draft and Create and start record real task outcomes without claiming
     outcome: "Finish",
     ready: false,
   });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(
     page,
@@ -249,10 +329,16 @@ test("Save draft and Create and start record real task outcomes without claiming
   await screenshot(page, "1366-confirmed-ready-running");
 });
 
-test("browser frozen storage failure sends zero commands and restores only last saved input", async (t) => {
-  const f = await createOperatorFixture();
+test("browser frozen storage failure sends zero commands and restores only last saved input", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const d = f.service.domain(),
     projectId = randomUUID();
   d.execute({
@@ -263,9 +349,10 @@ test("browser frozen storage failure sends zero commands and restores only last 
     name: "Storage project",
     leadProfileId: null,
   });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(
     page,
@@ -324,10 +411,16 @@ test("browser frozen storage failure sends zero commands and restores only last 
   assert.equal(posts, 0);
   await screenshot(page, "390-restored-last-saved-input");
 });
-test("committed lost-response creation survives reload expiry and exact reconciliation; failed read retains receipt", async (t) => {
-  const f = await createOperatorFixture();
+test("committed lost-response creation survives reload expiry and exact reconciliation; failed read retains receipt", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const d = f.service.domain(),
     projectId = randomUUID(),
     profileId = randomUUID(),
@@ -359,11 +452,12 @@ test("committed lost-response creation survives reload expiry and exact reconcil
     outcome: "First",
     ready: false,
   });
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
     viewport: { width: 1366, height: 820 },
   });
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(
     page,
@@ -415,6 +509,36 @@ test("committed lost-response creation survives reload expiry and exact reconcil
       .count(),
     0,
   );
+  await page.unroute("**/api/operator/commands");
+  for (const [status, code] of [
+    [400, "invalid-input"],
+    [403, "forbidden"],
+    [409, "conflict"],
+  ] as const) {
+    await page.route("**/api/operator/commands", async (route) => {
+      sent.push(route.request().postData() ?? "");
+      await route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code, message: "Safe failure" } }),
+      });
+    });
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).isDisabled(),
+      true,
+    );
+    await page.unroute("**/api/operator/commands");
+  }
+  await page.route("**/api/operator/commands", async (route) => {
+    sent.push(route.request().postData() ?? "");
+    await route.continue();
+  });
   f.advanceClock(70000);
   await page
     .getByRole("button", { name: "Reconcile submission", exact: true })
@@ -442,7 +566,7 @@ test("committed lost-response creation survives reload expiry and exact reconcil
     )
     .waitFor();
   await page.getByText(/original creation receipt remains confirmed/).waitFor();
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 6);
   assert.ok(sent.every((bytes) => bytes === sent[0]));
   assert.equal(d.tasks(projectId).length, 2);
   assert.equal(d.assignments(material.taskId).length, 1);
@@ -551,7 +675,12 @@ async function seedCatalog(
       expectedVersion: 1,
       ready: true,
     });
-    await until(() => f.runtime.turns === before + 1);
+    await until(() =>
+      f.service
+        .turnRequests()
+        .some((r) => r.taskId === id && r.state === "active"),
+    );
+    assert.ok(f.runtime.turns >= before + 1);
     const request = f.service
       .turnRequests()
       .find((r) => r.taskId === id && r.state === "active");
@@ -560,8 +689,7 @@ async function seedCatalog(
   };
   const blocker = task("Open dependency"),
     draft = task("Literal <script>malicious()</script>");
-  const waiting = task("Ready but dependent", true, [blocker]),
-    ready = task("Ready selected", true);
+  const waiting = task("Ready but dependent", true, [blocker]);
   const done = task("Completed result"),
     cancelled = task("Cancelled work");
   for (const [taskId, state] of [
@@ -582,6 +710,31 @@ async function seedCatalog(
     uncertainStop = await active("Stop with uncertain ownership"),
     uncertain = await active("Uncertain execution"),
     running = await active("Work running normally");
+  const occupied = d.capacityLimits([projectId]).currentUsage.projects[
+    projectId
+  ];
+  assert.equal(occupied, 5);
+  d.execute({
+    type: "capacity.configure",
+    actor: "operator",
+    key: randomUUID(),
+    globalLimit: 10,
+    projectOverrides: { [projectId]: occupied },
+  });
+  const ready = task("Ready selected", true);
+  await f.service.provisionTask(ready);
+  await until(() =>
+    f.service
+      .turnRequests()
+      .some((r) => r.taskId === ready && r.state === "queued"),
+  );
+  assert.equal(d.admission(ready).eligible, true);
+  assert.equal(
+    f.service
+      .turnRequests()
+      .filter((r) => r.taskId === ready && r.state === "active").length,
+    0,
+  );
   const work = f.service
     .list()
     .find((w) => w.workId === question.request.workId);
@@ -632,6 +785,7 @@ async function seedCatalog(
     outcome: "Work",
     ready: true,
   });
+  await f.service.provisionTask(paused);
   d.execute({
     type: "github.configure",
     key: randomUUID(),
@@ -704,17 +858,24 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 683, height: 410 },
 ])
-  test(`UI03 critical journeys remain usable at laptop phone and scaled layout ${viewport.width}`, async (t) => {
-    const f = await createOperatorFixture();
+  test(`UI03 critical journeys remain usable at laptop phone and scaled layout ${viewport.width}`, async (_t, journey) => {
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
     let browser: Browser | undefined;
-    t.after(() => f.close(browser));
-    const web = await f.startWeb();
-    browser = await chromium.launch();
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
+    const web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
     const context = await browser.newContext({
         viewport,
         deviceScaleFactor: viewport.width === 683 ? 2 : 1,
       }),
       page = await context.newPage();
+    journey.observe(page);
     page.setDefaultTimeout(5000);
     const errors: string[] = [],
       external: string[] = [],
@@ -759,7 +920,17 @@ for (const viewport of [
       name: "Ready for first task",
       leadProfileId: null,
     });
+    const emptyRead = page.waitForResponse(
+      (response) =>
+        response.url() === `${web.origin}/api/operator/task-list` &&
+        response.request().method() === "GET",
+    );
     await page.goto(`${web.origin}/app/projects/${emptyProject}`);
+    assert.equal(
+      (await emptyRead).status(),
+      200,
+      "exact task catalog read for empty-project route succeeds",
+    );
     await page
       .getByText(
         "Ready for your first task. Create an outcome or save a draft.",
@@ -814,8 +985,8 @@ for (const viewport of [
         .locator(`[data-task-id="${ids.running.id}"]`)
         .getByText(/Capacity currently full/)
         .count(),
-      0,
-      "override ten does not falsely report five reservations as full",
+      1,
+      "occupied project limit preserves eligible Ready work in its real capacity queue",
     );
     await screenshot(page, `${viewport.width}-overview-attention-work`);
     let commandPosts = 0;
@@ -827,7 +998,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Open existing coordination controls",
+          name: "Advanced coordination controls",
           exact: true,
         })
         .getAttribute("href"),
@@ -943,6 +1114,10 @@ for (const viewport of [
     await page
       .getByRole("button", { name: "Refresh tasks", exact: true })
       .click();
+    await page
+      .locator(`[data-task-id="${ids.running.id}"]`)
+      .getByText(/Capacity currently full/)
+      .waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "Board", exact: true }).click();
     await page.getByRole("button", { name: /^Ready \(/ }).click();
     if (viewport.width < 760) {
@@ -1014,7 +1189,10 @@ for (const viewport of [
     await page
       .getByRole("link", { name: "Imported source task", exact: true })
       .click();
-    assert.ok(page.url().endsWith(`/task/${ids.importedId}`));
+    assert.ok(page.url().endsWith(`/app/tasks/${ids.importedId}`));
+    await page
+      .getByRole("link", { name: "Runtime / Stop / Resume", exact: true })
+      .waitFor();
     assert.equal(
       await page
         .locator('input[name="title"],textarea[name="outcome"]')
@@ -1024,7 +1202,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Runtime status, controls and recovery evidence",
+          name: "Runtime / Stop / Resume",
           exact: true,
         })
         .count(),
@@ -1033,7 +1211,7 @@ for (const viewport of [
     assert.equal(
       await page
         .getByRole("link", {
-          name: "Task-scoped coordination and history",
+          name: "Requests and coordination",
           exact: true,
         })
         .count(),
@@ -1167,14 +1345,20 @@ for (const viewport of [
     assert.deepEqual(external, []);
     assert.deepEqual(violations, []);
     console.log(
-      `UI03 ${viewport.width} browser ${browser.version()} evidence: ${evidence}; fixture ${f.directory} awaits teardown`,
+      `UI03 ${viewport.width} browser ${browser.version()} evidence: ${journey.directory}; fixture ${f.directory} awaits teardown`,
     );
   });
 
-test("composer switches scoped options despite delayed prior response and preserves input after revoked assignee", async (t) => {
-  const f = await createOperatorFixture();
+test("composer switches scoped options despite delayed prior response and preserves input after revoked assignee", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
   let browser: Browser | undefined;
-  t.after(() => f.close(browser));
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
   const d = f.service.domain(),
     a = randomUUID(),
     b = randomUUID(),
@@ -1212,9 +1396,10 @@ test("composer switches scoped options despite delayed prior response and preser
       ready: false,
     });
   }
-  const web = await f.startWeb();
-  browser = await chromium.launch();
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage();
+  journey.observe(page);
   page.setDefaultTimeout(5000);
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -1241,7 +1426,7 @@ test("composer switches scoped options despite delayed prior response and preser
       } else await route.continue();
     },
   );
-  t.after(() => release());
+  journey.cleanup(async () => release(), "pending-request.release");
   await signIn(page, web.origin, web.password, `/app/tasks/new?project=${a}`);
   await entered;
   await page
@@ -1300,4 +1485,166 @@ test("composer switches scoped options despite delayed prior response and preser
   );
   assert.equal(d.tasks(a).length, 1);
   assert.equal(f.runtime.turns, 0);
+});
+test("replacement composer owns recovery before a detached committed receipt or old-session 401 arrives", async (_t, journey) => {
+  for (const mode of ["receipt-navigation", "401-expiry"] as const) {
+    journey.restart();
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
+    let browser: Browser | undefined;
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
+    const d = f.service.domain(),
+      projectId = randomUUID(),
+      profileId = randomUUID();
+    d.execute({
+      type: "profile.create",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      name: "Delayed agent",
+      instructions: "private",
+      capabilities: "coordinate",
+    });
+    d.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Delayed recovery project",
+      leadProfileId: profileId,
+    });
+    const web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
+    const page = await browser.newPage({
+      viewport:
+        mode === "receipt-navigation"
+          ? { width: 1366, height: 820 }
+          : { width: 390, height: 844 },
+    });
+    journey.observe(page);
+    page.setDefaultTimeout(5000);
+    const errors: string[] = [],
+      sent: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await signIn(
+      page,
+      web.origin,
+      web.password,
+      `/app/tasks/new?project=${projectId}`,
+    );
+    await page
+      .getByLabel("Task title", { exact: true })
+      .fill("Delayed original creation");
+    await page
+      .getByLabel("Desired outcome", { exact: true })
+      .fill("Finish exactly once");
+    await page.getByLabel("Assignee", { exact: true }).selectOption(profileId);
+    let release!: () => void, committed!: () => void;
+    const held = new Promise<void>((done) => {
+      committed = done;
+    });
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    await page.route("**/api/operator/commands", async (route) => {
+      sent.push(route.request().postData() ?? "");
+      const response = await route.fetch();
+      assert.equal(response.status(), 200);
+      committed();
+      await gate;
+      if (mode === "401-expiry")
+        await route.fulfill({
+          status: 401,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { code: "unauthenticated", message: "Sign in" },
+          }),
+        });
+      else await route.fulfill({ response });
+    });
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await held;
+    const recovery = await page.evaluate(() =>
+      sessionStorage.getItem("ensemble.ui03.composer.v1"),
+    );
+    assert.ok(recovery);
+    const command = JSON.parse(sent[0] ?? "null");
+    assert.equal(d.tasks(projectId).length, 1);
+    assert.equal(d.assignments(command.taskId).length, 1);
+    if (mode === "receipt-navigation") {
+      await page
+        .getByRole("link", { name: "All tasks", exact: true })
+        .first()
+        .click();
+      await page.getByRole("link", { name: "New task", exact: true }).click();
+    } else {
+      f.advanceClock(61_000);
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await page.getByLabel("Password", { exact: true }).fill(web.password);
+      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    }
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(sent.length, 1);
+    const delivered = page.waitForResponse((r) =>
+      r.url().endsWith("/api/operator/commands"),
+    );
+    release();
+    await delivered;
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).inputValue(),
+      "Delayed original creation",
+    );
+    assert.equal(
+      await page.getByLabel("Task title", { exact: true }).isDisabled(),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        sessionStorage.getItem("ensemble.ui03.composer.v1"),
+      ),
+      recovery,
+    );
+    assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
+    assert.equal(sent.length, 1);
+    await screenshot(
+      page,
+      `${mode === "receipt-navigation" ? "1366" : "390"}-${mode}-replacement-unknown`,
+    );
+    await page.unroute("**/api/operator/commands");
+    page.on("request", (r) => {
+      if (r.url().endsWith("/api/operator/commands"))
+        sent.push(r.postData() ?? "");
+    });
+    await page
+      .getByRole("button", { name: "Reconcile submission", exact: true })
+      .click();
+    await page
+      .getByText("Draft task saved in Ensemble.", { exact: true })
+      .waitFor();
+    assert.deepEqual(sent, [sent[0], sent[0]]);
+    assert.equal(
+      await page.evaluate(() =>
+        sessionStorage.getItem("ensemble.ui03.composer.v1"),
+      ),
+      null,
+    );
+    assert.equal(d.tasks(projectId).length, 1);
+    assert.equal(d.assignments(command.taskId).length, 1);
+    assert.equal(f.runtime.turns, 0);
+    assert.deepEqual(errors, []);
+    await screenshot(
+      page,
+      `${mode === "receipt-navigation" ? "1366" : "390"}-${mode}-reconciled`,
+    );
+  }
 });

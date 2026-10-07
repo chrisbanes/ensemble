@@ -1,0 +1,124 @@
+# UI06 configuration and recovery contract
+
+UI06 completes the reviewed setup, configuration and recovery surfaces in the React operator served by the existing listener. Existing authenticated HTML editors stay reachable. UI07 owns final visual/usability parity and removal approval; this delivery does not qualify release, cutover, real provider access, native structured input or paused X01-X08.
+
+## Configuration and receipt behavior
+
+Settings is `/app/settings`. Profile and paused-project creation are separate recorded steps; optional project instructions are saved later through project configuration. Creation starts no execution. Project/profile edits omit unchanged optional private input; an explicit empty instruction replacement clears it. Routing guidance/candidates and source selections/readiness/repositories are complete explicit replacements. Search queries, Project filters and repository paths are write-only replacement input; exact current-value or partial edits remain at `/project/:id` and `/profile/:id`. Credential references support omission to preserve, null to clear, or a valid environment reference to set. Credential values are server-only. Only the GitHub command input makes its reference optional; persisted configuration remains required/nullable. Omitted input is literally omitted before canonical hashing; existing explicit hashes remain compatible.
+
+The browser fixes a key, create identity, submitted revisions and validated bytes for each operation. An unknown result freezes that concrete form/resource across same-session internal navigation; explicit reconciliation sends the original key and payload. A subsequent rejection/conflict cannot erase prior uncertainty. Matching original receipts stay recorded independently of fresh observations. Later configuration reads cannot replace a receipt or alter a dirty/frozen submission. Editable conflicts require explicit review/adoption of the loaded revision before a new operation. Recorded operations remain separate from latest resource observations.
+
+Each task retains one placement draft. Pending or unknown placement submissions and recorded receipts remain reachable in their initiating presentation project even when the canonical command owner is another membership project and fresh conflict rows disappear. The initiating project is captured separately in authenticated draft memory; it never changes the frozen owner/key/payload or enters command JSON. Placement receipts must match the original chosen project as well as command key, task and version. After an initial definite placement conflict, Review latest placement revision explicitly adopts the loaded task version with a fresh key while retaining the chosen membership input. It is unavailable after any unknown outcome, including a later409 reconciliation response, which preserves the original frozen bytes/key. Mounted fields use React IDs for their own labels and descriptions. Readiness validation retains safe local array indices so the actual first invalid condition receives focus; repository verification retains its fixed safe group error without disclosing diagnostics.
+
+Private draft state lives only in authenticated application memory. Expiry/logout purges it and suppresses delayed completions. Reload or session end discards private drafts: no cross-session browser draft recovery is claimed. There is no configuration localStorage/sessionStorage, private URL field, automatic replay, browser credential resolution or current-state receipt reconstruction. Current/retained instructions, declared credential refs/environment keys/nonempty values and repository/workspace/control paths are excluded from curated JSON, including labels and receipts. Exact private editors retain existing authentication.
+
+Project/profile/routing/source writes retain existing policy and expected versions. Repository verification errors return fixed repositories inline input errors before mutation; diagnostics are discarded. Commit, notification, wakeup and invalid projection failures stay outcome-unknown. Capacity keeps its existing keyed command with no configuration version/CAS; lowering limits holds new admission without terminating active work.
+
+## Source observations and execution recovery
+
+Preview maps the public `github.preview` input to existing `github.activate` authority. A server-only complete command scope/actor/type/key/selection/version/hash lookup replays the original activation before provider access. Fresh preview requires current configuration and a complete version-matched read. Activation does not prove task import or successful sync. `/api/operator/source-refresh` is a guarded POST requesting installation-wide observations, with complete/partial/never/unavailable state separate from attempts and available successful timestamps. It creates no domain receipt and accepts no arbitrary provider/project URL.
+
+Runtime Settings shows configured/effective caps and actual usage. Recovery at `/app/assignments/:id/recovery` separates captured/configured/current-next revisions from the actual selected admitted generation. All verified task-scoped recovery rows contribute independent Stop, task, writer, capacity and uncertainty holds before the newest 20 evidence rows are selected in persisted insertion order. Omitted count is explicit; older holds and the supported next step remain visible. Foreign or unverified unbound rows are excluded; a selected request without binding can appear only by its exact verified request/assignment identity. Unknown observation kinds remain unknown. Raw process/thread/turn/path/reason data stays out of this projection.
+
+Delivery policy and authority remain at `/project/:id`: completion mode, all nine scoped grant kinds, required checks/app bindings and credential set/clear. Delivery issue/Project/PR/provider/local facts, exact guarded Accept handback/Settle outcome as closed and observation refresh remain UI04-owned at `/coordination/task/:id`. Settings links the retained editor; no delivery policy or action is exposed in the public JSON API. S07a live handback/through-merge qualification remains unrun and required. UI01 native callback qualification retains its failed one-turn/zero-callback evidence and consumed budget; UI06 grants no retry or native adapter.
+
+Advanced original recovery/Apply, task Stop/Resume/dependencies, captured history, task/source review and messages/results/questions/approvals remain linked to their exact retained destinations. Recovery is read-only: identities, receipts, acknowledgement and elapsed time do not establish termination or authorize ownership release. Resume clears operator Stop independently of other holds. Phone layouts explain current state and link the desktop-first advanced evidence.
+
+## Individual control dispositions
+
+Every semicolon-separated foundation inventory control appears individually below. Original routes/forms remain supported; these concrete dispositions were reviewed in #744. A replacement does not authorize removing its retained control.
+
+| Command/action | Control/read operation | Retained destination | Reachable replacement or retained destination | Disposition |
+| --- | --- | --- | --- | --- |
+| project.create | create project | / | /app/settings/projects/new | Implemented replacement; original control retained. |
+| project.create | name | / | /app/settings/projects/new | Implemented replacement; original control retained. |
+| project.create | lead | / | /app/settings/projects/new | Implemented replacement; original control retained. |
+| profile.create | create profile | / | /app/settings/profiles/new | Implemented replacement; original control retained. |
+| profile.create | name | / | /app/settings/profiles/new | Implemented replacement; original control retained. |
+| profile.create | instructions | / | /app/settings/profiles/new | Implemented replacement; original control retained. |
+| profile.create | capabilities | / | /app/settings/profiles/new | Implemented replacement; original control retained. |
+| project.configure | name | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| project.configure | lead | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| project.configure | instructions | /project/:id | /app/projects/:id/settings | Explicit write-only replacement in React; exact current private values and partial edits remain in retained editor. |
+| project.configure | pause | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| profile.configure | name | /profile/:id | /app/profiles/:id/settings | Implemented replacement; original control retained. |
+| profile.configure | instructions | /profile/:id | /app/profiles/:id/settings | Explicit write-only replacement in React; exact current private values and partial edits remain in retained editor. |
+| profile.configure | capabilities | /profile/:id | /app/profiles/:id/settings | Explicit write-only replacement in React; exact current private values and partial edits remain in retained editor. |
+| profile.configure | revoke | /profile/:id | /app/profiles/:id/settings | Implemented replacement; original control retained. |
+| routing.configure | enable | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| routing.configure | guidance | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| routing.configure | candidates | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| routing.configure | set/clear credential reference | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| github.configure | selections | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| github.configure | readiness | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| github.configure | repositories | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| github.configure | set/clear credential reference | /project/:id | /app/projects/:id/settings | Explicit complete replacement in React; exact private guidance, queries, filters and paths and partial edits remain in retained editor. |
+| github.preview | preview selections | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| github.preview | activation via preview receipt | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| github.refresh | refresh observation | /project/:id | /app/projects/:id/settings | Installation-wide observation request; no domain receipt or successful-sync claim. |
+| github.place | conflicting placement | /project/:id | /app/projects/:id/settings | Implemented replacement; original control retained. |
+| delivery.configure | completion mode | /project/:id | /project/:id | Retained exact policy/authority editor: completion mode, all nine grant kinds with repository/Project/field/options, required checks/app binding and credential set/clear; no public JSON command. |
+| delivery.configure | scoped grants | /project/:id | /project/:id | Retained exact policy/authority editor: completion mode, all nine grant kinds with repository/Project/field/options, required checks/app binding and credential set/clear; no public JSON command. |
+| delivery.configure | required checks | /project/:id | /project/:id | Retained exact policy/authority editor: completion mode, all nine grant kinds with repository/Project/field/options, required checks/app binding and credential set/clear; no public JSON command. |
+| delivery.configure | set/clear credential reference | /project/:id | /project/:id | Retained exact policy/authority editor: completion mode, all nine grant kinds with repository/Project/field/options, required checks/app binding and credential set/clear; no public JSON command. |
+| delivery.read | issue observation | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | Project field observations | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | PR identity/head/state | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | provider feedback | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | external action states | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | local task state | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| delivery.read | delivery holds | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| /coordination/control/delivery/settle | Accept handback | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| /coordination/control/delivery/settle | Settle outcome as closed | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| /coordination/control/delivery/settle | task/delivery/policy revisions | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| /coordination/control/delivery/settle | repository/PR/node/head guard | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| /coordination/control/delivery/refresh | refresh delivery observations | /coordination/task/:id | /coordination/task/:id | Retained UI04 delivery detail at this exact destination: cached provider/local facts and guarded settlement or observation request; no new React adapter or authority. |
+| task.create | draft | /project/:id | /app/tasks/new | Implemented replacement; original control retained. |
+| task.create | create and start | /project/:id | /app/tasks/new | Implemented replacement; original control retained. |
+| task.create | retained alongside delivered `/app/tasks/new` composer | /project/:id | /app/tasks/new | Implemented replacement; original control retained. |
+| task.configure | local title | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| task.configure | outcome | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| task.configure | readiness | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | source identity | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | body | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | status | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | Project fields | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | native blockers | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | review | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| source.review | hold resolution | /task/:id | /task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /runtime/control/capacity | global capacity | /runtime | /app/settings/runtime | Implemented replacement; original control retained. |
+| /runtime/control/capacity | project override | /runtime | /app/settings/runtime | Implemented replacement; original control retained. |
+| /runtime/control/capacity | remove override | /runtime | /app/settings/runtime | Implemented replacement; original control retained. |
+| /runtime/control/dependency/add | local dependency add | /runtime/task/:id | /runtime/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /runtime/control/dependency/remove | local dependency remove | /runtime/task/:id | /runtime/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /runtime/control/instruction-apply | apply project instructions and profile revisions | /runtime/task/:id | /runtime/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /runtime/control/stop | stop request and observation | /runtime/task/:id | /runtime/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /runtime/control/resume | explicit resume | /runtime/task/:id | /runtime/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| read | generation | /runtime/assignment/:id | /app/assignments/:id/recovery | Read-only curated evidence; exact advanced evidence and existing Apply remain retained. No ownership release or proof controls. |
+| read | holds | /runtime/assignment/:id | /app/assignments/:id/recovery | Read-only curated evidence; exact advanced evidence and existing Apply remain retained. No ownership release or proof controls. |
+| read | advanced recovery evidence | /runtime/assignment/:id | /app/assignments/:id/recovery | Read-only curated evidence; exact advanced evidence and existing Apply remain retained. No ownership release or proof controls. |
+| /coordination/control/message | message recipient | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/message | exact version | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/message | durable message | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/result/recipient | unresolved results | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/result/recipient | destination reconciliation | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| read | retained captured history | /coordination/assignment/:id | /coordination/assignment/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| read | omissions | /coordination/assignment/:id | /coordination/assignment/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| read | results | /coordination/assignment/:id | /coordination/assignment/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/question/answer | plain question and exact revision answer | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/approval/decision | retained exact material | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/approval/decision | approve | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /coordination/control/approval/decision | deny | /coordination/task/:id | /coordination/task/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /login | password sign-in | /login | /login | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| /logout | sign-out | /app | /app | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| navigation | delivered overview/project List/Board/composer | /app | /app | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| navigation | retained task/profile/assignment/Runtime/Coordination destinations | /app | /app | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+| read | captured instructions/profile revision and result destination | /assignment/:id | /assignment/:id | Retained at this exact destination; UI04/UI05 detail and Inbox remain separate delivery scope. |
+
+Programmatic dispositions: `assignment.create` remains programmatic as a standalone operation; delivered `/app/tasks/new` supports optional initial assignment atomically with task creation. `assignment.apply`, `dependency.add` and `dependency.remove` retain their exact runtime controls and existing JSON adapters. `imported-blockers.set` has no HTTP/JSON exposure. Arbitrary `github.activate`, recovery-resolution/proof submission and force unlock remain unsupported. No routing/plugin/development-stage framework is added.
+
+Project and existing-profile configuration expose an in-place read-only reload. Reload updates observations while retaining dirty replacement inputs, their captured revision/key and any frozen unknown submission. It never confirms a receipt or adopts a revision; deliberate revision review is still required after a definite initial conflict.
+
+## Shared command implementation
+
+Configuration and the task composer share immutable submission ownership, send admission and outcome settlement. Configuration receipt predicates, explicit revision adoption and session-memory privacy remain local. Placement origin, command owner and chosen destination remain distinct. Request-time authentication scope prevents old-session 401 responses from purging newer input while current-session expiry still purges it. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.

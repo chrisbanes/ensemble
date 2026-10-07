@@ -9,7 +9,7 @@ and private to the operator.
 
 ## Runtime and authentication
 
-Use Node.js `24.21.0` and npm `12.1.0`. Build from a reviewed checkout and keep
+Use Node.js `24.21.0` and npm `12.2.0`. Build from a reviewed checkout and keep
 the Node executable and compiled CLI at stable absolute paths that remain
 available to the logged-in user:
 
@@ -182,8 +182,12 @@ restore can leave an empty directory indistinguishable from a deliberately
 created fresh installation. Track the intended path out-of-band and never
 start it until restore succeeds and the snapshot is verified.
 
-S08a is backup/restore preparation, not release-candidate recovery or cutover.
-S08b (#698) retains final-schema and external-effect reconciliation, safe
-disposition of old work, host-restart qualification, production deployment and
-the reviewed Haze cutover gate. Do not migrate old work or enable competing
-production work based only on this snapshot.
+S08a remains backup/restore preparation. [S08b final recovery evidence](../evidence/s08b-final-recovery.md) supplements it with complete macOS identity under the rendered environment, an exact owned-child recovery receipt, and current-schema CLI restore checks. See the [named Haze cutover proposal](standalone-cutover-proposal.md) for the separate execution gates. These checks do not establish deployment or cutover.
+S08b (#698) retains final-schema and external-effect recovery qualification,
+including a separately authorised host-restart test if needed, and a reviewed,
+executable cutover proposal. It may complete before deployment. S08c (#761) owns
+the separately authorised production deployment and actual cutover, including
+safe disposition of old work, preservation/rollback and verification that no
+competing scheduler or writer remains. Physical sleep/wake proof (#732) remains
+required before operational use on the Mac. Do not migrate old work or enable
+competing production work based only on this snapshot or completion of S08b.

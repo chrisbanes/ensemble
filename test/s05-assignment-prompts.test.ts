@@ -352,12 +352,6 @@ test("task turns include their captured instructions and lead accountability con
       "captured instructions are composed at runtime, not copied into durable queued prompts",
     );
 
-    command(service, {
-      type: "assignment.apply",
-      projectId,
-      assignmentId: workerAssignmentId,
-      expectedVersion: 1,
-    });
     const question = service
       .coordinationView()
       .readTask(workerTaskId)
@@ -365,12 +359,30 @@ test("task turns include their captured instructions and lead accountability con
         (item) => item.requestingAssignmentId === workerAssignmentId,
       );
     assert.ok(question);
+    command(service, {
+      type: "project.configure",
+      projectId,
+      expectedVersion: Number(service.domain().project(projectId).version),
+      paused: true,
+    });
     await service.coordinationView().answerQuestion({
       key: randomUUID(),
       taskId: workerTaskId,
       interactionId: question.interactionId,
       expectedRevision: question.revision,
       answer: "S05_OPERATOR_ANSWER_REVISION_TWO",
+    });
+    command(service, {
+      type: "assignment.apply",
+      projectId,
+      assignmentId: workerAssignmentId,
+      expectedVersion: 1,
+    });
+    command(service, {
+      type: "project.configure",
+      projectId,
+      expectedVersion: Number(service.domain().project(projectId).version),
+      paused: false,
     });
     await waitUntil(
       () =>
@@ -526,6 +538,12 @@ test("routed candidate result materializes and wakes the task lead at capacity o
       }),
     );
 
+    assert.ok(
+      runtime.prompts.every(
+        (prompt) => !prompt.includes("Current task (revision"),
+      ),
+      "ordinary inbox prompts retain their existing material",
+    );
     assert.equal(routingClient.requests.length, 1);
     assert.equal(runtime.turns, 2);
     assert.equal(runtime.maxActiveTurns, 1);

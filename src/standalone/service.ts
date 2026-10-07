@@ -1,3 +1,24 @@
+import { InboxStartupReconciliation } from "./inbox-startup.js";
+import { createHash } from "node:crypto";
+import {
+  materialDigest,
+  isOperatorDeliveryCaller,
+  type RuntimeDeliveryCaller,
+  type OperatorDeliveryCaller,
+  type OperatorCommentReview,
+  type DeliveryActionRecord,
+} from "../core/delivery.js";
+import { z } from "zod";
+import {
+  ArchivedResumeRejectedError,
+  preTurnRecoveryCommandSchema,
+  noTurnRecoveryCommandSchema,
+  type HistoricalNoTurnAdoption,
+  type NoTurnRecoveryCommand,
+  type HistoricalPreTurnAdoption,
+  type PreTurnRecoveryCommand,
+  type ReplaceConversationCommand,
+} from "./pre-turn-recovery.js";
 import {
   DeliveryStore,
   canonicalMaterial,
@@ -22,12 +43,19 @@ import {
   type CoordinationCall,
   type CoordinationReceipt,
   type InboxDelivery,
+  type RuntimeQuestionRecord,
 } from "../core/coordination.js";
 import {
   dispatchCoordinationTool,
   isCoordinationTool,
   coordinationTools,
 } from "./coordination-tools.js";
+import {
+  nativeEndpointKey,
+  encodeNativeInputReply,
+  type RuntimeUserInputRequest,
+  type RuntimeUserInputOutcome,
+} from "./native-input.js";
 import { CoordinationView } from "./coordination-view.js";
 import {
   DomainStore,
@@ -166,6 +194,7 @@ export class StandaloneService {
   private workspaces: WorkspaceManager | undefined;
   private workspaceBindings: SqliteWorkspaceBindingStore | undefined;
   private schedulerStore: SchedulerStore | undefined;
+  private inboxStartup: InboxStartupReconciliation | undefined;
   private scheduler: TurnScheduler | undefined;
   private supervisor: ExecutionSupervisor | undefined;
   private power: ExecutionPower | undefined;
@@ -179,6 +208,10 @@ export class StandaloneService {
   private lastCompletedWorkId: string | undefined;
   private readonly active = new Set<Promise<ExecutionIntent>>();
   private readonly activeByWorkId = new Map<string, Promise<ExecutionIntent>>();
+  private readonly nativeWaiters = new Map<
+    string,
+    { workId: string; interactionId: string; resolve: () => void }
+  >();
   private readonly callbacks = new Map<string, Set<Promise<unknown>>>();
   private readonly routingCoordinators = new Map<string, RoutingCoordinator>();
   private readonly retryNow: () => number;
@@ -280,10 +313,20 @@ export class StandaloneService {
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
-      const coordination = new CoordinationStore(db, domain, (workId) =>
-        state.isNeverAdmittedRefusedInboxWork(workId),
+      const coordination = new CoordinationStore(
+        db,
+        domain,
+        (workId) => state.isNeverAdmittedRefusedAssignmentWork(workId),
+        (workId) =>
+          (this.callbacks.get(workId)?.size ?? 0) === 0
+            ? state.reconciledAssignmentProof(workId)
+            : undefined,
       );
       coordination.migrate();
+      this.inboxStartup = new InboxStartupReconciliation(db, domain);
+      coordination.invalidateRuntimeQuestions(
+        "Service restarted; native endpoints cannot be reconstructed",
+      );
       this.coordination = coordination;
       const deliveryStore = new DeliveryStore(db);
       deliveryStore.migrate();
@@ -297,6 +340,11 @@ export class StandaloneService {
           : {}),
         authorize: (caller, exceptOperationId, request) => {
           this.authorizeDelivery(caller, exceptOperationId);
+          if (isOperatorDeliveryCaller(caller)) {
+            if (request && request.action.kind !== "issue.comment")
+              throw Error("Operator delivery only permits issue.comment");
+            return;
+          }
           if (
             request &&
             (request.action.kind === "pr.merge" ||
@@ -347,22 +395,24 @@ export class StandaloneService {
             identity,
           ),
         approved: (request, caller) =>
-          Boolean(
-            request.approval &&
-              deliveryStore.approvalCurrent(
-                request.approval.interactionId,
-                caller,
-                request.action,
-                request.operationId,
-              ) &&
-              coordination.authorizationFor({
-                assignmentId: caller.assignmentId,
-                ...request.approval,
-                action: request.action.kind,
-                target: canonicalMaterial(request.action.target),
-                material: request.action,
-              }),
-          ),
+          isOperatorDeliveryCaller(caller)
+            ? deliveryStore.operatorApprovalCurrent(request, caller)
+            : Boolean(
+                request.approval &&
+                  deliveryStore.approvalCurrent(
+                    request.approval.interactionId,
+                    caller,
+                    request.action,
+                    request.operationId,
+                  ) &&
+                  coordination.authorizationFor({
+                    assignmentId: caller.assignmentId,
+                    ...request.approval,
+                    action: request.action.kind,
+                    target: canonicalMaterial(request.action.target),
+                    material: request.action,
+                  }),
+              ),
         activationAllowed: (policy) =>
           !policy.credentialRef ||
           (!this.runtimeSpawnSnapshot?.[policy.credentialRef.slice(4)] &&
@@ -449,6 +499,12 @@ export class StandaloneService {
           this.supervisor?.noteAnomaly(item.workId);
         }
       });
+      runtime.onUserInputRequest?.((request) =>
+        this.handleUserInputRequest(request),
+      );
+      runtime.onUserInputOutcome?.((outcome) =>
+        this.handleUserInputOutcome(outcome),
+      );
       runtime.onToolCall?.((call) => this.handleToolCall(call));
       runtime.onConversationEvent?.((event) =>
         this.receiveConversationEvent(event),
@@ -480,6 +536,9 @@ export class StandaloneService {
       await this.reconcileOwnDeliveryClosures();
       await this.githubSynchronizer.refresh();
       this.emitSourceHoldNotices();
+      // The scheduler is deliberately absent until provider reconciliation and
+      // queued-inbox supersession finish; domain notifications cannot admit work.
+      this.inboxStartup.reconcile();
       const powerOptions = this.options.power;
       const powerEnabled =
         powerOptions?.enabled ??
@@ -532,6 +591,9 @@ export class StandaloneService {
       }, githubInterval);
       this.githubPollTimer.unref();
     } catch (error) {
+      const scheduler = this.scheduler;
+      scheduler?.stop();
+      this.scheduler = undefined;
       try {
         if (this.state)
           for (const item of this.state.list())
@@ -552,6 +614,12 @@ export class StandaloneService {
           await this.githubSynchronizer?.stop().catch(() => {});
           await this.deliveryCoordinator?.stop().catch(() => {});
           await this.runtime?.stop().catch(() => {});
+          try {
+            await scheduler?.settle();
+          } catch (cleanupError) {
+            if (error instanceof Error && error.cause === undefined)
+              error.cause = cleanupError;
+          }
           await this.supervisor?.settle();
         } finally {
           this.runtime = undefined;
@@ -586,7 +654,8 @@ export class StandaloneService {
   }
 
   async stop(): Promise<void> {
-    this.scheduler?.stop();
+    const scheduler = this.scheduler;
+    scheduler?.stop();
     this.scheduler = undefined;
     if (this.githubPollTimer) clearInterval(this.githubPollTimer);
     this.githubPollTimer = undefined;
@@ -597,13 +666,26 @@ export class StandaloneService {
     const supervisor = this.supervisor;
     supervisor?.cancelObservations();
     const runtime = this.runtime;
+    let failure: unknown;
+    try {
+      if (this.db?.isOpen)
+        this.coordination?.invalidateRuntimeQuestions(
+          "Service stopped; native endpoints lost",
+        );
+    } catch (error) {
+      failure = error;
+    }
     this.runtime = undefined;
     this.clearConversationCaptures();
-    let failure: unknown;
     try {
       if (runtime) await runtime.stop();
     } catch (error) {
-      failure = error;
+      if (failure === undefined) failure = error;
+    }
+    try {
+      await scheduler?.settle();
+    } catch (error) {
+      if (failure === undefined) failure = error;
     }
     await Promise.allSettled(this.active);
     const power = this.power;
@@ -632,6 +714,8 @@ export class StandaloneService {
     this.workspaceBindings = undefined;
     this.conversationHistory = undefined;
     this.activeByWorkId.clear();
+    this.nativeWaiters.clear();
+    this.callbacks.clear();
     try {
       db?.close();
     } catch (error) {
@@ -662,10 +746,59 @@ export class StandaloneService {
   resolveHeldExecution(receipt: RecoveryReceipt) {
     return this.requireSupervisor().resolveHeldExecution(receipt);
   }
+  adoptHistoricalPreTurnRejection(command: HistoricalPreTurnAdoption) {
+    return this.requireState().adoptHistoricalPreTurnRejection(command);
+  }
+  recoverPreTurnExecution(command: PreTurnRecoveryCommand) {
+    const value = preTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay("recover", value);
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  adoptHistoricalNoTurnSubmission(command: HistoricalNoTurnAdoption) {
+    return this.requireState().adoptHistoricalNoTurnSubmission(command);
+  }
+  recoverNoTurnExecution(command: NoTurnRecoveryCommand) {
+    const value = noTurnRecoveryCommandSchema.parse(command);
+    const replay = this.requireState().preTurnCommandReplay(
+      "recover-no-turn",
+      value,
+    );
+    if (replay)
+      return Promise.resolve(
+        z
+          .object({
+            id: z.string().uuid(),
+            workId: z.string().min(1),
+            state: z.literal("reconciled"),
+          })
+          .strict()
+          .parse(replay),
+      );
+    return this.requireSupervisor().resolveHeldExecution(value.receipt, value);
+  }
+  replaceConversationCommand(command: ReplaceConversationCommand) {
+    return this.requireState().replaceConversationCommand(command);
+  }
 
   turnRequests(): TurnRequest[] {
     if (!this.schedulerStore) throw new Error("Service is not started");
     return this.schedulerStore.list();
+  }
+
+  taskReview() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.taskReview();
   }
 
   domain(): DomainStore {
@@ -713,6 +846,19 @@ export class StandaloneService {
     caller: DeliveryCaller,
     exceptOperationId?: string,
   ): void {
+    if (isOperatorDeliveryCaller(caller)) {
+      this.delivery().validateOperatorCaller(caller);
+      if (
+        this.requireState().taskHold(caller.taskId) ||
+        this.domain()
+          .admission(caller.taskId)
+          .reasons.filter((reason) => !reason.startsWith("external-action-"))
+          .length ||
+        this.delivery().actionBlockers(caller.taskId, exceptOperationId).length
+      )
+        throw Error("Task admission is held");
+      return;
+    }
     const state = this.requireState(),
       coordination = this.coordination,
       intent = state.byWorkId(caller.workId);
@@ -741,6 +887,111 @@ export class StandaloneService {
       this.delivery().actionBlockers(caller.taskId, exceptOperationId).length
     )
       throw new Error("Task admission is held");
+  }
+  operatorCommentCaller(taskId: string): OperatorDeliveryCaller {
+    const d = this.domain(),
+      task = d.task(taskId),
+      imported = d.importedTask(taskId),
+      source = this.taskReview().sources(taskId).at(-1),
+      review = imported
+        ? this.githubSources().review(String(imported.nodeId))
+        : undefined;
+    if (!imported || !source || !review)
+      throw Error("Imported task source unavailable");
+    return {
+      actor: "operator",
+      principal: "installation-operator",
+      projectId: String(task.projectId),
+      taskId,
+      taskVersion: Number(task.version),
+      sourceId: source.sourceId,
+      sourceRevision: source.revision,
+      sourceDigest: String(review.observedDigest),
+      sourceNodeId: String(imported.nodeId),
+      sourceRepositoryId: String(imported.repositoryId),
+      policyVersion: this.delivery().configuration(String(task.projectId))
+        .version,
+    };
+  }
+  private operatorCommentAction(caller: OperatorDeliveryCaller, body: string) {
+    const issue = this.githubSources().issue(caller.sourceNodeId);
+    if (!issue) throw Error("Imported task issue unavailable");
+    return {
+      kind: "issue.comment" as const,
+      target: {
+        nodeId: caller.sourceNodeId,
+        repositoryId: caller.sourceRepositoryId,
+        number: Number(issue.issueNumber),
+      },
+      body,
+    };
+  }
+  reviewOperatorComment(command: {
+    key: string;
+    taskId: string;
+    operationId: string;
+    expectedTaskVersion: number;
+    body: string;
+  }): OperatorCommentReview {
+    const prior = this.delivery().operatorReview(command.key);
+    if (prior) {
+      if (prior.commandHash !== materialDigest(command))
+        throw Error("Operator review key reused with different material");
+      return prior;
+    }
+    const caller = this.operatorCommentCaller(command.taskId);
+    return this.delivery().reviewOperatorComment(
+      command,
+      caller,
+      this.operatorCommentAction(caller, command.body),
+    );
+  }
+  confirmOperatorComment(command: {
+    key: string;
+    taskId: string;
+    reviewId: string;
+    expectedRevision: number;
+    materialHash: string;
+    decision: "approved" | "denied";
+  }) {
+    return this.delivery().confirmOperatorComment(command, () => {
+      const record = this.delivery().operatorReview(command.reviewId);
+      if (!record) throw Error("Operator review unavailable");
+      this.authorizeDelivery(record.caller);
+    });
+  }
+  async postOperatorComment(command: {
+    key: string;
+    taskId: string;
+    expectedTaskVersion: number;
+    body: string;
+    reviewId?: string | undefined;
+  }): Promise<DeliveryActionRecord> {
+    const prior = this.delivery()
+      .actions(command.taskId)
+      .find((a) => a.operationId === command.key);
+    if (prior) {
+      if (
+        !isOperatorDeliveryCaller(prior.binding) ||
+        prior.request.action.kind !== "issue.comment" ||
+        prior.request.action.body !== command.body ||
+        prior.binding.taskVersion !== command.expectedTaskVersion ||
+        prior.request.operatorReviewId !== command.reviewId
+      )
+        throw Error("Operation key used with different material or caller");
+      return prior;
+    }
+    const caller = this.operatorCommentCaller(command.taskId);
+    if (caller.taskVersion !== command.expectedTaskVersion)
+      throw Error("Operator task revision conflict");
+    return this.requireDeliveryCoordinator().submit(
+      {
+        operationId: command.key,
+        action: this.operatorCommentAction(caller, command.body),
+        ...(command.reviewId ? { operatorReviewId: command.reviewId } : {}),
+      },
+      caller,
+    );
   }
   async refreshGitHub(): Promise<void> {
     if (!this.githubSynchronizer) throw new Error("Service is not started");
@@ -863,8 +1114,13 @@ export class StandaloneService {
       this.state,
       this.routingAttempts,
       () => this.wakeScheduler(),
-      (taskId, assignmentId) =>
-        this.readConversationHistory(taskId, assignmentId),
+      (taskId, assignmentId, beforeSequence, beforeOmissionSequence) =>
+        this.readConversationHistory(
+          taskId,
+          assignmentId,
+          beforeSequence,
+          beforeOmissionSequence,
+        ),
       {
         readTask: (taskId) => this.delivery().publicTask(taskId),
         settleHandback: (command) => this.settleHandback(command),
@@ -947,6 +1203,28 @@ export class StandaloneService {
     return binding;
   }
 
+  taskWorkspaceVisibility(taskId: string) {
+    if (!this.workspaceBindings) throw Error("Service not started");
+    const binding = this.workspaceBindings.get(taskId);
+    return createHash("sha256")
+      .update(
+        JSON.stringify(
+          binding
+            ? {
+                workspaceId: binding.workspaceId,
+                path: binding.path,
+                repositories: binding.repositories.map((r) => [
+                  r.repositoryId,
+                  r.sourcePath,
+                  r.workspacePath,
+                  r.gitCommonDir,
+                ]),
+              }
+            : null,
+        ),
+      )
+      .digest("hex");
+  }
   taskWorkspace(taskId: string) {
     this.domain().task(taskId);
     return this.requireWorkspaces().get(taskId);
@@ -992,6 +1270,12 @@ export class StandaloneService {
     this.domain().task(taskId);
     const state = this.requireState();
     const targets = state.stopTask(taskId);
+    for (const question of this.coordination?.runtimeQuestions(taskId) ?? [])
+      if (targets.some((target) => target.workId === question.requestingWorkId))
+        this.runtime?.cancelUserInput?.(
+          question.identity,
+          "Task stopped before native receipt",
+        );
     return this.requireSupervisor().observeStop(taskId, targets);
   }
 
@@ -1013,6 +1297,13 @@ export class StandaloneService {
       throw new Error("No active execution to hold");
     const holdReason = `Known unfinished execution: ${reason}`;
     this.supervisor?.noteSurvivor(workId);
+    if (
+      intent.state === "reconciled" &&
+      this.coordination?.recoveryDispositionForWork(workId) ===
+        "operator-reconciled"
+    ) {
+      state.holdReconciledContinuationSurvivor(workId, holdReason);
+    }
     this.retractWriterAndSuccessors(intent, holdReason);
   }
 
@@ -1031,7 +1322,13 @@ export class StandaloneService {
   }
 
   registerExecutionCallback(workId: string, callback: Promise<unknown>): void {
-    if (this.requireState().byWorkId(workId)?.state === "completed")
+    const state = this.requireState().byWorkId(workId)?.state;
+    if (
+      state === "completed" ||
+      (state === "reconciled" &&
+        this.coordination?.recoveryDispositionForWork(workId) ===
+          "operator-reconciled")
+    )
       this.holdKnownSurvivor(workId, "late Ensemble callback");
     const set = this.callbacks.get(workId) ?? new Set<Promise<unknown>>();
     set.add(callback);
@@ -1042,6 +1339,236 @@ export class StandaloneService {
         if (set.size === 0) this.callbacks.delete(workId);
       })
       .catch(() => {});
+  }
+
+  private handleUserInputRequest(call: RuntimeUserInputRequest): void {
+    const state = this.requireState();
+    const runtime = this.requireRuntime();
+    const coordination = this.coordination;
+    if (!coordination) return;
+    try {
+      if (
+        runtime.currentUserInputGeneration?.() !==
+        call.identity.runtimeGeneration
+      )
+        throw new Error("Native process generation mismatch");
+      let binding = state.runtimeQuestionBinding(
+        call.identity.threadId,
+        call.identity.turnId,
+      );
+      if (!binding) {
+        const snapshot = state.nativeTurnPrebinding(
+          call.identity.threadId,
+          call.identity.turnId,
+          call.identity.runtimeGeneration,
+        );
+        if (!snapshot || !state.prebindNativeTurn(snapshot))
+          throw new Error("Native callback has no exact admitted binding");
+        this.requireSupervisor().turnBound(
+          snapshot.workId,
+          call.identity.threadId,
+          call.identity.turnId,
+        );
+        binding = state.runtimeQuestionBinding(
+          call.identity.threadId,
+          call.identity.turnId,
+        );
+      }
+      if (!binding) throw new Error("Native callback binding unavailable");
+      const recovery = state.recoveryIdentity(binding.workId);
+      const currentProcess = runtime.processIdentity?.();
+      if (
+        !recovery?.processIdentity ||
+        !currentProcess ||
+        currentProcess instanceof Promise ||
+        JSON.stringify(currentProcess) !==
+          JSON.stringify(recovery.processIdentity)
+      )
+        throw new Error("Native admitted process identity mismatch");
+      const question = coordination.recordRuntimeQuestion(call);
+      const key = nativeEndpointKey(call.identity);
+      if (this.nativeWaiters.has(key)) return;
+      let resolve!: () => void;
+      const pending = new Promise<void>((done) => {
+        resolve = done;
+      });
+      this.nativeWaiters.set(key, {
+        workId: binding.workId,
+        interactionId: question.interactionId,
+        resolve,
+      });
+      this.registerExecutionCallback(binding.workId, pending);
+    } catch {
+      const execution = state
+        .list()
+        .find(
+          (intent) =>
+            intent.threadId === call.identity.threadId &&
+            (intent.turnId === call.identity.turnId || intent.turnId === null),
+        );
+      if (execution) {
+        state.hold(execution.id, "Native callback could not be durably bound");
+        this.supervisor?.noteAnomaly(execution.workId);
+      }
+      runtime.cancelUserInput?.(
+        call.identity,
+        "Native callback binding failed",
+      );
+    }
+  }
+  private handleUserInputOutcome(outcome: RuntimeUserInputOutcome): void {
+    const waiter = this.nativeWaiters.get(nativeEndpointKey(outcome));
+    const coordination = this.coordination;
+    if (!coordination) return;
+    try {
+      const record = coordination.recordRuntimeReplyOutcome(outcome);
+      if (record.deliveryState === "confirmed" && waiter) {
+        this.nativeWaiters.delete(nativeEndpointKey(outcome));
+        waiter.resolve();
+      } else if (
+        outcome.outcome === "uncertain" ||
+        outcome.outcome === "unavailable"
+      ) {
+        const execution = this.state?.byWorkId(record.requestingWorkId);
+        if (execution) {
+          this.state?.hold(
+            execution.id,
+            "Native input delivery unavailable or uncertain",
+          );
+          this.supervisor?.noteAnomaly(execution.workId);
+        }
+      }
+    } catch {
+      const record = coordination
+        .runtimeQuestions()
+        .find(
+          (q) => nativeEndpointKey(q.identity) === nativeEndpointKey(outcome),
+        );
+      const workId = waiter?.workId ?? record?.requestingWorkId;
+      const execution = workId ? this.state?.byWorkId(workId) : undefined;
+      if (execution) {
+        this.retractWriterAndSuccessors(
+          execution,
+          "Native receipt could not be durably committed",
+        );
+        this.supervisor?.noteAnomaly(execution.workId);
+      }
+    }
+  }
+  private runtimeAnswerEligibility(question: RuntimeQuestionRecord): string[] {
+    const state = this.requireState(),
+      runtime = this.requireRuntime(),
+      domain = this.domain();
+    const reasons: string[] = [
+      ...domain.admission(question.taskId, false).reasons,
+    ];
+    const binding = state.runtimeQuestionBinding(
+      question.identity.threadId,
+      question.identity.turnId,
+    );
+    const recovery = state.recoveryIdentity(question.requestingWorkId);
+    const intent = state.byWorkId(question.requestingWorkId);
+    if (
+      !binding ||
+      binding.workId !== question.requestingWorkId ||
+      binding.assignmentId !== question.requestingAssignmentId ||
+      intent?.state !== "running"
+    )
+      reasons.push("requesting-generation-not-running");
+    if (
+      runtime.currentUserInputGeneration?.() !==
+      question.identity.runtimeGeneration
+    )
+      reasons.push("native-process-generation-changed");
+    const process = runtime.processIdentity?.();
+    if (
+      !process ||
+      process instanceof Promise ||
+      JSON.stringify(process) !== JSON.stringify(recovery?.processIdentity)
+    )
+      reasons.push("native-process-identity-changed");
+    if (binding) {
+      reasons.push(...domain.assignmentAdmission(binding.assignmentId).reasons);
+      const assignment = domain.assignment(binding.assignmentId);
+      if (
+        Number(assignment.version) !== binding.assignmentVersion ||
+        Number(assignment.instructionsRevision) !==
+          binding.instructionsRevision ||
+        Number(assignment.profileRevision) !== binding.profileRevision
+      )
+        reasons.push("native-immutable-revision-changed");
+    }
+    const hold = state.taskHold(question.taskId);
+    if (hold) reasons.push(hold);
+    if (state.stopTarget(question.requestingWorkId))
+      reasons.push("task-stopped");
+    if (state.powerAdmissionState().held) reasons.push("power-held");
+    if (this.supervisor?.hasKnownRisk(question.requestingWorkId))
+      reasons.push("known-execution-risk");
+    if (
+      state
+        .list()
+        .some(
+          (other) =>
+            other.workId !== question.requestingWorkId &&
+            ["submitting", "running", "held"].includes(other.state) &&
+            state.taskBinding(other.workId)?.taskId === question.taskId,
+        )
+    )
+      reasons.push("competing-task-generation");
+    if (!this.nativeWaiters.has(nativeEndpointKey(question.identity)))
+      reasons.push("native-endpoint-unavailable");
+    return reasons;
+  }
+  private flushRuntimeAnswers(): void {
+    const coordination = this.coordination;
+    if (!coordination || !this.runtime?.replyUserInput) return;
+    for (const question of coordination.runtimeQuestions()) {
+      if (
+        !question.answers ||
+        question.replyIntentId ||
+        question.requestState !== "available"
+      )
+        continue;
+      const reasons = this.runtimeAnswerEligibility(question);
+      if (reasons.length) {
+        coordination.holdRuntimeAnswer(
+          question.interactionId,
+          reasons.join("; "),
+        );
+        continue;
+      }
+      void this.runtime
+        .replyUserInput(
+          question.identity,
+          encodeNativeInputReply(question.request, question.answers),
+          () => {
+            const reasons = this.runtimeAnswerEligibility(question);
+            if (reasons.length) {
+              coordination.holdRuntimeAnswer(
+                question.interactionId,
+                reasons.join("; "),
+              );
+              throw new Error("Native reply held");
+            }
+            return coordination.beginRuntimeReply(
+              question.interactionId,
+              question.identity,
+            );
+          },
+        )
+        .catch(() => {
+          const current = this.coordination
+            ?.runtimeQuestions(question.taskId)
+            .find((q) => q.interactionId === question.interactionId);
+          if (current?.replyIntentId) {
+            this.runtime?.cancelUserInput?.(
+              question.identity,
+              "Native reply failed",
+            );
+          }
+        });
+    }
   }
 
   private handleToolCall(call: RuntimeToolCall): Promise<RuntimeToolResult> {
@@ -1078,7 +1605,7 @@ export class StandaloneService {
         success: false,
       });
 
-    let capturedDeliveryCaller: DeliveryCaller | undefined;
+    let capturedDeliveryCaller: RuntimeDeliveryCaller | undefined;
     const pending = Promise.resolve()
       .then(async () => {
         if (call.tool === "ensemble_external_action") {
@@ -1286,6 +1813,7 @@ export class StandaloneService {
       !routingAttempts
     )
       return;
+    this.flushRuntimeAnswers();
     const deliveryWorkCompleted = (delivery: InboxDelivery): boolean => {
       const intent = state.byWorkId(delivery.deliveryWorkId);
       const binding = state.taskBinding(delivery.deliveryWorkId);
@@ -1687,7 +2215,7 @@ export class StandaloneService {
               (item.state === "queued" ||
                 item.state === "active" ||
                 item.state === "held") &&
-              !state.isNeverAdmittedRefusedInboxWork(item.workId),
+              !coordination.isHistoricalWorkResolved(item.workId),
           )
       )
         continue;
@@ -1711,7 +2239,19 @@ export class StandaloneService {
           assignmentVersion: version,
           instructionsRevision: Number(assignment.instructionsRevision),
           profileRevision: Number(assignment.profileRevision),
-          prompt: this.assignmentPrompt(String(assignment.brief), delivery),
+          prompt: this.assignmentPrompt(
+            String(assignment.brief),
+            delivery,
+            state.isNeverAdmittedRefusedAssignmentWork(
+              `assignment:${recipientAssignmentId}:initial`,
+            )
+              ? {
+                  version: Number(task.version),
+                  title: String(task.title),
+                  outcome: String(task.outcome),
+                }
+              : undefined,
+          ),
           previousWorkId:
             state.latestCompletedAssignmentWork(recipientAssignmentId) ?? null,
         },
@@ -1756,17 +2296,25 @@ export class StandaloneService {
         { requestKey: repair.repairWorkId, workId: repair.repairWorkId },
       );
     }
+    for (const queued of store.queued()) this.inboxStartup?.capture(queued);
     await scheduler.wake();
     if (refusalRebindPass === 0 && withdrawStaleRefusedDeliveries() > 0)
       await this.wakeScheduler(1);
   }
 
-  private assignmentPrompt(brief: string, delivery?: InboxDelivery): string {
+  private assignmentPrompt(
+    brief: string,
+    delivery?: InboxDelivery,
+    currentTask?: { version: number; title: string; outcome: string },
+  ): string {
     if (!delivery) return brief;
     const events = delivery.events.map(
       (event) => `- ${event.eventType}: ${event.payload}`,
     );
-    return `${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
+    const context = currentTask
+      ? `Current task (revision ${currentTask.version}): ${currentTask.title}\nCurrent outcome: ${currentTask.outcome}\n\nPreserved assignment brief:\n`
+      : "";
+    return `${context}${brief}\n\nDurable assignment inbox through event ${delivery.highWaterSequence}:\n${events.join("\n")}`;
   }
 
   private executionPrompt(request: TurnRequest): string {
@@ -1818,9 +2366,34 @@ export class StandaloneService {
     const roleContext = leadBinding
       ? "Assignment role: project lead. You are accountable for coordinating this task, reviewing its results, and deciding whether to request completion."
       : "Assignment role: project assignee. The project lead remains accountable for coordinating this task and reviewing its results before completion. Report your result and durable next action through Ensemble.";
+    const capture = (() => {
+      try {
+        return this.taskReview().contextForWork(
+          binding.taskId,
+          binding.assignmentId,
+          request.workId,
+          binding.assignmentVersion,
+        );
+      } catch {
+        return undefined;
+      }
+    })();
+    const source = capture?.sourceId
+      ? this.taskReview().source(binding.taskId, capture.sourceId)
+      : undefined;
+    const reviewReferences = source
+      ? JSON.stringify({
+          sourceId: source.sourceId,
+          sourceRevision: source.revision,
+          criteriaOmittedCount: source.criteriaOmittedCount,
+          criteria: source.criteria,
+        })
+      : "Unavailable: no retained source capture for this work";
     return [
       request.prompt,
       roleContext,
+      `Captured review references (JSON): ${reviewReferences}`,
+
       `Captured project instructions (revision ${binding.instructionsRevision}):\n${projectInstructions || "(none)"}`,
       `Captured profile instructions (revision ${binding.profileRevision}):\n${profileInstructions || "(none)"}`,
     ].join("\n\n");
@@ -1834,6 +2407,15 @@ export class StandaloneService {
     let validateAssignment: (() => string[]) | undefined;
     try {
       if (request.taskId && request.assignmentId && request.projectId) {
+        // Initial local tasks need no repository grant. Existing bindings,
+        // including held/missing workspaces, remain the recovery authority.
+        if (
+          !this.workspaceBindings?.get(request.taskId) &&
+          !this.domain().importedTask(request.taskId) &&
+          !state.taskHold(request.taskId) &&
+          !state.hasTaskWorkspaceEvidence(request.taskId)
+        )
+          await this.requireWorkspaces().provision(request.taskId, []);
         const binding = await this.requireWorkspaces().forExecution(
           request.taskId,
         );
@@ -1875,6 +2457,21 @@ export class StandaloneService {
             instructionsRevision,
             profileRevision,
           }).reasons;
+          if (
+            this.requireSchedulerStore()
+              .list()
+              .some(
+                (older) =>
+                  older.assignmentId === assignmentId &&
+                  older.workId !== request.workId &&
+                  older.state === "held" &&
+                  this.coordination?.recoveryDispositionForWork(
+                    older.workId,
+                  ) === "operator-reconciled" &&
+                  !this.coordination.hasRecoveryContinuation(older.workId),
+              )
+          )
+            reasons.push("recovery-continuation-unresolved");
           if (domain.importedTask(binding.taskId)) {
             const task = domain.task(binding.taskId);
             const linked = domain.githubConfiguration(
@@ -1970,11 +2567,15 @@ export class StandaloneService {
       priorBinding?.conversationRevision !== binding.conversationRevision
     )
       previous = undefined;
+    // Shutdown may finish while workspace or process admission is awaiting.
+    // A request with no admitted effect remains queued for ordinary restart.
+    const runtime = this.runtime;
+    if (!runtime) return;
     try {
-      const runtime = this.requireRuntime();
       const processIdentity = await Promise.resolve(
         runtime.processIdentity?.() ?? null,
       ).catch(() => null);
+      if (this.runtime !== runtime) return;
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),
@@ -2041,6 +2642,7 @@ export class StandaloneService {
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
+    let submissionStage: "resume" | "thread" | "bound" | "turn" = "thread";
     let captureThreadId: string | undefined;
     let conversationCapture: ConversationHistoryCapture | undefined;
     try {
@@ -2052,6 +2654,7 @@ export class StandaloneService {
       if (previous?.threadId) {
         if (state.get(intent.id).state !== "submitting")
           throw new Error("Execution admission was held");
+        submissionStage = "resume";
         await runtime.resumeThread(previous.threadId, tools);
         threadId = previous.threadId;
       } else {
@@ -2059,6 +2662,7 @@ export class StandaloneService {
           throw new Error("Execution admission was held");
         threadId = await runtime.startThread(workspace, tools);
       }
+      submissionStage = "bound";
       const threadBound = state.bindThread(intent.id, threadId);
       this.requireSupervisor().threadBound(request.workId, threadId);
       if (!threadBound) throw new Error("Thread binding was held or changed");
@@ -2070,13 +2674,39 @@ export class StandaloneService {
         workspace,
         threadId,
       );
+      submissionStage = "turn";
       const turnId = await runtime.startTurn(
         threadId,
         workspace,
         this.executionPrompt(request),
       );
-      const turnBound = state.bindTurn(intent.id, turnId);
-      this.requireSupervisor().turnBound(request.workId, threadId, turnId);
+      let turnBound = state.bindTurn(intent.id, turnId);
+      let nativeRejected = false;
+      if (!turnBound) {
+        const reconciliation = state.reconcileNativeTurnStartResponse({
+          intentId: intent.id,
+          workId: request.workId,
+          threadId,
+          turnId,
+          runtimeGeneration: runtime.currentUserInputGeneration?.(),
+        });
+        turnBound = reconciliation === "matched";
+        if (reconciliation === "rejected") {
+          nativeRejected = true;
+          state.hold(
+            intent.id,
+            "Native turn start response disagrees with admitted prebinding",
+          );
+          for (const question of this.coordination?.runtimeQuestions() ?? [])
+            if (question.requestingWorkId === request.workId)
+              runtime.cancelUserInput?.(
+                question.identity,
+                "Native prebinding rejected",
+              );
+        }
+      }
+      if (!nativeRejected)
+        this.requireSupervisor().turnBound(request.workId, threadId, turnId);
       if (!turnBound) {
         conversationCapture?.discard();
         if (conversationCapture)
@@ -2182,6 +2812,13 @@ export class StandaloneService {
         }
       }
     } catch (error) {
+      if (
+        submissionStage === "resume" &&
+        error instanceof ArchivedResumeRejectedError &&
+        previous?.threadId === error.rejection.threadId &&
+        state.get(intent.id).state === "submitting"
+      )
+        state.capturePreTurnRejection(request.workId, error.rejection);
       if (state.get(intent.id).state !== "held")
         state.hold(
           intent.id,
@@ -2280,6 +2917,8 @@ export class StandaloneService {
   private readConversationHistory(
     taskId: string,
     assignmentId: string,
+    beforeSequence?: number,
+    beforeOmissionSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const history = this.conversationHistory;
     if (!history) throw new Error("Service is not started");
@@ -2288,6 +2927,8 @@ export class StandaloneService {
       assignmentId,
       200,
       this.conversationExclusionsForAssignment(taskId, assignmentId),
+      beforeSequence,
+      beforeOmissionSequence,
     );
   }
 

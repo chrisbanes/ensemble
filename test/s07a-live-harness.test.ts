@@ -5,6 +5,7 @@ import {
   FixtureGuard,
   fixtureManifestSchema,
   qualificationDisposition,
+  qualificationTaskIdle,
 } from "./s07a/fixture.js";
 
 const manifest = () => ({
@@ -243,6 +244,47 @@ test("live guard permits only exact recorded progress, status, merge and separat
 });
 
 import { spawnSync } from "node:child_process";
+test("live waiting checkpoint joins requests to executions and rejects unfinished work", () => {
+  const requests = [{ taskId: "task", workId: "work", state: "completed" }];
+  assert.equal(
+    qualificationTaskIdle("task", requests, [
+      { workId: "work", state: "completed" },
+    ]),
+    true,
+  );
+  for (const state of [
+    "ready",
+    "capacity-waiting",
+    "submitting",
+    "running",
+    "held",
+    "resolved-failed",
+    "reconciled",
+  ]) {
+    assert.equal(
+      qualificationTaskIdle("task", requests, [{ workId: "work", state }]),
+      false,
+    );
+  }
+  for (const state of ["queued", "active", "held"]) {
+    assert.equal(
+      qualificationTaskIdle(
+        "task",
+        [{ ...requests[0]!, state }],
+        [{ workId: "work", state: "completed" }],
+      ),
+      false,
+    );
+  }
+  assert.equal(qualificationTaskIdle("task", requests, []), false);
+  assert.equal(qualificationTaskIdle("task", [], []), false);
+  assert.equal(
+    qualificationTaskIdle("task", requests, [
+      { workId: "other", state: "completed" },
+    ]),
+    false,
+  );
+});
 test("live entry point refuses missing authority before credential lookup or Codex start", () => {
   const result = spawnSync(process.execPath, ["test/s07a/live-delivery.mjs"], {
     encoding: "utf8",

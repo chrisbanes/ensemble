@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { structuredAnswerDigest } from "../src/core/structured-questions.js";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   chmodSync,
@@ -1525,4 +1527,778 @@ test("delivery spawn snapshot excludes configured key and exact-value aliases wh
     await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("qualified native runtime waits for one exact reply and confirms only its ordered receipt", async () => {
+  const runtime = new CodexRuntime(
+    join(process.cwd(), "test/ui01/native-runtime-fixture.mjs"),
+    {
+      qualifiedExecutableHash: createHash("sha256")
+        .update(
+          readFileSync(
+            join(process.cwd(), "test/ui01/native-runtime-fixture.mjs"),
+          ),
+        )
+        .digest("hex"),
+    },
+  );
+  const received: import("../src/standalone/native-input.js").RuntimeUserInputRequest[] =
+    [];
+  const outcomes: import("../src/standalone/native-input.js").RuntimeUserInputOutcome[] =
+    [];
+  let notify!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    notify = resolve;
+  });
+  runtime.onUserInputRequest((request) => {
+    received.push(request);
+    notify();
+  });
+  runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
+  await runtime.start();
+  try {
+    const threadId = await runtime.startThread(process.cwd());
+    const turnId = await runtime.startTurn(threadId, process.cwd(), "fixture");
+    await waiting;
+    assert.equal(outcomes.length, 0);
+    const request = received[0];
+    assert.ok(request);
+    const identity = request.identity;
+    await assert.rejects(
+      runtime.replyUserInput(
+        { ...identity, requestId: 1 },
+        { answers: { q: { answers: ["Local"] } } },
+        () => ({
+          replyIntentId: "intent",
+          answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+        }),
+      ),
+    );
+    await runtime.replyUserInput(
+      identity,
+      { answers: { q: { answers: ["Local"] } } },
+      () => ({
+        replyIntentId: "intent",
+        answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+      }),
+    );
+    assert.equal(await runtime.waitForTurn(threadId, turnId), "completed");
+    assert.equal(outcomes.filter((o) => o.outcome === "confirmed").length, 1);
+    const receiptOrder = outcomes.find(
+      (o) => o.outcome === "confirmed",
+    )?.orderedReceipt;
+    assert.ok(receiptOrder?.stdinSucceeded && receiptOrder.matchingResolution);
+    assert.ok(receiptOrder.writeInitiated < receiptOrder.stdinSucceeded);
+    assert.ok(receiptOrder.writeInitiated < receiptOrder.matchingResolution);
+    await assert.rejects(
+      runtime.replyUserInput(
+        identity,
+        { answers: { q: { answers: ["Local"] } } },
+        () => ({
+          replyIntentId: "intent",
+          answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+        }),
+      ),
+    );
+  } finally {
+    await runtime.stop();
+  }
+});
+async function nativeTransport(mode: string) {
+  const executable = join(
+    process.cwd(),
+    "test/ui01/native-runtime-fixture.mjs",
+  );
+  const runtime = new CodexRuntime(executable, {
+    qualifiedExecutableHash: createHash("sha256")
+      .update(readFileSync(executable))
+      .digest("hex"),
+    spawnEnvironment: () => ({
+      ...process.env,
+      ENSEMBLE_UI01_NATIVE_TRANSPORT_FIXTURE: mode,
+    }),
+  });
+  let call!: import("../src/standalone/native-input.js").RuntimeUserInputRequest;
+  let resolve!: () => void;
+  const received = new Promise<void>((done) => {
+    resolve = done;
+  });
+  const outcomes: import("../src/standalone/native-input.js").RuntimeUserInputOutcome[] =
+    [];
+  const anomalies: string[] = [];
+  runtime.onUserInputRequest((request) => {
+    call = request;
+    resolve();
+  });
+  runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
+  const unexpected: import("../src/standalone/codex.js").UnexpectedRequest[] =
+    [];
+  runtime.onUnexpectedRequest((request) => {
+    anomalies.push(request.method);
+    unexpected.push(request);
+  });
+  await runtime.start();
+  const threadId = await runtime.startThread(process.cwd());
+  await runtime.startTurn(threadId, process.cwd(), "fixture");
+  await received;
+  return {
+    runtime,
+    call,
+    outcomes,
+    anomalies,
+    unexpected,
+    reply: () =>
+      runtime.replyUserInput(
+        call.identity,
+        { answers: { q: { answers: ["Local"] } } },
+        () => ({
+          replyIntentId: "intent",
+          answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+        }),
+      ),
+  };
+}
+async function nativeUntil(predicate: () => boolean) {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("Native receipt deadline");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+test("native early resolution makes an unanswered endpoint unavailable with zero reply effects", async () => {
+  const f = await nativeTransport("early-resolution");
+  try {
+    await nativeUntil(() => f.outcomes.length > 0);
+    assert.equal(f.outcomes[0]?.outcome, "unavailable");
+    let gate = 0;
+    await assert.rejects(
+      f.runtime.replyUserInput(
+        f.call.identity,
+        { answers: { q: { answers: ["Local"] } } },
+        () => {
+          gate++;
+          return {
+            replyIntentId: "intent",
+            answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+          };
+        },
+      ),
+    );
+    assert.equal(gate, 0);
+  } finally {
+    await f.runtime.stop();
+  }
+});
+test("native stdin success without resolution remains unconfirmed", async () => {
+  const f = await nativeTransport("no-resolution");
+  try {
+    await f.reply();
+    assert.deepEqual(
+      f.outcomes.map((o) => o.outcome),
+      ["sent-unconfirmed"],
+    );
+    f.runtime.cancelUserInput(f.call.identity, "Stop");
+    assert.deepEqual(
+      f.outcomes.map((o) => o.outcome),
+      ["sent-unconfirmed", "uncertain"],
+    );
+  } finally {
+    await f.runtime.stop();
+  }
+});
+for (const mode of [
+  "buffered",
+  "write-error",
+  "cancelled",
+  "wrong-thread",
+  "wrong-type",
+] as const)
+  test(`native ordered receipt ${mode} does not confirm before all required evidence`, async () => {
+    const f = await nativeTransport(mode);
+    let callback: ((error: Error | null) => void) | undefined;
+    let writeComplete = false;
+    const child = (
+      f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
+    ).child;
+    const original = child.stdin.write.bind(child.stdin);
+    try {
+      child.stdin.write = ((
+        line: string,
+        done: (error: Error | null) => void,
+      ) =>
+        original(line, (error) => {
+          writeComplete = true;
+          callback = done;
+          if (error) done(error);
+        })) as typeof child.stdin.write;
+      const sent = f.reply();
+      sent.catch(() => {});
+      await nativeUntil(() => writeComplete);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(
+        f.outcomes.filter((o) => o.outcome === "confirmed").length,
+        0,
+      );
+      if (mode === "cancelled")
+        f.runtime.cancelUserInput(
+          f.call.identity,
+          "Stop before acknowledgement",
+        );
+      assert.ok(callback);
+      callback(
+        mode === "write-error"
+          ? new Error("fixture write callback error")
+          : null,
+      );
+      if (mode === "write-error" || mode === "cancelled")
+        await assert.rejects(sent);
+      else await sent;
+      if (mode === "buffered") {
+        assert.deepEqual(
+          f.outcomes.map((o) => o.outcome),
+          ["confirmed"],
+        );
+        const receiptOrder = f.outcomes[0]?.orderedReceipt;
+        assert.ok(
+          receiptOrder?.stdinSucceeded && receiptOrder.matchingResolution,
+        );
+        assert.ok(
+          receiptOrder.writeInitiated < receiptOrder.matchingResolution,
+        );
+        assert.ok(
+          receiptOrder.matchingResolution < receiptOrder.stdinSucceeded,
+        );
+        f.runtime.cancelUserInput(f.call.identity, "Stop after confirmation");
+        assert.equal(f.outcomes.length, 1);
+      } else if (mode === "write-error" || mode === "cancelled") {
+        assert.equal(f.outcomes.at(-1)?.outcome, "uncertain");
+      } else {
+        assert.deepEqual(
+          f.outcomes.map((o) => o.outcome),
+          ["sent-unconfirmed"],
+        );
+        await nativeUntil(() =>
+          f.anomalies.includes("unmatched-native-resolution"),
+        );
+        assert.ok(f.anomalies.includes("unmatched-native-resolution"));
+      }
+    } finally {
+      child.stdin.write = original;
+      await f.runtime.stop();
+    }
+  });
+for (const mode of [
+  "reply-replay",
+  "reply-replay-confirmed",
+  "reply-replay-changed",
+  "reply-replay-excess",
+  "reply-replay-type",
+] as const)
+  test(`native ${mode} preserves one reply and distinguishes retransmission from conflict`, async () => {
+    const f = await nativeTransport(mode);
+    try {
+      await f.reply();
+      const rejected =
+        mode === "reply-replay-changed" ||
+        mode === "reply-replay-excess" ||
+        mode === "reply-replay-type";
+      await nativeUntil(() =>
+        f.outcomes.some(
+          (o) => o.outcome === (rejected ? "uncertain" : "confirmed"),
+        ),
+      );
+      assert.equal(
+        f.outcomes.filter((o) => o.outcome === "confirmed").length,
+        rejected ? 0 : 1,
+      );
+      if (mode === "reply-replay-confirmed")
+        assert.equal(
+          await f.runtime.waitForTurn(
+            f.call.identity.threadId,
+            f.call.identity.turnId,
+          ),
+          "completed",
+        );
+      assert.equal(f.anomalies.length > 0, rejected);
+      if (rejected) {
+        const diagnostic = f.unexpected[0]?.nativeReplay;
+        assert.ok(diagnostic);
+        assert.equal(
+          diagnostic.runtimeGeneration,
+          f.call.identity.runtimeGeneration,
+        );
+        assert.match(diagnostic.paramsDigest, /^[0-9a-f]{64}$/);
+        assert.equal(diagnostic.identical, mode === "reply-replay-excess");
+        assert.equal(
+          diagnostic.acceptedReplays,
+          mode === "reply-replay-excess" ? 1 : 0,
+        );
+        assert.equal(JSON.stringify(diagnostic).includes("Changed"), false);
+      }
+      let gates = 0;
+      await assert.rejects(
+        f.runtime.replyUserInput(
+          f.call.identity,
+          { answers: { q: { answers: ["Local"] } } },
+          () => {
+            gates++;
+            return {
+              replyIntentId: "duplicate",
+              answerDigest: structuredAnswerDigest({
+                q: { answers: ["Local"] },
+              }),
+            };
+          },
+        ),
+      );
+      assert.equal(gates, 0);
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+for (const control of ["cancel", "interrupt"] as const)
+  test(`native ${control} after confirmation retires replay eligibility without rewriting receipt`, async () => {
+    const f = await nativeTransport("replay-after-stop");
+    try {
+      await f.reply();
+      await nativeUntil(() =>
+        f.outcomes.some((o) => o.outcome === "confirmed"),
+      );
+      const receipt = structuredClone(f.outcomes);
+      if (control === "interrupt")
+        await f.runtime.interruptTurn(
+          f.call.identity.threadId,
+          f.call.identity.turnId,
+        );
+      else {
+        f.runtime.cancelUserInput(f.call.identity, "Stop after confirmation");
+        const child = (
+          f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
+        ).child;
+        child.stdin.write(JSON.stringify({ method: "fixture/replay" }) + "\n");
+      }
+      await f.runtime.waitForTurn(
+        f.call.identity.threadId,
+        f.call.identity.turnId,
+      );
+      assert.ok(f.anomalies.includes("stale-native-input"));
+      assert.deepEqual(f.outcomes, receipt);
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+test("native exact replay without resolution never confirms delivery", async () => {
+  const f = await nativeTransport("reply-replay-no-resolution");
+  try {
+    await f.reply();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(
+      f.outcomes.map((o) => o.outcome),
+      ["sent-unconfirmed"],
+    );
+    assert.deepEqual(f.anomalies, []);
+    f.runtime.cancelUserInput(f.call.identity, "Stop");
+    assert.equal(f.outcomes.at(-1)?.outcome, "uncertain");
+  } finally {
+    await f.runtime.stop();
+  }
+});
+test("native exact replay during an outstanding stdin callback still requires successful write and resolution", async () => {
+  const f = await nativeTransport("reply-replay");
+  const child = (
+    f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
+  ).child;
+  const original = child.stdin.write.bind(child.stdin);
+  const receiver = f.runtime as unknown as {
+    receiveNativeRequest(
+      child: ChildProcessWithoutNullStreams,
+      id: string | number,
+      input: unknown,
+    ): boolean;
+  };
+  const receive = receiver.receiveNativeRequest.bind(f.runtime);
+  let replayProcessed = false;
+  receiver.receiveNativeRequest = (attached, id, input) => {
+    const result = receive(attached, id, input);
+    replayProcessed = true;
+    return result;
+  };
+  let callback: ((error: Error | null) => void) | undefined;
+  try {
+    child.stdin.write = ((line: string, done: (error: Error | null) => void) =>
+      original(line, () => {
+        callback = done;
+      })) as typeof child.stdin.write;
+    const sent = f.reply();
+    sent.catch(() => {});
+    await nativeUntil(() => Boolean(callback));
+    await nativeUntil(() => replayProcessed);
+    assert.equal(f.outcomes.length, 0);
+    assert.ok(callback);
+    callback(null);
+    await sent;
+    await nativeUntil(() => f.outcomes.some((o) => o.outcome === "confirmed"));
+    assert.deepEqual(f.anomalies, []);
+  } finally {
+    receiver.receiveNativeRequest = receive;
+    child.stdin.write = original;
+    await f.runtime.stop();
+  }
+});
+test("replacement process reusing a typed RPC ID cannot receive an old answer", async () => {
+  const f = await nativeTransport("no-resolution");
+  try {
+    await f.runtime.stop();
+    assert.equal(f.runtime.currentUserInputGeneration(), undefined);
+    let next!: import("../src/standalone/native-input.js").RuntimeUserInputRequest;
+    let resolve!: () => void;
+    const received = new Promise<void>((done) => {
+      resolve = done;
+    });
+    f.runtime.onUserInputRequest((request) => {
+      next = request;
+      resolve();
+    });
+    await f.runtime.start();
+    const thread = await f.runtime.startThread(process.cwd());
+    await f.runtime.startTurn(thread, process.cwd(), "replacement fixture");
+    await received;
+    assert.equal(next.identity.requestId, f.call.identity.requestId);
+    assert.notEqual(
+      next.identity.runtimeGeneration,
+      f.call.identity.runtimeGeneration,
+    );
+    let gates = 0;
+    await assert.rejects(
+      f.runtime.replyUserInput(
+        f.call.identity,
+        { answers: { q: { answers: ["Local"] } } },
+        () => {
+          gates++;
+          return {
+            replyIntentId: "old-intent",
+            answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+          };
+        },
+      ),
+    );
+    assert.equal(gates, 0);
+    assert.equal(f.outcomes.filter((o) => o.outcome === "confirmed").length, 0);
+  } finally {
+    await f.runtime.stop();
+  }
+});
+for (const mode of [
+  "unknown-version",
+  "plan",
+  "wrong-hash",
+  "async-before",
+] as const)
+  test(`native ${mode} disables support before question exposure or answer effects`, async () => {
+    const executable = join(
+      process.cwd(),
+      "test/ui01/native-runtime-fixture.mjs",
+    );
+    const runtime = new CodexRuntime(executable, {
+      qualifiedExecutableHash:
+        mode === "wrong-hash"
+          ? "0".repeat(64)
+          : createHash("sha256").update(readFileSync(executable)).digest("hex"),
+      spawnEnvironment: () => ({
+        ...process.env,
+        ENSEMBLE_UI01_NATIVE_TRANSPORT_FIXTURE: mode,
+      }),
+    });
+    let requests = 0;
+    const anomalies: string[] = [];
+    runtime.onUserInputRequest(() => requests++);
+    runtime.onUnexpectedRequest((request) => anomalies.push(request.method));
+    try {
+      await runtime.start();
+      const thread = await runtime.startThread(process.cwd());
+      await runtime.startTurn(thread, process.cwd(), "unsupported fixture");
+      await nativeUntil(() => anomalies.length > 0);
+      if (mode === "async-before") {
+        await nativeUntil(() => anomalies.includes("unqualified-native-input"));
+      }
+      assert.equal(requests, 0);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+for (const mode of [
+  "two-turn-early",
+  "two-turn-early-old-replay",
+  "two-turn-early-conflict",
+  "two-turn-early-async",
+  "two-turn-early-plan",
+  "two-turn-early-duplicate-resolution",
+  "two-turn-early-late-replay",
+  "two-turn-early-resolution",
+] as const)
+  test(`native adapter resumed thread ${mode} isolates early callback and historical receipt`, async () => {
+    const executable = join(
+      process.cwd(),
+      "test/ui01/native-runtime-fixture.mjs",
+    );
+    const runtime = new CodexRuntime(executable, {
+      qualifiedExecutableHash: createHash("sha256")
+        .update(readFileSync(executable))
+        .digest("hex"),
+      spawnEnvironment: () => ({
+        ...process.env,
+        ENSEMBLE_UI01_NATIVE_TRANSPORT_FIXTURE: mode,
+      }),
+    });
+    const calls: import("../src/standalone/native-input.js").RuntimeUserInputRequest[] =
+      [];
+    const outcomes: import("../src/standalone/native-input.js").RuntimeUserInputOutcome[] =
+      [];
+    const anomalies: string[] = [];
+    let secondResponseBound = false;
+    runtime.onUserInputRequest((call) => {
+      if (calls.length === 1)
+        assert.equal(
+          secondResponseBound,
+          true,
+          "second callback exposed before turn response",
+        );
+      calls.push(call);
+    });
+    runtime.onUserInputOutcome((outcome) => outcomes.push(outcome));
+    runtime.onUnexpectedRequest((request) => anomalies.push(request.method));
+    const reply = (index: number) => {
+      const call = calls[index];
+      assert.ok(call);
+      return runtime.replyUserInput(
+        call.identity,
+        { answers: { q: { answers: ["Local"] } } },
+        () => ({
+          replyIntentId: `intent-${index}`,
+          answerDigest: structuredAnswerDigest({ q: { answers: ["Local"] } }),
+        }),
+      );
+    };
+    try {
+      await runtime.start();
+      const thread = await runtime.startThread(process.cwd());
+      const firstTurn = await runtime.startTurn(
+        thread,
+        process.cwd(),
+        "first fixture turn",
+      );
+      await nativeUntil(() => calls.length === 1);
+      await reply(0);
+      assert.equal(await runtime.waitForTurn(thread, firstTurn), "completed");
+      const firstReceipt = outcomes.find((o) => o.outcome === "confirmed");
+      assert.ok(firstReceipt);
+      await runtime.resumeThread(thread);
+      const secondTurn = await runtime.startTurn(
+        thread,
+        process.cwd(),
+        "second fixture turn",
+      );
+      secondResponseBound = true;
+      const rejected = [
+        "two-turn-early-conflict",
+        "two-turn-early-async",
+        "two-turn-early-plan",
+      ].includes(mode);
+      if (mode === "two-turn-early-resolution") {
+        await nativeUntil(
+          () =>
+            calls.length === 2 ||
+            anomalies.includes("unqualified-native-input"),
+        );
+        let secondWrites = 0;
+        await assert.rejects(
+          runtime.replyUserInput(
+            {
+              requestId: 702,
+              runtimeGeneration: firstReceipt.runtimeGeneration,
+              threadId: thread,
+              turnId: secondTurn,
+              itemId: "native-item-2",
+            },
+            { answers: { q: { answers: ["Local"] } } },
+            () => {
+              secondWrites++;
+              return {
+                replyIntentId: "intent-second",
+                answerDigest: structuredAnswerDigest({
+                  q: { answers: ["Local"] },
+                }),
+              };
+            },
+          ),
+          /unavailable/,
+        );
+        assert.equal(secondWrites, 0);
+        assert.equal(calls.length, 1);
+        assert.ok(anomalies.includes("native-resolution-before-qualification"));
+        assert.equal(
+          outcomes.filter((o) => o.outcome === "confirmed").length,
+          1,
+        );
+      } else if (rejected) {
+        await nativeUntil(() => anomalies.includes("unqualified-native-input"));
+        assert.equal(calls.length, 1);
+        assert.equal(
+          outcomes.filter((o) => o.outcome === "confirmed").length,
+          1,
+        );
+      } else {
+        await nativeUntil(() => calls.length === 2);
+        assert.equal(calls[1]?.identity.turnId, secondTurn);
+        assert.equal(calls[1]?.identity.requestId, 702);
+        await reply(1);
+        assert.equal(
+          await runtime.waitForTurn(thread, secondTurn),
+          "completed",
+        );
+        assert.equal(
+          outcomes.filter((o) => o.outcome === "confirmed").length,
+          2,
+        );
+        if (mode === "two-turn-early-old-replay")
+          assert.ok(anomalies.includes("stale-native-input"));
+        else assert.deepEqual(anomalies, []);
+      }
+      assert.deepEqual(
+        outcomes.find((o) => o.outcome === "confirmed"),
+        firstReceipt,
+      );
+      await assert.rejects(reply(0), /unavailable/);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+test("archived resume rejection retains its exact correlated request and process before any turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-archived-resume-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    [
+      `#!${process.execPath}`,
+      "import { createInterface } from 'node:readline';",
+      "const write = m => process.stdout.write(JSON.stringify(m) + '\\n');",
+      "for await (const line of createInterface({input:process.stdin})) {",
+      "const m=JSON.parse(line);",
+      "if(m.method==='initialize') write({id:m.id,result:{}});",
+      "if(m.method==='account/read') write({id:m.id,result:{account:{type:'chatgpt'}}});",
+      "if(m.method==='config/read') write({id:m.id,result:{config:{approval_policy:'never',sandbox_mode:'workspace-write'}}});",
+      "if(m.method==='thread/resume') write({id:m.id,error:{code:-32600,message:'session '+m.params.threadId+' is archived. Run `codex unarchive '+m.params.threadId+'` to unarchive it first.'}});",
+      "}",
+    ].join("\n"),
+  );
+  chmodSync(executable, 0o700);
+  const runtime = new CodexRuntime(executable, {
+    captureProcessIdentity: async () => ({
+      processId: "synthetic-123",
+      processStartedAt: "synthetic-birth",
+      bootId: "synthetic-boot",
+    }),
+  });
+  try {
+    await runtime.start();
+    await assert.rejects(
+      runtime.resumeThread("archived-thread"),
+      (error: unknown) => {
+        const rejection = (
+          error as {
+            rejection?: {
+              method: string;
+              requestId: number;
+              threadId: string;
+              processIdentity: unknown;
+            };
+          }
+        ).rejection;
+        assert.ok(
+          rejection,
+          "positive rejection must retain structured RPC correlation",
+        );
+        assert.equal(rejection.method, "thread/resume");
+        assert.equal(rejection.threadId, "archived-thread");
+        assert.ok(Number.isSafeInteger(rejection.requestId));
+        assert.deepEqual(rejection.processIdentity, runtime.processIdentity());
+        return true;
+      },
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("archived RPC text cannot qualify wrong methods, identities or malformed responses", async (t) => {
+  for (const mode of [
+    "wrong-code",
+    "wrong-thread",
+    "malformed",
+    "result-and-error",
+    "method-empty",
+    "params-present",
+    "method-and-params",
+    "string-id",
+    "wrong-method",
+    "no-response",
+  ] as const)
+    await t.test(mode, async () => {
+      const root = mkdtempSync(join(tmpdir(), "ensemble-archived-negative-"));
+      const executable = join(root, "fake-codex.mjs");
+      const error = {
+        code: mode === "wrong-code" ? -32000 : -32600,
+        message: `session ${mode === "wrong-thread" ? "other-thread" : "archived-thread"} is archived. Run \`codex unarchive ${mode === "wrong-thread" ? "other-thread" : "archived-thread"}\` to unarchive it first.`,
+      };
+      writeFileSync(
+        executable,
+        [
+          `#!${process.execPath}`,
+          "import {createInterface} from 'node:readline';",
+          "const write=m=>process.stdout.write(JSON.stringify(m)+'\\n');",
+          "for await(const line of createInterface({input:process.stdin})){const m=JSON.parse(line);",
+          "if(m.method==='initialize')write({id:m.id,result:{}});",
+          "if(m.method==='account/read')write({id:m.id,result:{account:{type:'chatgpt'}}});",
+          "if(m.method==='config/read')write({id:m.id,result:{config:{approval_policy:'never',sandbox_mode:'workspace-write'}}});",
+          `if(m.method==='${mode === "wrong-method" ? "thread/start" : "thread/resume"}' && '${mode}'!=='no-response')write({id:${mode === "string-id" ? "String(m.id)" : "m.id"},error:${JSON.stringify(mode === "malformed" ? { ...error, code: "-32600" } : error)},${mode === "result-and-error" ? "result:{}," : ""}${mode === "method-empty" || mode === "method-and-params" ? "method:''," : ""}${mode === "params-present" || mode === "method-and-params" ? "params:{malformed:true}," : ""}});`,
+          "}",
+        ].join("\n"),
+      );
+      chmodSync(executable, 0o700);
+      const runtime = new CodexRuntime(executable, {
+        captureProcessIdentity: async () => ({
+          processId: "synthetic-123",
+          processStartedAt: "synthetic-birth",
+          bootId: "synthetic-boot",
+        }),
+      });
+      try {
+        await runtime.start();
+        const call =
+          mode === "wrong-method"
+            ? runtime.startThread(root)
+            : runtime.resumeThread("archived-thread");
+        await assert.rejects(
+          mode === "no-response"
+            ? bounded(
+                call.then(() => undefined),
+                30,
+              )
+            : call,
+          (error: unknown) => {
+            assert.equal(
+              (error as { rejection?: unknown }).rejection,
+              undefined,
+            );
+            return true;
+          },
+        );
+      } finally {
+        await runtime.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
 });

@@ -1,8 +1,19 @@
 import {
+  questionAnswersSchema,
+  type QuestionAnswers,
+} from "../core/question-forms.js";
+import { feedbackReferenceSchema } from "../core/task-review.js";
+import {
   handbackSettlementSchema,
   type HandbackSettlement,
   type TaskDeliveryView,
 } from "../core/delivery.js";
+import {
+  runtimeQuestionAnswerCommandSchema,
+  type RuntimeQuestionAnswerReceipt,
+  type RuntimeQuestionRecord,
+} from "../core/coordination.js";
+import type { StructuredQuestionAnswers } from "../core/structured-questions.js";
 import { z } from "zod";
 import type {
   AssignmentResult,
@@ -28,12 +39,23 @@ import type {
 
 const uuid = z.string().uuid();
 const commandKey = z.string().uuid();
-const assignmentMessageSchema = z.object({ message: z.string() }).strict();
+const assignmentMessageSchema = z
+  .object({
+    message: z.string(),
+    reference: feedbackReferenceSchema.optional(),
+  })
+  .strict();
 const answerEventSchema = z
   .object({
     interactionId: uuid,
     revision: z.number().int().positive(),
-    answer: z.string(),
+    answer: z.string().optional(),
+    formVersion: z.literal(1).optional(),
+    answers: questionAnswersSchema.optional(),
+    requestingWorkId: z.string().optional(),
+    requestingWorkRevision: z.number().int().positive().optional(),
+    requestingAssignmentVersion: z.number().int().positive().optional(),
+    conversationRevision: z.number().int().positive().optional(),
   })
   .strict();
 const approvalEventSchema = z
@@ -77,6 +99,7 @@ export interface CoordinationWorkHistoryEntry {
   assignmentVersion: number;
   conversationRevision: number;
   state: ExecutionIntent["state"];
+  recoveryDisposition?: "operator-reconciled";
   threadId: string | null;
   turnId: string | null;
 }
@@ -85,7 +108,7 @@ export interface CoordinationViewMessage {
   eventId: string;
   eventType: string;
   recipientAssignmentId: string;
-  deliveryState: "pending" | "queued" | "delivered";
+  deliveryState: "pending" | "queued" | "delivered" | "operator-reconciled";
   createdAt: number;
   text?: string;
   decision?: "approved" | "denied";
@@ -94,7 +117,9 @@ export interface CoordinationViewMessage {
   resultId?: string;
   routingOperationId?: string;
   routingReason?: string;
+  questionAnswers?: QuestionAnswers;
   interactionId?: string;
+  reference?: z.infer<typeof feedbackReferenceSchema>;
 }
 
 export interface CoordinationInteractionAttention {
@@ -159,6 +184,24 @@ export interface CoordinationTaskView {
   unresolvedResults: UnresolvedResultDestination[];
   messages: CoordinationViewMessage[];
   questions: CoordinationInteraction[];
+  questionForms?: Array<{ interactionId: string; requestState: string }>;
+  runtimeQuestions?: Array<
+    Pick<
+      RuntimeQuestionRecord,
+      | "interactionId"
+      | "requestingAssignmentId"
+      | "revision"
+      | "answers"
+      | "deliveryState"
+      | "requestState"
+      | "reason"
+    > & {
+      request: Pick<
+        RuntimeQuestionRecord["request"],
+        "questions" | "isBlocking" | "autoResolutionMs"
+      >;
+    }
+  >;
   approvals: CoordinationInteraction[];
   completionRequests: TaskCompletionRequest[];
   routing: {
@@ -181,6 +224,7 @@ export interface CoordinationCommandReceipt {
 }
 
 export interface OperatorMessageCommand {
+  reference?: z.infer<typeof feedbackReferenceSchema>;
   taskId: string;
   key: string;
   recipientAssignmentId: string;
@@ -222,6 +266,7 @@ const operatorMessageCommand = z
     recipientAssignmentId: uuid,
     expectedAssignmentVersion: z.number().int().positive(),
     message: z.string().trim().min(1).max(16000),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const resultRecipientCommand = z
@@ -274,6 +319,8 @@ export class CoordinationView {
     private readonly readConversationHistory?: (
       taskId: string,
       assignmentId: string,
+      beforeSequence?: number,
+      beforeOmissionSequence?: number,
     ) => ConversationHistoryAssignmentRead,
     private readonly deliveryApi?: {
       readTask: (taskId: string) => TaskDeliveryView;
@@ -285,13 +332,21 @@ export class CoordinationView {
   /** Assignment identity determines its task; history never authorizes execution. */
   readAssignmentHistory(
     assignmentId: string,
+    beforeSequence?: number,
+    beforeOmissionSequence?: number,
   ): ConversationHistoryAssignmentRead {
     const assignment = this.domain.assignment(uuid.parse(assignmentId));
     const taskId = String(assignment.taskId);
-    const history = this.readConversationHistory?.(taskId, assignmentId) ?? {
+    const history = this.readConversationHistory?.(
+      taskId,
+      assignmentId,
+      beforeSequence,
+      beforeOmissionSequence,
+    ) ?? {
       items: [],
       turnOmissions: [],
       omittedItemCount: 0,
+      omittedTurnCount: 0,
     };
     if (
       [...history.items, ...history.turnOmissions].some(
@@ -326,6 +381,9 @@ export class CoordinationView {
             assignmentVersion: binding.assignmentVersion,
             conversationRevision: binding.conversationRevision,
             state: intent.state,
+            ...(this.coordination.recoveryDispositionForWork(intent.workId)
+              ? { recoveryDisposition: "operator-reconciled" as const }
+              : {}),
             threadId: intent.threadId,
             turnId: intent.turnId,
           },
@@ -439,6 +497,34 @@ export class CoordinationView {
       results: this.coordination.results(id),
       unresolvedResults: this.coordination.unresolvedResultDestinations(id),
       messages,
+      questionForms: this.coordination.questionFormSummaries(id),
+      runtimeQuestions: this.coordination
+        .runtimeQuestions(id)
+        .map(
+          ({
+            interactionId,
+            requestingAssignmentId,
+            revision,
+            request,
+            answers,
+            deliveryState,
+            requestState,
+            reason,
+          }) => ({
+            interactionId,
+            requestingAssignmentId,
+            revision,
+            request: {
+              questions: request.questions,
+              isBlocking: request.isBlocking,
+              autoResolutionMs: request.autoResolutionMs,
+            },
+            answers,
+            deliveryState,
+            requestState,
+            reason,
+          }),
+        ),
       questions: interactions.filter(
         (interaction) => interaction.kind === "question",
       ),
@@ -509,6 +595,63 @@ export class CoordinationView {
         resultId: command.resultId,
         expectedRevision: command.expectedRevision,
         recipientAssignmentId: command.recipientAssignmentId,
+      }),
+    );
+  }
+
+  async answerRuntimeQuestion(input: {
+    taskId: string;
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: StructuredQuestionAnswers;
+  }): Promise<RuntimeQuestionAnswerReceipt> {
+    const command = runtimeQuestionAnswerCommandSchema.parse({
+      actor: "operator",
+      ...input,
+    });
+    this.requireInteraction(command.taskId, command.interactionId, "question");
+    const receipt = this.coordination.answerRuntimeQuestion(command);
+    await this.onCommand();
+    return receipt;
+  }
+
+  ownQuestionEligibility(interactionId: string) {
+    return this.coordination.ownQuestionEligibility(interactionId);
+  }
+  recordedQuestionFormAnswer(
+    input: Parameters<CoordinationStore["recordedQuestionFormAnswer"]>[0] & {
+      taskId: string;
+    },
+  ) {
+    this.requireInteraction(input.taskId, input.interactionId, "question");
+    const { taskId: _taskId, ...command } = input;
+    return this.coordination.recordedQuestionFormAnswer(command);
+  }
+  recordedRuntimeQuestionAnswer(
+    input: Parameters<CoordinationStore["recordedRuntimeQuestionAnswer"]>[0],
+  ) {
+    return this.coordination.recordedRuntimeQuestionAnswer(input);
+  }
+  questionForm(interactionId: string) {
+    return this.coordination.questionForm(interactionId);
+  }
+
+  async answerQuestionForm(input: {
+    taskId: string;
+    key: string;
+    interactionId: string;
+    expectedRevision: number;
+    answers: QuestionAnswers;
+  }): Promise<CoordinationCommandReceipt> {
+    this.requireInteraction(input.taskId, input.interactionId, "question");
+    return this.commitCommand(
+      this.coordination.answerQuestionForm({
+        actor: "operator",
+        key: input.key,
+        interactionId: input.interactionId,
+        expectedRevision: input.expectedRevision,
+        answers: input.answers,
       }),
     );
   }
@@ -593,11 +736,13 @@ export class CoordinationView {
       eventId: event.eventId,
       eventType: event.eventType,
       recipientAssignmentId: event.recipientAssignmentId,
-      deliveryState: pending.has(event.eventId)
-        ? "pending"
-        : queued.has(event.eventId)
-          ? "queued"
-          : "delivered",
+      deliveryState:
+        this.coordination.recoveryDispositionForEvent(event.eventId) ??
+        (pending.has(event.eventId)
+          ? "pending"
+          : queued.has(event.eventId)
+            ? "queued"
+            : "delivered"),
       createdAt: event.createdAt,
     };
     switch (event.eventType) {
@@ -609,18 +754,24 @@ export class CoordinationView {
             .strict()
             .parse(JSON.parse(event.payload)).reason,
         };
-      case "operator-message":
+      case "operator-message": {
+        const payload = assignmentMessageSchema.parse(
+          JSON.parse(event.payload),
+        );
         return {
           ...base,
-          text: assignmentMessageSchema.parse(JSON.parse(event.payload))
-            .message,
+          text: payload.message,
+          ...(payload.reference ? { reference: payload.reference } : {}),
         };
+      }
       case "question-answer": {
         const payload = answerEventSchema.parse(JSON.parse(event.payload));
         return {
           ...base,
           interactionId: payload.interactionId,
-          text: payload.answer,
+          ...(payload.answers
+            ? { questionAnswers: payload.answers }
+            : { text: payload.answer ?? "Answer unavailable" }),
         };
       }
       case "approval-decision": {

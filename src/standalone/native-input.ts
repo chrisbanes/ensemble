@@ -1,0 +1,16 @@
+export {
+  nativeInputRequestSchema,
+  type NativeInputRequest,
+  type NativeInputReply,
+  nativeInputEndpointIdentitySchema,
+  type NativeInputEndpointIdentity,
+  nativeInputQualificationSchema,
+  type NativeInputProtocolQualification,
+  type RuntimeUserInputRequest,
+  type RuntimeReplyIntent,
+  runtimeUserInputOutcomeSchema,
+  type RuntimeUserInputOutcome,
+  parseNativeInputRequest,
+  encodeNativeInputReply,
+  nativeEndpointKey,
+} from "../core/structured-questions.js";

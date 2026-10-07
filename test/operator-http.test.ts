@@ -367,6 +367,9 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
 
     const loginPage = await fetch(`${origin}/login`);
     assert.equal(loginPage.status, 200);
+    const loginMarkup = await loginPage.text();
+    assert.doesNotMatch(loginMarkup, /legacy-operator|rel="stylesheet"/);
+    assert.match(loginMarkup, /<main>/);
     const anonymousCookie = cookiePair(loginPage);
     const anonymousSession = auth.getSession(
       anonymousCookie.split("=", 2)[1] ?? "",
@@ -387,8 +390,7 @@ test("all operator and extension routes inherit login, origin, and CSRF guards",
     assert.equal(loginPage.headers.get("x-content-type-options"), "nosniff");
     assert.ok(loginPage.headers.get("content-security-policy"));
 
-    const loginHtml = await loginPage.text();
-    const loginCsrf = csrfFrom(loginHtml);
+    const loginCsrf = csrfFrom(loginMarkup);
     const wrongCsrf = await fetch(`${origin}/login`, {
       method: "POST",
       headers: {
@@ -970,6 +972,186 @@ test("real runtime and coordination routes inherit HTTP guards and persist capac
     await http?.stop();
     auth?.close();
     await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy awaited slots and extension publications reject expired or logged-out exact sessions while admitted writes remain once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ui04-session-publication-"));
+  const db = new DatabaseSync(":memory:");
+  let auth: OperatorAuth | undefined, http: LocalOperatorHttp | undefined;
+  try {
+    new Store(db).ensureHost("test");
+    const domain = new DomainStore(db);
+    domain.migrate();
+    const projectId = randomUUID();
+    domain.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Private retained legacy marker",
+      leadProfileId: null,
+    });
+    const ui = new LocalOperatorUi(domain),
+      port = await unusedPort(),
+      origin = `http://127.0.0.1:${port}`,
+      authFile = join(directory, "auth");
+    let now = 100;
+    await OperatorAuth.initialize(authFile, password);
+    auth = await OperatorAuth.open({
+      authFile,
+      origin,
+      now: () => now,
+      idleTimeoutMs: 1000,
+      absoluteTimeoutMs: 10000,
+    });
+    let gate: Promise<void> | undefined,
+      entered: () => void = () => {};
+    const handler = async ({ csrfToken }: { csrfToken: string }) => {
+      const body = ui.home(csrfToken);
+      if (gate) {
+        entered();
+        await gate;
+      }
+      return { kind: "html" as const, body };
+    };
+    const routes = new OperatorRouteRegistry();
+    routes.registerSlot("runtime", [
+      { method: "GET", path: "/runtime", handler },
+    ]);
+    routes.registerSlot("coordination", [
+      { method: "GET", path: "/coordination", handler },
+    ]);
+    routes.register({ method: "GET", path: "/extension/private", handler });
+    const profileId = randomUUID();
+    routes.register({
+      method: "POST",
+      path: "/extension/write",
+      handler: async ({ fields, csrfToken }) => {
+        domain.execute({
+          type: "profile.create",
+          actor: "operator",
+          key: fields.key!,
+          profileId,
+          name: "Admitted exact mutation",
+          instructions: "Fixture instruction",
+          capabilities: "fixture",
+        });
+        return handler({ csrfToken });
+      },
+    });
+    http = new LocalOperatorHttp(ui, auth, { routes });
+    await http.start(port);
+    const login = async () => {
+      assert.ok(auth);
+      const anon = auth.createAnonymousSession();
+      const current = await auth.authenticate(anon.id, password);
+      assert.ok(current);
+      return {
+        cookie: `ensemble_operator_session=${current.id}`,
+        csrfToken: current.csrfToken,
+      };
+    };
+    const logout = async (session: { cookie: string; csrfToken: string }) => {
+      const response = await fetch(`${origin}/logout`, {
+        method: "POST",
+        headers: {
+          cookie: session.cookie,
+          origin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ csrfToken: session.csrfToken }),
+        redirect: "manual",
+      });
+      assert.equal(response.status, 303);
+    };
+    for (const path of ["/runtime", "/coordination", "/extension/private"])
+      for (const mode of ["logout", "expiry"]) {
+        const session = await login();
+        let response = await fetch(origin + path, {
+          headers: { cookie: session.cookie },
+        });
+        assert.equal(response.status, 200);
+        assert.match(await response.text(), /Private retained legacy marker/);
+        let release!: () => void;
+        gate = new Promise<void>((r) => (release = r));
+        const arrival = new Promise<void>((r) => (entered = r));
+        const pending = fetch(origin + path, {
+          headers: { cookie: session.cookie },
+        });
+        try {
+          await arrival;
+          if (mode === "logout") await logout(session);
+          else now += 1000;
+          release();
+          response = await pending;
+          assert.equal(response.status, 401);
+          assert.doesNotMatch(
+            await response.text(),
+            /Private retained legacy marker/,
+          );
+        } finally {
+          release();
+          await pending;
+          gate = undefined;
+        }
+      }
+    const synchronous = await login();
+    const originalSession = auth.getSession.bind(auth);
+    let revokeAtAuthorization = true;
+    auth.getSession = (id) => {
+      const captured = originalSession(id);
+      if (revokeAtAuthorization) {
+        revokeAtAuthorization = false;
+        queueMicrotask(() => auth?.logout(id));
+      }
+      return captured;
+    };
+    const revoked = await fetch(`${origin}/project/${projectId}`, {
+      headers: { cookie: synchronous.cookie },
+    });
+    assert.equal(revoked.status, 401);
+    assert.doesNotMatch(await revoked.text(), /Private retained legacy marker/);
+    auth.getSession = originalSession;
+    const session = await login(),
+      key = randomUUID();
+    let release!: () => void;
+    gate = new Promise<void>((r) => (release = r));
+    const arrival = new Promise<void>((r) => (entered = r));
+    const send = (session: { cookie: string; csrfToken: string }) =>
+      fetch(`${origin}/extension/write`, {
+        method: "POST",
+        headers: {
+          cookie: session.cookie,
+          origin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ key, csrfToken: session.csrfToken }),
+      });
+    const pending = send(session);
+    try {
+      await arrival;
+      assert.equal(
+        domain.profiles().filter((p) => p.id === profileId).length,
+        1,
+      );
+      await logout(session);
+      release();
+      assert.equal((await pending).status, 401);
+    } finally {
+      release();
+      await pending;
+      gate = undefined;
+    }
+    const replay = await send(await login());
+    assert.equal(replay.status, 200);
+    await replay.text();
+    assert.equal(domain.profiles().filter((p) => p.id === profileId).length, 1);
+  } finally {
+    await http?.stop();
+    auth?.close();
+    db.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

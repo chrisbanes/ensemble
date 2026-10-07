@@ -14,7 +14,8 @@
     "operator-auth": "npm run build && node dist/src/standalone/operator-auth-cli.js",
     "build": "npm run build:service && npm run build:web",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "test:fixture-preflight": "npm run build && node scripts/run-tests.mjs --fixture-preflight",
     "s04b:view": "node test/s04b/local-view.mjs",
     "s04b:live": "node test/s04b/live-runtime.mjs --live",
     "s04d:live": "node test/s04d/live-operator.mjs --live",
@@ -27,24 +28,31 @@
     "format:check": "biome format .",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
     "build:service": "tsc",
-    "build:web": "vite build --config web/vite.config.ts"
+    "build:web": "vite build --config web/vite.config.ts",
+    "ui01:live": "node test/ui01/runtime-contract.mjs --live --phase service"
   },
   "dependencies": {
-    "@fontsource/ibm-plex-mono": "5.3.0",
-    "@fontsource/instrument-sans": "5.3.0",
-    "@fontsource/space-grotesk": "5.3.0",
+    "@fontsource/inter": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
     "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-slot": "1.3.3",
     "@typesafe-ai/sdk": "0.6.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.51.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "tailwind-merge": "3.7.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "26.6.4",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "playwright": "1.63.0",
+    "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.2"
   }

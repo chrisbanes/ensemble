@@ -40,6 +40,15 @@ and [bounded evidence](evidence/s08a-operations-2026-09-30.md) distinguish the
 deterministic exact-receipt admission journey from the live launchd proof's
 paused/unready fixture.
 
+Delivery [UI01 #739](https://github.com/chrisbanes/ensemble/issues/739) adds the
+bounded native Codex input adapter, durable recorded-versus-delivered lifecycle,
+exact eligible callback reply, conservative restart handling and curated service
+answer seam for UI05. Its bounded protocol T1 and separately granted actual T6
+service journey have passed; deterministic fixtures qualify the remaining bounded
+hold, restart and unsupported-shape contracts.
+Production structured forms and complete native UI acceptance remain outstanding.
+See the [native input evidence](evidence/ui01-runtime-input.md).
+
 ## Purpose and scope
 
 Ensemble is one standalone service coordinating multiple projects for a trusted
@@ -229,6 +238,90 @@ Operator messages may target only pending or running assignments. Held or comple
 assignments are not implicitly revived; resolve the hold or create explicit follow-up/
 recovery first. Legacy inbox events do not dispatch a completed assignment.
 
+A retained canonical initial assignment request positively refused for captured task or
+assignment revision mismatch before runtime admission can be continued by posting a
+fresh operator message through the existing task inbox. The original held request,
+intent and refusal remain immutable history; no replacement initial request is created
+automatically. The fresh inbox work captures the current task revision and includes its
+current title/outcome alongside the preserved assignment brief and instruction/profile
+snapshots. Current admission, permissions, dependency, Stop and execution/effect holds
+still apply. Runtime identity, writer admission, capacity reservation, recovery
+identity, pending effects or a Stop target disqualify the historical refusal exemption.
+Any initial inbox batch stays bound unless the existing narrow stale-delivery withdrawal
+proves it safe to withdraw; continuation never orphans or replays that batch.
+
+After exact-generation operator recovery, the old intent remains `reconciled` and
+its turn request remains held; the validated recovery receipt alone does not dispatch
+work. A new operator message to the same task/assignment can explicitly authorize a
+fresh inbox continuation. The message transaction retains an immutable audit linking
+the recovered work, receipt, message key/event and old batch. It processes the old
+batch without replaying its events; task and assignment message views identify this
+as `operator-reconciled`, distinct from successful runtime delivery. Message replay,
+provider feedback and settlement cannot create or retarget that authority. Every
+admission, completion and external completion action rechecks the audit and exact
+recovered-generation proof, while current project/profile/dependency/permission and
+Stop gates remain in force. Late callbacks or known survivors after a recorded
+continuation persist an uncertainty hold and retract admitted successors; ending the
+callback or restarting does not clear that hold. The recovery receipt, old intent and
+continuation audit remain historical evidence, not a successful result or a force
+unlock. Existing callbacks before any recorded continuation retain their previous
+recovery behaviour.
+
+A positively rejected archived `thread/resume` before turn submission has a
+separate pre-turn recovery proof. The Codex adapter retains the exact correlated
+RPC request, predecessor thread, `-32600` archived-session response and runtime
+process identity. The service persists that witness against the admitted request
+sequence, work revision and assignment binding before losing submission context.
+Missing thread/turn identities, a timeout, malformed response, another RPC error or
+a lost turn-start response cannot qualify. The never-admitted refusal and bound-turn
+recovery proofs remain distinct.
+
+A historical generation lacking that typed witness requires explicit authenticated
+operator adoption. Its immutable command receipt binds the exact held generation,
+predecessor, process and persisted response to operator attestations and reviewed
+source/harness/evidence/approval references. The host operator verifies those
+artifacts and the independently reviewed no-turn evidence; valid metadata syntax or
+an error string alone does not establish proof. Model tools cannot adopt evidence.
+Command replay returns the same result and rejects altered material or retargeting.
+Adoption and recovery are authenticated advanced operator routes; they grant no
+new model tool authority or automatic recovery control.
+
+A keyed pre-turn recovery receipt requires the persisted witness, truthful null
+thread/turn identities, independent exact-process termination verification and
+settled workspace/effects. Recovery reconciles only that generation's ownership;
+it leaves the old request held and does not dispatch a successor. An explicit
+conversation replacement and a NEW operator message are then both required. The
+replacement command checks captured assignment/conversation revisions, persists
+its result and prevents duplicate revision increments on replay. The new work starts
+a fresh thread. Existing receipts and continuation audits retain their identities
+and material unchanged; the old batch is processed as `operator-reconciled` without
+replay. Admission, completion and external actions revalidate the pre-turn witness,
+receipt and continuation audit at use time. Independent holds, current admission
+gates and persistent late-callback/survivor holds remain enforced.
+
+A distinct historical no-turn-submission proof covers an admitted generation
+with a captured known-null predecessor and unbound thread/turn identities. It is
+operator-only adoption of independently reviewed frozen source, harness and a
+complete synchronous write-ahead invocation ledger establishing that `startTurn`
+was never called for the exact generation. A generic stop error, missing identities,
+process absence or metadata syntax alone cannot establish this proof. An initial
+`thread/start` may have created an unobserved idle thread; this contract does not
+claim thread noncreation, a positive archived-resume rejection or successful work.
+The existing archived-resume predicate and bound-turn proofs remain unchanged.
+
+The separate no-turn witness and receipt discriminator bind request/work,
+conversation/writer revisions, assignment snapshots, process and immutable operator
+command material. Recovery independently verifies exact-process termination and
+requires settled current workspace/effects, preserving null identities and all
+older receipt/audit material. It leaves the request held and produces no successful
+assignment result or automatic dispatch. Existing keyed conversation replacement
+and a NEW authenticated operator message are both required for continuation. The
+old batch records `operator-reconciled` processing without replay. Admission,
+completion and actions recheck the distinct witness/receipt/audit and current gates;
+late callbacks or known survivors persist a hold and retract successors across
+restart. The advanced authenticated host routes expose bounded acknowledgement,
+with no new model tool authority or forms in the curated operator UI.
+
 Already-admitted execution and tools may survive coordinator or App Server failure
 and continue effects. A crash releases neither writer ownership nor capacity. No
 queued turn, follow-up, delegation or replacement may gain admission while Ensemble
@@ -291,6 +384,10 @@ without trusting agent-supplied project or assignment IDs.
 
 ## Operator interface and human requests
 
+Make the next decision obvious, and keep its evidence close. The presentation
+refinements below were approved on 3 October 2026; implementation and visual
+qualification remain separate from this product contract.
+
 Provide project/task lists, task detail, conversations and execution history,
 configuration and a shared attention inbox. Show capacity, source health, the lead, assignees,
 results and artifacts. Distinguish empty, loading, stale, failed, paused, waiting,
@@ -315,6 +412,214 @@ then questions and approvals oldest first. Show project and task context on each
 item. Unresolved questions, pending approvals and failures remain visible even
 when related history is collapsed.
 
+Each attention item explains the decision or intervention needed, its requester
+when known, why the operator is needed, and the available response. Keep relevant
+evidence beside the response or directly accessible within the task context.
+Use the same meaning and action wording in Overview, Inbox, List/Board and task
+detail. Returning from a request preserves the previous filters and position.
+
+Distinguish work progress, the next actor and operator attention. Derive them from
+recorded facts, showing unknown responsibility explicitly. Running activity alone
+does not establish that an agent owns or is repairing a particular failure. A
+failed check with an agent-owned repair does not itself create operator attention;
+an independent question, approval or recovery problem remains visible. Capacity
+waiting is normal progress unless a separate intervention is required.
+
+### Task workspace inspection — approved post-MVP scope, 6 October 2026
+
+Chris confirmed this product scope during triage of #776 on 6 October 2026.
+It is not an implementation claim or dispatch authority. Design and review the
+desktop/phone experience in Pen before UI implementation; GitHub owns delivery
+decomposition and sequencing. This post-MVP scope adds no release/cutover gate
+to #649 and does not reopen the paused integrations in #734.
+
+- Give reviewing code changes and inspecting generated outputs equal weight,
+  including repository-free task outputs.
+- Preview text/code, Markdown, common raster images and PDFs. The initial
+  experience is preview-only: unsupported files remain visible with metadata,
+  without file downloads or workspace export.
+- Preserve bounded copies of result-linked files and diffs so that exact result
+  evidence remains inspectable after later workspace changes or removal. Do not
+  promise a retained snapshot of the entire result workspace.
+- Hide ignored clutter initially and allow the operator to reveal ignored files.
+  Sensitive/private-path exclusions remain enforced in every inspection surface.
+- Offer a comparison dropdown with Branch, Last turn and Uncommitted targets.
+  Uncommitted supports staged and unstaged filters. Branch compares current
+  contents against the merge base with the task's base branch, displaying that
+  branch and exact baseline commit.
+- Last turn means the actual most recent agent turn that could change the task
+  workspace, not the latest reported result or completed assignment. It requires
+  bounded before/after change capture, identifies the agent and discloses
+  incomplete capture. Existing result/work revisions alone do not provide it.
+- Keep only the latest finished turn's capture as turn history. Evidence retained
+  with a result has its own lifetime and must not disappear when that turn
+  capture is replaced.
+- Keep the displayed inspection stable until explicit refresh, with observation
+  time and known changes disclosed. Inspection does not pause agents or clear
+  any execution, dependency or ownership hold.
+- A capture that is excluded, oversized, unavailable or changing records a
+  specific evidence gap rather than blocking the result. Never substitute later
+  bytes for the missing historical capture.
+- When the base branch cannot be established, show the missing baseline and let
+  the operator select a locally available base branch for inspection. This does
+  not fetch, check out a branch or silently substitute a guessed baseline.
+- For a failed, interrupted or uncertain latest turn, show any available partial
+  observation with its recorded outcome, time and unsettled state. Missing
+  capture remains unavailable; observing a diff cannot establish that execution
+  or further writes have ended.
+- Identify each repository and its own comparison baseline. Repository-free
+  workspaces support file inspection and turn capture; Git comparisons are
+  unavailable there. Include untracked, deleted and renamed files where
+  applicable, with truthful binary/unsupported states.
+- Restrict every listing, preview and capture to authorised task contents.
+  Reject unsafe paths and symlink escapes; enforce bounded reads and rendering
+  without exposing excluded content or executing inspected content as the app.
+  Exact storage, routes, renderers and documented numeric limits are engineering
+  choices within these contracts. Existing historical results are not backfilled
+  with later bytes. Editing, terminals, whole-workspace snapshots, arbitrary
+  revision comparison and native desktop integration remain outside this scope.
+
+The [post-MVP inspection acceptance scenarios](acceptance.md#post-mvp-task-workspace-inspection)
+define the required evidence without claiming any scenario has passed.
+
+#### Local code review amendment — 6 October 2026
+
+Chris approved adding line-level feedback and batched local code reviews to this
+scope. File inspection remains read-only; review drafts and submission are
+explicit local feedback actions.
+
+- Select a single line or range in supported text previews or either diff side,
+  including deleted lines. Collect comments across files within the same task;
+  add, edit or remove draft comments and supply an optional overall summary.
+- Bind each comment to exact task/repository/file content identity, line range,
+  applicable diff side and source comparison/result/turn context. Retain bounded
+  reviewed context independently of latest-turn replacement or workspace cleanup;
+  this extends retention to review anchors, not whole workspace snapshots.
+- Later changes mark affected comments outdated without silently moving them to
+  newer contents. Unavailable or unknown comparisons remain explicit; file paths
+  and line numbers alone cannot establish exact identity. Retention limits and
+  access exclusions still apply, and missing original context is never replaced
+  with newer bytes.
+- Let the operator inspect the complete draft and named project-lead destination
+  before Send review. Submit the comments and optional summary together as one
+  logical review, with a receipt and exact anchors available to the lead.
+- Preserve drafts through navigation and refresh under existing session/privacy
+  rules. Confirmed failures retain editable content; uncertain submissions keep
+  their original payload and identity for reconciliation without duplicate sends.
+- A review delivers local feedback only. It does not publish to GitHub, approve
+  or reject work, change readiness/completion, grant merge authority or clear
+  holds. Submitted reviews remain recorded feedback; draft removal does not
+  retract a submitted review. Retraction, threaded resolution and formal review
+  verdicts are outside this initial scope.
+- Design and qualify the draft, line selection, outdated-context and submission
+  journeys on desktop, phone and keyboard across file/diff and result entry
+  points. Preserve the existing single-message contextual feedback workflow.
+
+### Task overview and evidence — design direction, 3 October 2026
+
+Chris approved bringing the task brief, delegation, latest result and supporting
+evidence together, informed by Intent's shared-spec and verification experience.
+This is a specification change. Design and review the experience in Pen before
+implementing it; this amendment does not approve a screen layout.
+The following describes desired behaviour, not implemented capability or a fixed
+screen layout. Existing GitHub delivery issues remain authoritative for sequencing
+and slice acceptance; this amendment does not complete UI04 or qualify release.
+
+The [Pen source](../design/design.pen) and
+[interaction and state handoff](../design/DESIGN.md) include the subsequent review
+extensions below. Chris agreed to carry these into the specification and delivery
+briefs on 3 October 2026. Status: **design reviewed; implementation deferred**.
+Static canvas review does not establish implemented behaviour or final integrated
+visual/usability acceptance. Comparison-image loading remains unverified after
+relocating the source assets; retain that handoff gap until it is checked.
+
+- **Shared task brief.** Make the desired outcome, supplied acceptance criteria,
+  current approach, recorded decisions and unresolved questions easy to find.
+  Preserve provenance: imported GitHub content remains authoritative and read-only
+  locally, while agent plans and decisions are distinguishable from requirements.
+  Do not create a competing editable specification or invent missing criteria.
+- **Evidence beside results.** Present relevant screenshots, artifacts and
+  validation alongside the result or acceptance criterion they support, when that
+  relationship is recorded. Identify the reporting assignment and relevant work
+  or artifact revision. Distinguish agent-reported claims from recorded verification;
+  absent, unavailable, stale or redacted evidence cannot imply a passed criterion.
+  Keep earlier results accessible without presenting them as the current outcome.
+- **Readable delegation.** Show each assignment's responsibility, assignee,
+  requester, known reason for waiting and result destination. Keep the accountable
+  project lead identifiable and distinguish assignments sharing a profile. Use
+  durable coordination and runtime observations rather than inferring ownership,
+  waiting or completion from conversation text. Unknown state stays explicit.
+- **Compact progress across tasks.** Summarize the current work state, known wait
+  reason and latest available result using source-faithful text. Keep ordinary
+  progress and dependency waiting separate from decisions needing the operator.
+  List, Board, overview and attention entry points must lead to a consistent task
+  experience without losing project or source context.
+
+The reviewed extension adds these behaviours to the same task experience:
+
+- **Criterion outcomes.** Summarise supplied criteria using their recorded
+  evidence relationships. Distinguish supported, failed, unverified and stale
+  evidence; expose the supporting result, assignment and revision. Do not infer
+  an overall pass from agent claims, missing checks or a count of supported rows.
+- **Before/after comparison.** Pair recorded captures with labels identifying
+  their role, result and work/artifact revision. Keep the relevant criterion and
+  evidence context reachable. Missing, unavailable, redacted or mismatched
+  captures remain explicit; an image comparison does not itself verify a
+  criterion. Comparison is also usable on phone.
+- **Contextual feedback.** From a result, criterion or artifact, let the operator
+  inspect the context and edit an “Ask lead for changes” draft before sending.
+  Show the accountable lead destination and preserve the exact recorded anchors.
+  This is an ordinary local message under existing permissions: it does not
+  approve, reject, change task state or post to GitHub. A confirmed failure
+  retains an editable draft for retry; an unknown send outcome requires existing
+  reconciliation before another send, and confirmed delivery has a receipt.
+- **Changes since viewed.** Identify newer results, superseded evidence and
+  changed source requirements relative to the recorded viewing reference.
+  Keep earlier revisions accessible. Viewing is not approval. Show no baseline
+  or unknown source comparison explicitly; a failed refresh cannot establish
+  that requirements are unchanged.
+- **Captured assignment context.** Show who supplied the brief, its captured
+  version, recorded instruction/profile revisions and source references, with
+  unavailable or incomplete capture explicit. Distinguish that assignment's
+  captured context from current requirements. A reference being available does
+  not establish that an agent read it. Do not expose secrets or imply complete
+  runtime visibility.
+- **Recorded changes and delivery.** Keep recorded files, commits, result diff,
+  PR identity, checks and findings close to the result. Attribute repair ownership
+  only when recorded. Identify provider state, the checked head/revision and
+  stale or changed-head evidence; retain a useful no-PR state. Provider refresh
+  is a read. A merged PR does not complete the Ensemble task, and these views
+  retain exact-material approvals and independent dependency/recovery holds.
+- **Search recorded work.** Provide discoverable Search in shared desktop and
+  phone navigation for retained tasks, decisions and results within permitted
+  project access. Every match identifies its project, parent task and record type,
+  including similar matches from different projects. Open the exact matching
+  section and revision, with historical results labelled. Return preserves query,
+  filters, selected match and reading position; returning to the originating
+  workspace preserves its view state. Distinguish no matches, partial coverage
+  and failed search. Search does not promise a complete runtime transcript or
+  access to unavailable, redacted or unretained material. Canvas state specimens
+  are review aids, not additional product navigation.
+
+These behaviours belong to #742, including search and the shared navigation
+changes needed to reach it. #736 retains the overall scope and final human
+acceptance gate; #745 qualifies the assembled experience. This amendment does
+not reopen completed #741 work or authorise implementation dispatch.
+
+The Pen design should explore information hierarchy, concise previews and expanded
+detail on laptop and phone. Include tasks with no assignments or results, parallel
+delegation, long briefs, a pending question or approval, dependency waits, failed
+refresh, uncertain execution and unavailable evidence. Preserve visible actionable
+requests, reading position, disclosure choices and unfinished replies. Existing
+execution, recovery and exact-material approval controls must remain reachable.
+Do not freeze routes, API fields, attachment storage or rendering technology through
+the design; settle those against the reviewed experience and existing boundaries.
+
+Centralized, consolidated PR feedback is a separate technical idea to assess against
+Ensemble's existing implementation, not a new requirement in this amendment.
+Integrated editors, terminals, browsers, extra execution providers and remote
+execution are outside this change. The deferred native integrations remain paused.
+
 ### Kanban board
 
 Provide a List/Board switch for cross-project and project task views. Both views
@@ -328,6 +633,14 @@ uncertain and stopping work visible rather than implying completion. Cards open
 the same task detail as list rows; the attention inbox remains available in either
 view. Provide readable narrow-screen navigation between columns.
 
+Attention appears alongside work state rather than replacing it. Keep actionable
+readiness, successful completion, cancellation and provider closure without
+delivery visibly distinguishable. Provider closure alone does not establish task
+completion. Prioritise the task's meaning, current situation and next actor;
+supporting identifiers and timestamps must remain readable and accessible without
+competing with that information. These refinements do not change the existing
+board state mapping.
+
 Board columns describe Ensemble work, not GitHub issue state or Project fields.
 The board does not grant arbitrary status changes or require drag-and-drop for the
 MVP. Any offered transition must use an existing permitted command and preserve
@@ -336,10 +649,12 @@ bypass a hold or silently write to GitHub.
 
 ### Task creation and project setup
 
-Provide a substantial task composer with project selection, desired outcome and
-detailed brief, optional reference links, permitted explicit assignee selection
-and task dependencies. Use Create and start as the primary action and Save draft
-as the secondary action. Explain before submission that starting is subject to
+Provide a simple initial task composer that supports a substantial brief. Keep
+project selection, title and desired outcome prominent. Progressively disclose
+optional context, reference links, permitted explicit assignee selection and task
+dependencies; show a summary of supplied optional settings when collapsed. Keep
+entered values and field errors accessible through disclosure. Use Create and start
+as the primary action and Save draft as the secondary action. Explain before submission that starting is subject to
 project state, dependencies, capacity and execution holds. Show the persisted
 state and reason for any wait after submission; creation does not imply running.
 These controls must preserve existing readiness and admission rules.
@@ -376,13 +691,30 @@ success, confirmed failure or uncertain. Do not present local or optimistic stat
 as a confirmed GitHub update. Refreshing or retrying must preserve the existing
 remote-write reconciliation and permission rules.
 
+### Task detail
+
+The initial task view presents the outcome, current situation and next actor,
+unresolved decisions, and relevant results or evidence before detailed history.
+Keep delivery observations, artifacts, dependencies, assignments and captured
+conversations accessible within task detail. Understanding current work
+must not require reading raw runtime output.
+
+Preserve the task, assignment and conversation hierarchy: the task retains the
+outcome and accountable lead, assignments identify delegated responsibility, and
+conversations supply supporting history. Use recorded facts and attributed,
+source-faithful excerpts for the overview. Do not invent narrative summaries,
+recommendations or ownership when the evidence is absent. Unavailable or stale
+evidence remains explicit. This presentation adds no terminal, embedded browser
+or complete-transcript capability.
+
 ### Readable task histories
 
 Default to meaningful task activity and group conversation content by durable
 assignment. Identify each group by assignment, assignee, latest status and time,
 with a source-faithful excerpt rather than an invented summary. Older completed
-groups can be collapsed. Opening a group initially shows the latest three available
-messages and its result, with Show earlier for the rest. Long messages have
+groups can be collapsed. Opening a group initially shows a bounded recent preview
+and its result, with Show earlier for the rest. The preview count is a presentation
+choice, not a fixed acceptance requirement. Long messages have
 expandable previews. Provide Expand all, Collapse all and a chronological view of
 available captured conversation content, retaining omission and redaction notices.
 
@@ -407,6 +739,15 @@ custom text when the request permits it. A recommended or preselected option is
 not a submitted answer. Validate each answer against its question and keep
 unfinished input on submission failure.
 
+The full Ensemble question model is distinct from the selected runtime's supported
+native inputs. The 3 October 2026 acceptance amendment retains the full form model
+above, qualified through deterministic service/browser tests or Ensemble question
+tools. Native MVP acceptance uses the bounded shapes qualified by #739: the
+observed single-choice/custom-text round trip and deterministic grouped-shape
+coverage. Native standalone free text, multiple selection and recommendation
+fields are not additional MVP runtime-proof gates. Unsupported native requests
+remain visibly unresolved, without fabricated answers or silent chat conversion.
+
 Persist answers before confirming submission and route them to the requesting
 assignment/runtime request, rather than treating them as an unrelated message to
 the lead. Replayed submissions must not answer or resume work twice. Restart must
@@ -417,6 +758,26 @@ unavailable or unsupported runtime interaction explicitly rather than fabricatin
 an answer or silently treating it as ordinary chat. Structured runtime bridging
 requires qualification; the existing plain-text question tool alone is not evidence
 of support for these interactions.
+
+UI05 #743 implements the action Inbox and shared exact request view at
+`/app/inbox` and `/app/tasks/:taskId?request=:interactionId`. Its summary queue
+uses 100-row fingerprinted pages over the bounded 10,000-task catalog. Selected
+forms are read independently of queue and history pages. Approval and recovery
+items retain their exact existing material/control destinations. Unknown ownership
+or age is labelled explicitly. Answers are durable decisions; correction requires
+a new agent request. Transport failures reconcile the original frozen command and
+key before editing can resume.
+
+The version-1 Ensemble form retains up to 32 questions, 100 options per question,
+512-character IDs/labels, 16,000-character text fields, and independent 256 KiB
+UTF-8 form/answer limits. Only the operator command JSON route allows the answer
+limit plus its mechanically derived strict command envelope; other commands retain
+their 64 KiB raw limit. Unsafe exact forms are withheld in full. Persisted answers
+retain original requester/work/version attribution, and fresh responses reject
+replaced, cancelled, completed-assignment or ambiguous identity. A successful
+requesting terminal or ordinary continuation alone does not supersede an own-tool
+question. Receipts replay before fresh eligibility checks. See
+[UI05 evidence](evidence/ui05-inbox-questions.md) for validation and retained limits.
 
 Questions and approvals are durable and scoped. Approval includes the action,
 target, requester and reviewed material; changed material invalidates approval.
@@ -502,11 +863,24 @@ without that proof, independent holds and changed source text remain held. Expli
 issue closure requires observed open before the effect; a concurrent independent
 closure between that read and write remains an attribution limit.
 
-This implementation has deterministic service/provider/operator coverage. Required
-real GitHub/Codex/browser delivery journeys remain unrun without a named resource,
-operation, credential, runtime-turn and cleanup grant. See the
-[S07a evidence inventory](evidence/s07a-github-delivery.md). S07a is incomplete;
-release, operations, redesigned UI and cutover are separate gates.
+This implementation has deterministic service/provider/operator coverage. The bounded
+real GitHub/Codex/browser handback and through-merge journeys and cleanup are
+qualified in the [S07a evidence inventory](evidence/s07a-github-delivery.md);
+its original limits and failed checkpoints remain visible. The native UI gate
+#736 is closed/completed. [S07b](evidence/s07b-release-candidate.md) assembles
+the candidate inventory and deterministic production-provider/UI integration;
+physical sleep/wake, final operations and cutover remain separate gates.
+
+On startup, after complete provider/source reconciliation and before scheduler
+admission, a queued inbox request may receive one durable fresh generation when
+only provider-derived task versions changed. The exact ready intent must never
+have been admitted; captured source identity/digest, assignment/instruction/profile
+revisions, immutable task-control command receipts and nonderived policy/repository snapshots must match. Independent
+Stop/ownership, unfinished execution, effect or recovery evidence prevents this
+supersession. The old captured request/context material remains immutable and historical, with an
+explicit old-to-new receipt; retirement is not a successful terminal. Legacy
+requests lacking the required anchor fail closed. Held or admitted work still
+requires its existing recovery path.
 
 ## Review checkpoint
 
@@ -534,6 +908,16 @@ acceptance scenario**. That scenario remains unproved; no native availability is
 claimed. Delivery [UI03 #741](https://github.com/chrisbanes/ensemble/issues/741)
 adds attention overview, shared List/Board and atomic local composer, with
 [contract](design/ui03-tasks.md) and [service/browser evidence](evidence/ui03-tasks.md).
-UI01/UI04–UI07 screens, runtime-question integration and parent #736
-final acceptance remain separate. Existing controls stay available. This
+UI01/UI04–UI07 screens and runtime-question integration retain their own
+qualified evidence; parent #736 is closed/completed as of 4 October 2026. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
+
+Delivery [UI06 #744](https://github.com/chrisbanes/ensemble/issues/744) implements the [configuration/recovery presentation contract](design/ui06-configuration.md), retaining exact private editors and operational destinations. Production-bundle integration is qualified with disposable SQLite and deterministic runtime/provider fixtures; this does not replace live-runtime, provider or release evidence.
+
+Delivery [UI08 #765](https://github.com/chrisbanes/ensemble/issues/765) provides
+the shared owned shadcn/ui source and semantic tokens across the React shell,
+configuration/recovery screens and retained production HTML. See the [UI08
+contract](design/ui08-foundation.md) and [fixture evidence](evidence/ui08-foundation.md).
+It changes presentation only; it does not add task-detail, search, or Inbox
+capabilities, and it does not qualify the web-disabled diagnostic fallback for
+production visual parity.

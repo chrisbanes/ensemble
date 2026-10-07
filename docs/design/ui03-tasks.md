@@ -2,6 +2,13 @@
 
 Delivery UI03 #741 adds the `/app` attention preview, `/app/tasks` and `/app/projects/:id` List/Board views, and `/app/tasks/new`. One complete aggregate feeds both presentations and their shared URL filters. Rows and cards open the existing `/task/:id`; Inbox links `/coordination`. Project controls, local task configuration, Runtime and Coordination remain operational. UI04 #742, UI05 #743 and UI06 #744 retain their replacement responsibilities; UI07 and parent #736 acceptance remain separate.
 
+The 3 October 2026 [operator UX refinement](../SPEC.md#operator-interface-and-human-requests)
+adds requirements for evidence-backed next actors, separate attention and work
+state, and progressive composer disclosure. The [reviewed design handoff](../../design/DESIGN.md#approved-refinement-brief--3-october-2026)
+records the completed Pen revision and its static review. The delivery record below and existing evidence
+do not establish implementation or qualification of those refinements. The board
+mapping and command/admission contracts remain unchanged.
+
 ## Creation and admission
 
 `task.create` accepts optional unique same-project `blockerTaskIds` (maximum 128) and `initialAssignment: {assignmentId, profileId}`. Its one outer transaction reuses private dependency and assignment policy before committing the original receipt and waking admission. Invalid profile/project/edge policy rolls the entire creation back. An explicit permitted active assignee bypasses routing; admission still enforces project configuration, pause, capacity, dependency, Stop and ownership holds. Assignment result accountability remains with the retained task lead.
@@ -35,3 +42,7 @@ Every first or deliberate reconciliation POST requires successful frozen-record 
 Pending/unknown input cannot edit, rekey, change project or start another creation. Unknown survives subsequent authentication, permission, availability, validation and conflict failures. Only an exact original receipt matching kind/key/task/project/open/ready/final-version confirms it. No automatic replay occurs. Restoration happens after authentication; expiry/sign-out unmount private UI. This is same-tab on-device recovery, not durable Ensemble work or cross-device storage. No credential, session/CSRF token or fetched API cache is stored.
 
 The existing guarded listener owns Host, exact Origin, sessions, CSRF, strict JSON/byte bounds and same-origin assets/APIs. This delivery adds no deployment, credentials, actual model call, native structured-input availability or release/cutover claim. Qualification is recorded in [UI03 evidence](../evidence/ui03-tasks.md).
+
+## Shared command implementation
+
+The composer and private configuration now share immutable submission ownership, send admission and outcome settlement. Task receipt identity and verified same-tab recovery remain composer policy. Unmounting invalidates completion effects while leaving the frozen unknown record available to the next authenticated mount; reconciliation remains deliberate. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.

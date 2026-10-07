@@ -78,6 +78,7 @@ test("task catalog pages exclude private retained revisions and classify depende
     "function",
     "task catalog is publicly available",
   );
+  await f.service.provisionTask(taskId);
   const page = await boundary.readTaskListPage?.();
   const task = page?.data.tasks.find((x) => x.id === taskId);
   assert.ok(task);
@@ -357,7 +358,7 @@ test("a complete task aggregate rejects changing membership and repeated page cu
   const filtered = filterTasks(all.tasks, filters);
   assert.equal(filtered.length, 12);
   assert.ok(filtered.every((t) => taskColumn(t) === "Paused"));
-  assert.ok(filtered.every((t) => taskDetailHref(t) === `/task/${t.id}`));
+  assert.ok(filtered.every((t) => taskDetailHref(t) === `/app/tasks/${t.id}`));
   assert.deepEqual(
     parseTaskFilters("?project=bad&source=bad&state=bad&ready=bad&view=bad"),
     { project: "", state: "", source: "", ready: "", q: "", view: "list" },
@@ -594,6 +595,7 @@ test("shared task reasons retain all current interventions and deduplicate uncer
   const ids = await projectFixture(f, false),
     taskId = createTask(f, ids.projectId, "Action", true),
     api = new OperatorApi(f.service, [f.directory]);
+  await f.service.provisionTask(taskId);
   const template = (await api.readTaskListPage()).data.tasks.find(
     (t) => t.id === taskId,
   );

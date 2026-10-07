@@ -14,6 +14,7 @@ import {
   LocalOperatorHttp,
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
+import { seedReviewTask } from "./fixtures/task-review.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 test("one guarded listener serves shell and authenticated JSON with rotated CSRF", async (t) => {
   const f = await createOperatorFixture();
@@ -22,9 +23,13 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   await mkdir(join(bundlePath, "assets"), { recursive: true });
   await writeFile(
     join(bundlePath, "index.html"),
-    '<html><script src="/assets/main.js"></script></html>',
+    '<html><link rel="stylesheet" href="/assets/main.css"><script src="/assets/main.js"></script></html>',
   );
   await writeFile(join(bundlePath, "assets/main.js"), 'console.log("static");');
+  await writeFile(
+    join(bundlePath, "assets/main.css"),
+    "body { color: white; }",
+  );
   const authFile = join(f.directory, "auth");
   await OperatorAuth.initialize(authFile, "fixture-password");
   let now = 100;
@@ -36,12 +41,14 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
     absoluteTimeoutMs: 3000,
   });
   t.after(() => auth.close());
+  const bundle = await OperatorWebBundle.open(bundlePath);
+  assert.deepEqual(bundle.stylesheets, ["/assets/main.css"]);
   const http = new LocalOperatorHttp(
     new LocalOperatorUi(f.service.domain()),
     auth,
     {
       web: new OperatorWebBoundary(
-        await OperatorWebBundle.open(bundlePath),
+        bundle,
         new OperatorApi(f.service, [f.directory]),
       ),
     },
@@ -50,6 +57,15 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   t.after(() => http.stop());
   const origin = `http://127.0.0.1:${port}`;
   assert.equal((await fetch(`${origin}/app`)).status, 200);
+  const loginPage = await fetch(`${origin}/runtime`);
+  const loginHtml = await loginPage.text();
+  assert.equal(loginPage.status, 200);
+  assert.match(loginHtml, /<body class="legacy-operator">/);
+  assert.match(loginHtml, /<link rel="stylesheet" href="\/assets\/main\.css">/);
+  const stylesheet = await fetch(`${origin}/assets/main.css`);
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get("content-type") ?? "", /text\/css/);
+  assert.equal(await stylesheet.text(), "body { color: white; }");
   assert.equal((await fetch(`${origin}/api/operator/workspace`)).status, 401);
   for (const path of [
     "/api/operator/task-list",
@@ -360,5 +376,218 @@ test("HTTPS configured origin retains Secure host-only cookie and rejects loopba
       body: JSON.stringify({ password: "fixture password" }),
     });
     assert.equal(login.status, requestOrigin === configured ? 200 : 403);
+  }
+});
+
+async function webLogin(web: { origin: string; password: string }) {
+  const anonymous = await fetch(`${web.origin}/api/operator/session`);
+  const anon = (await anonymous.json()) as { csrfToken: string };
+  const response = await fetch(`${web.origin}/api/operator/login`, {
+    method: "POST",
+    headers: {
+      cookie: anonymous.headers.get("set-cookie")!.split(";")[0]!,
+      origin: web.origin,
+      "content-type": "application/json",
+      "x-csrf-token": anon.csrfToken,
+    },
+    body: JSON.stringify({ password: web.password }),
+  });
+  assert.equal(response.status, 200);
+  return {
+    cookie: response.headers.get("set-cookie")!.split(";")[0]!,
+    csrfToken: ((await response.json()) as { csrfToken: string }).csrfToken,
+  };
+}
+async function webLogout(
+  web: { origin: string },
+  session: { cookie: string; csrfToken: string },
+) {
+  const response = await fetch(`${web.origin}/api/operator/logout`, {
+    method: "POST",
+    headers: {
+      cookie: session.cookie,
+      origin: web.origin,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrfToken,
+    },
+    body: "{}",
+  });
+  assert.equal(response.status, 200);
+}
+
+test("every shared curated publication rechecks exact session after actual private reads on logout and expiry", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(
+    f,
+    "Session projection",
+    "Retained session private title",
+  );
+  const result = a.result("Retained private result");
+  const web = await f.startWeb();
+  const routes = [
+    `/api/operator/tasks/${a.taskId}`,
+    `/api/operator/tasks/${a.taskId}/review?resultId=${result.resultId}`,
+    `/api/operator/assignments/${a.assignmentId}/history`,
+    `/api/operator/task-list`,
+    `/api/operator/projects/${a.projectId}/composer-options`,
+    `/api/operator/runtime`,
+  ];
+  const original = OperatorWebBoundary.prototype.read;
+  t.after(() => {
+    OperatorWebBoundary.prototype.read = original;
+  });
+  for (const route of routes)
+    for (const mode of ["logout", "expiry"]) {
+      const session = await webLogin(web);
+      const valid = await fetch(web.origin + route, {
+        headers: { cookie: session.cookie },
+      });
+      assert.equal(valid.status, 200);
+      await valid.arrayBuffer();
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>((r) => (release = r)),
+        arrival = new Promise<void>((r) => (entered = r));
+      OperatorWebBoundary.prototype.read = async function (path, query) {
+        const data = await original.call(this, path, query);
+        entered();
+        await gate;
+        return data;
+      };
+      const pending = fetch(web.origin + route, {
+        headers: { cookie: session.cookie },
+      });
+      try {
+        await arrival;
+        if (mode === "logout") await webLogout(web, session);
+        else f.advanceClock(60000);
+        release();
+        const response = await pending;
+        assert.equal(response.status, 401, route);
+        const body = await response.text();
+        assert.match(body, /unauthenticated/);
+        assert.doesNotMatch(
+          body,
+          /Retained session private title|Retained private result|sourceId|assignmentId/,
+        );
+      } finally {
+        release();
+        await pending;
+        OperatorWebBoundary.prototype.read = original;
+      }
+    }
+});
+
+test("private command acknowledgement withholds its receipt after logout without replaying a recorded effect", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const a = await seedReviewTask(f);
+  const result = a.result("Exact retained result");
+  const web = await f.startWeb();
+  const session = await webLogin(web);
+  const command = {
+    type: "review.view",
+    key: randomUUID(),
+    taskId: a.taskId,
+    sourceId: a.source.sourceId,
+    resultIds: [result.resultId],
+  };
+  const original = OperatorApi.prototype.execute;
+  t.after(() => {
+    OperatorApi.prototype.execute = original;
+  });
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((r) => (release = r)),
+    arrival = new Promise<void>((r) => (entered = r));
+  OperatorApi.prototype.execute = async function (body) {
+    const receipt = await original.call(this, body);
+    entered();
+    await gate;
+    return receipt;
+  };
+  const pending = fetch(`${web.origin}/api/operator/commands`, {
+    method: "POST",
+    headers: {
+      cookie: session.cookie,
+      origin: web.origin,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrfToken,
+    },
+    body: JSON.stringify(command),
+  });
+  let saved: unknown;
+  try {
+    await arrival;
+    saved = f.service.taskReview().read(a.taskId).viewed;
+    assert.ok(saved);
+    await webLogout(web, session);
+    release();
+    const response = await pending;
+    assert.equal(response.status, 401);
+    assert.doesNotMatch(await response.text(), new RegExp(command.key));
+  } finally {
+    release();
+    await pending;
+    OperatorApi.prototype.execute = original;
+  }
+  const current = await webLogin(web);
+  const replay = await fetch(`${web.origin}/api/operator/commands`, {
+    method: "POST",
+    headers: {
+      cookie: current.cookie,
+      origin: web.origin,
+      "content-type": "application/json",
+      "x-csrf-token": current.csrfToken,
+    },
+    body: JSON.stringify(command),
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(((await replay.json()) as { key: string }).key, command.key);
+  assert.deepEqual(f.service.taskReview().read(a.taskId).viewed, saved);
+});
+
+test("source refresh acknowledgement rechecks exact session after completed actual service refresh", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  await seedReviewTask(f);
+  const web = await f.startWeb();
+  const original = OperatorApi.prototype.refreshSources;
+  t.after(() => {
+    OperatorApi.prototype.refreshSources = original;
+  });
+  for (const mode of ["logout", "expiry"]) {
+    const session = await webLogin(web);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((r) => (release = r)),
+      arrival = new Promise<void>((r) => (entered = r));
+    OperatorApi.prototype.refreshSources = async function () {
+      const data = await original.call(this);
+      entered();
+      await gate;
+      return data;
+    };
+    const pending = fetch(`${web.origin}/api/operator/source-refresh`, {
+      method: "POST",
+      headers: {
+        cookie: session.cookie,
+        origin: web.origin,
+        "content-type": "application/json",
+        "x-csrf-token": session.csrfToken,
+      },
+      body: "{}",
+    });
+    try {
+      await arrival;
+      if (mode === "logout") await webLogout(web, session);
+      else f.advanceClock(60000);
+      release();
+      const response = await pending;
+      assert.equal(response.status, 401);
+      assert.match(await response.text(), /unauthenticated/);
+    } finally {
+      release();
+      await pending;
+      OperatorApi.prototype.refreshSources = original;
+    }
   }
 });

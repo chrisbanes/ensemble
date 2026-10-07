@@ -1,4 +1,17 @@
+import {
+  questionFormSchema,
+  questionAnswersSchema,
+  questionPayloadLimit,
+} from "../core/question-forms.js";
+import {
+  taskReviewReadSchema,
+  feedbackReferenceSchema,
+} from "../core/task-review.js";
 import { z } from "zod";
+import {
+  githubConfigurationSchema,
+  readinessSchema,
+} from "../core/github-source-contracts.js";
 export const uuid = z.string().uuid();
 const revision = z.number().int().positive().safe();
 const time = z.number().int().nonnegative().safe();
@@ -256,6 +269,12 @@ export const assignmentSchema = z
     assignmentId: uuid,
     profileId: uuid,
     name: safeText,
+    brief: safeText.optional(),
+    requesterAssignmentId: uuid.nullable().optional(),
+    resultDestination: safeText.optional(),
+    resultRecipientAssignmentId: uuid.nullable().optional(),
+    resultRecipientDisposition: safeText.optional(),
+    waitReason: safeText.optional(),
     version: revision,
     state: z.enum(["pending", "running", "completed", "held", "cancelled"]),
     profileRevision: revision,
@@ -270,7 +289,12 @@ const message = z
     eventId: uuid,
     eventType: z.string(),
     recipientAssignmentId: uuid,
-    deliveryState: z.enum(["pending", "queued", "delivered"]),
+    deliveryState: z.enum([
+      "pending",
+      "queued",
+      "delivered",
+      "operator-reconciled",
+    ]),
     createdAt: time,
     text: safeText.optional(),
     decision: z.enum(["approved", "denied"]).optional(),
@@ -279,7 +303,9 @@ const message = z
     resultId: uuid.optional(),
     routingOperationId: uuid.optional(),
     routingReason: safeText.optional(),
+    questionAnswers: questionAnswersSchema.optional(),
     interactionId: uuid.optional(),
+    reference: feedbackReferenceSchema.optional(),
   })
   .strict();
 const result = z
@@ -419,6 +445,117 @@ const source = z
   })
   .strict()
   .nullable();
+export const reviewReadSchema = envelope(taskReviewReadSchema);
+export const deliveryReadSchema = z
+  .object({
+    mode: z.enum(["reviewable-pr", "through-merge"]),
+    policyVersion: revision,
+    blockers: z.array(text).max(128),
+    omittedBlockerCount: z.number().int().nonnegative(),
+    omittedActionCount: z.number().int().nonnegative(),
+    binding: z
+      .object({
+        revision,
+        number: revision,
+        repositoryName: text,
+        headSha: text,
+        state: z.enum(["OPEN", "CLOSED", "MERGED"]),
+        observedAt: time,
+        readError: safeText,
+        omittedCheckCount: z.number().int().nonnegative(),
+        omittedFeedbackCount: z.number().int().nonnegative(),
+        checks: z
+          .array(
+            z
+              .object({
+                name: safeText,
+                sha: text,
+                status: z.enum(["success", "pending", "failure"]),
+              })
+              .strict(),
+          )
+          .max(128),
+        feedback: z
+          .array(
+            z
+              .object({
+                nodeId: text,
+                kind: text,
+                author: safeText,
+                body: safeText,
+                commitSha: safeText,
+                updatedAt: text,
+                state: text,
+              })
+              .strict(),
+          )
+          .max(128),
+      })
+      .strict()
+      .nullable(),
+    actions: z
+      .array(
+        z
+          .object({
+            operationId: uuid,
+            kind: text,
+            state: text,
+            reason: safeText,
+            createdAt: time,
+            updatedAt: time,
+          })
+          .strict(),
+      )
+      .max(128),
+  })
+  .strict();
+export const searchQuerySchema = z
+  .object({
+    query: z.string().trim().min(1).max(256),
+    projectId: uuid.optional(),
+    type: z.enum(["task", "decision", "result"]).optional(),
+    after: z.coerce.number().int().nonnegative().optional(),
+    before: z.coerce.number().int().nonnegative().optional(),
+    historical: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
+    cursor: z
+      .string()
+      .regex(/^[a-f0-9-]{36}(?::decision:[0-9]+)?$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(50),
+  })
+  .strict();
+export const searchReadSchema = envelope(
+  z
+    .object({
+      matches: z
+        .array(
+          z
+            .object({
+              recordId: text,
+              type: z.enum(["task", "decision", "result"]),
+              taskId: uuid,
+              projectId: uuid,
+              projectName: safeText,
+              taskTitle: safeText,
+              sourceId: uuid.nullable(),
+              resultId: uuid.nullable(),
+              excerpt: safeText,
+              createdAt: time,
+              historical: z.boolean(),
+              href: text,
+            })
+            .strict(),
+        )
+        .max(50),
+      nextCursor: text.nullable(),
+      coverage: z.literal("retained-records-only"),
+      omittedCount: time,
+    })
+    .strict(),
+);
 export const taskSchema = envelope(
   z
     .object({
@@ -434,6 +571,7 @@ export const taskSchema = envelope(
         })
         .strict(),
       lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
+      leadAssignmentId: uuid.nullable().optional(),
       assignments: z.array(assignmentSchema),
       admission: z
         .object({
@@ -500,6 +638,16 @@ export const taskSchema = envelope(
           ),
         })
         .strict(),
+      review: taskReviewReadSchema.optional(),
+      delivery: deliveryReadSchema.optional(),
+      commentPolicy: z
+        .object({
+          available: z.boolean(),
+          mode: z.enum(["allow", "approval"]).nullable(),
+          reason: safeText,
+        })
+        .strict()
+        .optional(),
       contentUnavailable: z.boolean(),
     })
     .strict(),
@@ -519,6 +667,7 @@ const binding = {
 export const assignmentHistorySchema = envelope(
   z
     .object({
+      visibilityRevision: hash.optional(),
       items: z.array(
         z
           .object({
@@ -554,6 +703,7 @@ export const assignmentHistorySchema = envelope(
           .strict(),
       ),
       omittedItemCount: time,
+      omittedTurnCount: z.number().int().nonnegative(),
     })
     .strict(),
 );
@@ -624,6 +774,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       recipientAssignmentId: uuid,
       expectedAssignmentVersion: revision,
       message: z.string().trim().min(1).max(16000),
+      reference: feedbackReferenceSchema.optional(),
     })
     .strict(),
   z
@@ -633,7 +784,45 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       taskId: uuid,
       interactionId: uuid,
       expectedRevision: revision,
-      answer: z.string().trim().min(1).max(16000),
+      answer: z.string().min(1).max(16000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("question.form.answer"),
+      taskId: uuid,
+      interactionId: uuid,
+      expectedRevision: revision,
+      answers: questionAnswersSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("question.native.answer"),
+      taskId: uuid,
+      interactionId: uuid,
+      expectedRevision: revision,
+      answers: z
+        .record(
+          z.string().min(1).max(512),
+          z
+            .object({
+              answers: z.array(z.string().min(1).max(16000)).length(1),
+            })
+            .strict(),
+        )
+        .superRefine((value, ctx) => {
+          if (
+            new TextEncoder().encode(JSON.stringify(value)).byteLength >
+            questionPayloadLimit
+          )
+            ctx.addIssue({
+              code: "custom",
+              message: "Answer payload exceeds limit",
+            });
+        }),
     })
     .strict(),
   z
@@ -659,8 +848,535 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       recipientAssignmentId: uuid,
     })
     .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("project.create"),
+      name: z.string().trim().min(1).max(512),
+      leadProfileId: uuid.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("project.configure"),
+      expectedVersion: revision,
+      name: z.string().trim().min(1).max(512).optional(),
+      paused: z.boolean().optional(),
+      leadProfileId: uuid.nullable().optional(),
+      instructions: text.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("profile.create"),
+      profileId: uuid,
+      name: z.string().trim().min(1).max(512),
+      instructions: text,
+      capabilities: text,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("profile.configure"),
+      profileId: uuid,
+      expectedVersion: revision,
+      name: z.string().trim().min(1).max(512).optional(),
+      instructions: text.optional(),
+      capabilities: text.optional(),
+      revoked: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("routing.configure"),
+      expectedVersion: revision,
+      enabled: z.boolean(),
+      guidance: text,
+      credentialRef: z
+        .string()
+        .regex(/^env:[A-Z][A-Z0-9_]*$/)
+        .nullable()
+        .optional(),
+      candidateProfileIds: z
+        .array(uuid)
+        .max(128)
+        .refine((ids) => new Set(ids).size === ids.length),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.configure"),
+      expectedVersion: revision,
+      ...githubConfigurationSchema.shape,
+      credentialRef: githubConfigurationSchema.shape.credentialRef.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("capacity.configure"),
+      globalLimit: revision,
+      projectOverrides: z.record(uuid, revision.nullable()),
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.preview"),
+      selectionId: z.string().trim().min(1).max(512),
+      expectedVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...domainBase,
+      type: z.literal("github.place"),
+      taskId: uuid,
+      chosenProjectId: uuid,
+      expectedVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.view"),
+      taskId: uuid,
+      sourceId: uuid.nullable(),
+      resultIds: z.array(uuid).max(128),
+    })
+    .strict(),
+  z
+    .object({ ...base, type: z.literal("delivery.refresh"), taskId: uuid })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.review"),
+      taskId: uuid,
+      operationId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.confirm"),
+      taskId: uuid,
+      reviewId: uuid,
+      expectedRevision: revision,
+      materialHash: hash,
+      decision: z.enum(["approved", "denied"]),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("comment.send"),
+      taskId: uuid,
+      expectedTaskVersion: revision,
+      body: z.string().trim().min(1).max(16000),
+      reviewId: uuid.optional(),
+    })
+    .strict(),
 ]);
+export const configurationReceiptSchema = z
+  .object({
+    kind: z.literal("configuration"),
+    key: uuid,
+    recorded: z.literal(true),
+    result: z.discriminatedUnion("commandType", [
+      z
+        .object({
+          commandType: z.enum(["project.create", "project.configure"]),
+          resourceId: uuid,
+          version: revision,
+          paused: z.boolean(),
+          leadProfileId: uuid.nullable(),
+          instructionsRevision: revision,
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.enum(["profile.create", "profile.configure"]),
+          resourceId: uuid,
+          version: revision,
+          revoked: z.boolean(),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("routing.configure"),
+          resourceId: uuid,
+          version: revision,
+          enabled: z.boolean(),
+          credentialConfigured: z.boolean(),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.configure"),
+          resourceId: uuid,
+          version: revision,
+          credentialConfigured: z.boolean(),
+          selectionCount: time,
+          repositoryCount: time,
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("capacity.configure"),
+          resourceId: z.literal("system:capacity"),
+          globalLimit: revision,
+          defaultProjectLimit: z.literal(2),
+          projectOverrides: z.record(uuid, revision),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.preview"),
+          resourceId: uuid,
+          selectionId: z.string().min(1).max(512),
+          configVersion: revision,
+          active: z.literal(true),
+        })
+        .strict(),
+      z
+        .object({
+          commandType: z.literal("github.place"),
+          resourceId: uuid,
+          projectId: uuid,
+          version: revision,
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+export const runtimeSettingsSchema = envelope(
+  z
+    .object({
+      globalLimit: revision,
+      defaultProjectLimit: z.literal(2),
+      globalUsage: time,
+      projects: z.array(
+        z
+          .object({
+            project: projectSummarySchema,
+            limit: revision,
+            usage: time,
+            override: revision.nullable(),
+            tasks: z.array(
+              z
+                .object({
+                  taskId: uuid,
+                  title: safeText,
+                  paused: z.boolean(),
+                  held: z.boolean(),
+                  assignments: z.array(
+                    z.object({ assignmentId: uuid, name: safeText }).strict(),
+                  ),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
+export const recoveryObservationSchema = z.enum([
+  "exact-live",
+  "exact-terminal-completed",
+  "exact-terminal-failed",
+  "historical-only",
+  "conflicting",
+  "no-proof",
+  "unknown",
+  "termination-verified",
+  "termination-conflict",
+  "termination-unknown",
+  "receipt-accepted",
+  "retry-enqueued",
+]);
+const recoveryHolds = z
+  .object({
+    stop: z.boolean(),
+    writer: z.boolean(),
+    capacity: z.boolean(),
+    uncertainty: z.boolean(),
+    task: z.boolean(),
+  })
+  .strict();
+export const assignmentRecoverySchema = envelope(
+  z
+    .object({
+      assignment: assignmentSchema,
+      taskId: uuid,
+      project: projectSummarySchema,
+      held: z.boolean(),
+      holds: recoveryHolds,
+      evidenceAvailable: z.boolean(),
+      omittedCount: time,
+      records: z
+        .array(
+          z
+            .object({
+              workId: safeText,
+              generation: z
+                .object({
+                  workRevision: revision.nullable(),
+                  requestSequence: revision,
+                })
+                .strict(),
+              binding: z
+                .object({
+                  assignmentId: uuid,
+                  assignmentVersion: revision,
+                  instructionsRevision: revision,
+                  profileRevision: revision,
+                })
+                .strict()
+                .nullable(),
+              intentState: z.enum([
+                "ready",
+                "capacity-waiting",
+                "held",
+                "submitting",
+                "running",
+                "completed",
+                "reconciled",
+                "resolved-failed",
+                "unknown",
+              ]),
+              requestState: z
+                .enum(["queued", "active", "completed", "held", "unknown"])
+                .nullable(),
+              holds: recoveryHolds,
+              observations: z.array(recoveryObservationSchema).max(12),
+              pendingEffectCount: time,
+              noTurnSubmission: z
+                .object({
+                  id: uuid,
+                  source: z.literal("operator-adopted"),
+                  idleThreadMayExist: z.literal(true),
+                })
+                .strict()
+                .optional(),
+              preTurnRejection: z
+                .object({
+                  id: uuid,
+                  source: z.enum(["runtime", "operator-adopted"]),
+                  predecessorThreadId: safeText,
+                })
+                .strict()
+                .optional(),
+              receiptRecorded: z.boolean(),
+              workspace: z.enum(["preserved", "reconciled", "unknown"]),
+            })
+            .strict(),
+        )
+        .max(20),
+    })
+    .strict(),
+);
+export const sourceObservationSchema = envelope(
+  z
+    .object({
+      projects: z.array(
+        z
+          .object({
+            projectId: uuid,
+            selections: z.array(
+              z
+                .object({
+                  selectionId: safeText,
+                  state: z.enum([
+                    "complete",
+                    "partial",
+                    "never",
+                    "unavailable",
+                  ]),
+                  lastAttemptAt: z.string().nullable(),
+                  lastSuccessfulAt: z.string().nullable(),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
+export const profileConfigurationSchema = envelope(
+  z
+    .object({
+      profile: profileSummarySchema,
+      instructionPresent: z.boolean(),
+      instructionRevision: revision,
+      capabilities: safeText,
+    })
+    .strict(),
+);
+export const projectConfigurationSchema = envelope(
+  z
+    .object({
+      project: projectSummarySchema,
+      profiles: z.array(profileSummarySchema),
+      instructionsRevision: revision,
+      instructionPresent: z.boolean(),
+      routing: z
+        .object({
+          version: revision,
+          enabled: z.boolean(),
+          candidateProfileIds: z.array(uuid),
+          credentialConfigured: z.boolean(),
+          availability: z.enum([
+            "available",
+            "disabled",
+            "missing-client-credentials",
+            "no-eligible-candidates",
+          ]),
+        })
+        .strict(),
+      placements: z.array(
+        z
+          .object({
+            taskId: uuid,
+            projectId: uuid,
+            version: revision,
+            title: safeText,
+            choices: z.array(projectSummarySchema),
+          })
+          .strict(),
+      ),
+      source: z
+        .object({
+          version: revision,
+          credentialConfigured: z.boolean(),
+          selections: z.array(
+            z
+              .object({
+                id: safeText,
+                kind: z.enum(["repository", "search", "project"]),
+                descriptor: safeText,
+                active: z.boolean(),
+              })
+              .strict(),
+          ),
+          readiness: readinessSchema.nullable(),
+          repositories: z.array(
+            z.object({ repositoryId: safeText, ref: safeText }).strict(),
+          ),
+        })
+        .strict(),
+    })
+    .strict(),
+);
+export const questionReadSchema = z
+  .object({
+    data: z
+      .object({
+        taskId: uuid,
+        interactionId: uuid,
+        requestingAssignmentId: uuid,
+        conversationRevision: revision,
+        revision,
+        source: z.enum(["plain", "ensemble", "native"]),
+        status: z.enum([
+          "pending",
+          "recorded",
+          "stale",
+          "cancelled",
+          "offline",
+          "unsupported",
+          "unavailable",
+        ]),
+        form: questionFormSchema.nullable(),
+        answers: questionAnswersSchema.nullable(),
+        reason: safeText,
+        deliveryState: safeText,
+      })
+      .strict(),
+    observedAt: time,
+  })
+  .strict();
+export type QuestionRead = z.infer<typeof questionReadSchema>;
+export const inboxItemSchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    kind: z.enum(["question", "approval", "intervention"]),
+    urgency: z.number().int().min(0).max(1),
+    createdAt: time.nullable(),
+    taskId: uuid,
+    projectId: uuid,
+    projectName: safeText,
+    taskTitle: safeText,
+    requestingAssignmentId: uuid.nullable(),
+    requesterName: safeText,
+    interactionId: uuid.nullable(),
+    revision: revision.nullable(),
+    reason: safeText,
+    destination: z.string().max(512),
+    evidence: z.string().max(512),
+    conversation: z.string().max(512).nullable(),
+  })
+  .strict();
+export const inboxReadSchema = z
+  .object({
+    data: z
+      .object({
+        items: z.array(inboxItemSchema).max(100),
+        nextCursor: z.string().max(256).nullable(),
+        complete: z.boolean(),
+        unavailable: z.boolean(),
+      })
+      .strict(),
+    observedAt: time,
+  })
+  .strict();
+export type InboxItem = z.infer<typeof inboxItemSchema>;
+// Fixed strict command envelope maxima; question JSON independently remains <=256 KiB.
+export const questionCommandRawLimit =
+  questionPayloadLimit +
+  new TextEncoder().encode(
+    JSON.stringify({
+      type: "question.native.answer",
+      key: "f".repeat(36),
+      taskId: "f".repeat(36),
+      interactionId: "f".repeat(36),
+      expectedRevision: Number.MAX_SAFE_INTEGER,
+      answers: {},
+    }),
+  ).byteLength -
+  2;
+
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("native-question"),
+      key: uuid,
+      taskId: uuid,
+      interactionId: uuid,
+      revision,
+      recorded: z.literal(true),
+      deliveryState: z.literal("recorded"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("review"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      operation: z.enum(["review.view", "delivery.refresh"]),
+    })
+    .strict(),
+  configurationReceiptSchema,
   z
     .object({
       kind: z.literal("domain"),
@@ -699,6 +1415,46 @@ export const commandReceiptSchema = z.discriminatedUnion("kind", [
       recipientAssignmentId: uuid,
       eventType: z.string(),
       createdAt: time,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("comment-review"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      reviewId: uuid,
+      operationId: uuid,
+      revision,
+      materialHash: hash,
+      decision: z.enum(["pending", "approved", "denied"]),
+      body: safeText,
+      target: z
+        .object({ repositoryId: text, nodeId: text, number: revision })
+        .strict(),
+      taskVersion: revision,
+      sourceId: uuid,
+      sourceRevision: revision,
+      sourceDigest: hash,
+      policyVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("delivery"),
+      key: uuid,
+      recorded: z.literal(true),
+      taskId: uuid,
+      operationId: uuid,
+      state: z.enum([
+        "prepared",
+        "attempting",
+        "uncertain",
+        "confirmed-success",
+        "confirmed-failure",
+        "denied",
+      ]),
+      reason: safeText,
     })
     .strict(),
 ]);

@@ -1,3 +1,4 @@
+import { isOperatorDeliveryCaller } from "../core/delivery.js";
 import { z } from "zod";
 import {
   actionObservationSchema,
@@ -890,6 +891,15 @@ export class GitHubHttpDeliveryProvider implements GitHubDeliveryProvider {
   async performAction(
     record: DeliveryActionRecord,
   ): Promise<ProviderActionObservation> {
+    if (
+      isOperatorDeliveryCaller(record.binding) &&
+      (record.request.action.kind !== "issue.comment" ||
+        record.request.approval ||
+        record.request.action.target.nodeId !== record.binding.sourceNodeId ||
+        record.request.action.target.repositoryId !==
+          record.binding.sourceRepositoryId)
+    )
+      throw Error("Operator delivery only permits the bound issue.comment");
     const a = record.request.action;
     try {
       const repo = {

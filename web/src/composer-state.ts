@@ -6,6 +6,7 @@ import {
   type CommandReceipt,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
+import { CommandLifecycle } from "./command-lifecycle.js";
 export const storageKey = "ensemble.ui03.composer.v1";
 export const recoveryLimit = 262144,
   commandLimit = 65536;
@@ -140,17 +141,59 @@ export function writeRecovery(
   if (storage.getItem(storageKey) !== bytes || !readRecovery(storage))
     throw Error("recovery-readback-failed");
 }
+type CreationCommand = Extract<OperatorCommand, { type: "task.create" }>;
+function matchesCreationReceipt(
+  command: CreationCommand,
+  receipt: CommandReceipt,
+) {
+  return (
+    receipt.kind === "domain" &&
+    receipt.key === command.key &&
+    "state" in receipt.result &&
+    receipt.result.id === command.taskId &&
+    receipt.result.projectId === command.projectId &&
+    receipt.result.state === "open" &&
+    receipt.result.ready === command.ready &&
+    receipt.result.version === 1 + (command.blockerTaskIds?.length ?? 0)
+  );
+}
 export class ComposerState {
   input: ComposerInput = emptyInput();
   phase: "editable" | "pending" | "unknown" | "recorded" = "editable";
   notice = "";
   errors: Record<string, string> = {};
-  receipt: CommandReceipt | null = null;
+  private readonly lifecycle = new CommandLifecycle<CreationCommand>();
+  private generation = 0;
+  private active = true;
+  get receipt() {
+    return this.lifecycle.receipt;
+  }
+  get frozen() {
+    return this.lifecycle.frozen;
+  }
+  activate(changed: () => void) {
+    this.generation++;
+    this.active = true;
+    this.changed = changed;
+  }
+  captureScope() {
+    const generation = this.generation;
+    return () => this.active && generation === this.generation;
+  }
+  dispose() {
+    this.generation++;
+    this.active = false;
+    const command = this.frozen;
+    if (this.phase === "pending" && command) {
+      this.lifecycle.reset();
+      this.lifecycle.restoreUnknown(command);
+      this.phase = "unknown";
+    }
+  }
   recovered = false;
-  frozen: Extract<OperatorCommand, { type: "task.create" }> | null = null;
   constructor(
     private readonly storage: RecoveryStorage,
-    private readonly changed: () => void = () => {},
+    private changed: () => void = () => {},
   ) {
     const saved = readRecovery(storage);
     if (saved) {
@@ -158,7 +201,7 @@ export class ComposerState {
       this.recovered = true;
       if (saved.status === "unknown") {
         this.phase = "unknown";
-        this.frozen = saved.command;
+        this.lifecycle.restoreUnknown(saved.command);
         this.notice =
           "On-device submission outcome is unknown. Reconcile the exact original submission.";
       } else
@@ -167,7 +210,7 @@ export class ComposerState {
     }
   }
   private publish() {
-    this.changed();
+    if (this.active) this.changed();
   }
   edit(patch: Partial<ComposerInput>) {
     if (this.phase !== "editable") return;
@@ -197,7 +240,8 @@ export class ComposerState {
     this.publish();
   }
   async submit(client: OperatorClient, csrfToken: string, ready: boolean) {
-    if (this.phase === "pending" || this.phase === "recorded") return;
+    if (!this.active || this.phase === "pending" || this.phase === "recorded")
+      return;
     const wasUnknown = this.phase === "unknown";
     if (!wasUnknown) {
       this.errors = {};
@@ -243,7 +287,7 @@ export class ComposerState {
         this.publish();
         return;
       }
-      this.frozen = command;
+      this.lifecycle.freeze(command);
     }
     const command = this.frozen;
     if (!command) return;
@@ -256,7 +300,7 @@ export class ComposerState {
       });
     } catch {
       if (!wasUnknown) {
-        this.frozen = null;
+        this.lifecycle.reset();
         this.phase = "editable";
       }
       this.notice =
@@ -264,23 +308,16 @@ export class ComposerState {
       this.publish();
       return;
     }
+    const sending = this.lifecycle.begin();
+    if (!sending) return;
+    const isCurrent = this.captureScope();
     this.phase = "pending";
     this.notice = "Submitting the recorded creation request…";
     this.publish();
-    const result = await client.command(command, csrfToken);
-    const receiptMatches =
-      result.state === "recorded" &&
-      result.receipt.kind === "domain" &&
-      result.receipt.key === command.key &&
-      "state" in result.receipt.result &&
-      result.receipt.result.id === command.taskId &&
-      result.receipt.result.projectId === command.projectId &&
-      result.receipt.result.state === "open" &&
-      result.receipt.result.ready === command.ready &&
-      result.receipt.result.version ===
-        1 + (command.blockerTaskIds?.length ?? 0);
-    if (result.state === "recorded" && receiptMatches) {
-      this.receipt = result.receipt;
+    const result = await client.command(sending, csrfToken);
+    if (!isCurrent()) return;
+    const disposition = this.lifecycle.settle(result, matchesCreationReceipt);
+    if (disposition === "recorded") {
       this.phase = "recorded";
       this.notice = command.ready
         ? "Task recorded as Ready. Creation does not establish execution."
@@ -289,18 +326,14 @@ export class ComposerState {
         this.storage.removeItem(storageKey);
       } catch {}
       this.recovered = false;
-    } else if (
-      result.state === "recorded" ||
-      result.state === "unknown" ||
-      wasUnknown
-    ) {
+    } else if (disposition === "unknown") {
       this.phase = "unknown";
       this.notice =
         "Submission outcome is unknown. Reconcile the exact original submission; no automatic retry.";
     } else {
       this.phase = "editable";
-      this.frozen = null;
-      this.notice = `Submission rejected (${result.code}). Input retained.`;
+
+      this.notice = `Submission rejected (${result.state === "recorded" ? "command-outcome-unknown" : result.code}). Input retained.`;
       try {
         writeRecovery(this.storage, {
           version: 1,

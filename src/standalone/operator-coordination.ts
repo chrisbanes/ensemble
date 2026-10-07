@@ -270,13 +270,24 @@ function questionSection(
   view: CoordinationTaskView,
   domain: OperatorDomain,
   csrfToken: string,
+  webEnabled = false,
 ): string {
   const rows = view.questions
     .map((question) => {
       const requestingAssignment = question.requestingAssignmentId;
       const requesterLink = `<a href="${assignmentHref(requestingAssignment)}">${escapeHtml(assignmentLabel(requestingAssignment, domain))}</a>`;
-      const answer =
-        question.status === "open"
+      const full =
+        view.questionForms?.some(
+          (q) => q.interactionId === question.interactionId,
+        ) ||
+        view.runtimeQuestions?.some(
+          (q) => q.interactionId === question.interactionId,
+        );
+      const answer = full
+        ? webEnabled
+          ? `<p><a href="/app/tasks/${encodeURIComponent(taskId)}?request=${encodeURIComponent(question.interactionId)}">Open exact structured question</a>. Answer recording is separate from runtime delivery.</p>`
+          : `<p>Structured response unavailable in web-disabled diagnostic HTML; request remains unresolved until the shared web form is available.</p>`
+        : question.status === "open"
           ? textForm(
               "/coordination/control/question/answer",
               [
@@ -493,6 +504,7 @@ function taskPage(
   taskId: string,
   api: CoordinationOperatorApi,
   csrfToken: string,
+  webEnabled = false,
 ): string {
   const view = api.view().readTask(uuid.parse(taskId));
   const domain = api.domain();
@@ -521,7 +533,7 @@ function taskPage(
     .join("");
   const fallbackCount = view.attention.routingFallbacks.length;
   const availability = api.routingAvailability(String(view.task.projectId));
-  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${deliverySection(view, csrfToken)}${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
+  return `<main><h1>${escapeHtml(view.task.title)} coordination</h1><p>Task state: ${escapeHtml(view.task.state)}; ${view.task.ready ? "Ready" : "Not ready"}.</p><p>Project: <a href="/project/${encodeURIComponent(String(project.id))}">${escapeHtml(project.name)}</a>. <a href="/runtime/task/${encodeURIComponent(taskId)}">Task-scoped runtime controls and recovery</a>.</p>${lead}<section><h2>Assignments and admission</h2>${assignments ? `<ul>${assignments}</ul>` : "<p>No assignments.</p>"}<p>A selected or queued assignment is not a running turn; runtime intent and held/recovery state are separate evidence.</p></section><section><h2>Lead and assignee histories</h2>${histories ? `<ul>${histories}</ul>` : "<p>No runtime history is recorded.</p>"}</section>${deliverySection(view, csrfToken)}${routingSection(view, domain, availability)}${resultSection(taskId, view, domain, csrfToken)}${questionSection(taskId, view, domain, csrfToken, webEnabled)}${approvalSection(taskId, view, csrfToken)}${messageSection(taskId, view, domain, csrfToken)}<section><h2>Coordination history</h2>${view.completionRequests.length ? `<p>Completion requests: ${view.completionRequests.map((item) => `${escapeHtml(item.status)} (revision ${escapeHtml(item.revision)})`).join(", ")}.</p>` : "<p>No completion requests.</p>"}${fallbackCount ? `<p>${fallbackCount} routing fallback event(s) need review.</p>` : "<p>No routing fallback needs review.</p>"}</section></main>`;
 }
 
 function capturedHistory(history: ConversationHistoryAssignmentRead): string {
@@ -690,9 +702,9 @@ export class CoordinationOperatorRoutes {
       {
         method: "GET",
         path: "/coordination/task/:taskId",
-        handler: ({ params, csrfToken }) => ({
+        handler: ({ params, csrfToken, webEnabled }) => ({
           kind: "html",
-          body: taskPage(params.taskId ?? "", this.api, csrfToken),
+          body: taskPage(params.taskId ?? "", this.api, csrfToken, webEnabled),
         }),
       },
       {

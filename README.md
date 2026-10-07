@@ -78,6 +78,21 @@ before storage, with current exclusions reapplied when reading history. This is
 a bounded diagnostic view, not a complete transcript or ownership-release proof.
 Missing history does not change admission or completion gates.
 
+The shared task workspace now retains exact source and result revisions, scoped
+supplied evidence, captured context and separate local/GitHub replies. Search
+covers permitted retained tasks, decisions and results with historical navigation
+and preserved return state. Legacy advanced controls remain reachable.
+[UI04 evidence](docs/evidence/ui04-task-workspace.md) records the deterministic
+browser checks, one bounded live callback and remaining qualification limits.
+
+The action Inbox now lists cross-project questions, approvals and recorded
+interventions by urgency and age. Exact own-tool forms support grouped text,
+single-choice and multiple-choice answers, with preserved drafts and durable
+submission receipts shared with task detail. Qualified native single-choice/custom
+requests use their existing runtime delivery path. [UI05 evidence](docs/evidence/ui05-inbox-questions.md)
+records deterministic browser, SQLite, recovery and transport checks and the
+reused native runtime qualification.
+
 The service now includes local GitHub discovery for selected repository issues,
 searches and Projects, with provider-owned readiness and dependency holds.
 Operators can inspect source state and refresh it in the authenticated UI.
@@ -121,7 +136,12 @@ npm run check
 ```
 
 The checks cover types, lint, formatting, compilation and tests, including the
-operator's browser tests. Live runtime qualification is a separate, explicit
+operator's browser tests. `npm run test:fixture-preflight` checks writable temporary
+storage, real listeners, browser cleanup and evidence from an expected assertion
+failure. Set `ENSEMBLE_TEST_EVIDENCE_DIR` to an absolute, dedicated directory to
+retain bounded synthetic screenshots, phase manifests and allowlisted diagnostic
+logs. Test deadlines end waiting; they do not prove execution termination or
+complete cleanup. Live runtime qualification is a separate, explicit
 step. See the [development reference](docs/development.md) for commands and
 service contracts, or the [macOS operations guide](docs/operations/standalone-macos.md)
 for authentication, service management and backups.
@@ -155,3 +175,12 @@ The [foundation contract](docs/design/ui02-foundation.md) records the strict
 projection/receipt boundary and retained-control owners. UI01 native structured
 input and UI04–UI07 screen/acceptance work remain separate. This foundation does
 not establish release or cutover readiness.
+
+[UI06 configuration and recovery](docs/design/ui06-configuration.md) adds Settings, paused project/profile setup, explicit private replacements, source observations, capacity and curated recovery. Exact private editors and operational controls remain reachable; UI07 visual/usability and release qualification remain outstanding.
+
+[UI08 #765](docs/design/ui08-foundation.md) supplies locally owned shadcn/ui
+components, Dark / Neutral / Default tokens, self-hosted Inter and JetBrains
+Mono, and shared presentation for the retained production HTML forms. Its
+[evidence](docs/evidence/ui08-foundation.md) records fixture-browser behavior
+and the remaining composition gaps; final integrated UI acceptance remains
+with #736.

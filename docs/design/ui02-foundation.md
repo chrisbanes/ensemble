@@ -4,7 +4,7 @@ The React shell is staged at `/app`; `/` and all existing operator forms remain 
 
 ## Retained-control inventory
 
-Each semicolon-separated control is individually retained at the listed destination. No removal is authorized until its named child has replacement behavior, keyboard/browser evidence and UI07 #745 parity approval. JSON readiness describes this foundation, not replacement forms.
+Each semicolon-separated control is individually retained at the listed destination. No removal is authorized until its named child has replacement behavior, keyboard/browser evidence and UI07 #745 parity approval. JSON readiness describes this foundation. [UI06 configuration and recovery](ui06-configuration.md) records delivered replacements and the individual concrete retained dispositions.
 
 | Existing destination | Command/action | Controls/read destinations | Replacement owner | JSON readiness |
 | --- | --- | --- | --- | --- |
@@ -17,7 +17,10 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /project/:id | github.preview | preview selections; activation via preview receipt | UI06 #744 | no |
 | /project/:id | github.refresh | refresh observation | UI06 #744 | no |
 | /project/:id | github.place | conflicting placement | UI06 #744 | no |
-| /project/:id | delivery.configure | completion mode; scoped grants; required checks; set/clear credential reference | UI06 #744 retained exact policy/authority editor | no |
+| /project/:id | delivery.configure | completion mode; scoped grants; required checks; set/clear credential reference | UI06 #744 retained exact editor | no |
+| /coordination/task/:id | delivery.read | issue observation; Project field observations; PR identity/head/state; provider feedback; external action states; local task state; delivery holds | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/settle | Accept handback; Settle outcome as closed; task/delivery/policy revisions; repository/PR/node/head guard | UI04 #742 retained detail | no |
+| /coordination/task/:id | /coordination/control/delivery/refresh | refresh delivery observations | UI04 #742 retained detail | no |
 | /project/:id | task.create | draft; create and start; retained alongside delivered `/app/tasks/new` composer | UI03 #741 delivered | yes |
 | /task/:id | task.configure | local title; outcome; readiness | UI04 #742 | yes |
 | /task/:id | source.review | source identity; body; status; Project fields; native blockers; review; hold resolution | UI04 #742 | no |
@@ -30,9 +33,6 @@ Each semicolon-separated control is individually retained at the listed destinat
 | /runtime/assignment/:id | read | generation; holds; advanced recovery evidence | UI06 #744 | read subset |
 | /coordination/task/:id | /coordination/control/message | message recipient; exact version; durable message | UI04 #742 | yes |
 | /coordination/task/:id | /coordination/control/result/recipient | unresolved results; destination reconciliation | UI04 #742 | yes |
-| /coordination/task/:id | read | separate issue/Project, PR and task facts; delivery holds; action outcomes; provider feedback | UI04 #742 retained detail | no |
-| /coordination/task/:id | /coordination/control/delivery/settle | Accept handback; Settle outcome as closed; exact task/delivery/policy revisions and PR identity/head | UI04 #742 retained detail | no |
-| /coordination/task/:id | /coordination/control/delivery/refresh | Refresh delivery observations | UI04 #742 retained detail | no |
 | /coordination/assignment/:id | read | retained captured history; omissions; results | UI04 #742 | yes |
 | /coordination/task/:id | /coordination/control/question/answer | plain question and exact revision answer | UI05 #743 | yes |
 | /coordination/task/:id | /coordination/control/approval/decision | retained exact material; approve; deny | UI05 #743 | yes |
@@ -42,6 +42,19 @@ Each semicolon-separated control is individually retained at the listed destinat
 | `/assignment/:id` | read | captured instructions/profile revision and result destination | UI04 #742 | curated subset |
 
 The delivery rows record the existing S07a controls and the ownership in the [reviewed UI06 revision 2 plan](https://github.com/chrisbanes/ensemble/issues/744#issuecomment-5948676415): UI06 retains the exact policy/authority editor, while UI04 owns the task delivery facts, guarded handback settlement and observation refresh. These controls have no JSON delivery adapter in this foundation. Settlement records an operator decision; refresh requests provider observations. Neither action alone completes the local task.
+
+Advanced authenticated recovery routes added for the approved #737 pre-turn
+recovery boundary have no rendered form or new React control. The host operator
+supplies the reviewed evidence and exact command material under the existing
+Origin, session and CSRF checks; model tools have no adoption authority.
+
+| Advanced route | Owner and disposition |
+| --- | --- |
+| `/runtime/control/pre-turn/adopt` | #737 historical pre-turn evidence adoption; exact held generation, operator attestation and immutable command receipt. Witness acknowledgement appears on the shared task/assignment runtime history and assignment recovery view. |
+| `/runtime/control/pre-turn/recover` | #737 exact witness-bound recovery; independently verified termination and settled effects/workspace reconcile ownership without dispatch. Existing runtime history records the receipt and retained holds. |
+| `/runtime/control/no-turn/adopt` | #737 distinct historical no-turn-submission evidence adoption; reviewed complete invocation ledger and exact known-null-predecessor generation. Shared task/assignment runtime history and assignment recovery view acknowledge the witness while retaining possible idle-thread creation. |
+| `/runtime/control/no-turn/recover` | #737 exact no-turn witness-bound recovery; verified process termination and settled effects/workspace reconcile ownership without dispatch. Separate conversation replacement and NEW message remain required; no model tool authority or new forms in the curated operator UI. |
+| `/runtime/control/conversation-replace` | #737 explicit recovery counterpart; assignment/conversation revision checks and immutable keyed result prevent duplicate increments. Fresh operator message remains separately required for continuation. |
 
 Programmatic support (no new HTTP exposure):
 

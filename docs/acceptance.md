@@ -75,11 +75,174 @@ question evidence cannot qualify structured runtime interactions. Keep delivery
 sequencing in [#736](https://github.com/chrisbanes/ensemble/issues/736); these additions
 do not reopen the completed bounded S01 feasibility gate.
 
+Delivery UI01 #739 owns the bounded actual protocol and integrated service runtime
+journeys in [native input evidence](evidence/ui01-runtime-input.md), plus deterministic
+SQLite/hold/restart tests. T1 protocol and the separately granted actual T6 service
+journey have passed for the bounded native adapter and curated service seam. These
+results do not complete UI01/UI02 frontend acceptance; UI05 and parent #736 own the
+forms and assembled UI.
+
+Chris approved a bounded native-input and evidence-reuse amendment on 3 October
+2026. UI01 below retains the full Ensemble form model, qualified by deterministic
+service/SQLite/browser tests or Ensemble question tools. UI02 requires the native
+shapes qualified by #739: its observed single-choice/custom-text round trip and
+deterministic grouped-shape coverage. Native standalone free text, multiple
+selection and recommendation fields are not additional MVP runtime-proof gates.
+Unsupported native requests stay visibly unresolved; this does not claim support,
+permit fabricated answers or waive identity, persistence, duplicate-prevention or
+hold requirements.
+
+UI07 #745 and S07b #697 share one attributable evidence inventory and may reuse
+the same still-valid bounded assembled UI/service/runtime journey. Reuse #739/#743
+evidence with its source/runtime identity and scope; add missing delivery/provider
+integration checks in S07b. Test pause, Stop, restart, replay, failure and session
+expiry combinations deterministically unless a changed integration boundary or a
+demonstrated failure requires a bounded live check. A later gate alone is not a
+reason to repeat a live journey. Chris's final integrated visual/usability
+acceptance remains required on #736.
+
 | ID | Given / when | Required observable result | Layer |
 | --- | --- | --- | --- |
 | UI01 | Agent issues individual and grouped questions using free text, single choice and multiple choice; operator answers from inbox or task detail on desktop and phone | Question/option text, descriptions, explicit recommendations and selection constraints are preserved; custom text is available when permitted; recommended/preselected choices do not submit themselves; validation identifies the affected question; failed submission retains input and unresolved status; confirmed submission shows a recorded answer, distinct from approval or ordinary messaging | Service + UI + SQLite |
 | UI02 | Selected runtime issues its supported AskUserQuestion-style equivalent; restart around answer persistence/delivery, replay submissions, or answer a stale/cancelled/already answered request | The durable question maps to the exact requesting assignment/runtime request; persisted answers survive restart and produce no duplicate answer or continuation; stale/cancelled requests reject new answers and conflicting repeats cannot replace accepted answers; pause, Stop, dependency and ownership holds remain effective; unsupported/unavailable interactions are explicit, with no fabricated answer or silent chat fallback; record the actual runtime API/version and observed round trip | Runtime + service fault injection + UI |
 | UI03 | Switch List/Board in cross-project and project views with shared filters and a mix of local/imported tasks, including Ready-but-blocked, waiting, paused, stopping and uncertain work | Same filtered task set in both views; switching changes no task state; cards show title, project, lead, imported source identity and relevant wait/intervention reasons, and open the same detail; all states remain reachable on desktop and narrow screens with keyboard-accessible controls; readiness remains distinct from execution holds; GitHub state/Project fields remain source-owned; any offered card transition uses a permitted command and cannot bypass holds or silently write to GitHub; drag-and-drop is not required | UI + service + adapter |
+
+### Task overview and evidence design review — 3 October 2026
+
+Review the [task overview specification](SPEC.md#task-overview-and-evidence--design-direction-3-october-2026)
+in Pen before implementation. These observable outcomes guide design review and
+subsequent UI validation; a mockup does not prove persistence, permissions, runtime
+behaviour or delivery. GitHub issues retain delivery scope and sequencing under
+[#736](https://github.com/chrisbanes/ensemble/issues/736), with task detail in
+[#742](https://github.com/chrisbanes/ensemble/issues/742) and assembled UI acceptance
+in [#745](https://github.com/chrisbanes/ensemble/issues/745).
+
+The [Pen source](../design/design.pen) and
+[interaction/state handoff](../design/DESIGN.md) record the reviewed design.
+Chris agreed the extended requirements and issue ownership on 3 October 2026:
+**design reviewed; implementation deferred**. Final integrated visual/usability
+acceptance remains open. The handoff also records unverified comparison-image
+loading after source-asset relocation; resolve that before claiming those images
+have passed saved-design visual review.
+
+- **Brief provenance:** local and imported examples show the desired outcome,
+  supplied criteria and recorded decisions without inventing missing content.
+  GitHub requirements stay source-owned; agent plans and decisions are distinct.
+- **Delegation:** parallel assignments, including two using the same profile,
+  have distinguishable responsibilities, requesters and result destinations.
+  The project lead remains identifiable; known waits and unknown state are clear.
+- **Results and evidence:** show current and earlier results with reporting
+  assignment and relevant revision. Recorded evidence-to-criterion relationships
+  are visible. Agent claims, recorded verification and missing, stale, unavailable
+  or redacted evidence remain distinguishable; absence is never a pass.
+- **Navigation and attention:** List, Board, overview and attention entry points
+  preserve task/project/source context. Ordinary progress and dependency waiting
+  stay outside the attention inbox. Questions, approvals and uncertain execution
+  remain visible and their existing controls reachable.
+- **Reading and responsive states:** laptop and phone designs cover empty tasks,
+  long briefs, parallel work, pending requests, failed refresh and unavailable
+  evidence. Expanded detail, reading position and unfinished replies survive
+  updates; routine progress does not interrupt the operator's reading.
+
+Qualify the reviewed extension against the real UI/service with attributable
+records. Use deterministic browser/service/persistence coverage for these cases;
+static Pen fixtures do not pass them:
+
+- **Criteria and comparison:** supplied criteria with supported, failed,
+  unverified and stale evidence keep their result/assignment/revision attribution
+  and imply no overall pass. Correctly paired before/after captures, missing sides,
+  unavailable/redacted material and revision mismatch remain distinguishable on
+  desktop and phone; earlier evidence stays reachable.
+- **Feedback:** opening from a result, criterion or artifact preserves its exact
+  context. The editable draft names the local lead destination. Confirmed sends
+  show a receipt; confirmed failures retain input for retry; uncertain outcomes
+  reconcile before resending without duplicate messages. No feedback action
+  grants approval, changes task state or posts to GitHub.
+- **Viewing reference:** new results, superseded evidence and changed source
+  requirements are distinguishable from the viewed revision. No baseline,
+  unknown comparison and failed refresh are explicit. Viewing alone never
+  records approval or clears an independent hold.
+- **Assignment context:** captured supplier/brief/instruction/profile/source
+  references are distinct from current requirements, with omissions visible.
+  Available references are not labelled read without evidence; secrets and
+  unavailable runtime history are not exposed.
+- **Changes and delivery:** recorded diff/commit/PR/check/finding relationships
+  identify the checked revision and known repair owner. No PR, changed head,
+  stale provider data and merged-but-incomplete task states remain truthful.
+  Refresh performs no write, and exact approvals and independent holds persist.
+- **Search and return:** search is reachable through shared desktop and phone
+  navigation. Similar cross-project matches each retain project/task/type
+  attribution; opening a historical match reaches its exact section/revision.
+  Query, filters, selection and reading position survive opening and returning,
+  including the originating workspace view. Empty results, partial retained
+  coverage, failure and inaccessible material never imply complete capture.
+  Review-only state specimens are absent from product navigation. Verify keyboard
+  access and preservation of disclosures/drafts on the connected journeys.
+
+#742 owns these task/review/search behaviours and required shared navigation.
+#745 checks their integration with Overview, Inbox, project/cross-project
+List/Board and task detail wherever exposed, using the shared #745/#697 evidence
+inventory. Reuse unaffected evidence and limit live checks to changed integration
+boundaries or demonstrated gaps under the existing finite acceptance amendment.
+#736 retains Chris's final integrated UI acceptance; #741 is not reopened.
+
+Link the reviewed Pen design from the specification and relevant delivery issues
+before implementation, including its interaction and state handoff. No routes,
+API schema, artifact-storage mechanism or new runtime capability is prescribed
+by these checks. Existing evidence remains historical; these additions do not
+claim completed UI04, release qualification or reopened native integrations.
+
+### Operator UX refinements — 3 October 2026
+
+These approved requirements await implementation and qualification. UX identifiers
+are acceptance scenarios, not delivery issues or claims that existing evidence
+passes them. Exercise the same fixtures through Overview, Inbox, cross-project and
+project List/Board, and task detail wherever applicable. Check desktop and phone
+layouts, keyboard access, readable text and distinguishable task titles.
+
+| ID | Given / when | Required observable result | Layer |
+| --- | --- | --- | --- |
+| UX01 | A failed check has a recorded agent-owned repair; a different running task has no evidence identifying the repair owner | The first shows the repair responsibility without creating operator attention solely for the check; the second does not infer repair from running activity and shows responsibility as unknown. Independent questions, approvals and recovery problems remain visible; all applicable entry points agree on state and next actor | UI + service |
+| UX02 | Open a specific operator question or approval from Overview, Inbox or task detail, inspect its evidence, respond and return | The request explains what is needed, its requester when known, why the operator is needed and the permitted response. Evidence stays within task context. Exact approval material remains available. Confirmation reflects the recorded outcome; returning preserves filters and position. Failed submission retains input; stale evidence is labelled; answering does not clear an independent dependency hold | UI + service + SQLite |
+| UX03 | Inspect actionable readiness, completion with evidence and no decision, cancellation, provider closure without delivery, capacity waiting and uncertain execution | These situations remain distinguishable; provider closure does not imply task completion, normal capacity waiting creates no attention, and uncertainty retains its recovery explanation. Attention does not replace work state. The existing board mapping is preserved | UI + service + adapter |
+| UX04 | Open a task containing several assignments and conversations, then inspect its history as updates arrive | The initial view explains the outcome, current situation, next actor or unknown responsibility, unresolved decisions and relevant evidence. Lead accountability and assignment/conversation identities remain distinct. Recorded facts and attributed excerpts suffice without reading runtime output; omissions/staleness remain visible. Updates preserve reading position, disclosure and unfinished replies | UI + service |
+| UX05 | Create a task with optional context, references, assignee and dependencies, collapse/reopen those controls, then submit with a validation error or capacity wait | Project, title and outcome remain prominent; supplied optional settings have a visible summary and retain values through disclosure. Errors remain discoverable. Create and start / Save draft retain their semantics; confirmed creation and execution waiting are distinct. Existing draft and unknown-outcome reconciliation guarantees remain effective | UI + service + SQLite |
+
+## Post-MVP task workspace inspection
+
+Chris confirmed this #776 scope on 6 October 2026. These are requirements for
+post-MVP workspace inspection, not passing evidence or additions to #649's
+release/cutover gates. Preserve completed #742 behaviour and the #734 pause.
+
+| ID | Scenario | Required outcome |
+| --- | --- | --- |
+| WI01 | Browse repository-free and multiple-repository task workspaces | Files and generated outputs are inspectable with explicit task/repository identity. Ignored clutter is hidden initially and can be revealed; excluded sensitive content remains inaccessible. Missing/removed workspaces are explicit. |
+| WI02 | Open text/code, Markdown, raster images, PDF, binary and oversized files | Supported previews are bounded and usable; unsupported, excluded and oversized states give truthful limits. No download/export action is provided. Inspected active content cannot execute with application authority. |
+| WI03 | Attempt traversal, absolute-path injection, symlink escape, cross-task access and file replacement during reads/capture | Service-side validation prevents access outside the authorised task scope and applies the same exclusions to listings, previews, captures and retained evidence. Inconsistent reads fail with an explicit gap rather than false exactness. |
+| WI04 | Select Branch and Uncommitted in a workspace with committed, staged, unstaged, untracked, deleted and renamed changes | Branch compares against the merge base with the identified task base branch; Uncommitted offers staged/unstaged filters. Display the exact baseline and observation time; binary and unsupported entries remain visible. Each repository has its own baseline. Git targets are unavailable for repository-free workspaces. |
+| WI05 | Base branch is unknown or a selected local branch has no usable baseline | Explain the missing baseline and allow local base selection. No implicit guessed baseline, fetch or checkout occurs. An unusable comparison stays unavailable. |
+| WI06 | Complete successive real agent turns, then observe a failed/interrupted/uncertain turn | Last turn is bound to the actual turn/agent and bounded before/after observation, not a result revision. Only the latest turn capture is retained as turn history; result evidence survives replacement. Partial/unknown observations disclose identity, outcome, time and uncertainty without clearing holds or asserting writes have ended. Older tasks with no capture remain unavailable. |
+| WI07 | Report a result, change its files, replace the latest turn capture, restart, then remove the workspace | Successfully retained result-linked file bytes and diffs remain attributable and inspectable as the original evidence. No whole-workspace snapshot is implied. Capture exclusions, size limits and failures are recorded without rejecting the result or replacing historical bytes with later contents. |
+| WI08 | Work continues while an operator reads a file/diff and later refreshes | Keep the displayed read stable until explicit refresh, show observation time and known changes, preserve selection/reading position where still valid and represent deletion/unavailability honestly. Inspection neither pauses work nor changes execution, approval or ownership state. |
+| WI09 | Reach inspection from task, result/evidence and applicable direct links on desktop and phone | Preserve exact current/result/turn context, return navigation, disclosures and unfinished replies. Keyboard navigation and long files/diffs remain usable. Review applicable List/Board, Overview, Inbox and existing advanced routes for consistent task navigation; document absent entry points rather than adding unrelated ones. |
+
+The approved local code review amendment adds these scenarios:
+
+| ID | Scenario | Required outcome |
+| --- | --- | --- |
+| WI10 | Select single lines and ranges in text previews and both diff sides, including deleted lines; collect comments across files | Draft comments can be added, edited and removed, with an optional review summary. Exact task/repository/content/range/side and comparison/result/turn context remain attached. Cross-task, invalid-range and excluded-content anchors are rejected. |
+| WI11 | Change, rename or delete reviewed files, replace the latest turn capture, restart or remove the workspace | Bounded retained review context remains tied to original content. Affected comments show outdated status; missing or unknown comparison remains explicit. No automatic retargeting, newer-byte substitution or implied whole-workspace history occurs. |
+| WI12 | Inspect a draft and send, retry a confirmed failure, or reconcile an uncertain submission | One logical review containing the exact comments and summary reaches the named accountable lead with a receipt. Confirmed failures preserve editable drafts; unknown outcomes retain the original operation for reconciliation without duplicate delivery. No GitHub call, approval, readiness/completion change, merge authority or hold release occurs. |
+| WI13 | Navigate among files, diffs and exact result evidence while drafting on desktop, phone and keyboard | Draft content and anchors survive navigation/refresh under session privacy rules. Sent feedback remains inspectable with its original context. Existing contextual feedback is preserved; no unrelated thread-resolution or retraction workflow is introduced. |
+
+Use production service APIs, real filesystem/Git and SQLite fixtures for the
+deterministic cases, including bounded sizes, process restart and cleanup.
+Qualify the changed turn-capture boundary with a bounded real-runtime journey
+after deterministic coverage, then verify the integrated production UI on
+desktop and phone. Record source/runtime identity, observed captures, limits and
+exact resource cleanup; reuse unaffected runtime and #742 evidence. The
+implementation owner runs validation. Review the Pen interaction/state handoff
+before UI implementation and retain final integrated usability review.
 
 ## Implemented service and integration proofs
 
@@ -178,7 +341,7 @@ These extend A01–A30; they are required alongside the product scenarios.
 | R03 | Sleep assertion exists only during active execution and releases when idle or supervision ends. Forced sleep/wake reconciles execution before more dispatch, without duplicates. | S03 |
 | R04 | Web UI is privately reachable over Tailscale and independently requires an Ensemble login. Unauthenticated requests cannot read private data or mutate controls; authenticated browser actions have session and origin/CSRF protection. | S04; verified in S05 |
 | R05 | Conversation history and durable operator messages survive restart. Duplicate submission does not duplicate delivery; the next eligible turn receives the message without bypassing holds. No live steering is exposed. | S04; verified in S05 |
-| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08a backup/restore preparation; S08b final recovery/cutover |
+| R06 | Fresh standalone startup never reads or mutates the prototype database. Backup/restore preserves standalone records. Cutover records old active-work disposition before enabling competing work. | S02 fresh DB; S08a backup/restore preparation; S08b final recovery/proposal; S08c actual cutover |
 | R07 | Routing-enabled eligible task supplies its initial brief without a lead turn. Explicit permitted assignee bypasses TypeSafe; disabled projects allocate through the lead without API calls. Profile capabilities and project routing guidance are used; ineligible profiles cannot be selected and full transcripts/credentials are excluded. | S04; verified in S05 |
 | R08 | Uncertain/no-fit/missing-context/API-failure outcomes wake the lead once with the brief and evidence. Lead can allocate without TypeSafe. Busy selected profile waits for capacity; repairs retain assignee. All dispatch rechecks current permissions and holds. | S03/S04; verified in S05 |
 | R09 | Nested results resume their delegator, initial results resume the task-scoped lead, including restart and capacity-one cases. Two tasks using the lead profile keep separate histories. Worker success alone cannot complete a task; lead completion requests satisfy service gates. | S04; verified in S05 |
@@ -229,9 +392,14 @@ A28/A30 and R01–R05, R07–R10 plus R06 fresh-database separation. Physical R0
 sleep/wake proof is deferred to follow-up #732; it remains unproved and does not
 pass the operational release gate. S06–S07 complete GitHub portions and all
 A01–A30. S08a prepares R06 backup/restore after S04b, concurrently with UI/local/external
-qualification. S08b verifies final-schema and external-effect recovery and operational
-cutover against the S07 release candidate, reusing valid S08a evidence. The operational
-release gate requires the S07 release candidate and S08 operational evidence;
+qualification. S08b verifies final-schema and external-effect recovery against the
+S07 release candidate, reusing valid S08a evidence, and delivers a reviewed,
+executable cutover proposal. Under the approved 3 October split, #698 may complete
+after that technical evidence and proposal review; actual separately authorised
+cutover is tracked by S08c #761. Technical readiness does not establish deployed
+operation or completed cutover. The operational release gate retains the S07
+candidate, required S08 evidence, physical R03 proof before operational use on the
+Mac, and verified authorised cutover;
 X01–X08 are deferred and do not block the MVP. The #698 prerequisite on #728 is removed;
 a cutover is not a prerequisite for building or testing the release candidate.
 S08a evidence is composed deliberately: deterministic T4 tests prove exact
@@ -240,7 +408,7 @@ post-recovery admission; the disposable launchd proof backs up/restores
 populated paused/unready public records and confirms start/restart/stop without
 admission. The latter does not inject a live exact recovery receipt because
 #704 does not own a recovery-control surface. Neither result passes S08b's
-final-schema, external-effect, old-work disposition or cutover checks.
+final-schema/external-effect checks or S08c's actual old-work disposition/cutover.
 
 Record every proof as passed, failed or unproved with its runtime/source identity,
 observed effects and limits. Missing evidence is never a pass. Earlier termination,
@@ -284,3 +452,22 @@ adds attention overview, shared List/Board and atomic local composer, with
 UI01/UI04–UI07 screens, runtime-question integration and parent #736
 final acceptance remain separate. Existing controls stay available. This
 foundation does not authorize deployment or cutover.
+
+UI06 presentation evidence is recorded in [configuration and recovery evidence](evidence/ui06-configuration.md). Fixture browser/API evidence qualifies the changed same-origin presentation; real-runtime/provider, final visual/usability UI07 and release/cutover gates remain separate.
+
+Delivery [UI08 #765](https://github.com/chrisbanes/ensemble/issues/765)
+reconciles the shared React/production-HTML presentation foundation. Its
+[contract](design/ui08-foundation.md) and [evidence](evidence/ui08-foundation.md)
+record owned components, responsive browser checks, preserved retained forms,
+font/CSP verification and visual gaps. This does not complete the human UI
+acceptance or release/cutover gates owned by #736.
+
+## UI05 deterministic question and Inbox evidence
+
+[UI05 evidence](evidence/ui05-inbox-questions.md) records the implemented full
+Ensemble form, shared task/Inbox entry points, durable validation/replay, bounded
+transport and desktop/phone viewport journeys. Native acceptance reuses #739's
+qualified synchronous single-choice/custom round trip; grouped native shapes
+remain deterministic coverage. No additional live model attempt or physical-device
+qualification is claimed. This slice does not close parent #736 visual acceptance,
+#745/#697 assembled/provider release evidence, or #761 cutover.

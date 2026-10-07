@@ -443,3 +443,27 @@ export function qualificationDisposition(results: {
       ? "passed"
       : "unproved";
 }
+
+/** A restart checkpoint requires successful terminal work, not merely no active intent. */
+export function qualificationTaskIdle(
+  taskId: string,
+  requests: ReadonlyArray<{
+    taskId: string | null;
+    workId: string;
+    state: string;
+  }>,
+  intents: ReadonlyArray<{ workId: string; state: string }>,
+): boolean {
+  const taskRequests = requests.filter((request) => request.taskId === taskId);
+  return (
+    taskRequests.length > 0 &&
+    taskRequests.every(
+      (request) =>
+        request.state === "completed" &&
+        intents.some(
+          (intent) =>
+            intent.workId === request.workId && intent.state === "completed",
+        ),
+    )
+  );
+}

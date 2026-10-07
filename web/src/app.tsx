@@ -1,8 +1,11 @@
+import { Inbox, InboxState } from "./inbox.js";
+import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
   useEffect,
   useMemo,
   useState,
+  useRef,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -14,6 +17,7 @@ import {
 import { ClientError, OperatorClient } from "./api.js";
 import { useOperatorResource } from "./resource.js";
 import {
+  ActionLink,
   Button,
   TextField,
   StatusBadge,
@@ -22,6 +26,17 @@ import {
 } from "./components.js";
 import { loadTaskList } from "./tasks.js";
 import { TaskComposer } from "./task-composer.js";
+import { RuntimeSettings, AssignmentRecovery } from "./recovery.js";
+import { ConfigurationDrafts } from "./settings-state.js";
+import {
+  SettingsWorkspace,
+  ProjectSetup,
+  ProjectConfiguration,
+  ProfileConfiguration,
+} from "./settings.js";
+import { Search, SearchState } from "./search.js";
+import { TaskWorkspace } from "./task-workspace.js";
+import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
@@ -75,6 +90,9 @@ function ProjectNavigation({
       </RouteLink>
       <RouteLink href="/app/tasks" path={path} navigate={navigate}>
         All tasks
+      </RouteLink>
+      <RouteLink href="/app/search" path={path} navigate={navigate}>
+        Search
       </RouteLink>
       <h2 className="small-heading">Projects</h2>
       {workspace?.data.projects.length === 0 && (
@@ -157,37 +175,119 @@ export function Login({
   );
 }
 export function App() {
+  const drafts = useRef(new ConfigurationDrafts());
+  const acceptedIdentity = useRef<string | null>(null);
+  const navigationScope = useRef(crypto.randomUUID());
+  const clearPrivateNavigation = () => {
+    const next =
+      location.pathname === "/app/search"
+        ? "/app/search"
+        : location.pathname + location.search;
+    history.replaceState(
+      { navigationScope: navigationScope.current, navKey: crypto.randomUUID() },
+      "",
+      next,
+    );
+    setPath(next);
+  };
+  const clientRef = useRef<OperatorClient | null>(null);
   const [session, setSession] = useState<Session | null>(null),
     [bootstrapError, setBootstrapError] = useState(false),
     [bootstrap, setBootstrap] = useState(0),
     [path, setPath] = useState(location.pathname + location.search),
+    [navigationVersion, setNavigationVersion] = useState(0),
     [drawer, setDrawer] = useState(false),
     [logoutPending, setLogoutPending] = useState(false),
     [logoutNotice, setLogoutNotice] = useState<string | null>(null);
+  const searchState = useRef(new Map<string, SearchState>());
+  const taskStates = useRef(new TaskWorkspaceStates());
+  const questionStates = useRef(new QuestionResponseStates());
+  const inboxState = useRef(new InboxState());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: navigation purge uses current browser entry and stable scope ref.
   const expired = useCallback(() => {
+    navigationScope.current = crypto.randomUUID();
+    clearPrivateNavigation();
+    clientRef.current?.invalidateAuthentication();
+    acceptedIdentity.current = null;
+    setLogoutPending(false);
+    drafts.current.purge();
+    taskStates.current.purge();
+    questionStates.current.purge();
+    inboxState.current.clear();
+    searchState.current.clear();
     setSession(null);
     setBootstrap((v) => v + 1);
     setDrawer(false);
   }, []);
   const client = useMemo(() => new OperatorClient(fetch, expired), [expired]);
+  clientRef.current = client;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: browser-entry purge is needed only when accepting this exact current authentication scope.
+  const acceptSession = useCallback(
+    (next: Session) => {
+      const identity = next.authenticated ? next.csrfToken : null;
+      if (identity !== acceptedIdentity.current) {
+        if (!identity && acceptedIdentity.current) {
+          navigationScope.current = crypto.randomUUID();
+          clearPrivateNavigation();
+        }
+        client.invalidateAuthentication();
+        drafts.current.purge();
+        taskStates.current.purge();
+        questionStates.current.purge();
+        inboxState.current.clear();
+        searchState.current.clear();
+        if (
+          identity &&
+          history.state?.navigationScope &&
+          history.state.navigationScope !== navigationScope.current
+        )
+          clearPrivateNavigation();
+        if (identity)
+          history.replaceState(
+            { ...history.state, navigationScope: navigationScope.current },
+            "",
+          );
+        acceptedIdentity.current = identity;
+        setLogoutPending(false);
+      }
+      setSession(next);
+    },
+    [client],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrap explicitly refreshes the server session after expiry or retry.
   useEffect(() => {
     let active = true;
     setBootstrapError(false);
+    const isCurrentScope = client.captureAuthenticationScope();
     client.session().then(
       (s) => {
-        if (active) setSession(s);
+        if (active && isCurrentScope()) acceptSession(s);
       },
       () => {
-        if (active) setBootstrapError(true);
+        if (active && isCurrentScope()) setBootstrapError(true);
       },
     );
     return () => {
       active = false;
     };
-  }, [client, bootstrap]);
+  }, [client, bootstrap, acceptSession]);
+  const restoreFocus = useRef<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: current scope ref guards browser Back/Forward entries across authentication expiry.
   useEffect(() => {
-    const pop = () => setPath(location.pathname + location.search);
+    const pop = () => {
+      if (history.state?.navigationScope !== navigationScope.current) {
+        clearPrivateNavigation();
+        restoreFocus.current = null;
+      } else restoreFocus.current = history.state?.focusedHref ?? null;
+      setPath(location.pathname + location.search);
+      setNavigationVersion((n) => n + 1);
+      requestAnimationFrame(() =>
+        scrollTo(
+          0,
+          (history.state as { scrollY?: number } | null)?.scrollY ?? 0,
+        ),
+      );
+    };
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, []);
@@ -208,10 +308,99 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     taskLoader,
   );
-  const pathname = path.split("?")[0] ?? "/app";
+  const taskRefresh = useRef(tasks.refresh);
+  taskRefresh.current = tasks.refresh;
+  const inboxScope =
+    session?.authenticated && path.split("?")[0] === "/app/inbox"
+      ? session.csrfToken
+      : null;
+  useEffect(() => {
+    if (!inboxScope) return;
+    taskRefresh.current();
+    const timer = setInterval(() => taskRefresh.current(), 15000);
+    return () => clearInterval(timer);
+  }, [inboxScope]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore the previous entry focus after its route and asynchronous task content render.
+  useEffect(() => {
+    const href = restoreFocus.current;
+    if (!href) return;
+    const target = [
+      ...document.querySelectorAll<HTMLAnchorElement>("a[href]"),
+    ].find((a) => a.getAttribute("href") === href);
+    if (target) {
+      target.focus({ preventScroll: true });
+      restoreFocus.current = null;
+    }
+  }, [path, navigationVersion, tasks.state.data, workspace.state.data]);
+  useEffect(() => {
+    const click = (e: MouseEvent) => {
+      if (e.defaultPrevented) return;
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest("a"),
+        href = anchor?.getAttribute("href");
+      if (
+        href?.startsWith("/app") &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.button === 0
+      ) {
+        e.preventDefault();
+        history.replaceState(
+          { ...history.state, scrollY, focusedHref: href },
+          "",
+        );
+        history.pushState(
+          {
+            origin: location.pathname + location.search,
+            workspaceOrigin:
+              location.pathname === "/app/search"
+                ? history.state?.workspaceOrigin
+                : location.pathname + location.search,
+            navigationScope: navigationScope.current,
+            navKey: crypto.randomUUID(),
+            entryIndex: (history.state?.entryIndex ?? 0) + 1,
+            workspaceIndex:
+              location.pathname === "/app/search"
+                ? (history.state?.workspaceIndex ?? 0)
+                : (history.state?.entryIndex ?? 0),
+          },
+          "",
+          href,
+        );
+        setPath(href);
+        setNavigationVersion((n) => n + 1);
+        setDrawer(false);
+      }
+    };
+    document.addEventListener("click", click);
+    return () => document.removeEventListener("click", click);
+  }, []);
+  const pathname = path.split(/[?#]/)[0] ?? "/app";
   const navigate = (next: string) => {
-    history.pushState(null, "", next);
+    history.replaceState({ ...history.state, scrollY }, "");
+    history.pushState(
+      {
+        origin: location.pathname + location.search,
+        workspaceOrigin:
+          location.pathname === "/app/search"
+            ? history.state?.workspaceOrigin
+            : location.pathname + location.search,
+        navigationScope: navigationScope.current,
+        navKey: crypto.randomUUID(),
+        entryIndex: (history.state?.entryIndex ?? 0) + 1,
+        workspaceIndex:
+          location.pathname === "/app/search"
+            ? (history.state?.workspaceIndex ?? 0)
+            : (history.state?.entryIndex ?? 0),
+      },
+      "",
+      next,
+    );
     setPath(next);
+    setNavigationVersion((n) => n + 1);
     setDrawer(false);
   };
   if (!session)
@@ -248,7 +437,7 @@ export function App() {
               history.replaceState(null, "", "/app");
               setPath("/app");
             }
-            setSession(next);
+            acceptSession(next);
           }}
         />
         {logoutNotice && (
@@ -258,24 +447,38 @@ export function App() {
         )}
       </>
     );
+  const entryKey = history.state?.navKey ?? path;
+  let activeSearch = searchState.current.get(entryKey);
+  if (!activeSearch) {
+    activeSearch = new SearchState();
+    searchState.current.set(entryKey, activeSearch);
+  }
   const projectId = pathname.match(/^\/app\/projects\/([^/]+)$/)?.[1];
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
   const title =
-    pathname === "/app"
-      ? "Overview"
-      : pathname === "/app/tasks"
-        ? "All tasks"
-        : pathname === "/app/tasks/new"
-          ? "New task"
-          : pathname === "/app/inbox"
-            ? "Inbox"
-            : pathname === "/app/settings"
-              ? "Settings"
-              : projectId
-                ? (project?.name ?? "Project")
-                : "Page not found";
+    pathname === "/app/search"
+      ? "Search"
+      : pathname === "/app"
+        ? "Overview"
+        : /^\/app\/tasks\/[^/]+$/.test(pathname) &&
+            pathname !== "/app/tasks/new"
+          ? "Task workspace"
+          : pathname === "/app/tasks"
+            ? "All tasks"
+            : pathname === "/app/tasks/new"
+              ? "New task"
+              : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname)
+                ? "Recovery"
+                : pathname === "/app/inbox"
+                  ? "Inbox"
+                  : pathname.startsWith("/app/settings") ||
+                      pathname.endsWith("/settings")
+                    ? "Settings"
+                    : projectId
+                      ? (project?.name ?? "Project")
+                      : "Page not found";
   const destination =
     projectId && project
       ? `/project/${project.id}`
@@ -291,20 +494,36 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   async function logout() {
+    navigationScope.current = crypto.randomUUID();
+    clearPrivateNavigation();
+    client.invalidateAuthentication();
+    acceptedIdentity.current = null;
+    const isCurrentScope = client.captureAuthenticationScope();
+    drafts.current.purge();
+    taskStates.current.purge();
+    questionStates.current.purge();
+    inboxState.current.clear();
+    searchState.current.clear();
     setLogoutPending(true);
     setLogoutNotice(null);
     try {
       await client.logout(session?.csrfToken ?? "");
     } catch (error) {
-      if (error instanceof ClientError && error.status !== 401)
+      if (
+        isCurrentScope() &&
+        error instanceof ClientError &&
+        error.status !== 401
+      )
         setLogoutNotice(
           "Sign-out outcome is unknown. Session status has been checked; review before retrying.",
         );
     } finally {
-      setSession(null);
-      setDrawer(false);
-      setLogoutPending(false);
-      setBootstrap((v) => v + 1);
+      if (isCurrentScope()) {
+        setSession(null);
+        setDrawer(false);
+        setLogoutPending(false);
+        setBootstrap((v) => v + 1);
+      }
     }
   }
   const nav = (
@@ -341,7 +560,10 @@ export function App() {
             <h1 className="page-heading">{title}</h1>
             <Button
               variant="secondary"
-              onClick={workspace.refresh}
+              onClick={() => {
+                workspace.refresh();
+                if (pathname === "/app/inbox") tasks.refresh();
+              }}
               disabled={workspace.state.pending}
             >
               Refresh
@@ -355,7 +577,63 @@ export function App() {
           {workspace.state.status !== "fresh" && (
             <ResourceStatus state={workspace.state} retry={workspace.refresh} />
           )}
-          {pathname === "/app/tasks/new" ? (
+          {pathname === "/app/settings/runtime" ? (
+            <RuntimeSettings
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname) ? (
+            <AssignmentRecovery
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              assignmentId={pathname.split("/")[3] ?? ""}
+            />
+          ) : pathname === "/app/settings" ? (
+            <SettingsWorkspace
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : pathname === "/app/settings/projects/new" ? (
+            <ProjectSetup
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+            />
+          ) : pathname === "/app/settings/profiles/new" ||
+            /^\/app\/profiles\/[^/]+\/settings$/.test(pathname) ? (
+            <ProfileConfiguration
+              key={pathname}
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              {...(pathname.includes("/profiles/") && !pathname.endsWith("/new")
+                ? { profileId: pathname.split("/")[3] }
+                : {})}
+            />
+          ) : /^\/app\/projects\/[^/]+\/settings$/.test(pathname) ? (
+            <ProjectConfiguration
+              key={pathname}
+              client={client}
+              session={session}
+              drafts={drafts.current}
+              workspace={workspace.state.data}
+              refresh={workspace.refresh}
+              projectId={pathname.split("/")[3] ?? ""}
+            />
+          ) : pathname === "/app/tasks/new" ? (
             <TaskComposer
               key={session.csrfToken}
               client={client}
@@ -366,6 +644,39 @@ export function App() {
                 ""
               }
               onRecorded={tasks.refresh}
+            />
+          ) : pathname === "/app/inbox" ? (
+            <Inbox
+              client={client}
+              session={session}
+              path={path}
+              navigate={navigate}
+              state={inboxState.current}
+              questions={questionStates.current}
+              observation={workspace.state.data}
+            />
+          ) : pathname === "/app/search" ? (
+            <Search
+              key={`${session.csrfToken}:${entryKey}`}
+              client={client}
+              session={session}
+              workspace={workspace.state.data}
+              path={path}
+              navigate={navigate}
+              state={activeSearch}
+            />
+          ) : /^\/app\/tasks\/[^/]+$/.test(pathname) ? (
+            <TaskWorkspace
+              key={`${session.csrfToken}:${entryKey}`}
+              client={client}
+              session={session}
+              taskId={pathname.split("/")[3] ?? ""}
+              path={path}
+              questionStates={questionStates.current}
+              state={taskStates.current.forTask(
+                pathname.split("/")[3] ?? "",
+                entryKey,
+              )}
             />
           ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
             <TaskViews
@@ -380,15 +691,16 @@ export function App() {
           ) : (
             <>
               <p className="introduction muted">{description}</p>
-              <a
-                className="control button primary action-link"
+              <ActionLink
+                variant="primary"
+                className="action-link"
                 href={destination}
               >
                 Open existing{" "}
                 {pathname === "/app/inbox"
                   ? "coordination controls"
                   : "operator controls"}
-              </a>
+              </ActionLink>
               <p className="metadata muted">
                 Task detail, complete Inbox and settings controls remain
                 available in the existing operator.
