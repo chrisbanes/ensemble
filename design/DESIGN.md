@@ -1392,12 +1392,12 @@ entry point, or product behavior.
 | Canvas composition | Node | Size | Review purpose |
 | --- | --- | --- | --- |
 | Tablet Overview / List | `h23qD` | 1024 × 768 | Existing drawer, attention summary, compact task rows, and List/Board switch. |
-| Compact tablet Inbox / question | `FsTwL` | 800 × 768 | Queue and selected question share the constrained viewport. |
+| Compact tablet Inbox / question | `FsTwL` | 800 × 768 | Fieldnotes Q-204/r2 is one three-question form with one disabled Submit answers action while Q2 exceeds its limit; the task remains Paused. |
 | Tablet task detail / evidence | `dUUIS` | 1024 × 768 | Task situation and next actor stay distinct from the evidence rail. |
-| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Query, filters, exact match context, selected preview, and return origin. |
+| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Canonical Atlas AT-142 identity, source, next actor and return anchor; A-108 remains a separate cold-start task. |
 | Tablet composer / validation disclosure | `LBzlj` | 1024 × 768 | Optional summaries, expanded dependency error, focus treatment, and both actions. |
-| Tablet project Board | `nKHGv` | 1024 × 768 | Ready, Running and Waiting columns; a Ready task with a hold remains Ready. |
-| Phone question / short viewport | `Sejey` | 390 × 480 | Long question body in an independent scroll viewport with Submit retained. |
+| Tablet all-projects Board | `nKHGv` | 1024 × 768 | Ready 0, Running 2, Waiting 3 and Paused 1; Stopping and Uncertain remain reachable. Held Ready work remains Ready and is grouped in Waiting. |
+| Phone question / short viewport | `Sejey` | 390 × 480 | Q-204/r2 Q2–Q3 scroll position, retained Q1 selection, over-limit Q2 error, Q3 draft, and one disabled Submit answers action. |
 | Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries with Save draft and Create and start retained. |
 
 The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
@@ -1416,12 +1416,18 @@ those values as historical evidence. No proposed navigation threshold,
 textarea cap, or scroll rule becomes an implementation contract before T2.
 
 The List, Board, Inbox, Search and composer specimens preserve current routing
-and state semantics. The selected Inbox response remains a local draft until
-submission. Search keeps its query, filters, selected result, and return origin.
-Task evidence does not decide source ownership or release a hold. The Board
-does not move a Ready-but-blocked task into Waiting and does not imply drag or
-state mutation; List / Board changes presentation only, and Waiting is never
-inferred from inactivity. Composer summaries show the supplied context,
+and state semantics. Q-204/r2 is one unsubmitted three-answer group: Q1 is valid,
+Q2 has all three fixed choices selected and exceeds its 1–2 limit, and Q3 retains
+its supplied text. The single Submit answers action stays disabled until the
+answers are valid. Recording answers does not resume Fieldnotes F-203 or clear
+independent holds. Search keeps its query, filters, selected result, and return
+origin; selected Atlas AT-142 retains `acme/atlas#142`, Mira, A-105 / Builder,
+source S2, W-18, R3 `b72e910` at 11:40, and its next actor. The A-108 cold-start
+result remains distinct. Task evidence does not decide source ownership or
+release a hold. The All-projects Board preserves Ready readiness while grouping
+tasks with dependency holds in Waiting; Q-204 remains Paused until separately
+resumed. List / Board changes presentation only and does not imply drag or state
+mutation. Composer summaries show the supplied context,
 references, assignee and dependency; expanding the dependency reveals the
 validation error without discarding its value. The disabled Create and start
 action remains visible beside Save draft. The supplied-values panel keeps its
@@ -1442,9 +1448,10 @@ notification entry point is introduced. The five existing comparison-image
 references still render placeholders in Pen MCP, so comparison-image loading
 remains unverified.
 
-The short phone frames intentionally clip `wHhpl`, the long question body inside
-the 390 × 480 question scroll viewport. That is the only detected bounds issue
-in the eight new compositions; the other frame and component bounds are inside
+The short phone question frame intentionally clips `wHhpl`, the long answer body
+inside the 390 × 480 scroll viewport; the Q2–Q3 view ends at the pinned action
+area. Three disabled `Card Actions` slots in reused option components are
+zero-sized and do not appear in the render. Other visible-node bounds are inside
 their viewports. The proposed scroll owner is the named body or queue region,
 not the page. Board columns may scroll horizontally; the phone question and
 composer keep their primary action visible in the 480px frame. A client still

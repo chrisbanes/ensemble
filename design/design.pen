@@ -90411,7 +90411,7 @@
           "x": 1200,
           "y": 92,
           "name": "04B · Compact tablet Inbox / question · 800 × 768",
-          "context": "Tablet proposal. Queue and selected detail share the available width after navigation moves to the existing drawer. At narrower widths, use the existing queue → detail route and restore its selection. Scroll/focus/inset behavior requires browser evidence.",
+          "context": "Inbox for Fieldnotes. Q-204/r2 is one grouped three-question request; all answers submit together. The task remains paused and other holds remain independent. Queue and selected detail share the available width after project navigation uses its drawer.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -90564,7 +90564,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Choose the guide’s audience",
+                          "content": "Shape the first-run guide",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 13,
@@ -90577,7 +90577,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Q-204 · Nora · Paused",
+                          "content": "Fieldnotes · Q-204/r2 · Paused",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -90742,8 +90742,8 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "layout": "vertical",
-                      "gap": 12,
-                      "padding": 20,
+                      "gap": 3,
+                      "padding": 10,
                       "children": [
                         {
                           "type": "text",
@@ -90752,7 +90752,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "QUESTION  ·  Q-204  ·  PAUSED",
+                          "content": "GROUPED QUESTIONS  ·  Q-204/r2  ·  PAUSED",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -90765,7 +90765,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Choose the guide’s audience",
+                          "content": "Shape the first-run guide",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 20,
@@ -90778,7 +90778,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Nora · requested 4 Oct 2026 · Fieldnotes onboarding refresh",
+                          "content": "Nora Ellis · F-203 · Fieldnotes · requested 4 Oct 2026",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -90833,7 +90833,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Choose one audience",
+                          "content": "1. Who should the guide address? · Required · choose one",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 14,
@@ -90844,13 +90844,13 @@
                           "id": "EXZer",
                           "name": "Every new member",
                           "width": "fill_container",
-                          "height": 62,
+                          "height": 56,
                           "fill": "$X:--accent",
                           "cornerRadius": 6,
                           "stroke": "$X:--ring",
                           "strokeWidth": 2,
                           "gap": 10,
-                          "padding": 10,
+                          "padding": 6,
                           "alignItems": "center",
                           "children": [
                             {
@@ -90891,7 +90891,7 @@
                                   "fill": "$X:--muted-foreground",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "Separate setup steps.",
+                                  "content": "Recommended by Nora · owner setup separate.",
                                   "lineHeight": 1.35,
                                   "fontFamily": "Inter",
                                   "fontSize": 12,
@@ -90904,15 +90904,15 @@
                         {
                           "type": "frame",
                           "id": "MwxAX",
-                          "name": "Team owners",
+                          "name": "Workspace owners option",
                           "width": "fill_container",
-                          "height": 62,
+                          "height": 56,
                           "fill": "$X:--card",
                           "cornerRadius": 6,
                           "stroke": "$X:--border",
                           "strokeWidth": 1,
                           "gap": 10,
-                          "padding": 10,
+                          "padding": 6,
                           "alignItems": "center",
                           "children": [
                             {
@@ -90940,7 +90940,7 @@
                                   "fill": "$X:--foreground",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "Team owners",
+                                  "content": "Workspace owners",
                                   "lineHeight": 1.35,
                                   "fontFamily": "Inter",
                                   "fontSize": 13,
@@ -90953,8 +90953,267 @@
                                   "fill": "$X:--muted-foreground",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "Keep the setup guide.",
+                                  "content": "Focus on inviting people and setup.",
                                   "lineHeight": 1.35,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "ciNkA",
+                          "name": "Custom audience option",
+                          "width": "fill_container",
+                          "height": 56,
+                          "fill": "$X:--card",
+                          "cornerRadius": 6,
+                          "stroke": "$X:--border",
+                          "strokeWidth": 1,
+                          "gap": 10,
+                          "padding": 6,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "icon",
+                              "id": "Q17g6",
+                              "name": "Team owners radio",
+                              "width": 18,
+                              "height": 18,
+                              "icon": "circle",
+                              "library": "lucide",
+                              "fill": "$X:--foreground"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "azu8C",
+                              "name": "Team owners option copy",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 3,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "xGDEw",
+                                  "name": "Team owners option",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Custom audience",
+                                  "lineHeight": 1.35,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 13,
+                                  "fontWeight": "600"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "xZziu",
+                                  "name": "Team owners description",
+                                  "fill": "$X:--muted-foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Describe another audience below.",
+                                  "lineHeight": 1.35,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "Aj3op",
+                          "name": "Q2 · guide sections · invalid three selections",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 4,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "dhfUA",
+                              "name": "Q2 title",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "2. Which sections belong in the guide?",
+                              "lineHeight": 1.25,
+                              "fontFamily": "Inter",
+                              "fontSize": 14,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "MhLU0",
+                              "name": "Q2 constraint",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Required · select 1–2 · custom options not allowed",
+                              "lineHeight": 1.25,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "EWaiZ",
+                              "name": "Find everyday actions · selected",
+                              "width": "fill_container",
+                              "height": 30,
+                              "fill": "$X:--accent",
+                              "cornerRadius": 6,
+                              "stroke": "$X:--ring",
+                              "strokeWidth": 1,
+                              "padding": 6,
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "RavuC",
+                                  "name": "Find everyday actions selected option",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "✓  Find everyday actions · Searching and keyboard shortcuts",
+                                  "lineHeight": 1.25,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "pebrY",
+                              "name": "Invite teammates · selected",
+                              "width": "fill_container",
+                              "height": 30,
+                              "fill": "$X:--accent",
+                              "cornerRadius": 6,
+                              "stroke": "$X:--ring",
+                              "strokeWidth": 1,
+                              "padding": 6,
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "FFm9w",
+                                  "name": "Invite teammates selected option",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "✓  Invite teammates · Owner checklist",
+                                  "lineHeight": 1.25,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "S00Vr",
+                              "name": "Workspace defaults · selected",
+                              "width": "fill_container",
+                              "height": 30,
+                              "fill": "$X:--accent",
+                              "cornerRadius": 6,
+                              "stroke": "$X:--ring",
+                              "strokeWidth": 1,
+                              "padding": 6,
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "t2MEj",
+                                  "name": "Workspace defaults selected option",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "✓  Workspace defaults · Initial settings",
+                                  "lineHeight": 1.25,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "id": "TYmZt",
+                              "name": "Q2 selection error",
+                              "fill": "$X:--destructive",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Select at most 2 sections.",
+                              "lineHeight": 1.25,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "CmNqf",
+                          "name": "Q3 · opening tone · saved response",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 4,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "eSecQ",
+                              "name": "Q3 title",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "3. How should the opening sound?",
+                              "lineHeight": 1.25,
+                              "fontFamily": "Inter",
+                              "fontSize": 14,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "joVVs",
+                              "name": "Q3 constraint",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Required · free text · up to 240 characters",
+                              "lineHeight": 1.25,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "frame",
+                              "id": "FCVul",
+                              "name": "Q3 tone response",
+                              "width": "fill_container",
+                              "height": 42,
+                              "fill": "$X:--background",
+                              "cornerRadius": 6,
+                              "stroke": "$X:--border",
+                              "strokeWidth": 1,
+                              "layout": "vertical",
+                              "padding": 8,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "ZZTzV",
+                                  "name": "Q3 saved draft value",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Friendly and direct. Avoid setup jargon.",
+                                  "lineHeight": 1.25,
                                   "fontFamily": "Inter",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -90970,7 +91229,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Answering records Q-204 only. It does not resume the paused task or clear other holds.",
+                          "content": "One group submission records Q-204 only. It does not resume the paused task or clear other holds.",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -91003,7 +91262,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Answer not submitted",
+                          "content": "Q2 needs 1–2 choices · nothing submitted",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -91013,7 +91272,7 @@
                           "id": "Q8SGuY",
                           "type": "ref",
                           "ref": "X:VSnC2",
-                          "name": "Submit answer",
+                          "name": "Submit answers · disabled",
                           "width": 142,
                           "height": 44,
                           "theme": {
@@ -91021,12 +91280,13 @@
                             "X:Base": "Neutral",
                             "X:Accent": "Default"
                           },
+                          "opacity": 0.5,
                           "descendants": {
                             "X:8jVfJ": {
                               "enabled": false
                             },
                             "X:8tnXG": {
-                              "content": "Submit answer"
+                              "content": "Submit answers"
                             }
                           }
                         }
@@ -91523,7 +91783,7 @@
           "x": 32,
           "y": 914,
           "name": "04D · Tablet Search / selected result · 1024 × 768",
-          "context": "Search shows task/request identity, match context and return state. The query, filters, selected result and scroll position remain the origin when opening the task; exact navigation restoration is not proven by a static frame.",
+          "context": "Search for keyboard-accessible menu work. The selected task is canonical Atlas AT-142, acme/atlas#142, with Mira as accountable lead; A-105/Builder, source S2, W-18 and R3 b72e910 at 11:40 remain attached. A-108 is a separate running cold-start task. Return restores this query and match.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -91819,7 +92079,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Ship accessible command menu",
+                              "content": "Ship an accessible command menu",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 13,
@@ -91832,7 +92092,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Atlas · Task · Waiting",
+                              "content": "Atlas · AT-142 · Waiting for approval",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -91887,7 +92147,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Atlas · Task · Running",
+                              "content": "Atlas · A-108 · Running",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -91900,7 +92160,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "…menu opens without shifting the task's current state…",
+                              "content": "…reduce the cold-start delay…",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -91999,7 +92259,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Ship accessible command menu",
+                          "content": "Ship an accessible command menu",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 20,
@@ -92012,7 +92272,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Task · external issue #108 · accountable lead Mira · updated 6 Oct",
+                          "content": "GitHub acme/atlas#142 · source S2 · A-105 / Builder · W-18 · R3 b72e910 · 11:40",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -92025,7 +92285,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Waiting · You need to choose retry limits. Jonas is waiting for the policy choice.",
+                          "content": "Waiting for approval · Next: you · review PR-creation material · Mira, accountable lead",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 13,
@@ -92886,8 +93146,8 @@
           "id": "nKHGv",
           "x": 2368,
           "y": 914,
-          "name": "04F · Tablet project Board · 1024 × 768",
-          "context": "Board reflows within tablet content after the existing navigation uses its drawer. Columns intentionally scroll horizontally; Ready-but-blocked remains in Ready. No drag-and-drop or state mutation is implied.",
+          "name": "04F · Tablet all-projects Board · 1024 × 768",
+          "context": "One board across Atlas, Relay and Fieldnotes. At 1024 wide, Ready, Running, Waiting and Paused are visible; named controls reach every state including Stopping and Uncertain. Ready work with a dependency hold remains Ready in Waiting. No drag or state mutation is implied.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -92951,7 +93211,7 @@
                   "fill": "$X:--foreground",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Atlas board",
+                  "content": "All-projects Board",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
                   "fontSize": 18,
@@ -92964,7 +93224,7 @@
                   "fill": "$X:--muted-foreground",
                   "textGrowth": "fixed-width",
                   "width": 140,
-                  "content": "Atlas · 8 tasks",
+                  "content": "3 projects · 8 tasks",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
                   "fontSize": 12,
@@ -93019,7 +93279,7 @@
                       "fill": "$X:--foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "Project work",
+                      "content": "All projects",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 16,
@@ -93032,11 +93292,165 @@
                       "fill": "$X:--muted-foreground",
                       "textGrowth": "fixed-width",
                       "width": 140,
-                      "content": "All work  ·  8 tasks",
+                      "content": "8 active tasks",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 12,
                       "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "FHlYa",
+                  "name": "All-project state navigation · all six states",
+                  "width": "fill_container",
+                  "height": 32,
+                  "gap": 8,
+                  "children": [
+                    {
+                      "id": "P5mEMU",
+                      "type": "ref",
+                      "ref": "X:coMmv",
+                      "name": "Ready · 0 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Ready · 0",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
+                    },
+                    {
+                      "id": "sAXit",
+                      "type": "ref",
+                      "ref": "X:coMmv",
+                      "name": "Running · 2 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Running · 2",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
+                    },
+                    {
+                      "id": "VYuEZ",
+                      "type": "ref",
+                      "ref": "X:coMmv",
+                      "name": "Waiting · 3 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Waiting · 3",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
+                    },
+                    {
+                      "id": "c4TcO6",
+                      "type": "ref",
+                      "ref": "X:coMmv",
+                      "name": "Paused · 1 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Paused · 1",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
+                    },
+                    {
+                      "id": "PdFdg",
+                      "type": "ref",
+                      "ref": "X:QY0Ka",
+                      "name": "Stopping · 1 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Stopping · 1",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
+                    },
+                    {
+                      "id": "Cjz5Y",
+                      "type": "ref",
+                      "ref": "X:QY0Ka",
+                      "name": "Uncertain · 1 column link",
+                      "width": "fill_container",
+                      "height": 32,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "alignItems": "center",
+                      "justifyContent": "center",
+                      "descendants": {
+                        "X:qYQHc": {
+                          "content": "Uncertain · 1",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "textAlign": "left",
+                          "fontSize": 14
+                        }
+                      }
                     }
                   ]
                 },
@@ -93053,7 +93467,7 @@
                       "type": "frame",
                       "id": "KTXhE",
                       "name": "Ready column",
-                      "width": 300,
+                      "width": 234,
                       "height": "fill_container",
                       "fill": "$X:--card",
                       "cornerRadius": 8,
@@ -93070,121 +93484,24 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Ready  ·  2",
+                          "content": "Ready  ·  0",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 14,
                           "fontWeight": "600"
                         },
                         {
-                          "type": "frame",
-                          "id": "w2mEn",
-                          "name": "Ready but independently blocked task",
+                          "type": "text",
+                          "id": "sbXYV",
+                          "name": "Ready empty state",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "height": 124,
-                          "fill": "$X:--background",
-                          "cornerRadius": 6,
-                          "stroke": "$X:--border",
-                          "strokeWidth": 1,
-                          "layout": "vertical",
-                          "gap": 6,
-                          "padding": 10,
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "Sh7Yu",
-                              "name": "Ready task title",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Document retry policy",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
-                              "fontWeight": "600"
-                            },
-                            {
-                              "type": "text",
-                              "id": "UXbpK",
-                              "name": "Ready task state",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Ready · execution held by GitHub dependency",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            },
-                            {
-                              "type": "text",
-                              "id": "W6h0wN",
-                              "name": "Ready next actor",
-                              "fill": "$X:--muted-foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Next: you · choose retry limits",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            }
-                          ]
-                        },
-                        {
-                          "type": "frame",
-                          "id": "UeG6p",
-                          "name": "Ready task card",
-                          "width": "fill_container",
-                          "height": 104,
-                          "fill": "$X:--background",
-                          "cornerRadius": 6,
-                          "stroke": "$X:--border",
-                          "strokeWidth": 1,
-                          "layout": "vertical",
-                          "gap": 5,
-                          "padding": 10,
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "I8FrS",
-                              "name": "Ready task two title",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Prepare release checklist",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
-                              "fontWeight": "600"
-                            },
-                            {
-                              "type": "text",
-                              "id": "fXwtv",
-                              "name": "Ready task two state",
-                              "fill": "$X:--muted-foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Ready · no current hold",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            },
-                            {
-                              "type": "text",
-                              "id": "HF9nq",
-                              "name": "Ready task two next actor",
-                              "fill": "$X:--muted-foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Next: Eli · begin assigned work",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            }
-                          ]
+                          "content": "No unheld Ready tasks. Ready-with-hold appears in Waiting.",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -93192,7 +93509,7 @@
                       "type": "frame",
                       "id": "a8Zg6I",
                       "name": "Running column",
-                      "width": 300,
+                      "width": 234,
                       "height": "fill_container",
                       "fill": "$X:--card",
                       "cornerRadius": 8,
@@ -93249,7 +93566,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Running · repair owner unknown",
+                              "content": "Atlas · A-108 · Running",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93291,7 +93608,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Improve startup checks",
+                              "content": "Reduce image-cache misses",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 13,
@@ -93304,7 +93621,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Running · Eli is assigned",
+                              "content": "Atlas · AT-156 · Running · owner unknown",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93317,7 +93634,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Next: Eli · check A-107",
+                              "content": "Next: Mira · inspect run",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93331,7 +93648,7 @@
                       "type": "frame",
                       "id": "dBAqL",
                       "name": "Waiting column",
-                      "width": 300,
+                      "width": 234,
                       "height": "fill_container",
                       "fill": "$X:--card",
                       "cornerRadius": 8,
@@ -93348,7 +93665,201 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Waiting  ·  2",
+                          "content": "Waiting  ·  3",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 14,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "UeG6p",
+                          "name": "Ready task card",
+                          "width": "fill_container",
+                          "height": 138,
+                          "fill": "$X:--background",
+                          "cornerRadius": 6,
+                          "stroke": "$X:--border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "gap": 5,
+                          "padding": 10,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "I8FrS",
+                              "name": "Ready task two title",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Prepare release checklist",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "fXwtv",
+                              "name": "Ready task two state",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Atlas · Ready · blocked by AT-142",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "HF9nq",
+                              "name": "Ready task two next actor",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: Mira · resolve AT-142",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "OvitP",
+                          "name": "Dependency waiting card",
+                          "width": "fill_container",
+                          "height": 138,
+                          "fill": "$X:--background",
+                          "cornerRadius": 6,
+                          "stroke": "$X:--border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "gap": 5,
+                          "padding": 10,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "naZEM",
+                              "name": "Waiting task title",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Ship an accessible command menu",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "K5eKT1",
+                              "name": "Waiting task state",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Atlas · AT-142 · waiting approval · held by #87",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "Kk8Xr",
+                              "name": "Waiting task next actor",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: you · review PR material · Mira leads",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "w2mEn",
+                          "name": "Ready but independently blocked task",
+                          "width": "fill_container",
+                          "height": 138,
+                          "fill": "$X:--background",
+                          "cornerRadius": 6,
+                          "stroke": "$X:--border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "gap": 6,
+                          "padding": 10,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "Sh7Yu",
+                              "name": "Ready task title",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Document retry policy",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "UXbpK",
+                              "name": "Ready task state",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Relay · Ready · held by GitHub dependency",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "W6h0wN",
+                              "name": "Ready next actor",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: Jonas · answer Q-191",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "bWHkr",
+                      "name": "Paused column",
+                      "width": 234,
+                      "height": "fill_container",
+                      "fill": "$X:--card",
+                      "cornerRadius": 8,
+                      "stroke": "$X:--border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "gap": 10,
+                      "padding": 10,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "C9dlN",
+                          "name": "Paused heading",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Paused  ·  1",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 14,
@@ -93359,7 +93870,7 @@
                           "id": "FiUfJ",
                           "name": "Question waiting card",
                           "width": "fill_container",
-                          "height": 124,
+                          "height": 138,
                           "fill": "$X:--background",
                           "cornerRadius": 6,
                           "stroke": "$X:--border",
@@ -93388,7 +93899,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Paused · Question Q-204",
+                              "content": "Fieldnotes · Q-204/r2 · Paused",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93401,62 +93912,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Next: you · answer does not resume work",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            }
-                          ]
-                        },
-                        {
-                          "type": "frame",
-                          "id": "OvitP",
-                          "name": "Dependency waiting card",
-                          "width": "fill_container",
-                          "height": 100,
-                          "fill": "$X:--background",
-                          "cornerRadius": 6,
-                          "stroke": "$X:--border",
-                          "strokeWidth": 1,
-                          "layout": "vertical",
-                          "gap": 5,
-                          "padding": 10,
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "naZEM",
-                              "name": "Waiting task title",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Publish onboarding draft",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 13,
-                              "fontWeight": "600"
-                            },
-                            {
-                              "type": "text",
-                              "id": "K5eKT1",
-                              "name": "Waiting task state",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Waiting · blocked by a task dependency",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            },
-                            {
-                              "type": "text",
-                              "id": "Kk8Xr",
-                              "name": "Waiting task next actor",
-                              "fill": "$X:--muted-foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Next: dependency owner",
+                              "content": "Next: you · submit all 3 answers; task stays paused",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93467,19 +93923,6 @@
                       ]
                     }
                   ]
-                },
-                {
-                  "type": "text",
-                  "id": "RG7GL",
-                  "name": "Other columns note",
-                  "fill": "$X:--muted-foreground",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
-                  "content": "More columns →  Stopping · 1  /  Uncertain · 1     ·     Horizontal column navigation; no drag-to-mutate actions.",
-                  "lineHeight": 1.35,
-                  "fontFamily": "Inter",
-                  "fontSize": 12,
-                  "fontWeight": "normal"
                 }
               ]
             }
@@ -93490,8 +93933,8 @@
           "id": "Sejey",
           "x": 2368,
           "y": 1736,
-          "name": "04G · Phone question / short viewport · 390 × 480",
-          "context": "390×480 short-height question. The body is an independent scroller; selected answer and focus remain when scrolling. The action stays visually reachable; real bottom safe-area inset must be applied and verified in a device client. Static design cannot prove scroll chaining or virtual-keyboard behavior.",
+          "name": "04G · Phone grouped question · Q2–Q3 short viewport · 390 × 480",
+          "context": "390×480 Q-204/r2 snapshot at the Q2–Q3 scroll position. The same three answers remain one grouped submission; Q1's selected audience is retained and the footer stays visible. The task remains paused, and answering does not clear independent holds. Bottom safe-area and keyboard behavior still need a real device check.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -93539,7 +93982,7 @@
                   "fill": "$X:--foreground",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Inbox  ·  Question 3 of 5",
+                  "content": "Inbox  ·  Q-204/r2  ·  Paused",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
                   "fontSize": 14,
@@ -93561,8 +94004,12 @@
                 {
                   "type": "frame",
                   "id": "wHhpl",
+                  "layoutPosition": "absolute",
+                  "x": 12,
+                  "y": -252,
                   "name": "Question content",
-                  "width": "fill_container",
+                  "width": 366,
+                  "height": 720,
                   "layout": "vertical",
                   "gap": 8,
                   "children": [
@@ -93573,7 +94020,7 @@
                       "fill": "$X:--muted-foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "PAUSED TASK  ·  Q-204",
+                      "content": "PAUSED  ·  FIELDNOTES  ·  Q-204/r2",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 12,
@@ -93586,7 +94033,7 @@
                       "fill": "$X:--foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "Choose the audience for the onboarding guide",
+                      "content": "Shape the first-run guide",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 18,
@@ -93599,7 +94046,7 @@
                       "fill": "$X:--foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "This guide contains steps for both workspace owners and every new member. Nora asks which group should receive the first version and why.",
+                      "content": "Nora Ellis · F-203 · Fieldnotes / Refresh onboarding copy.",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 13,
@@ -93626,7 +94073,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "EVIDENCE · DRAFT V3",
+                          "content": "Q1 · SELECTED ANSWER",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -93639,7 +94086,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Owner-specific setup appears in steps 2–4.",
+                          "content": "Every new member · Nora’s recommended choice.",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
@@ -93654,7 +94101,7 @@
                       "fill": "$X:--foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "Choose one audience",
+                      "content": "1. Who should the guide address? · Required · choose one",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 13,
@@ -93691,64 +94138,11 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Every new member",
+                          "content": "Every new member · recommended by Nora",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
                           "fontWeight": "600"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "rxbs5",
-                      "name": "Long answer input",
-                      "width": "fill_container",
-                      "height": 94,
-                      "layout": "vertical",
-                      "gap": 4,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "MgjrW",
-                          "name": "Answer label",
-                          "fill": "$X:--muted-foreground",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "Your answer · saved only when confirmed",
-                          "lineHeight": 1.35,
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        },
-                        {
-                          "type": "frame",
-                          "id": "vHwms",
-                          "name": "Answer text area",
-                          "width": "fill_container",
-                          "height": 74,
-                          "fill": "$X:--background",
-                          "cornerRadius": 6,
-                          "stroke": "$X:--border",
-                          "strokeWidth": 1,
-                          "layout": "vertical",
-                          "gap": 4,
-                          "padding": 8,
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "cWXt3",
-                              "name": "Long answer value",
-                              "fill": "$X:--foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Use a short guide for every new member, with owner-only setup in a clearly separate section.",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
-                            }
-                          ]
                         }
                       ]
                     },
@@ -93759,11 +94153,421 @@
                       "fill": "$X:--muted-foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "1 of 2 questions answered · scroll to review the full form",
+                      "content": "Paused. Answering does not resume work or clear other holds.",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 12,
                       "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "pmMZm",
+                      "name": "Q2–Q3 · same grouped Q-204/r2 form",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "utXTS",
+                          "name": "Q2 title",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "2. Which sections belong in the guide?",
+                          "lineHeight": 1.25,
+                          "fontFamily": "Inter",
+                          "fontSize": 14,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "text",
+                          "id": "JEcHX",
+                          "name": "Q2 constraint",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Required · select 1–2 · custom options not allowed",
+                          "lineHeight": 1.25,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "id": "zoweu",
+                          "type": "ref",
+                          "ref": "X:pcGlv",
+                          "name": "Find everyday actions",
+                          "width": "fill_container",
+                          "theme": {
+                            "X:Mode": "Dark",
+                            "X:Base": "Neutral",
+                            "X:Accent": "Default"
+                          },
+                          "height": "fit_content",
+                          "fill": "$X:--accent",
+                          "stroke": "$X:--primary",
+                          "strokeWidth": 1,
+                          "cornerRadius": 6,
+                          "effect": [],
+                          "descendants": {
+                            "X:CgJv7": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            },
+                            "X:frWPV": {
+                              "type": "frame",
+                              "id": "CRm86",
+                              "name": "Find everyday actions content",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 8,
+                              "padding": 8,
+                              "children": [
+                                {
+                                  "id": "C6Qw2K",
+                                  "type": "ref",
+                                  "ref": "X:J7Uph",
+                                  "name": "Multiple-choice option",
+                                  "width": "fill_container",
+                                  "alignItems": "start",
+                                  "justifyContent": "start",
+                                  "theme": {
+                                    "X:Mode": "Dark"
+                                  },
+                                  "descendants": {
+                                    "X:kfU2y": {
+                                      "fill": "$X:--primary",
+                                      "stroke": "$X:--primary"
+                                    },
+                                    "X:5n2yq": {
+                                      "enabled": true,
+                                      "fill": "$X:--primary-foreground"
+                                    },
+                                    "X:dszbm": {
+                                      "type": "frame",
+                                      "id": "kYg3p",
+                                      "name": "Option content",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 4,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "HrEvb",
+                                          "name": "Option label",
+                                          "fill": "$X:--foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Find everyday actions",
+                                          "lineHeight": 1.25,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "KPx6D",
+                                          "name": "Option description",
+                                          "fill": "$X:--muted-foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Searching and keyboard shortcuts",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "X:bvhSM": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            }
+                          }
+                        },
+                        {
+                          "id": "jIaQL",
+                          "type": "ref",
+                          "ref": "X:pcGlv",
+                          "name": "Invite teammates",
+                          "width": "fill_container",
+                          "theme": {
+                            "X:Mode": "Dark",
+                            "X:Base": "Neutral",
+                            "X:Accent": "Default"
+                          },
+                          "height": "fit_content",
+                          "fill": "$X:--accent",
+                          "stroke": "$X:--primary",
+                          "strokeWidth": 1,
+                          "cornerRadius": 6,
+                          "effect": [],
+                          "descendants": {
+                            "X:CgJv7": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            },
+                            "X:frWPV": {
+                              "type": "frame",
+                              "id": "UeCfR",
+                              "name": "Invite teammates content",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 8,
+                              "padding": 8,
+                              "children": [
+                                {
+                                  "id": "KSiLn",
+                                  "type": "ref",
+                                  "ref": "X:J7Uph",
+                                  "name": "Multiple-choice option",
+                                  "width": "fill_container",
+                                  "alignItems": "start",
+                                  "justifyContent": "start",
+                                  "theme": {
+                                    "X:Mode": "Dark"
+                                  },
+                                  "descendants": {
+                                    "X:kfU2y": {
+                                      "fill": "$X:--primary",
+                                      "stroke": "$X:--primary"
+                                    },
+                                    "X:5n2yq": {
+                                      "enabled": true,
+                                      "fill": "$X:--primary-foreground"
+                                    },
+                                    "X:dszbm": {
+                                      "type": "frame",
+                                      "id": "oPkzi",
+                                      "name": "Option content",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 4,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "Ruvsh",
+                                          "name": "Option label",
+                                          "fill": "$X:--foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Invite teammates",
+                                          "lineHeight": 1.25,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "F2Pn4",
+                                          "name": "Option description",
+                                          "fill": "$X:--muted-foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Owner checklist",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "X:bvhSM": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            }
+                          }
+                        },
+                        {
+                          "id": "v0aSd",
+                          "type": "ref",
+                          "ref": "X:pcGlv",
+                          "name": "Workspace defaults",
+                          "width": "fill_container",
+                          "theme": {
+                            "X:Mode": "Dark",
+                            "X:Base": "Neutral",
+                            "X:Accent": "Default"
+                          },
+                          "height": "fit_content",
+                          "fill": "$X:--accent",
+                          "stroke": "$X:--primary",
+                          "strokeWidth": 1,
+                          "cornerRadius": 6,
+                          "effect": [],
+                          "descendants": {
+                            "X:CgJv7": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            },
+                            "X:frWPV": {
+                              "type": "frame",
+                              "id": "R07ND",
+                              "name": "Workspace defaults content",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 8,
+                              "padding": 8,
+                              "children": [
+                                {
+                                  "id": "nnJkl",
+                                  "type": "ref",
+                                  "ref": "X:J7Uph",
+                                  "name": "Multiple-choice option",
+                                  "width": "fill_container",
+                                  "alignItems": "start",
+                                  "justifyContent": "start",
+                                  "theme": {
+                                    "X:Mode": "Dark"
+                                  },
+                                  "descendants": {
+                                    "X:kfU2y": {
+                                      "fill": "$X:--primary",
+                                      "stroke": "$X:--primary"
+                                    },
+                                    "X:5n2yq": {
+                                      "enabled": true,
+                                      "fill": "$X:--primary-foreground"
+                                    },
+                                    "X:dszbm": {
+                                      "type": "frame",
+                                      "id": "I6XGP0",
+                                      "name": "Option content",
+                                      "width": "fill_container",
+                                      "layout": "vertical",
+                                      "gap": 4,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "oORMk",
+                                          "name": "Option label",
+                                          "fill": "$X:--foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Workspace defaults",
+                                          "lineHeight": 1.25,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "U2PLor",
+                                          "name": "Option description",
+                                          "fill": "$X:--muted-foreground",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "Initial settings",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "normal"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "X:bvhSM": {
+                              "enabled": false,
+                              "height": 0,
+                              "width": 0
+                            }
+                          }
+                        },
+                        {
+                          "type": "text",
+                          "id": "W0GKOv",
+                          "name": "Inline selection validation",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Select at most 2 sections.",
+                          "lineHeight": 1.25,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "YpMRK",
+                          "name": "Q3 title",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "3. How should the opening sound?",
+                          "lineHeight": 1.25,
+                          "fontFamily": "Inter",
+                          "fontSize": 14,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "text",
+                          "id": "IzGtG",
+                          "name": "Q3 constraint",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Required · free text · up to 240 characters",
+                          "lineHeight": 1.25,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "NCjp5",
+                          "name": "Unfinished tone answer",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 6,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "zafec",
+                              "name": "Tone answer field",
+                              "width": "fill_container",
+                              "height": 48,
+                              "fill": "$X:--background",
+                              "cornerRadius": 6,
+                              "stroke": "$X:--border",
+                              "strokeWidth": 1,
+                              "layout": "vertical",
+                              "padding": 12,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "IzPwU",
+                                  "name": "Tone answer value",
+                                  "fill": "$X:--foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Friendly and direct. Avoid setup jargon.",
+                                  "lineHeight": 1.5,
+                                  "fontFamily": "Inter",
+                                  "fontSize": 14,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
                     }
                   ]
                 }
@@ -93774,7 +94578,7 @@
               "id": "deIY2",
               "name": "Question pinned submit area",
               "width": "fill_container",
-              "height": 82,
+              "height": 90,
               "fill": "$X:--background",
               "stroke": "$X:--border",
               "strokeWidth": {
@@ -93796,7 +94600,7 @@
                   "fill": "$X:--muted-foreground",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Selected: Every new member",
+                  "content": "Q1 valid · Q2 exceeds 2 · Q3 saved · paused · not sent",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
                   "fontSize": 12,
@@ -93806,7 +94610,7 @@
                   "id": "J1zApA",
                   "type": "ref",
                   "ref": "X:VSnC2",
-                  "name": "Submit selected answer",
+                  "name": "Submit answers · disabled",
                   "width": "fill_container",
                   "height": 44,
                   "theme": {
@@ -93814,12 +94618,13 @@
                     "X:Base": "Neutral",
                     "X:Accent": "Default"
                   },
+                  "opacity": 0.5,
                   "descendants": {
                     "X:8jVfJ": {
                       "enabled": false
                     },
                     "X:8tnXG": {
-                      "content": "Submit answer"
+                      "content": "Submit answers"
                     }
                   }
                 }
@@ -94256,7 +95061,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "List / Board change presentation only; Ready-with-hold stays Ready, and Waiting is explicit. Measure the responsive navigation threshold and textarea growth cap in implementation; assign scrolling to the body/queue viewport and preserve selection/caret across resize. The phone question intentionally clips long content within its independent scroll viewport. Keyboard/focus order and focus before submission, forced-colour contrast, scrollbar chaining, safe-area and virtual-keyboard behavior, and physical-device resize/zoom/text scale need browser/device evidence. Comparison-image loading remains unverified.",
+              "content": "List / Board change presentation only. The All-projects Board keeps readiness separate from execution: dependency-held Ready tasks appear in Waiting, and Q-204/r2 remains Paused until separately resumed. All three Q-204 answers submit together; Q2's three selected choices exceed the 1–2 limit, so Submit answers stays disabled. The phone frame shows the Q2–Q3 scroll position while retaining Q1 above. Measure the responsive navigation threshold and textarea growth cap in implementation; assign scrolling to the body/queue viewport and preserve selection/caret across resize. Keyboard/focus order and focus before submission, forced-colour contrast, scrollbar chaining, safe-area and virtual-keyboard behavior, and physical-device resize/zoom/text scale need browser/device evidence. Comparison-image loading remains unverified.",
               "lineHeight": 1.35,
               "fontFamily": "Inter",
               "fontSize": 12,
