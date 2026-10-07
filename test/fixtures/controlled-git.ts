@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
@@ -20,6 +21,9 @@ export type ControlledGitRule = {
 export type ControlledGitEvent = {
   event: "start" | "ready" | "finish" | "term" | "descendant";
   pid: number;
+  fixtureToken?: string;
+  processPath?: string;
+  processStartedAt?: string | null;
   command?: string;
   cwd?: string;
   operation?: string;
@@ -32,7 +36,12 @@ export type ControlledGitEvent = {
 export function controlledGit(root?: string) {
   const fixtureRoot =
     root ?? mkdtempSync(join(tmpdir(), "ensemble-controlled-git-"));
-  const executable = join(fixtureRoot, "controlled-git.cjs");
+  const fixtureToken = randomUUID();
+  const executable = join(fixtureRoot, `controlled-git-${fixtureToken}.cjs`);
+  const descendantExecutable = join(
+    fixtureRoot,
+    `controlled-git-descendant-${fixtureToken}.cjs`,
+  );
   const controlPath = join(fixtureRoot, "controlled-git-control.json");
   const eventsPath = join(fixtureRoot, "controlled-git-events.jsonl");
   const realGit = spawnSync("which", ["git"], {
@@ -45,6 +54,9 @@ const { spawn, spawnSync } = require("node:child_process");
 const controlPath = ${JSON.stringify(controlPath)};
 const eventsPath = ${JSON.stringify(eventsPath)};
 const realGit = ${JSON.stringify(realGit)};
+const fixtureToken = ${JSON.stringify(fixtureToken)};
+const executable = ${JSON.stringify(executable)};
+const descendantExecutable = ${JSON.stringify(descendantExecutable)};
 const args = process.argv.slice(2);
 const cwdIndex = args.indexOf("-C");
 const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : process.cwd();
@@ -59,7 +71,18 @@ const classify = (value) => {
   if (value.startsWith("rev-parse --verify")) return "checkout-validation";
   return "other";
 };
-const writeEvent = (value) => appendFileSync(eventsPath, JSON.stringify({ ...value, atMs: Date.now() }) + "\\n");
+const processIdentity = (pid, processPath) => {
+  const result = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1000 });
+  const processStartedAt = !result.error && result.status === 0
+    ? result.stdout.trim().split(/\\s+/).join(" ")
+    : null;
+  return { fixtureToken, processPath, processStartedAt };
+};
+const writeEvent = (value) => {
+  const processPath = value.event === "descendant" ? descendantExecutable : executable;
+  const identity = processIdentity(value.pid, processPath);
+  appendFileSync(eventsPath, JSON.stringify({ ...value, ...(identity ?? {}), atMs: Date.now() }) + "\\n");
+};
 const operation = classify(command);
 const startedAt = Date.now();
 const control = JSON.parse(readFileSync(controlPath, "utf8"));
@@ -75,7 +98,7 @@ if (control.behavior && command.startsWith(control.commandPrefix) && (!control.c
       writeEvent({ event: "finish", pid: process.pid, operation, elapsedMs: Date.now() - startedAt, exitCode: 0, effectComplete: true });
     process.on("SIGTERM", () => writeEvent({ event: "term", pid: process.pid }));
     if (control.holdPipe) {
-      const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)"], { stdio: "inherit" });
+      const descendant = spawn(process.execPath, [descendantExecutable, fixtureToken], { stdio: "inherit" });
       writeEvent({ event: "descendant", pid: descendant.pid });
     }
     writeEvent({ event: "ready", pid: process.pid, operation });
@@ -98,8 +121,15 @@ if (control.behavior && command.startsWith(control.commandPrefix) && (!control.c
   process.exit(result.status ?? 1);
 }
 `;
+  const descendantSource = `#!${process.execPath}
+if (process.argv[2] !== ${JSON.stringify(fixtureToken)}) process.exit(91);
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`;
   writeFileSync(executable, source);
+  writeFileSync(descendantExecutable, descendantSource);
   chmodSync(executable, 0o755);
+  chmodSync(descendantExecutable, 0o755);
 
   return {
     root: fixtureRoot,
@@ -117,39 +147,144 @@ if (control.behavior && command.startsWith(control.commandPrefix) && (!control.c
         return [];
       }
     },
-    async cleanup(): Promise<void> {
-      const pids = new Set(
-        this.events()
-          .filter(({ event }) => event === "start" || event === "descendant")
-          .map(({ pid }) => pid)
-          .filter(
-            (pid) =>
-              Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid,
-          ),
+    recordStaleIdentityForTest(pid: number): void {
+      appendFileSync(
+        eventsPath,
+        `${JSON.stringify({
+          event: "start",
+          pid,
+          fixtureToken,
+          processPath: executable,
+          processStartedAt: "stale-process-birth-identity",
+        })}\n`,
       );
-      for (const pid of pids) {
-        if (isAlive(pid)) {
-          try {
-            process.kill(pid, "SIGTERM");
-          } catch {
-            // The exact fixture child may have exited between the liveness check and signal.
+    },
+    async cleanup(): Promise<void> {
+      const identities = new Map<string, ProcessIdentity>();
+      let unresolvedIdentity = false;
+      for (const event of this.events()) {
+        if (event.event !== "start" && event.event !== "descendant") continue;
+        if (
+          event.fixtureToken !== fixtureToken ||
+          (event.processPath !== executable &&
+            event.processPath !== descendantExecutable)
+        )
+          continue;
+        if (
+          !Number.isSafeInteger(event.pid) ||
+          event.pid <= 0 ||
+          event.pid === process.pid
+        )
+          continue;
+        if (!event.processStartedAt) {
+          const current = currentProcessIdentity(event.pid);
+          if (!current) {
+            if (isAlive(event.pid)) unresolvedIdentity = true;
+            continue;
           }
-          if (!(await waitUntil(() => !isAlive(pid), 250))) {
-            try {
-              process.kill(pid, "SIGKILL");
-            } catch {
-              // The exact fixture child may have exited before escalation.
-            }
-            if (!(await waitUntil(() => !isAlive(pid), 1000)))
-              throw new Error(
-                "Controlled Git fixture child did not stop within its cleanup bound",
-              );
-          }
+          if (
+            current.command.includes(event.processPath) &&
+            current.command.includes(fixtureToken)
+          )
+            unresolvedIdentity = true;
+          continue;
+        }
+        const identity = {
+          pid: event.pid,
+          fixtureToken,
+          processPath: event.processPath,
+          processStartedAt: event.processStartedAt,
+        };
+        identities.set(
+          `${identity.pid}:${identity.processStartedAt}:${identity.processPath}`,
+          identity,
+        );
+      }
+      for (const identity of identities.values()) {
+        const current = verifyOwnedProcess(identity);
+        if (current === "unverifiable")
+          throw new Error(
+            "Controlled Git fixture process identity could not be verified",
+          );
+        if (current !== "owned") continue;
+
+        signalOwnedProcess(identity, "SIGTERM");
+        if (!(await waitUntil(() => processIsGoneOrChanged(identity), 250))) {
+          signalOwnedProcess(identity, "SIGKILL");
+          if (!(await waitUntil(() => processIsGoneOrChanged(identity), 1000)))
+            throw new Error(
+              "Controlled Git fixture child did not stop within its cleanup bound",
+            );
         }
       }
+      if (unresolvedIdentity)
+        throw new Error(
+          "Controlled Git fixture has a live process without a captured birth identity",
+        );
       if (!root) rmSync(fixtureRoot, { recursive: true, force: true });
     },
   };
+}
+
+type ProcessIdentity = {
+  pid: number;
+  fixtureToken: string;
+  processPath: string;
+  processStartedAt: string;
+};
+
+function currentProcessIdentity(pid: number): {
+  processStartedAt: string;
+  command: string;
+} | null {
+  const result = spawnSync(
+    "ps",
+    ["-ww", "-p", String(pid), "-o", "lstart=,command="],
+    { encoding: "utf8", timeout: 250 },
+  );
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+      throw new Error(
+        "Controlled Git fixture process identity check timed out",
+      );
+    throw result.error;
+  }
+  if (result.status !== 0) return null;
+  const fields = result.stdout.trim().split(/\s+/);
+  if (fields.length < 6) return null;
+  return {
+    processStartedAt: fields.slice(0, 5).join(" "),
+    command: fields.slice(5).join(" "),
+  };
+}
+
+function verifyOwnedProcess(
+  identity: ProcessIdentity,
+): "owned" | "gone" | "changed" | "unverifiable" {
+  try {
+    process.kill(identity.pid, 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "gone";
+    if (code !== "EPERM") throw error;
+  }
+  const current = currentProcessIdentity(identity.pid);
+  if (!current) {
+    try {
+      process.kill(identity.pid, 0);
+      return "unverifiable";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return "gone";
+      throw error;
+    }
+  }
+  if (
+    current.processStartedAt !== identity.processStartedAt ||
+    !current.command.includes(identity.processPath) ||
+    !current.command.includes(identity.fixtureToken)
+  )
+    return "changed";
+  return "owned";
 }
 
 function isAlive(pid: number): boolean {
@@ -159,6 +294,33 @@ function isAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
+}
+
+function signalOwnedProcess(
+  identity: ProcessIdentity,
+  signal: NodeJS.Signals,
+): void {
+  const current = verifyOwnedProcess(identity);
+  if (current === "gone" || current === "changed") return;
+  if (current === "unverifiable")
+    throw new Error(
+      "Controlled Git fixture process identity could not be verified before signal",
+    );
+  try {
+    process.kill(identity.pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    throw error;
+  }
+}
+
+function processIsGoneOrChanged(identity: ProcessIdentity): boolean {
+  const current = verifyOwnedProcess(identity);
+  if (current === "unverifiable")
+    throw new Error(
+      "Controlled Git fixture process identity could not be verified during cleanup",
+    );
+  return current === "gone" || current === "changed";
 }
 
 async function waitUntil(

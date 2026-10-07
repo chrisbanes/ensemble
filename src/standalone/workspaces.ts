@@ -747,7 +747,8 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
     });
   }
 
-  private assertNotCancelled(): void {
+  /** @internal Allows service startup to honor the same sticky cancellation latch. */
+  assertNotCancelled(): void {
     if (this.cancelled) throw new WorkspaceManagerCancelledError();
   }
 

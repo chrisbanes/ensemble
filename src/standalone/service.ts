@@ -291,6 +291,7 @@ export class StandaloneService {
       );
       this.workspaces = workspaces;
       await workspaces.recover();
+      workspaces.assertNotCancelled();
       const state = new ExecutionState(db);
       for (const item of state.list()) {
         const executionBinding = state.taskBinding(item.workId);

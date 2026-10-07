@@ -23,9 +23,9 @@ import type {
 } from "../src/standalone/codex.js";
 import type {
   TaskWorkspaceRepositoryInput,
-  WorkspaceManager,
   WorkspaceManagerOptions,
 } from "../src/standalone/workspaces.js";
+import { WorkspaceManager } from "../src/standalone/workspaces.js";
 
 class RuntimeFixture implements Runtime {
   starts = 0;
@@ -108,6 +108,24 @@ function deferred() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+async function withTimeout<T>(
+  value: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      value,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sourceRepository(root: string, name: string): string {
@@ -1518,6 +1536,711 @@ test("uncertain archive status keeps its archival hold across restart", async (t
         } finally {
           rmSync(repositoryRoot, { recursive: true, force: true });
         }
+      }
+    }
+  }
+});
+
+test("service stop settles direct workspace provisioning before database close", async (t) => {
+  const controlled = controlledGit();
+  const failures: Parameters<
+    NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+  >[0][] = [];
+  const databaseOpenAtFailure: boolean[] = [];
+  let observingService: StandaloneService | undefined;
+  const f = await fixture({
+    workspaceManager: {
+      gitExecutable: controlled.executable,
+      gitTimeoutMs: { "repository-identity": 30_000 },
+      gitTerminationGraceMs: 20,
+      gitTerminationObservationMs: 40,
+      gitFailureObserver: (failure) => {
+        failures.push(failure);
+        const db = (observingService as unknown as { db?: DatabaseSync })?.db;
+        databaseOpenAtFailure.push(db?.isOpen ?? false);
+      },
+    },
+  });
+  observingService = f.service;
+  try {
+    const source = sourceRepository(f.root, "direct-provision-source");
+    const taskId = randomUUID();
+    f.execute({
+      type: "task.create",
+      actor: "operator",
+      projectId: f.projectId,
+      taskId,
+      title: "Direct provisioning",
+      outcome: "Preserve incomplete Git work",
+      ready: false,
+    });
+    const launchesBeforeProvision = controlled
+      .events()
+      .filter(
+        ({ event, operation }) =>
+          event === "start" && operation === "repository-identity",
+      ).length;
+    controlled.setRule({
+      commandPrefix: "rev-parse --show-toplevel",
+      behavior: "stall",
+      holdPipe: true,
+    });
+    const provisioning = f.service.provisionTask(taskId, [
+      { repositoryId: "repo", path: source },
+    ]);
+    const ready = await waitForControlledGitEvent(
+      controlled,
+      ({ event, operation }) =>
+        event === "ready" && operation === "repository-identity",
+    );
+    assert.ok(ready.atMs !== undefined);
+    const [binding] = await Promise.all([provisioning, f.service.stop()]);
+    const elapsedMs = Date.now() - ready.atMs;
+    assert.ok(elapsedMs < 20 + 40 + 800, `settled in ${elapsedMs}ms`);
+    t.diagnostic(
+      `service-provision-stop-evidence ${JSON.stringify({
+        readyToSettleMs: elapsedMs,
+        termGraceMs: 20,
+        observationMs: 40,
+        childExitSignal: failures.at(-1)?.childExitSignal,
+        databaseOpenAtChildExit: databaseOpenAtFailure.at(-1),
+      })}`,
+    );
+    assert.equal(binding.state, "held");
+    assert.equal(binding.gitUncertain, true);
+    assert.deepEqual(failures.at(-1), {
+      operation: "repository-identity",
+      kind: "cancelled",
+      childExitObserved: true,
+      childExitSignal: "SIGKILL",
+    });
+    assert.deepEqual(databaseOpenAtFailure, [true]);
+    assert.equal(
+      controlled
+        .events()
+        .filter(
+          ({ event, operation }) =>
+            event === "start" && operation === "repository-identity",
+        ).length,
+      launchesBeforeProvision + 1,
+      "direct provisioning was not retried during service stop",
+    );
+
+    const reopened = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    const stored = reopened
+      .prepare(
+        "SELECT workspaceId, path, state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+      )
+      .get(taskId) as
+      | {
+          workspaceId: string;
+          path: string;
+          state: string;
+          gitUncertain: number;
+        }
+      | undefined;
+    reopened.close();
+    assert.equal(stored?.workspaceId, binding.workspaceId);
+    assert.equal(stored?.path, binding.path);
+    assert.equal(stored?.state, "held");
+    assert.equal(stored?.gitUncertain, 1);
+    assert.equal(existsSync(binding.path), true);
+  } finally {
+    try {
+      await f.close();
+    } finally {
+      await controlled.cleanup();
+    }
+  }
+});
+
+test("service stop settles archive status and worktree removal before database close", async (t) => {
+  const scenarios = [
+    {
+      name: "archive status",
+      commandPrefix: "status --porcelain=v1 --untracked-files=all",
+      operation: "archive-status",
+    },
+    {
+      name: "worktree removal",
+      commandPrefix: "worktree remove",
+      operation: "worktree-remove",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (t) => {
+      const repositoryRoot = mkdtempSync(
+        join(tmpdir(), "ensemble-archive-stop-source-"),
+      );
+      const source = sourceRepository(repositoryRoot, "source");
+      const controlled = controlledGit();
+      const failures: Parameters<
+        NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+      >[0][] = [];
+      const databaseOpenAtFailure: boolean[] = [];
+      let observingService: StandaloneService | undefined;
+      const serviceOptions = {
+        workspaceManager: {
+          gitExecutable: controlled.executable,
+          gitTimeoutMs: {
+            "archive-status": 30_000,
+            "worktree-remove": 30_000,
+          },
+          gitTerminationGraceMs: 20,
+          gitTerminationObservationMs: 40,
+          gitFailureObserver: (failure: (typeof failures)[number]) => {
+            failures.push(failure);
+            const db = (observingService as unknown as { db?: DatabaseSync })
+              ?.db;
+            databaseOpenAtFailure.push(db?.isOpen ?? false);
+          },
+        },
+      };
+      const f = await fixture(serviceOptions, [
+        { repositoryId: "repo", path: source },
+      ]);
+      observingService = f.service;
+      try {
+        const binding = await f.service.taskWorkspace(f.taskId);
+        const repository = binding?.repositories[0];
+        assert.ok(binding);
+        assert.ok(repository);
+        controlled.setRule({
+          commandPrefix: scenario.commandPrefix,
+          behavior: "stall",
+          holdPipe: true,
+        });
+        const archival = f.service.archiveTask(f.taskId, {
+          deliveryConfirmed: true,
+          writerOwnershipResolved: true,
+          handoffsPreserved: true,
+          reconciliationEvidencePreserved: true,
+          workspaceContentsPreserved: true,
+        });
+        const ready = await waitForControlledGitEvent(
+          controlled,
+          ({ event, operation }) =>
+            event === "ready" && operation === scenario.operation,
+        );
+        assert.ok(ready.atMs !== undefined);
+        const [result] = await Promise.all([archival, f.service.stop()]);
+        const elapsedMs = Date.now() - ready.atMs;
+        assert.ok(elapsedMs < 20 + 40 + 800, `settled in ${elapsedMs}ms`);
+        t.diagnostic(
+          `service-archive-stop-evidence ${JSON.stringify({
+            operation: scenario.operation,
+            readyToSettleMs: elapsedMs,
+            termGraceMs: 20,
+            observationMs: 40,
+            childExitSignal: failures.at(-1)?.childExitSignal,
+            databaseOpenAtChildExit: databaseOpenAtFailure.at(-1),
+          })}`,
+        );
+        assert.equal(result.outcome, "retained");
+        if (result.outcome === "retained") {
+          assert.equal(result.binding.workspaceId, binding.workspaceId);
+          assert.equal(result.binding.state, "held");
+          assert.equal(result.binding.gitUncertain, true);
+          assert.match(
+            result.reason,
+            new RegExp(`cancelled during ${scenario.operation}`),
+          );
+        }
+        assert.deepEqual(failures.at(-1), {
+          operation: scenario.operation,
+          kind: "cancelled",
+          childExitObserved: true,
+          childExitSignal: "SIGKILL",
+        });
+        assert.deepEqual(databaseOpenAtFailure, [true]);
+        assert.equal(existsSync(repository.workspacePath), true);
+        assert.equal(
+          controlled
+            .events()
+            .filter(
+              ({ event, operation }) =>
+                event === "start" && operation === scenario.operation,
+            ).length,
+          1,
+          `${scenario.operation} was not retried during service stop`,
+        );
+        if (scenario.operation === "archive-status")
+          assert.equal(
+            controlled
+              .events()
+              .some(
+                ({ event, operation }) =>
+                  event === "start" && operation === "worktree-remove",
+              ),
+            false,
+            "archive status cancellation never reached removal",
+          );
+
+        const reopened = new DatabaseSync(
+          join(f.root, "data", "standalone.sqlite"),
+        );
+        const stored = reopened
+          .prepare(
+            "SELECT workspaceId, path, state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+          )
+          .get(f.taskId) as
+          | {
+              workspaceId: string;
+              path: string;
+              state: string;
+              gitUncertain: number;
+            }
+          | undefined;
+        const holdCount = (
+          reopened
+            .prepare(
+              "SELECT COUNT(*) AS count FROM task_archival_holds WHERE taskId = ?",
+            )
+            .get(f.taskId) as { count: number }
+        ).count;
+        reopened.close();
+        assert.equal(stored?.workspaceId, binding.workspaceId);
+        assert.equal(stored?.path, binding.path);
+        assert.equal(stored?.state, "held");
+        assert.equal(stored?.gitUncertain, 1);
+        assert.equal(holdCount, 1);
+      } finally {
+        try {
+          await f.close();
+        } finally {
+          try {
+            await controlled.cleanup();
+          } finally {
+            rmSync(repositoryRoot, { recursive: true, force: true });
+          }
+        }
+      }
+    });
+  }
+});
+
+test("service stop cancels startup workspace recovery and settles before database close", async (t) => {
+  const repositoryRoot = mkdtempSync(
+    join(tmpdir(), "ensemble-startup-recovery-source-"),
+  );
+  const source = sourceRepository(repositoryRoot, "source");
+  const controlled = controlledGit();
+  const failures: Parameters<
+    NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+  >[0][] = [];
+  const databaseOpenAtFailure: boolean[] = [];
+  let observingService: StandaloneService | undefined;
+  const serviceOptions = {
+    workspaceManager: {
+      gitExecutable: controlled.executable,
+      gitTimeoutMs: { "repository-identity": 30_000 },
+      gitTerminationGraceMs: 20,
+      gitTerminationObservationMs: 40,
+      gitFailureObserver: (failure: (typeof failures)[number]) => {
+        failures.push(failure);
+        const db = (observingService as unknown as { db?: DatabaseSync })?.db;
+        databaseOpenAtFailure.push(db?.isOpen ?? false);
+      },
+    },
+  };
+  const f = await fixture(serviceOptions, [
+    { repositoryId: "repo", path: source },
+  ]);
+  observingService = f.service;
+  let recovered: StandaloneService | undefined;
+  let reopenedService: StandaloneService | undefined;
+  let runtimeFactoryCalls = 0;
+  let runtimeStartCalls = 0;
+  let runtimeStopCalls = 0;
+  const recoveryRuntime = new RuntimeFixture();
+  try {
+    const binding = await f.service.taskWorkspace(f.taskId);
+    const repository = binding?.repositories[0];
+    assert.ok(binding);
+    assert.ok(repository);
+    const db = (f.service as unknown as { db: DatabaseSync }).db;
+    db.prepare(
+      "UPDATE task_workspace_bindings SET state = 'provisioning', reason = NULL, gitUncertain = 0 WHERE taskId = ?",
+    ).run(f.taskId);
+    await f.service.stop();
+
+    controlled.setRule({
+      commandPrefix: "rev-parse --show-toplevel",
+      behavior: "stall",
+      holdPipe: true,
+    });
+    recoveryRuntime.start = async () => {
+      runtimeStartCalls++;
+    };
+    recoveryRuntime.stop = async () => {
+      runtimeStopCalls++;
+    };
+    recovered = new StandaloneService(
+      join(f.root, "data"),
+      () => {
+        runtimeFactoryCalls++;
+        return recoveryRuntime;
+      },
+      undefined,
+      serviceOptions,
+    );
+    observingService = recovered;
+    const launchesBeforeRecovery = controlled
+      .events()
+      .filter(
+        ({ event, operation }) =>
+          event === "start" && operation === "repository-identity",
+      ).length;
+    const startup = recovered.start();
+    const ready = await waitForControlledGitEvent(
+      controlled,
+      ({ event, operation }) =>
+        event === "ready" && operation === "repository-identity",
+    );
+    assert.ok(ready.atMs !== undefined);
+    const settled = Promise.allSettled([startup, recovered.stop()]);
+    let timeout: NodeJS.Timeout | undefined;
+    let results: PromiseSettledResult<void>[];
+    try {
+      results = await Promise.race([
+        settled,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error("Startup recovery stop exceeded its cleanup bound"),
+              ),
+            1500,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    const elapsedMs = Date.now() - ready.atMs;
+    assert.ok(elapsedMs < 20 + 40 + 800, `settled in ${elapsedMs}ms`);
+    t.diagnostic(
+      `startup-recovery-stop-evidence ${JSON.stringify({
+        readyToSettleMs: elapsedMs,
+        termGraceMs: 20,
+        observationMs: 40,
+        childExitSignal: failures.at(-1)?.childExitSignal,
+        databaseOpenAtChildExit: databaseOpenAtFailure.at(-1),
+        startupOutcome: results[0]?.status,
+        runtimeFactoryCalls,
+        runtimeStartCalls,
+        runtimeStopCalls,
+        threadStarts: recoveryRuntime.starts,
+        turnStarts: recoveryRuntime.turns,
+        startupError:
+          results[0]?.status === "rejected"
+            ? String(results[0].reason)
+            : undefined,
+      })}`,
+    );
+    assert.equal(results[0]?.status, "rejected");
+    assert.deepEqual(failures.at(-1), {
+      operation: "repository-identity",
+      kind: "cancelled",
+      childExitObserved: true,
+      childExitSignal: "SIGKILL",
+    });
+    assert.deepEqual(databaseOpenAtFailure, [true]);
+    assert.equal(results[1]?.status, "fulfilled");
+    assert.equal(runtimeFactoryCalls, 0);
+    assert.equal(runtimeStartCalls, 0);
+    assert.equal(runtimeStopCalls, 0);
+    assert.equal(
+      recoveryRuntime.starts,
+      0,
+      "aborted startup admitted no thread",
+    );
+    assert.equal(recoveryRuntime.turns, 0, "aborted startup admitted no turn");
+    assert.equal(
+      controlled
+        .events()
+        .filter(
+          ({ event, operation }) =>
+            event === "start" && operation === "repository-identity",
+        ).length,
+      launchesBeforeRecovery + 1,
+      "startup recovery was not retried while stopping",
+    );
+
+    const reopened = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    const stored = reopened
+      .prepare(
+        "SELECT workspaceId, path, state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+      )
+      .get(f.taskId) as
+      | {
+          workspaceId: string;
+          path: string;
+          state: string;
+          gitUncertain: number;
+        }
+      | undefined;
+    reopened.close();
+    assert.equal(stored?.workspaceId, binding.workspaceId);
+    assert.equal(stored?.path, binding.path);
+    assert.equal(stored?.state, "held");
+    assert.equal(stored?.gitUncertain, 1);
+    assert.equal(existsSync(repository.workspacePath), true);
+
+    const launchesAfterAbort = controlled
+      .events()
+      .filter(
+        ({ event, operation }) =>
+          event === "start" && operation === "repository-identity",
+      ).length;
+    reopenedService = new StandaloneService(
+      join(f.root, "data"),
+      () => new RuntimeFixture(),
+      undefined,
+      serviceOptions,
+    );
+    await reopenedService.start();
+    const recoveredBinding = await reopenedService.taskWorkspace(f.taskId);
+    assert.equal(recoveredBinding?.state, "held");
+    assert.equal(recoveredBinding?.gitUncertain, true);
+    assert.equal(
+      controlled
+        .events()
+        .filter(
+          ({ event, operation }) =>
+            event === "start" && operation === "repository-identity",
+        ).length,
+      launchesAfterAbort,
+      "restart retained the uncertain binding without another Git attempt",
+    );
+  } finally {
+    try {
+      await reopenedService?.stop();
+    } finally {
+      try {
+        await recovered?.stop();
+      } finally {
+        try {
+          await f.close();
+        } finally {
+          try {
+            await controlled.cleanup();
+          } finally {
+            rmSync(repositoryRoot, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+  }
+});
+
+test("startup does not continue after workspace recovery returns to a cancelled manager", async (t) => {
+  const f = await fixture();
+  let recovered: StandaloneService | undefined;
+  let reopenedService: StandaloneService | undefined;
+  let runtimeFactoryCalls = 0;
+  let runtimeStartCalls = 0;
+  let runtimeStopCalls = 0;
+  const recoveryRuntime = new RuntimeFixture();
+  let startup: Promise<void> | undefined;
+  let stopping: Promise<void> | undefined;
+  const recoveryReturned = deferred();
+  const releaseRecovery = deferred();
+  const stopSettlementEntered = deferred();
+  const releaseStopSettlement = deferred();
+  let manager: WorkspaceManager | undefined;
+  let settleCallCount = 0;
+  const originalRecover = WorkspaceManager.prototype.recover;
+
+  try {
+    const binding = await f.service.taskWorkspace(f.taskId);
+    assert.ok(binding);
+    const db = (f.service as unknown as { db: DatabaseSync }).db;
+    db.prepare(
+      "UPDATE task_workspace_bindings SET state = 'held', reason = 'Retained for cancellation recovery', gitUncertain = 1 WHERE taskId = ?",
+    ).run(f.taskId);
+    await f.service.stop();
+
+    WorkspaceManager.prototype.recover = async function () {
+      await originalRecover.call(this);
+      manager = this;
+      recoveryReturned.resolve();
+      await releaseRecovery.promise;
+    };
+    recovered = new StandaloneService(join(f.root, "data"), () => {
+      runtimeFactoryCalls++;
+      return recoveryRuntime;
+    });
+    recoveryRuntime.start = async () => {
+      runtimeStartCalls++;
+    };
+    recoveryRuntime.stop = async () => {
+      runtimeStopCalls++;
+    };
+
+    const startupPromise = recovered.start();
+    startup = startupPromise;
+    await withTimeout(
+      recoveryReturned.promise,
+      1500,
+      "Workspace recovery did not reach its return barrier",
+    );
+    assert.ok(manager);
+    const originalSettle = manager.settle.bind(manager);
+    manager.settle = async () => {
+      await originalSettle();
+      settleCallCount++;
+      if (settleCallCount === 1) {
+        stopSettlementEntered.resolve();
+        await releaseStopSettlement.promise;
+      }
+    };
+
+    const stoppingPromise = recovered.stop();
+    stopping = stoppingPromise;
+    await withTimeout(
+      stopSettlementEntered.promise,
+      1500,
+      "Service stop did not reach workspace settlement",
+    );
+    assert.equal(
+      (recovered as unknown as { db: DatabaseSync }).db.isOpen,
+      true,
+      "service stop is held before database close while recovery returns",
+    );
+    releaseRecovery.resolve();
+
+    let startupResult: PromiseSettledResult<void>;
+    startupResult = await withTimeout(
+      startupPromise.then(
+        () => ({ status: "fulfilled" as const, value: undefined }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      ),
+      1500,
+      "Cancelled startup did not settle within its cleanup bound",
+    );
+    t.diagnostic(
+      `startup-recover-return-cancel-evidence ${JSON.stringify({
+        startupOutcome: startupResult.status,
+        startupError:
+          startupResult.status === "rejected"
+            ? String(startupResult.reason)
+            : undefined,
+        runtimeFactoryCalls,
+        runtimeStartCalls,
+        runtimeStopCalls,
+        threadStarts: recoveryRuntime.starts,
+        turnStarts: recoveryRuntime.turns,
+        databaseOpenBeforeRecoveryRelease: true,
+        stopSettlementCalls: settleCallCount,
+      })}`,
+    );
+    assert.equal(startupResult.status, "rejected");
+    if (startupResult.status === "rejected")
+      assert.match(
+        String(startupResult.reason),
+        /Workspace manager is stopping/,
+      );
+    assert.equal(runtimeFactoryCalls, 0);
+    assert.equal(runtimeStartCalls, 0);
+    assert.equal(runtimeStopCalls, 0);
+    assert.equal(
+      recoveryRuntime.starts,
+      0,
+      "cancelled startup admitted no thread",
+    );
+    assert.equal(
+      recoveryRuntime.turns,
+      0,
+      "cancelled startup admitted no turn",
+    );
+
+    releaseStopSettlement.resolve();
+    const stoppingResult = await withTimeout(
+      stoppingPromise.then(
+        () => ({ status: "fulfilled" as const, value: undefined }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      ),
+      1500,
+      "Workspace stop did not settle within its cleanup bound",
+    );
+    assert.equal(stoppingResult.status, "fulfilled");
+
+    const reopened = new DatabaseSync(
+      join(f.root, "data", "standalone.sqlite"),
+    );
+    const stored = reopened
+      .prepare(
+        "SELECT workspaceId, path, state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+      )
+      .get(f.taskId) as
+      | {
+          workspaceId: string;
+          path: string;
+          state: string;
+          gitUncertain: number;
+        }
+      | undefined;
+    reopened.close();
+    assert.equal(stored?.workspaceId, binding.workspaceId);
+    assert.equal(stored?.path, binding.path);
+    assert.equal(stored?.state, "held");
+    assert.equal(stored?.gitUncertain, 1);
+
+    reopenedService = new StandaloneService(
+      join(f.root, "data"),
+      () => new RuntimeFixture(),
+    );
+    await reopenedService.start();
+    const recoveredBinding = await reopenedService.taskWorkspace(f.taskId);
+    assert.equal(recoveredBinding?.workspaceId, binding.workspaceId);
+    assert.equal(recoveredBinding?.state, "held");
+    assert.equal(recoveredBinding?.gitUncertain, true);
+  } finally {
+    releaseRecovery.resolve();
+    releaseStopSettlement.resolve();
+    WorkspaceManager.prototype.recover = originalRecover;
+    const pending = [startup, stopping].filter(
+      (promise): promise is Promise<void> => promise !== undefined,
+    );
+    if (pending.length > 0)
+      await withTimeout(
+        Promise.allSettled(pending).then(() => {}),
+        1500,
+        "Startup or service stop did not settle during test cleanup",
+      );
+    try {
+      if (reopenedService)
+        await withTimeout(
+          reopenedService.stop(),
+          1500,
+          "Reopened service did not stop during test cleanup",
+        );
+    } finally {
+      try {
+        if (recovered)
+          await withTimeout(
+            recovered.stop(),
+            1500,
+            "Recovered service did not stop during test cleanup",
+          );
+      } finally {
+        if (runtimeFactoryCalls > 0 && runtimeStopCalls === 0)
+          await withTimeout(
+            recoveryRuntime.stop(),
+            1500,
+            "Fixture runtime did not stop during test cleanup",
+          );
+        await withTimeout(
+          f.close(),
+          1500,
+          "Task-writer fixture did not close during test cleanup",
+        );
       }
     }
   }

@@ -12,7 +12,7 @@ import {
   controlledGit,
   type ControlledGitEvent,
 } from "./fixtures/controlled-git.js";
-import { execFileSync } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -105,6 +105,66 @@ function processIsAlive(pid: number): boolean {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
+
+async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
+async function stopOwnedTestChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, 250)) return;
+  child.kill("SIGKILL");
+  if (!(await waitForChildExit(child, 1000)))
+    throw new Error(
+      "Workspace test child did not exit within its cleanup bound",
+    );
+}
+
+test("controlled Git cleanup does not signal an unrelated process from a stale identity", async () => {
+  const controlled = controlledGit();
+  const unrelated = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)",
+    ],
+    { stdio: "ignore" },
+  );
+  try {
+    await new Promise<void>((resolve, reject) => {
+      unrelated.once("spawn", resolve);
+      unrelated.once("error", reject);
+    });
+    const pid = unrelated.pid;
+    assert.ok(pid);
+    controlled.recordStaleIdentityForTest(pid);
+    await controlled.cleanup();
+    assert.equal(unrelated.exitCode, null);
+    assert.equal(unrelated.signalCode, null);
+    assert.equal(processIsAlive(pid), true);
+  } finally {
+    try {
+      await stopOwnedTestChild(unrelated);
+    } finally {
+      await controlled.cleanup();
+    }
+  }
+});
 
 const approvedCleanup: WorkspaceCleanupEvidence = {
   deliveryConfirmed: true,
@@ -396,6 +456,12 @@ test("a completed worktree add followed by a bounded stall is retained without r
     assert.equal(retained?.state, "held");
     assert.equal(retained?.gitUncertain, true);
     assert.equal(exists(repositoryBinding.workspacePath), true);
+    await controlled.cleanup();
+    assert.equal(
+      processIsAlive(descendant.pid),
+      false,
+      "fixture cleanup stopped its exact inherited-pipe descendant",
+    );
   } finally {
     try {
       await controlled.cleanup();
