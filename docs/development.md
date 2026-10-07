@@ -25,6 +25,11 @@ The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DA
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
 and optionally `previousWorkId` for a follow-up in a completed conversation.
 `serve` initializes the database and App Server, then waits for SIGINT or SIGTERM.
+Both `serve` and `operator` also stop with an unsuccessful exit status after an
+unexpected service-owned background failure. Provider failures already recorded
+as incomplete source observations or power-admission holds remain visible through
+those existing states; they do not trigger this fatal exit. Normal signal-driven
+shutdown remains successful.
 Reusing a work ID never resubmits it. A held result requires independent
 reconciliation; there is no force unlock. Automatic retry is limited to an exact
 terminal `serverOverloaded` or `rateLimitExceeded` failure with known retry
