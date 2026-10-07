@@ -8,7 +8,10 @@ type HeldDerivation = {
 type CallWaiter = {
   count: number;
   resolve(): void;
+  timeout: ReturnType<typeof setTimeout>;
 };
+
+const CALL_WAIT_TIMEOUT_MS = 10_000;
 
 export function createControlledPasswordDeriver(
   correctPassword: string,
@@ -24,6 +27,7 @@ export function createControlledPasswordDeriver(
       if (!waiter) continue;
       if (calls.length >= waiter.count) {
         waiters.splice(index, 1);
+        clearTimeout(waiter.timeout);
         waiter.resolve();
       }
     }
@@ -54,7 +58,24 @@ export function createControlledPasswordDeriver(
     derivePassword,
     async waitForCalls(count: number) {
       if (calls.length >= count) return;
-      await new Promise<void>((resolve) => waiters.push({ count, resolve }));
+      await new Promise<void>((resolve, reject) => {
+        let waiter: CallWaiter;
+        const timeout = setTimeout(() => {
+          const index = waiters.indexOf(waiter);
+          if (index >= 0) waiters.splice(index, 1);
+          reject(
+            new Error(
+              `Timed out waiting for ${count} password derivations; saw ${calls.length}`,
+            ),
+          );
+        }, CALL_WAIT_TIMEOUT_MS);
+        waiter = {
+          count,
+          resolve,
+          timeout,
+        };
+        waiters.push(waiter);
+      });
     },
     release(index: number) {
       const call = calls[index];

@@ -270,8 +270,10 @@ test("lockout follows derivation settlement order", async () => {
       wrong.id,
       "wrong sentinel",
     );
+    pendingWrongFirst.push(wrongAttempt);
+    await wrongFirst.deriver.waitForCalls(2);
     const correctAttempt = wrongFirst.auth.authenticate(correct.id, password);
-    pendingWrongFirst.push(wrongAttempt, correctAttempt);
+    pendingWrongFirst.push(correctAttempt);
     await wrongFirst.deriver.waitForCalls(3);
     wrongFirst.deriver.release(1);
     assert.equal(await wrongAttempt, undefined);
@@ -312,8 +314,10 @@ test("lockout follows derivation settlement order", async () => {
       wrong.id,
       "wrong sentinel",
     );
+    pendingCorrectFirst.push(wrongAttempt);
+    await correctFirst.deriver.waitForCalls(2);
     const correctAttempt = correctFirst.auth.authenticate(correct.id, password);
-    pendingCorrectFirst.push(wrongAttempt, correctAttempt);
+    pendingCorrectFirst.push(correctAttempt);
     await correctFirst.deriver.waitForCalls(3);
     correctFirst.deriver.release(2);
     assert.equal((await correctAttempt)?.authenticated, true);

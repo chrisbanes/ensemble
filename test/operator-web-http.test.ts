@@ -453,6 +453,7 @@ test("JSON login settles concurrent, duplicate, and stale attempts with generic 
         method: "POST",
         headers,
         body: JSON.stringify({ password }),
+        signal: AbortSignal.timeout(10_000),
       });
       pendingRequests.push(request);
       return request;
@@ -486,6 +487,7 @@ test("JSON login settles concurrent, duplicate, and stale attempts with generic 
     const wrong = await anonymous();
     const correct = await anonymous();
     const wrongResponse = postLogin(wrong, "WRONG-JSON-PASSWORD");
+    await deriver.waitForCalls(1);
     const correctResponse = postLogin(correct, correctPassword);
     await deriver.waitForCalls(2);
     deriver.release(0);

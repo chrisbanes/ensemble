@@ -846,6 +846,7 @@ test("HTML login settles concurrent and stale attempts through the shared auth b
           csrfToken,
         }),
         redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
       });
       pendingResponses.push(request);
       return request;
@@ -883,6 +884,7 @@ test("HTML login settles concurrent and stale attempts through the shared auth b
     const wrong = await anonymous();
     const correct = await anonymous();
     const wrongResponse = postLogin(wrong, "WRONG-HTML-PASSWORD-SENTINEL");
+    await deriver.waitForCalls(1);
     const correctResponse = postLogin(correct, "HTML-PASSWORD-SENTINEL");
     await deriver.waitForCalls(2);
     deriver.release(0);
