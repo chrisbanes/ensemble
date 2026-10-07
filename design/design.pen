@@ -90400,18 +90400,6 @@
                       "fill": "$X:--muted-foreground"
                     }
                   ]
-                },
-                {
-                  "type": "text",
-                  "id": "sgrh6",
-                  "name": "Board mapping note",
-                  "fill": "$X:--muted-foreground",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
-                  "content": "List / Board changes presentation only. Ready-but-blocked remains Ready; Waiting is not an inferred execution state.",
-                  "fontFamily": "Inter",
-                  "fontSize": 12,
-                  "fontWeight": "normal"
                 }
               ]
             }
@@ -92431,19 +92419,6 @@
                               "fontFamily": "Inter",
                               "fontSize": 13,
                               "fontWeight": "normal"
-                            },
-                            {
-                              "type": "text",
-                              "id": "uJq8G",
-                              "name": "Outcome growth limit",
-                              "fill": "$X:--muted-foreground",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
-                              "content": "Text grows to a measured cap, then scrolls inside without losing the caret.",
-                              "lineHeight": 1.35,
-                              "fontFamily": "Inter",
-                              "fontSize": 12,
-                              "fontWeight": "normal"
                             }
                           ]
                         }
@@ -92711,7 +92686,7 @@
                               "fill": "$X:--foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Choose an available task. Focus moves to this visible control before submit.",
+                              "content": "Choose an available task.",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -92809,7 +92784,7 @@
                       "fill": "$X:--muted-foreground",
                       "textGrowth": "fixed-width",
                       "width": "fill_container",
-                      "content": "Unfinished on-device input is not a saved Ensemble draft. A confirmed creation receipt is not evidence of admission or execution.",
+                      "content": "Unfinished input is not a saved draft.",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
                       "fontSize": 12,
@@ -94281,7 +94256,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Scroll belongs to the named body/queue viewport, not the page; the phone question intentionally clips long content inside its independent scroller. Keyboard/focus order and restoration, forced-colour contrast, scrollbar chaining, bottom safe-area and virtual keyboard, textarea growth/caret/selection, and physical-device resize/zoom/text scale need browser/device evidence. Comparison-image loading remains unverified.",
+              "content": "List / Board change presentation only; Ready-with-hold stays Ready, and Waiting is explicit. Measure the responsive navigation threshold and textarea growth cap in implementation; assign scrolling to the body/queue viewport and preserve selection/caret across resize. The phone question intentionally clips long content within its independent scroll viewport. Keyboard/focus order and focus before submission, forced-colour contrast, scrollbar chaining, safe-area and virtual-keyboard behavior, and physical-device resize/zoom/text scale need browser/device evidence. Comparison-image loading remains unverified.",
               "lineHeight": 1.35,
               "fontFamily": "Inter",
               "fontSize": 12,

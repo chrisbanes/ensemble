@@ -1377,7 +1377,7 @@ remain with #782 and the service slices.
 
 [#800](https://github.com/chrisbanes/ensemble/issues/800) owns this design-only
 proposal. The exact implementation plan remains the published
-[approval comment](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6047644893).
+[implementation plan](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6047644893).
 T1 prepares a concrete native canvas and this handoff; T2 still requires Chris's
 explicit review of both the Pen composition and implementation plan before any
 UI or application source work. Existing product contracts and #793 source,
@@ -1406,19 +1406,29 @@ The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
 phone references remain `pmu7r` / `YzbOM` / `m6ZUJR` (question), `i3glx`
 (composer), and `wXiWx` / `JX4dm` (expanded/collapsed validation). The new
 tablet frames propose using the existing navigation drawer at 1024px and keeping
-Inbox queue and detail side by side at 800px. These are review widths, not
-approved CSS breakpoints; implementation must measure and verify the final
-thresholds rather than infer them from these static samples.
+Inbox queue and detail side by side at 800px. The proposal uses content-measured
+navigation thresholds, a textarea growth cap measured against content, and
+scrolling inside its named viewport. These are T1 review proposals, not approved
+CSS breakpoints or dimensions. If Chris approves them at T2, they would replace
+or conflict with the historical 224px desktop sidebar, drawer below 760px, and
+fixed 260px desktop / 180px phone outcome-editor sizes recorded above; retain
+those values as historical evidence. No proposed navigation threshold,
+textarea cap, or scroll rule becomes an implementation contract before T2.
 
 The List, Board, Inbox, Search and composer specimens preserve current routing
 and state semantics. The selected Inbox response remains a local draft until
 submission. Search keeps its query, filters, selected result, and return origin.
 Task evidence does not decide source ownership or release a hold. The Board
 does not move a Ready-but-blocked task into Waiting and does not imply drag or
-state mutation. Composer summaries show the supplied context, references,
-assignee and dependency; expanding the dependency reveals the validation error
-without discarding its value. The disabled Create and start action remains
-visible beside Save draft. These labels and data are fictional review fixtures.
+state mutation; List / Board changes presentation only, and Waiting is never
+inferred from inactivity. Composer summaries show the supplied context,
+references, assignee and dependency; expanding the dependency reveals the
+validation error without discarding its value. The disabled Create and start
+action remains visible beside Save draft. The supplied-values panel keeps its
+unfinished-input notice concise and omits creation-receipt/admission explanation
+before submission. Implementation notes stay in this handoff: measure navigation
+and textarea behavior, verify scroll ownership and caret retention, and validate
+focus before submission. These labels and data are fictional review fixtures.
 
 The entry and recovery inventory is limited to existing references: desktop
 sidebar `X:PV1ln`; phone header `KthOL`; authentication expiry and private-state
