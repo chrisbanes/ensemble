@@ -978,8 +978,9 @@ Displayed file sizes/page counts illustrate metadata, not configured limits.
    use `dHsfB` / `rD02Q`. Selecting a repository restores its own comparison
    and baseline, not another repository's main branch.
 3. Select one text line or a range, including either diff side and deleted
-   lines. Add/Edit opens the anchored composer (`V0DCi` / `J2AwE`). Save adds
-   to the task's local draft and returns to the selected range. It does not send.
+   lines. Add/Edit opens the anchored composer (`V0DCi` / `J2AwE`) using the
+   originating selection, as specified below. Save adds to the task's local
+   draft and returns to that selection. It does not send.
 4. Move to another file and add another comment. Review opens the **complete**
    draft (`bRkWF`; phone `aB35C` → scroll → `EZasz`). Every comment, original
    excerpt, comparison and status can be inspected. Edit/remove and optional
@@ -1005,6 +1006,30 @@ Displayed file sizes/page counts illustrate metadata, not configured limits.
 | Context menus, extensions and notifications | No applicable entry points are established by the current design; none are invented in this addition. Native Codex/ChatGPT work remains paused. |
 
 ### Desktop, phone and keyboard behaviour
+
+#### Parameterised composer entry
+
+Composer references in canvas actions are layout templates, not navigation to
+the fixture's prefilled anchor. In particular, screen 78's Add comment reference
+to `J2AwE` must instantiate a **current-file** composer for the selected current
+line 42; it must not copy that specimen's Branch / Before / deleted lines 41–43.
+The same parameterised contract applies on desktop and phone, in code and
+Markdown Source, and when editing an existing draft comment.
+
+| Origin | Composer context that must remain unchanged |
+| --- | --- |
+| Files screen 78 (`unmyA`), current line 42 | AT-142 / `acme/atlas` / `src/components/CommandMenu.tsx`; Current workspace, observation 12:06, exact observed content identity and excerpt, line 42 only; no diff side or Branch comparison. |
+| Changes screen 80 (`V0DCi`) or phone 89 (`TEkRK`), deleted range | Same task/repository/path; Branch comparison and exact merge base; Before side, deleted lines 41–43, original compared content identity and excerpt. This is the fixture drawn in `J2AwE`. |
+| Retained result/evidence or an existing draft | That retained result/capture or saved comment's original immutable context, including its comparison/side/range when applicable; never the current file or another fixture's values. |
+
+Add comment captures the origin's task, repository/root, full path, current/
+comparison/result context, exact content identity and bounded excerpt, logical
+line/range and side (only for a diff), observation/capture time and return/focus
+anchor. The composer displays these supplied values. Save preserves them in the
+draft and returns to the originating selection; Cancel returns there without
+creating a comment. Refresh, responsive layout or switching composer templates
+cannot rebind the anchor. If that original context cannot be supplied, explain
+the unavailable anchor rather than falling back to the specimen's values.
 
 Desktop uses a file tree/list beside the dominant preview. A range composer sits
 beside the diff; complete review has its own reading surface. Files, Changes and
@@ -1259,8 +1284,9 @@ and states together as labeled specimens, not as one product screen state.
 On phone, the explorer is a full-width destination with 44px file rows. Opening
 a change leads to `TEkRK`'s unified diff, with distinct old/new gutter columns.
 Deleted rows remain selectable. Start/End controls choose the range without
-requiring a precise drag; Clear removes only the selection. Add comment opens
-`J2AwE`, then the complete-review journey remains `aB35C` → `EZasz`. Both phone
+requiring a precise drag; Clear removes only the selection. Add comment uses the
+`J2AwE` template with that origin's exact anchor, then the complete-review
+journey remains `aB35C` → `EZasz`. Both phone
 range controls and comment actions are 44px high. Files, Markdown and retained
 evidence use the same compact navigation, without squeezing a desktop rail onto
 the phone.
