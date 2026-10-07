@@ -31,7 +31,7 @@ jobs:
       - run: npm run check
       - name: Upload synthetic test evidence
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ensemble-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ensemble-test-evidence
