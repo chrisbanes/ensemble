@@ -24,6 +24,7 @@ import type {
 import type { ConversationHistoryBinding } from "./conversation-history.js";
 import type {
   RuntimeTerminalEvidence,
+  RuntimeTerminalFailureEvidence,
   RuntimeTerminalObservation,
   RuntimeThreadQualification,
   RuntimeThreadQualificationEvidence,
@@ -139,7 +140,32 @@ export interface WorkspaceNormalizationRow {
   workspacePath: string | null;
 }
 
-const runtimeTerminalEvidenceSchema = z
+const runtimeTerminalFailureEvidenceSchema = z
+  .object({
+    classification: z.enum(["transient", "permanent", "unknown"]),
+    reasonCode: z.enum([
+      "contextWindowExceeded",
+      "sessionBudgetExceeded",
+      "usageLimitExceeded",
+      "rateLimitExceeded",
+      "flexUnavailable",
+      "serverOverloaded",
+      "cyberPolicy",
+      "misalignmentPolicyViolation",
+      "internalServerError",
+      "unauthorized",
+      "badRequest",
+      "threadRollbackFailed",
+      "sandboxError",
+      "other",
+      "unknown",
+    ]),
+    source: z.enum(["codexErrorInfo", "missing"]),
+    codexRetries: z.number().int().nonnegative().safe().nullable(),
+  })
+  .strict();
+
+const runtimeTerminalEvidenceRowSchema = z
   .object({
     threadId: z.string().min(1).max(512),
     turnId: z.string().min(1).max(512),
@@ -153,8 +179,22 @@ const runtimeTerminalEvidenceSchema = z
     lastRuntimeGeneration: z.string().min(1).nullable(),
     firstObservedAt: z.number().int().nonnegative().nullable(),
     lastObservedAt: z.number().int().nonnegative().nullable(),
+    failureEvidence: z.string().max(256).nullable(),
   })
   .strict();
+
+function parseRuntimeTerminalEvidence(input: unknown): RuntimeTerminalEvidence {
+  const row = runtimeTerminalEvidenceRowSchema.parse(input);
+  const failure: RuntimeTerminalFailureEvidence | null =
+    row.failureEvidence === null
+      ? null
+      : runtimeTerminalFailureEvidenceSchema.parse(
+          JSON.parse(row.failureEvidence),
+        );
+  if (failure !== null && row.firstStatus !== "failed")
+    throw new Error("Runtime terminal failure evidence has no failed status");
+  return { ...row, conflicted: row.conflicted === 1, failure };
+}
 
 const runtimeThreadQualificationSchema = z
   .object({
@@ -450,6 +490,7 @@ export class ExecutionState {
       lastRuntimeGeneration TEXT,
       firstObservedAt INTEGER,
       lastObservedAt INTEGER,
+      failureEvidence TEXT CHECK(failureEvidence IS NULL OR length(failureEvidence) <= 256),
       PRIMARY KEY(threadId, turnId),
       CHECK((firstStatus IS NULL AND firstRuntimeGeneration IS NULL AND
         firstObservedAt IS NULL) OR (firstStatus IS NOT NULL AND
@@ -1424,8 +1465,10 @@ export class ExecutionState {
           "SELECT 1 FROM runtime_retention_migrations WHERE migrationId = ?",
         )
         .get("runtime-retention-v1")
-    )
+    ) {
+      this.migrateRuntimeFailureEvidence();
       return;
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (
@@ -1457,6 +1500,29 @@ export class ExecutionState {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    this.migrateRuntimeFailureEvidence();
+  }
+
+  private migrateRuntimeFailureEvidence(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = this.db
+        .prepare("PRAGMA table_info(runtime_terminal_evidence)")
+        .all() as Array<{ name: string }>;
+      if (!columns.some(({ name }) => name === "failureEvidence"))
+        this.db.exec(
+          "ALTER TABLE runtime_terminal_evidence ADD COLUMN failureEvidence TEXT",
+        );
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO runtime_retention_migrations (migrationId) VALUES (?)",
+        )
+        .run("runtime-retention-v2-failure-evidence");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private noteBoundRuntimeTurn(id: string, turnId: string): void {
@@ -1470,7 +1536,7 @@ export class ExecutionState {
       )
       .get(row.threadId, turnId);
     if (evidence === undefined) return;
-    const parsed = runtimeTerminalEvidenceSchema.parse(evidence);
+    const parsed = parseRuntimeTerminalEvidence(evidence);
     const matches = this.db
       .prepare(
         "SELECT workId FROM execution_intents WHERE threadId = ? AND turnId = ? LIMIT 2",
@@ -1534,7 +1600,7 @@ export class ExecutionState {
         );
       return null;
     }
-    const evidence = runtimeTerminalEvidenceSchema.parse(row);
+    const evidence = parseRuntimeTerminalEvidence(row);
     const matches = this.db
       .prepare(`SELECT intent.workId, identity.runtimeGeneration,
         identity.terminalEvidenceObserved
@@ -1558,7 +1624,7 @@ export class ExecutionState {
         matches[0]?.terminalEvidenceObserved !== 1)
     )
       throw new Error("Runtime terminal evidence binding is inconsistent");
-    return { ...evidence, conflicted: evidence.conflicted === 1 };
+    return evidence;
   }
 
   runtimeTerminalForWait(
@@ -1610,9 +1676,23 @@ export class ExecutionState {
         turnId: z.string().min(1).max(512),
         status: z.enum(["completed", "failed"]),
         runtimeGeneration: z.string().min(1).max(128),
+        failure: runtimeTerminalFailureEvidenceSchema.optional(),
       })
       .strict()
       .parse(input);
+    if (value.status === "completed" && value.failure !== undefined)
+      throw new Error("Completed terminal cannot carry failure evidence");
+    const failureEvidence =
+      value.status === "failed"
+        ? JSON.stringify(
+            value.failure ?? {
+              classification: "unknown",
+              reasonCode: "unknown",
+              source: "missing",
+              codexRetries: null,
+            },
+          )
+        : null;
     const observedAt = Date.now();
     if (!Number.isSafeInteger(observedAt) || observedAt < 0)
       throw new Error("Runtime terminal evidence timestamp unavailable");
@@ -1653,8 +1733,8 @@ export class ExecutionState {
           .prepare(`INSERT INTO runtime_terminal_evidence
             (threadId, turnId, firstStatus, conflicted, workId,
               firstRuntimeGeneration, lastRuntimeGeneration,
-              firstObservedAt, lastObservedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              firstObservedAt, lastObservedAt, failureEvidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(
             value.threadId,
             value.turnId,
@@ -1665,6 +1745,7 @@ export class ExecutionState {
             value.runtimeGeneration,
             observedAt,
             observedAt,
+            failureEvidence,
           );
         if (matches.length === 1) {
           const marked = this.db
@@ -1677,12 +1758,12 @@ export class ExecutionState {
             throw new Error("Runtime terminal evidence binding changed");
         }
       } else {
-        const prior = runtimeTerminalEvidenceSchema.parse(rawPrior);
+        const prior = parseRuntimeTerminalEvidence(rawPrior);
         const bindingMismatch =
           (matches.length > 1 && prior.workId !== null) ||
           (workId !== null && prior.workId !== null && workId !== prior.workId);
         const conflict =
-          prior.conflicted === 1 ||
+          prior.conflicted ||
           prior.firstStatus === null ||
           prior.firstStatus !== value.status ||
           ambiguous ||
@@ -1719,8 +1800,7 @@ export class ExecutionState {
       .get(value.threadId, value.turnId);
     if (record === undefined)
       throw new Error("Runtime terminal evidence is unavailable");
-    const parsed = runtimeTerminalEvidenceSchema.parse(record);
-    return { ...parsed, conflicted: parsed.conflicted === 1 };
+    return parseRuntimeTerminalEvidence(record);
   }
 
   registerRuntimeThreadTools(threadId: string, toolDigest: string): void {

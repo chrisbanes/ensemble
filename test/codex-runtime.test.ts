@@ -219,6 +219,16 @@ test("failure evidence is exact-turn-bound and only classifies the retry allowli
       }),
     );
 
+  for (const turnId of [
+    "overloaded",
+    "rate-limit",
+    "permanent",
+    "other",
+    "interrupted",
+    "missing",
+  ])
+    bindTestTurn(runtime, "thread", turnId);
+
   receive("thread", "overloaded", { codexErrorInfo: "serverOverloaded" });
   receive("thread", "rate-limit", { codexErrorInfo: "rateLimitExceeded" });
   receive("thread", "permanent", { codexErrorInfo: "badRequest" });
@@ -260,7 +270,12 @@ test("failure evidence is exact-turn-bound and only classifies the retry allowli
     (evidence("thread", "other") as { classification: string }).classification,
     "unknown",
   );
-  assert.equal(evidence("thread", "interrupted"), undefined);
+  assert.equal(
+    (evidence("thread", "interrupted") as { classification: string })
+      .classification,
+    "unknown",
+    "non-failed terminal labels cannot inherit transient retry classification",
+  );
   assert.equal(
     (evidence("thread", "missing") as { classification: string })
       .classification,
@@ -1510,10 +1525,12 @@ test("unregistered and malformed callbacks fail closed while approvals stay deni
     child?: ChildProcessWithoutNullStreams;
     send(line: string): Promise<void>;
     receive(child: ChildProcessWithoutNullStreams, line: string): void;
-    threadTools: Map<string, readonly { name: string }[]>;
+    threadSnapshots: Map<string, { tools?: readonly { name: string }[] }>;
   };
   internal.child = child;
-  internal.threadTools.set("thread-1", [{ name: "test_tool" }]);
+  internal.threadSnapshots.set("thread-1", {
+    tools: [{ name: "test_tool" }],
+  });
   const responses: unknown[] = [];
   const unexpected: unknown[] = [];
   internal.send = async (line) => {
@@ -1591,10 +1608,12 @@ test("handler rejection is bounded and response-pipe failure fails the runtime",
     child?: ChildProcessWithoutNullStreams;
     send(line: string): Promise<void>;
     receive(child: ChildProcessWithoutNullStreams, line: string): void;
-    threadTools: Map<string, readonly { name: string }[]>;
+    threadSnapshots: Map<string, { tools?: readonly { name: string }[] }>;
   };
   internal.child = child;
-  internal.threadTools.set("thread-1", [{ name: "test_tool" }]);
+  internal.threadSnapshots.set("thread-1", {
+    tools: [{ name: "test_tool" }],
+  });
   const responses: unknown[] = [];
   internal.send = async (line) => {
     responses.push(JSON.parse(line));
@@ -2541,10 +2560,10 @@ for (const mode of [
         assert.equal(calls[1]?.identity.requestId, 702);
         const threadState = runtime as unknown as {
           nativeQualifications: Map<string, unknown>;
-          threadTools: Map<string, unknown>;
+          threadSnapshots: Map<string, unknown>;
         };
         assert.ok(threadState.nativeQualifications.has(thread));
-        assert.ok(threadState.threadTools.has(thread));
+        assert.ok(threadState.threadSnapshots.has(thread));
         const fixture = runtimeFixtures.get(runtime)?.fixture;
         assert.ok(fixture);
         const previousWork = fixture.bindTurn(

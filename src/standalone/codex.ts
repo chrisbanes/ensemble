@@ -40,6 +40,7 @@ import type {
   RuntimeNativeEndpointHistory,
   RuntimeSafetyPort,
   RuntimeTerminalEvidence,
+  RuntimeTerminalFailureEvidence,
   RuntimeThreadQualification,
 } from "./runtime-retention.js";
 
@@ -118,6 +119,93 @@ export interface RuntimeToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+}
+
+interface RuntimeThreadSettings {
+  model: string;
+  modelProvider: string;
+  reasoningEffort: string | null;
+  serviceTier: string | null;
+}
+
+interface RuntimeThreadSnapshot {
+  tools?: readonly RuntimeToolDefinition[];
+  settings?: RuntimeThreadSettings;
+}
+
+const maxSettledThreadSnapshots = 128;
+const maxSettledThreadSnapshotBytes = 256 * 1024;
+
+function threadSnapshotBytes(
+  threadId: string,
+  snapshot: RuntimeThreadSnapshot,
+): number {
+  return Buffer.byteLength(JSON.stringify([threadId, snapshot]) ?? "", "utf8");
+}
+
+/** One joint bounded cache for tool definitions and thread-start settings. */
+class BoundedThreadSnapshotCache extends Map<string, RuntimeThreadSnapshot> {
+  constructor(private readonly isPinned: (threadId: string) => boolean) {
+    super();
+  }
+
+  override get(threadId: string): RuntimeThreadSnapshot | undefined {
+    const snapshot = super.get(threadId);
+    if (snapshot !== undefined) {
+      super.delete(threadId);
+      super.set(threadId, snapshot);
+    }
+    return snapshot;
+  }
+
+  override set(threadId: string, snapshot: RuntimeThreadSnapshot): this {
+    super.delete(threadId);
+    super.set(threadId, snapshot);
+    this.trimSettledEntries();
+    return this;
+  }
+
+  settledStats(): {
+    count: number;
+    utf8Bytes: number;
+    pinnedCount: number;
+    pinnedUtf8Bytes: number;
+  } {
+    let count = 0;
+    let utf8Bytes = 0;
+    let pinnedCount = 0;
+    let pinnedUtf8Bytes = 0;
+    for (const [threadId, snapshot] of this) {
+      const bytes = threadSnapshotBytes(threadId, snapshot);
+      if (this.isPinned(threadId)) {
+        pinnedCount++;
+        pinnedUtf8Bytes += bytes;
+      } else {
+        count++;
+        utf8Bytes += bytes;
+      }
+    }
+    return { count, utf8Bytes, pinnedCount, pinnedUtf8Bytes };
+  }
+
+  private trimSettledEntries(): void {
+    while (true) {
+      const stats = this.settledStats();
+      if (
+        stats.count <= maxSettledThreadSnapshots &&
+        stats.utf8Bytes <= maxSettledThreadSnapshotBytes
+      )
+        return;
+      let evicted = false;
+      for (const threadId of this.keys()) {
+        if (this.isPinned(threadId)) continue;
+        super.delete(threadId);
+        evicted = true;
+        break;
+      }
+      if (!evicted) return;
+    }
+  }
 }
 
 export interface RuntimeToolCall {
@@ -255,11 +343,9 @@ export function parseFailureEvidence(
   return retryAfterMs === undefined ? evidence : { ...evidence, retryAfterMs };
 }
 
-function makeFailureEvidence(
-  threadId: string,
-  turnId: string,
+function makeFailureClassification(
   rawCode: string | undefined,
-): FailureEvidence {
+): RuntimeTerminalFailureEvidence {
   const parsed =
     rawCode === undefined ? undefined : codexErrorInfoSchema.safeParse(rawCode);
   const code = parsed?.success ? parsed.data : undefined;
@@ -270,9 +356,6 @@ function makeFailureEvidence(
         ? "permanent"
         : "unknown";
   return {
-    threadId,
-    turnId,
-    status: "failed",
     classification,
     reasonCode: code ?? "unknown",
     source: code ? "codexErrorInfo" : "missing",
@@ -442,10 +525,9 @@ export class CodexRuntime implements Runtime {
   private readonly nativeEndpoints = new Map<string, NativeEndpoint>();
   private readonly nativeEndpointsByTurn = new Map<string, Set<string>>();
   private readonly nativeEndpointsByRpcId = new Map<string, Set<string>>();
-  private readonly nativeThreadSettings = new Map<
-    string,
-    Record<string, unknown>
-  >();
+  private readonly threadSnapshots = new BoundedThreadSnapshotCache(
+    (threadId) => this.isThreadSnapshotPinned(threadId),
+  );
   private readonly nativeTurns = new Map<string, string>();
   private readonly invalidNativeTurns = new Set<string>();
   private readonly nativeReadbacks = new Map<
@@ -590,8 +672,7 @@ export class CodexRuntime implements Runtime {
       this.nativeTurns.delete(threadId);
     if (ownsThreadState) {
       this.nativeQualifications.delete(threadId);
-      this.nativeThreadSettings.delete(threadId);
-      this.threadTools.delete(threadId);
+      this.threadSnapshots.delete(threadId);
     }
   }
   async replyUserInput(
@@ -729,7 +810,8 @@ export class CodexRuntime implements Runtime {
         }),
       })
       .safeParse(input);
-    const startedSettings = this.nativeThreadSettings.get(threadId);
+    const snapshot = this.threadSnapshots.get(threadId);
+    const startedSettings = snapshot?.settings;
     if (!parsed.success || !this.nativeExecutable || !this.nativeGeneration)
       return;
     const data = parsed.data;
@@ -747,7 +829,7 @@ export class CodexRuntime implements Runtime {
       )
     )
       return;
-    const definitions = this.threadTools.get(threadId);
+    const definitions = snapshot?.tools;
     if (!definitions) return;
     const toolDigest = createHash("sha256")
       .update(JSON.stringify(definitions))
@@ -1134,13 +1216,8 @@ export class CodexRuntime implements Runtime {
     }
   >();
   private readonly events = new EventEmitter();
-  private readonly failures = new Map<string, FailureEvidence>();
   private unexpected?: (request: UnexpectedRequest) => void;
   private toolCall?: (call: RuntimeToolCall) => Promise<RuntimeToolResult>;
-  private readonly threadTools = new Map<
-    string,
-    readonly RuntimeToolDefinition[]
-  >();
   private terminalAnomaly?: (anomaly: {
     threadId?: string;
     turnId?: string;
@@ -1156,6 +1233,23 @@ export class CodexRuntime implements Runtime {
   private readonly overflowedConversationTurns = new Set<string>();
   private conversationOverflowIdentityCapExceeded = false;
   private failure: Error | undefined;
+
+  private isThreadSnapshotPinned(threadId: string): boolean {
+    if (this.nativeTurns.has(threadId) || this.nativeReadbacks.has(threadId))
+      return true;
+    for (const pending of this.pending.values()) {
+      if (pending.method !== "thread/resume" && pending.method !== "turn/start")
+        continue;
+      const params = z
+        .object({ threadId: z.string().min(1) })
+        .safeParse(pending.params);
+      if (params.success && params.data.threadId === threadId) return true;
+    }
+    return [...this.nativeEndpoints.values()].some(
+      (endpoint) =>
+        endpoint.call.identity.threadId === threadId && !endpoint.turnEnded,
+    );
+  }
 
   private nativeTurnKey(threadId: string, turnId: string): string {
     return JSON.stringify([threadId, turnId]);
@@ -1325,7 +1419,6 @@ export class CodexRuntime implements Runtime {
   async start(): Promise<void> {
     if (this.child) throw new Error("Runtime already started");
     this.failure = undefined;
-    this.failures.clear();
     this.clearConversationCaptures();
     const environment = this.options.spawnEnvironment?.() ?? process.env;
     this.nativeGeneration = randomUUID();
@@ -1333,8 +1426,7 @@ export class CodexRuntime implements Runtime {
     this.nativeEndpoints.clear();
     this.nativeEndpointsByTurn.clear();
     this.nativeEndpointsByRpcId.clear();
-    this.threadTools.clear();
-    this.nativeThreadSettings.clear();
+    this.threadSnapshots.clear();
     this.nativeTurns.clear();
     this.invalidNativeTurns.clear();
     this.nativeReadbacks.clear();
@@ -1404,12 +1496,10 @@ export class CodexRuntime implements Runtime {
     this.nativeEndpoints.clear();
     this.nativeEndpointsByTurn.clear();
     this.nativeEndpointsByRpcId.clear();
-    this.nativeThreadSettings.clear();
+    this.threadSnapshots.clear();
     this.nativeTurns.clear();
     this.invalidNativeTurns.clear();
     this.nativeReadbacks.clear();
-    this.threadTools.clear();
-    this.failures.clear();
     this.clearConversationCaptures();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
@@ -1443,7 +1533,6 @@ export class CodexRuntime implements Runtime {
     tools: readonly RuntimeToolDefinition[] = [],
   ): Promise<string> {
     const definitions = registeredTools(tools);
-    let rawResponse: unknown;
     const response = thread.parse(
       await this.request(
         "thread/start",
@@ -1455,33 +1544,39 @@ export class CodexRuntime implements Runtime {
           ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
         },
         (raw) => {
-          rawResponse = raw;
           const started = thread.parse(raw);
-          this.threadTools.set(started.thread.id, definitions);
+          const toolDigest = createHash("sha256")
+            .update(JSON.stringify(definitions))
+            .digest("hex");
+          try {
+            this.options.safety.registerThreadTools(
+              started.thread.id,
+              toolDigest,
+            );
+          } catch {
+            throw new Error("Runtime thread safety baseline unavailable");
+          }
+          const settings = z
+            .object({
+              model: z.string(),
+              modelProvider: z.string(),
+              reasoningEffort: z.string().nullable(),
+              serviceTier: z.string().nullable(),
+            })
+            .safeParse(raw);
+          this.threadSnapshots.set(started.thread.id, {
+            tools: definitions,
+            ...(settings.success && this.nativeExecutable
+              ? { settings: settings.data }
+              : {}),
+          });
+          if (!this.threadSnapshots.has(started.thread.id))
+            throw new Error(
+              "Runtime thread snapshot could not be retained safely",
+            );
         },
       ),
     );
-    this.threadTools.set(response.thread.id, definitions);
-    const toolDigest = createHash("sha256")
-      .update(JSON.stringify(definitions))
-      .digest("hex");
-    try {
-      this.options.safety.registerThreadTools(response.thread.id, toolDigest);
-    } catch {
-      this.threadTools.delete(response.thread.id);
-      this.nativeThreadSettings.delete(response.thread.id);
-      throw new Error("Runtime thread safety baseline unavailable");
-    }
-    const settings = z
-      .object({
-        model: z.string(),
-        modelProvider: z.string(),
-        reasoningEffort: z.string().nullable(),
-        serviceTier: z.string().nullable(),
-      })
-      .safeParse(rawResponse);
-    if (settings.success && this.nativeExecutable)
-      this.nativeThreadSettings.set(response.thread.id, settings.data);
     return response.thread.id;
   }
 
@@ -1489,9 +1584,20 @@ export class CodexRuntime implements Runtime {
     threadId: string,
     tools?: readonly RuntimeToolDefinition[],
   ): Promise<void> {
-    const definitions = registeredTools(
-      tools ?? this.threadTools.get(threadId) ?? [],
-    );
+    let snapshot = this.threadSnapshots.get(threadId);
+    let restoredEmptyTools = false;
+    if (!snapshot && tools === undefined) {
+      const emptyToolDigest = createHash("sha256").update("[]").digest("hex");
+      try {
+        restoredEmptyTools =
+          this.options.safety.threadQualification(threadId)?.toolDigest ===
+          emptyToolDigest;
+      } catch {
+        // A missing or malformed durable baseline cannot establish tools.
+      }
+      if (restoredEmptyTools) snapshot = { tools: [] };
+    }
+    const definitions = registeredTools(tools ?? snapshot?.tools ?? []);
     const rawResponse = await this.request("thread/resume", {
       threadId,
       approvalPolicy: "never",
@@ -1501,8 +1607,15 @@ export class CodexRuntime implements Runtime {
     const resumed = thread.parse(rawResponse);
     if (resumed.thread.id !== threadId)
       throw new Error("Resumed thread identity mismatch");
-    if (tools !== undefined || !this.threadTools.has(threadId))
-      this.threadTools.set(threadId, definitions);
+    if (tools !== undefined || restoredEmptyTools) {
+      const nextSnapshot: RuntimeThreadSnapshot = {
+        ...(snapshot?.settings ? { settings: snapshot.settings } : {}),
+        tools: definitions,
+      };
+      this.threadSnapshots.set(threadId, nextSnapshot);
+      if (!this.threadSnapshots.has(threadId))
+        throw new Error("Runtime thread snapshot could not be retained safely");
+    }
     this.captureNativeQualification(threadId, rawResponse);
   }
 
@@ -1567,10 +1680,31 @@ export class CodexRuntime implements Runtime {
     turnId: string,
   ): FailureEvidence | undefined {
     if (!threadId || !turnId) return undefined;
-    const key = `${threadId}:${turnId}`;
-    const evidence = this.failures.get(key);
-    this.failures.delete(key);
-    return evidence ? { ...evidence } : undefined;
+    const generation = this.nativeGeneration;
+    if (!generation) return undefined;
+    try {
+      const evidence = this.options.safety.terminal(
+        threadId,
+        turnId,
+        generation,
+      );
+      if (
+        !evidence ||
+        evidence.firstStatus !== "failed" ||
+        evidence.conflicted ||
+        !evidence.workId ||
+        !evidence.failure
+      )
+        return undefined;
+      return parseFailureEvidence({
+        threadId,
+        turnId,
+        status: "failed",
+        ...evidence.failure,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   async waitForTurn(
@@ -1790,6 +1924,13 @@ export class CodexRuntime implements Runtime {
             turnId: terminal.data.turn.id,
             status,
             runtimeGeneration,
+            ...(terminal.data.turn.status === "failed"
+              ? {
+                  failure: makeFailureClassification(
+                    terminal.data.turn.error?.codexErrorInfo,
+                  ),
+                }
+              : {}),
           });
         } catch {
           this.terminalAnomaly?.({
@@ -1803,16 +1944,6 @@ export class CodexRuntime implements Runtime {
           );
           return;
         }
-        const key = `${terminal.data.threadId}:${terminal.data.turn.id}`;
-        if (terminal.data.turn.status === "failed" && !this.failures.has(key))
-          this.failures.set(
-            key,
-            makeFailureEvidence(
-              terminal.data.threadId,
-              terminal.data.turn.id,
-              terminal.data.turn.error?.codexErrorInfo,
-            ),
-          );
         if (evidence.conflicted || evidence.firstStatus === null)
           this.terminalAnomaly?.({
             threadId: terminal.data.threadId,
@@ -2143,7 +2274,9 @@ export class CodexRuntime implements Runtime {
     params: unknown,
   ): void {
     const call = parseRuntimeToolCall(params);
-    const definitions = call ? this.threadTools.get(call.threadId) : undefined;
+    const definitions = call
+      ? this.threadSnapshots.get(call.threadId)?.tools
+      : undefined;
     const registered = definitions?.some((tool) => tool.name === call?.tool);
     if (!call || !registered || !this.toolCall) {
       let holdFailed = false;
@@ -2218,15 +2351,13 @@ export class CodexRuntime implements Runtime {
       this.cancelUserInput(endpoint.call.identity, "Runtime lost");
     this.nativeGeneration = undefined;
     this.nativeQualifications.clear();
-    this.nativeThreadSettings.clear();
+    this.threadSnapshots.clear();
     this.nativeTurns.clear();
     this.invalidNativeTurns.clear();
     this.nativeReadbacks.clear();
-    this.threadTools.clear();
     this.nativeEndpoints.clear();
     this.nativeEndpointsByTurn.clear();
     this.nativeEndpointsByRpcId.clear();
-    this.failures.clear();
     this.failure = error;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);

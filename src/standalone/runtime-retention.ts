@@ -12,6 +12,15 @@ export interface RuntimeTerminalEvidence {
   lastRuntimeGeneration: string | null;
   firstObservedAt: number | null;
   lastObservedAt: number | null;
+  failure: RuntimeTerminalFailureEvidence | null;
+}
+
+/** Compact, validated first failure facts used by exact bound retry classification. */
+export interface RuntimeTerminalFailureEvidence {
+  classification: "transient" | "permanent" | "unknown";
+  reasonCode: string;
+  source: "codexErrorInfo" | "missing";
+  codexRetries: number | null;
 }
 
 export interface RuntimeTerminalObservation {
@@ -19,6 +28,7 @@ export interface RuntimeTerminalObservation {
   turnId: string;
   status: RuntimeTerminalStatus;
   runtimeGeneration: string;
+  failure?: RuntimeTerminalFailureEvidence;
 }
 
 export interface RuntimeThreadQualification {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
@@ -30,16 +30,27 @@ type RuntimeInternals = {
   nativeExecutable:
     | { codexVersion: string; executableHash: string }
     | undefined;
-  nativeThreadSettings: Map<string, Record<string, unknown>>;
+  threadSnapshots: Map<
+    string,
+    {
+      tools?: readonly unknown[];
+      settings?: Record<string, unknown>;
+    }
+  > & {
+    settledStats(): {
+      count: number;
+      utf8Bytes: number;
+      pinnedCount: number;
+      pinnedUtf8Bytes: number;
+    };
+  };
   nativeTurns: Map<string, string>;
-  threadTools: Map<string, readonly unknown[]>;
   nativeQualifications: Map<string, unknown>;
   nativeEndpoints: Map<string, unknown>;
   nativeEndpointsByTurn: Map<string, Set<string>>;
   nativeEndpointsByRpcId: Map<string, Set<string>>;
   invalidNativeTurns: Set<string>;
   nativeReadbacks: Map<string, unknown>;
-  failures: Map<string, unknown>;
   conversationTurns: Map<string, unknown>;
   pending: Map<string | number, unknown>;
   options: { safety: RuntimeSpawnContext["safety"] };
@@ -71,6 +82,10 @@ function fixture(root: string, currentGeneration = generation) {
   let safety: RuntimeSpawnContext["safety"] | undefined;
   let service!: StandaloneService;
   let resumeModel = "fixture-model";
+  let startedThreadCount = 0;
+  let startedTurnCount = 0;
+  let turnStartRequestCount = 0;
+  let failTurnStart = false;
   const requestThreads = new Map<
     string,
     { threadId: string; identity: NativeInputEndpointIdentity }
@@ -139,8 +154,19 @@ function fixture(root: string, currentGeneration = generation) {
         internals.child = undefined;
       };
       runtime.processIdentity = () => processIdentity;
-      internals.request = async (_method, params, beforeResolve) => {
-        const threadId = (params as { threadId: string }).threadId;
+      internals.request = async (method, params, beforeResolve) => {
+        if (method === "turn/start") {
+          turnStartRequestCount++;
+          if (failTurnStart) throw new Error("Synthetic turn startup failure");
+          return {
+            turn: { id: `retention-started-turn-${startedTurnCount++}` },
+          };
+        }
+        const paramsThreadId = (params as { threadId?: string }).threadId;
+        const threadId =
+          method === "thread/start"
+            ? `retention-start-thread-${startedThreadCount++}`
+            : (paramsThreadId ?? "retention-thread");
         const response = {
           thread: { id: threadId },
           approvalPolicy: "never",
@@ -187,6 +213,14 @@ function fixture(root: string, currentGeneration = generation) {
     setResumeModel: (value: string) => {
       resumeModel = value;
     },
+    setTurnStartFailure: (value: boolean) => {
+      failTurnStart = value;
+    },
+    stageCounts: () => ({
+      threadStarts: startedThreadCount,
+      turnStartRequests: turnStartRequestCount,
+      successfulTurnStarts: startedTurnCount,
+    }),
     safety: () => {
       assert.ok(safety);
       return safety;
@@ -314,15 +348,16 @@ function createNativeWork(
   f: ReturnType<typeof fixture>,
   task: ReturnType<typeof createTask>,
   index: number,
+  identity: Partial<{ threadId: string; turnId: string; workId: string }> = {},
 ) {
   const { state } = f.internals();
-  const threadId = `retention-native-thread-${index}`;
-  const turnId = `retention-native-turn-${index}`;
-  const workId = `retention-native-work-${index}`;
+  const threadId = identity.threadId ?? `retention-native-thread-${index}`;
+  const turnId = identity.turnId ?? `retention-native-turn-${index}`;
+  const workId = identity.workId ?? `retention-native-work-${index}`;
   const intent = state.create(
     workId,
     "Synthetic native question retention turn",
-    "/tmp/runtime-retention-native",
+    join("/tmp/runtime-retention-native", workId),
   );
   state.bindTask(workId, {
     taskId: task.taskId,
@@ -343,13 +378,15 @@ function createNativeWork(
   assert.equal(state.bindTurn(intent.id, turnId, generation), true);
   const internals = f.runtime() as unknown as RuntimeInternals;
   internals.nativeTurns.set(threadId, turnId);
-  internals.nativeThreadSettings.set(threadId, {
-    model: "fixture-model",
-    modelProvider: "fixture-provider",
-    reasoningEffort: null,
-    serviceTier: null,
+  internals.threadSnapshots.set(threadId, {
+    settings: {
+      model: "fixture-model",
+      modelProvider: "fixture-provider",
+      reasoningEffort: null,
+      serviceTier: null,
+    },
+    tools: [],
   });
-  internals.threadTools.set(threadId, []);
   f.safety().registerThreadTools(
     threadId,
     createHash("sha256").update("[]").digest("hex"),
@@ -368,12 +405,11 @@ function settledRuntimeCounts(f: ReturnType<typeof fixture>) {
     nativeEndpoints: runtime.nativeEndpoints.size,
     endpointsByTurn: runtime.nativeEndpointsByTurn.size,
     endpointsByRpcId: runtime.nativeEndpointsByRpcId.size,
-    threadSettings: runtime.nativeThreadSettings.size,
-    threadTools: runtime.threadTools.size,
+    threadSnapshots: runtime.threadSnapshots.size,
     nativeTurns: runtime.nativeTurns.size,
     invalidNativeTurns: runtime.invalidNativeTurns.size,
     readbacks: runtime.nativeReadbacks.size,
-    failures: runtime.failures.size,
+    failureEvidenceCache: 0,
     conversationTurns: runtime.conversationTurns.size,
     pendingRpc: runtime.pending.size,
     nativeWaiters: service.nativeWaiters.size,
@@ -457,12 +493,11 @@ function runtimeCollectionSizes(f: ReturnType<typeof fixture>) {
     nativeEndpoints: map(runtime.nativeEndpoints),
     endpointsByTurn: map(runtime.nativeEndpointsByTurn),
     endpointsByRpcId: map(runtime.nativeEndpointsByRpcId),
-    threadSettings: map(runtime.nativeThreadSettings),
-    threadTools: map(runtime.threadTools),
+    threadSnapshots: map(runtime.threadSnapshots),
     nativeTurns: map(runtime.nativeTurns),
     invalidNativeTurns: set(runtime.invalidNativeTurns),
     readbacks: map(runtime.nativeReadbacks),
-    failures: map(runtime.failures),
+    failureEvidenceCache: { count: 0, utf8Bytes: 0 },
     conversationTurns: map(runtime.conversationTurns),
     pendingRpc: map(runtime.pending),
     serviceNativeWaiters: map(service.nativeWaiters),
@@ -553,6 +588,7 @@ function receiveTerminal(
   turnId: string,
   status: "completed" | "failed" = "completed",
   threadId = "retention-thread",
+  errorCode?: string,
 ): void {
   (runtime as unknown as RuntimeInternals).receive(
     child,
@@ -560,7 +596,13 @@ function receiveTerminal(
       method: "turn/completed",
       params: {
         threadId,
-        turn: { id: turnId, status },
+        turn: {
+          id: turnId,
+          status,
+          ...(status === "failed" && errorCode !== undefined
+            ? { error: { codexErrorInfo: errorCode } }
+            : {}),
+        },
       },
     }),
   );
@@ -635,13 +677,9 @@ test("production adapter terminal evidence remains SQLite-backed past cache limi
       /uncertain/,
     );
     assert.equal(
-      runtime.failureEvidence("retention-thread", "retention-turn-0")?.status,
-      "failed",
-    );
-    assert.equal(
-      (runtime as unknown as RuntimeInternals).failures.size,
-      0,
-      "consumed failure evidence does not remain in the adapter map",
+      runtime.failureEvidence("retention-thread", "retention-turn-0"),
+      undefined,
+      "conflicted durable failure evidence cannot authorize a retry",
     );
     assertSettledRuntimeCounts(f);
 
@@ -697,6 +735,338 @@ test("production adapter terminal evidence remains SQLite-backed past cache limi
   }
 });
 
+test("unbound failed terminals retain exact retry facts only in durable evidence", {
+  timeout: 120_000,
+}, async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-runtime-failure-retention-"),
+  );
+  const f = fixture(root);
+  try {
+    await f.service.start();
+    f.internals().scheduler.stop();
+    const runtime = f.runtime();
+    const db = f.internals().db;
+    const count = 1_024;
+    for (let index = 0; index < count; index++)
+      receiveTerminal(
+        runtime,
+        f.child,
+        `unbound-failure-${index}`,
+        "failed",
+        "unbound-failure-thread",
+        "serverOverloaded",
+      );
+
+    const unbound = f
+      .internals()
+      .state.runtimeTerminal(
+        "unbound-failure-thread",
+        "unbound-failure-0",
+        generation,
+      );
+    assert.equal(unbound?.firstStatus, "failed");
+    assert.equal(unbound?.failure?.classification, "transient");
+    assert.equal(unbound?.workId, null);
+    assert.equal(
+      runtime.failureEvidence("unbound-failure-thread", "unbound-failure-0"),
+      undefined,
+      "an unbound receipt has no retry authority",
+    );
+    assert.equal(runtimeCollectionSizes(f).failureEvidenceCache.count, 0);
+
+    const task = createTask(f.service);
+    const early = {
+      threadId: "retention-early-failure-thread",
+      turnId: "retention-early-failure-turn",
+    };
+    receiveTerminal(
+      runtime,
+      f.child,
+      early.turnId,
+      "failed",
+      early.threadId,
+      "serverOverloaded",
+    );
+    assert.equal(
+      runtime.failureEvidence(early.threadId, early.turnId),
+      undefined,
+    );
+    const bound = createNativeWork(f, task, 50_000, {
+      ...early,
+      workId: "retention-early-failure-work",
+    });
+    assert.equal(bound.workId, "retention-early-failure-work");
+    assert.equal(
+      runtime.failureEvidence(early.threadId, early.turnId)?.classification,
+      "transient",
+      "an early failure is classifiable after exact SQLite binding, without an adapter cache",
+    );
+    receiveTerminal(
+      runtime,
+      f.child,
+      early.turnId,
+      "failed",
+      early.threadId,
+      "unauthorized",
+    );
+    assert.equal(
+      runtime.failureEvidence(early.threadId, early.turnId)?.reasonCode,
+      "serverOverloaded",
+      "a same-status duplicate cannot replace first failure facts",
+    );
+    receiveTerminal(
+      runtime,
+      f.child,
+      early.turnId,
+      "completed",
+      early.threadId,
+    );
+    assert.equal(
+      runtime.failureEvidence(early.threadId, early.turnId),
+      undefined,
+    );
+    assert.equal(
+      f
+        .internals()
+        .state.runtimeTerminal(early.threadId, early.turnId, generation)
+        ?.conflicted,
+      true,
+    );
+
+    const unknown = {
+      threadId: "retention-unknown-failure-thread",
+      turnId: "retention-unknown-failure-turn",
+    };
+    receiveTerminal(
+      runtime,
+      f.child,
+      unknown.turnId,
+      "failed",
+      unknown.threadId,
+      "not-a-codex-error-code",
+    );
+    createNativeWork(f, task, 50_001, {
+      ...unknown,
+      workId: "retention-unknown-failure-work",
+    });
+    assert.deepEqual(
+      {
+        classification: runtime.failureEvidence(
+          unknown.threadId,
+          unknown.turnId,
+        )?.classification,
+        reasonCode: runtime.failureEvidence(unknown.threadId, unknown.turnId)
+          ?.reasonCode,
+        source: runtime.failureEvidence(unknown.threadId, unknown.turnId)
+          ?.source,
+      },
+      { classification: "unknown", reasonCode: "unknown", source: "missing" },
+    );
+
+    const stored = db
+      .prepare(`SELECT COUNT(*) AS count,
+        SUM(LENGTH(CAST(failureEvidence AS BLOB))) AS failureUtf8Bytes
+        FROM runtime_terminal_evidence WHERE threadId = ?`)
+      .get("unbound-failure-thread") as {
+      count: number;
+      failureUtf8Bytes: number;
+    };
+    assert.equal(stored.count, count);
+    assert.ok(stored.failureUtf8Bytes > 0);
+    console.log(
+      `runtime-retention-failed-terminals ${JSON.stringify({
+        fixture: "actual-codex-runtime-receive-real-service-real-sqlite",
+        unboundNonconsumerRows: stored,
+        adapterFailureEvidenceCache: { count: 0, utf8Bytes: 0 },
+        earlyBoundClassification: "transient-first-fact",
+        duplicatePreservedFirstFact: true,
+        conflictedRetryEvidence: runtime.failureEvidence(
+          early.threadId,
+          early.turnId,
+        ),
+        unknownClassification: runtime.failureEvidence(
+          unknown.threadId,
+          unknown.turnId,
+        ),
+      })}`,
+    );
+  } finally {
+    await f.service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("service bounds settled thread snapshots after held bindings and failed turn startup", {
+  timeout: 120_000,
+}, async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-runtime-thread-retention-"),
+  );
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  const f = fixture(root);
+  try {
+    await f.service.start();
+    f.internals()
+      .db.prepare(
+        "UPDATE scheduler_capacity_limits SET globalLimit = 256 WHERE singleton = 1",
+      )
+      .run();
+    const runtime = f.runtime() as unknown as RuntimeInternals;
+    const baselineThread = await f.runtime().startThread(workspace, []);
+    await f.runtime().resumeThread(baselineThread, []);
+    const baseline = f
+      .internals()
+      .state.runtimeThreadQualification(baselineThread);
+    assert.equal(baseline?.model, "fixture-model");
+    f.setTurnStartFailure(true);
+    await assert.rejects(
+      f
+        .runtime()
+        .startTurn(baselineThread, workspace, "synthetic failed startup"),
+      /Synthetic turn startup failure/,
+    );
+    f.setTurnStartFailure(false);
+    assert.equal(runtime.nativeQualifications.size, 0);
+
+    const heldBindingWorkId = "retention-held-binding-work";
+    let heldBindingThread: string | undefined;
+    const originalStartThread = f.runtime().startThread.bind(f.runtime());
+    f.runtime().startThread = async (...args) => {
+      const threadId = await originalStartThread(...args);
+      heldBindingThread = threadId;
+      const intent = f.internals().state.byWorkId(heldBindingWorkId);
+      assert.ok(intent);
+      f.internals().state.hold(
+        intent.id,
+        "Synthetic hold after thread creation",
+      );
+      return threadId;
+    };
+    const heldWorkspace = join(root, "held-binding-workspace");
+    mkdirSync(heldWorkspace);
+    const heldBinding = await f.service.submit(
+      heldBindingWorkId,
+      "synthetic held binding",
+      heldWorkspace,
+    );
+    f.runtime().startThread = originalStartThread;
+    assert.equal(heldBinding.state, "held");
+    assert.ok(heldBindingThread);
+    assert.ok(runtime.threadSnapshots.has(heldBindingThread));
+    assert.equal(runtime.threadSnapshots.settledStats().pinnedCount, 0);
+
+    f.setTurnStartFailure(true);
+    const failedStarts = 140;
+    for (let index = 0; index < failedStarts; index++) {
+      const failedWorkspace = join(root, `failed-start-workspace-${index}`);
+      mkdirSync(failedWorkspace);
+      const result = await f.service.submit(
+        `retention-failed-start-${index}`,
+        "synthetic failed turn start",
+        failedWorkspace,
+      );
+      assert.equal(result.state, "held");
+      assert.ok(result.threadId);
+      assert.equal(result.turnId, null);
+    }
+    f.setTurnStartFailure(false);
+    assert.deepEqual(f.stageCounts(), {
+      threadStarts: failedStarts + 2,
+      turnStartRequests: failedStarts + 1,
+      successfulTurnStarts: 0,
+    });
+    const countStats = runtime.threadSnapshots.settledStats();
+    assert.ok(countStats.count <= 128);
+    assert.ok(countStats.utf8Bytes <= 256 * 1024);
+    assert.equal(countStats.pinnedCount, 0);
+    assert.equal(runtime.threadSnapshots.has(baselineThread), false);
+
+    const largeThreads: string[] = [];
+    const largeTools = (index: number) => [
+      {
+        type: "function" as const,
+        name: `large-retention-tool-${index}`,
+        description: "Large synthetic tool schema",
+        inputSchema: {
+          type: "object",
+          description: "x".repeat(60_000),
+        },
+      },
+    ];
+    for (let index = 0; index < 5; index++)
+      largeThreads.push(
+        await f.runtime().startThread(workspace, largeTools(index)),
+      );
+    const byteStats = runtime.threadSnapshots.settledStats();
+    assert.ok(byteStats.count < 128);
+    assert.ok(byteStats.utf8Bytes <= 256 * 1024);
+    assert.equal(byteStats.pinnedCount, 0);
+    assert.equal(runtime.threadSnapshots.has(largeThreads[0]!), false);
+
+    const activeThread = await f.runtime().startThread(workspace, []);
+    const activeTurn = await f
+      .runtime()
+      .startTurn(activeThread, workspace, "synthetic active turn");
+    assert.ok(runtime.threadSnapshots.has(activeThread));
+    assert.equal(runtime.threadSnapshots.settledStats().pinnedCount, 1);
+    await f.runtime().startThread(workspace, largeTools(6));
+    const pinnedStats = runtime.threadSnapshots.settledStats();
+    assert.ok(pinnedStats.count <= 128);
+    assert.ok(pinnedStats.utf8Bytes <= 256 * 1024);
+    assert.equal(pinnedStats.pinnedCount, 1);
+    assert.ok(runtime.threadSnapshots.has(activeThread));
+    receiveTerminal(
+      f.runtime(),
+      f.child,
+      activeTurn,
+      "completed",
+      activeThread,
+    );
+    assert.equal(runtime.threadSnapshots.has(activeThread), false);
+    assert.equal(runtime.threadSnapshots.settledStats().pinnedCount, 0);
+
+    assert.equal(
+      f.internals().state.runtimeThreadQualification(baselineThread)?.model,
+      "fixture-model",
+      "eviction preserves the exact durable first qualification",
+    );
+    assert.equal(runtime.nativeQualifications.has(baselineThread), false);
+    await f.runtime().resumeThread(baselineThread, []);
+    assert.ok(runtime.nativeQualifications.has(baselineThread));
+    runtime.nativeQualifications.delete(baselineThread);
+    f.setResumeModel("different-model");
+    await f.runtime().resumeThread(baselineThread, []);
+    assert.equal(runtime.nativeQualifications.has(baselineThread), false);
+    assert.equal(
+      f.internals().state.runtimeThreadQualification(baselineThread)?.model,
+      "fixture-model",
+      "a changed current readback cannot overwrite the durable first settings",
+    );
+
+    console.log(
+      `runtime-retention-thread-snapshots ${JSON.stringify({
+        fixture: "production-codex-runtime-and-standalone-service-real-sqlite",
+        heldBindingSnapshot: {
+          created: true,
+          pinnedAfterHold: false,
+          retainedBeforeChurn: true,
+        },
+        failedTurnStartupCohort: failedStarts,
+        afterCountChurn: countStats,
+        afterByteChurn: byteStats,
+        activeTurnPinDuringChurn: pinnedStats,
+        nativeQualificationAfterEvictedSnapshot: "exact durable prior matched",
+        changedReadback: "withheld without overwriting first facts",
+      })}`,
+    );
+  } finally {
+    await f.service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("production service settles 2,000 native waiters and callbacks with SQLite authority", {
   timeout: 180_000,
 }, async () => {
@@ -733,8 +1103,7 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           readbacks: number;
           nativeTurns: number;
           qualifications: number;
-          threadSettings: number;
-          threadTools: number;
+          threadSnapshots: number;
           serviceWaiters: number;
           callbackWorkItems: number;
           callbacks: number;
@@ -783,8 +1152,7 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           readbacks: runtime.nativeReadbacks.size,
           nativeTurns: runtime.nativeTurns.size,
           qualifications: runtime.nativeQualifications.size,
-          threadSettings: runtime.nativeThreadSettings.size,
-          threadTools: runtime.threadTools.size,
+          threadSnapshots: runtime.threadSnapshots.size,
           serviceWaiters: f.internals().nativeWaiters.size,
           callbackWorkItems: f.internals().callbacks.size,
           callbacks: [...f.internals().callbacks.values()].reduce(
@@ -800,8 +1168,7 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           "readbacks",
           "nativeTurns",
           "qualifications",
-          "threadSettings",
-          "threadTools",
+          "threadSnapshots",
           "serviceWaiters",
           "callbackWorkItems",
           "callbacks",
@@ -1092,10 +1459,31 @@ test("changed or missing legacy native qualification facts stay unqualified", {
       const work = createNativeWork(f, task, 20_000);
       const runtime = f.runtime() as unknown as RuntimeInternals;
       if (mode === "changed-settings") f.setResumeModel("different-model");
-      if (mode === "missing-legacy-settings")
-        runtime.nativeThreadSettings.delete(work.threadId);
+      if (mode === "missing-legacy-settings") {
+        const snapshot = runtime.threadSnapshots.get(work.threadId);
+        assert.ok(snapshot);
+        runtime.threadSnapshots.set(
+          work.threadId,
+          snapshot.tools === undefined ? {} : { tools: snapshot.tools },
+        );
+      }
       if (mode === "changed-tools")
-        runtime.threadTools.set(work.threadId, [{ name: "changed-tool" }]);
+        runtime.threadSnapshots.set(work.threadId, {
+          settings: {
+            model: "fixture-model",
+            modelProvider: "fixture-provider",
+            reasoningEffort: null,
+            serviceTier: null,
+          },
+          tools: [
+            {
+              type: "function",
+              name: "changed-tool",
+              description: "Changed tool",
+              inputSchema: { type: "object" },
+            },
+          ],
+        });
       const identity: NativeInputEndpointIdentity = {
         requestId: 20_000,
         runtimeGeneration: generation,
