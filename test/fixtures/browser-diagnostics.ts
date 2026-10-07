@@ -26,6 +26,9 @@ import {
   type FixtureLifecycleOptions,
 } from "./fixture-lifecycle.js";
 
+const defaultBrowserJourneyOverallMs = 90000;
+const browserSuiteTimeoutMarginMs = 5000;
+
 export const browserEvidenceLimits = {
   files: 24,
   screenshotBytes: 2 * 1024 * 1024,
@@ -459,7 +462,7 @@ export async function runBrowserJourney(
   options: BrowserJourneyOptions = {},
 ) {
   const executionMs = options.executionMs ?? 45000;
-  const overallMs = options.overallMs ?? 90000;
+  const overallMs = options.overallMs ?? defaultBrowserJourneyOverallMs;
   const cleanupStepMs = options.cleanupStepMs ?? 10000;
   const startupMs = options.startupMs ?? 15000;
   for (const limit of [executionMs, overallMs, cleanupStepMs, startupMs])
@@ -673,7 +676,10 @@ export function captureBrowserEvidence(
   if (!journey) throw Error("Screenshot must belong to a browser journey");
   return journey.capture(page, name, options.fullPage ?? true);
 }
-export function browserSuite(suite: string) {
+export function browserSuite(
+  suite: string,
+  journeyOptions: BrowserJourneyOptions = {},
+) {
   return (
     name: string,
     optionsOrAction:
@@ -686,10 +692,22 @@ export function browserSuite(suite: string) {
     const run =
       typeof optionsOrAction === "function" ? optionsOrAction : action;
     if (!run) throw Error("Browser journey callback is required");
-    return nodeTest(name, { timeout: 95000, ...options }, async (t) => {
-      await runBrowserJourney(suite, name, (journey) =>
-        screenshotJourney.run(journey, () => run(t, journey)),
-      );
-    });
+    return nodeTest(
+      name,
+      {
+        timeout:
+          (journeyOptions.overallMs ?? defaultBrowserJourneyOverallMs) +
+          browserSuiteTimeoutMarginMs,
+        ...options,
+      },
+      async (t) => {
+        await runBrowserJourney(
+          suite,
+          name,
+          (journey) => screenshotJourney.run(journey, () => run(t, journey)),
+          journeyOptions,
+        );
+      },
+    );
   };
 }
