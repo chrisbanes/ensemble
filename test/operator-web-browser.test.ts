@@ -401,10 +401,10 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   );
   let web = await journey.start("fixture.web", () => f.startWeb());
   browser = await journey.start("browser.launch", () => chromium.launch());
-  const context = await browser.newContext({
+  let context = await browser.newContext({
     viewport: { width: 1366, height: 820 },
   });
-  const page = await context.newPage();
+  let page = await context.newPage();
   journey.observe(page);
   page.setDefaultTimeout(5000);
   await page.goto(`${web.origin}/app`);
@@ -480,12 +480,43 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   const oldOrigin = web.origin;
+  const authenticatedState = await context.storageState();
+  assert.ok(
+    authenticatedState.cookies.some(
+      (cookie) =>
+        cookie.name === "ensemble_operator_session" && cookie.value.length > 0,
+    ),
+  );
+  const oldBrowser = browser;
+  assert.ok(oldBrowser);
+  await journey.closeStep(
+    "browser.close.before-restart",
+    () => oldBrowser.close(),
+    f.lifecycle,
+  );
+  browser = undefined;
+  assert.equal(
+    f.lifecycle.steps.find(
+      (step) => step.name === "browser.close.before-restart",
+    )?.status,
+    "completed",
+  );
   await web.close();
   await journey.closeStep("service.stop", () => f.service.stop(), f.lifecycle);
   journey.restart();
   await journey.start("service.start", () => f.service.start());
   web = await journey.start("fixture.web", () => f.startWeb());
   assert.notEqual(web.origin, oldOrigin);
+  browser = await journey.start("browser.launch.after-restart", () =>
+    chromium.launch(),
+  );
+  context = await browser.newContext({
+    viewport: { width: 1366, height: 820 },
+    storageState: authenticatedState,
+  });
+  page = await context.newPage();
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
   assert.equal(
     (
       await context.request.get(`${web.origin}/api/operator/workspace`)

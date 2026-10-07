@@ -11,7 +11,8 @@ import {
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedRetainedReviewWindow } from "./fixtures/task-review.js";
 import { ConversationHistoryStore } from "../src/standalone/conversation-history.js";
-const test = browserSuite("ui04-retention-access");
+const retentionJourneyLimits = { executionMs: 60000, overallMs: 100000 };
+const test = browserSuite("ui04-retention-access", retentionJourneyLimits);
 async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
   const f = await j.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
@@ -53,7 +54,7 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
     } catch {
       /* Cached diagnostics require no live browser call at the deadline. */
     }
-  }, 44000);
+  }, retentionJourneyLimits.executionMs - 1000);
   deadlineDiagnostic.unref();
   j.cleanup(async () => {
     clearTimeout(deadlineDiagnostic);

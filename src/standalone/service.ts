@@ -1,5 +1,5 @@
 import { InboxStartupReconciliation } from "./inbox-startup.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   materialDigest,
   isOperatorDeliveryCaller,
@@ -161,7 +161,47 @@ export interface StandaloneServiceOptions {
     fallbackBackoffMs?: number;
     maxFallbackBackoffMs?: number;
   };
+  /** Controlled fixtures may replace the bounded, redacted service diagnostic sink. */
+  backgroundDiagnosticSink?: (
+    diagnostic: BackgroundFailureDiagnostic,
+  ) => void | Promise<void>;
 }
+
+export type BackgroundFailureOperation =
+  | "github-poll"
+  | "power-poll"
+  | "domain-wake"
+  | "post-turn-wake"
+  | "scheduler-drain"
+  | "safe-shutdown";
+
+export type BackgroundFailureCode =
+  | "unexpected-background-failure"
+  | "shutdown-failed"
+  | "diagnostic-writer-failed";
+
+export interface BackgroundFailureDiagnostic {
+  serviceId: string;
+  incident: number;
+  operation: BackgroundFailureOperation;
+  errorCode: BackgroundFailureCode;
+}
+
+interface ServiceGeneration {
+  id: string;
+  accepting: boolean;
+  fatal: boolean;
+  shutdownFailureReported: boolean;
+  incident: number;
+  failureNotification: Promise<BackgroundFailureDiagnostic>;
+  resolveFailure: (diagnostic: BackgroundFailureDiagnostic) => void;
+  shutdown?: Promise<void>;
+  diagnosticQueue: Promise<void>;
+}
+
+const backgroundDiagnosticTimeoutMs = 50;
+const backgroundDiagnosticFallback =
+  '{"errorCode":"diagnostic-writer-failed"}\n';
 
 export type RoutingAvailabilityReason =
   | "disabled"
@@ -217,6 +257,13 @@ export class StandaloneService {
   private readonly retryNow: () => number;
   private readonly fallbackBackoffMs: number;
   private readonly maxFallbackBackoffMs: number;
+  private generation: ServiceGeneration | undefined;
+  private stopPromise: Promise<void> | undefined;
+  private readonly backgroundRuns = new Set<Promise<void>>();
+  private readonly generationsByNotification = new WeakMap<
+    Promise<BackgroundFailureDiagnostic>,
+    ServiceGeneration
+  >();
 
   constructor(
     private readonly dataDir: string,
@@ -254,6 +301,9 @@ export class StandaloneService {
       markerWriter: this.markerWriter,
     });
     this.owner = dataDirectory;
+    const generation = this.createGeneration();
+    this.generation = generation;
+    this.stopPromise = undefined;
     const { databasePath: database, workspacePath } = dataDirectory;
     try {
       const db = new DatabaseSync(database);
@@ -263,9 +313,11 @@ export class StandaloneService {
       );
       new Store(db).ensureHost("standalone-codex");
       this.conversationHistory = new ConversationHistoryStore(db);
-      const domain = new DomainStore(db, () => {
-        void this.wakeScheduler().catch(() => {});
-      });
+      const domain = new DomainStore(db, () =>
+        this.observeBackgroundFailure(generation, "domain-wake", () =>
+          this.wakeScheduler(0, generation),
+        ),
+      );
       domain.migrate();
       this.domainState = domain;
       const githubSources = new GitHubSourceStore(db);
@@ -561,20 +613,24 @@ export class StandaloneService {
           powerOptions?.eventSource ?? new MacPowerEventSource(),
           powerOptions?.assertion ?? new CaffeinateAssertion(),
           () => this.requireSupervisor().reconcileOnStart(),
-          () => this.wakeScheduler(),
+          () => this.wakeScheduler(0, generation),
         );
         this.power = power;
         await power.start();
         await power.poll();
         this.powerPollTimer = setInterval(() => {
-          void power.poll().catch(() => {});
+          this.observeBackgroundFailure(generation, "power-poll", () =>
+            power.poll(),
+          );
         }, pollIntervalMs);
         this.powerPollTimer.unref();
       }
       const scheduler = new TurnScheduler(
         schedulerStore,
-        (request) => this.attemptRequest(request),
+        (request) => this.attemptRequest(request, generation),
         this.retryNow,
+        (error) =>
+          this.handleBackgroundFailure(generation, "scheduler-drain", error),
       );
       this.scheduler = scheduler;
       scheduler.start();
@@ -589,10 +645,13 @@ export class StandaloneService {
           "GitHub refresh interval must be between 1000 and 3600000 milliseconds",
         );
       this.githubPollTimer = setInterval(() => {
-        void this.refreshGitHub().catch(() => {});
+        this.observeBackgroundFailure(generation, "github-poll", () =>
+          this.refreshGitHub(),
+        );
       }, githubInterval);
       this.githubPollTimer.unref();
     } catch (error) {
+      generation.accepting = false;
       const scheduler = this.scheduler;
       const workspaces = this.workspaces;
       workspaces?.cancelGitWork();
@@ -651,6 +710,7 @@ export class StandaloneService {
             this.db = undefined;
             dataDirectory.close();
             this.owner = undefined;
+            if (this.generation === generation) this.generation = undefined;
           }
         }
       }
@@ -658,7 +718,74 @@ export class StandaloneService {
     }
   }
 
-  async stop(): Promise<void> {
+  waitForBackgroundFailure(): Promise<BackgroundFailureDiagnostic> {
+    if (!this.generation) throw new Error("Service is not started");
+    return this.generation.failureNotification;
+  }
+
+  async waitForBackgroundShutdown(
+    failureNotification?: Promise<BackgroundFailureDiagnostic>,
+  ): Promise<void> {
+    const generation = failureNotification
+      ? this.generationsByNotification.get(failureNotification)
+      : this.generation;
+    const shutdown = generation?.shutdown;
+    if (!generation) return;
+    let failed = false;
+    let failure: unknown;
+    if (generation.fatal && shutdown) {
+      try {
+        await shutdown;
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+    }
+    await generation.diagnosticQueue;
+    if (failed) throw failure;
+  }
+
+  backgroundFailureObserved(
+    failureNotification?: Promise<BackgroundFailureDiagnostic>,
+  ): boolean {
+    const generation = failureNotification
+      ? this.generationsByNotification.get(failureNotification)
+      : this.generation;
+    return generation?.fatal ?? false;
+  }
+
+  stop(): Promise<void> {
+    const generation = this.generation;
+    if (generation) generation.accepting = false;
+    if (this.stopPromise) return this.stopPromise;
+    const stopping = this.stopOwned();
+    this.stopPromise = stopping;
+    void stopping.then(
+      () => {},
+      () => {
+        if (this.stopPromise === stopping) this.stopPromise = undefined;
+        const diagnostic =
+          generation &&
+          this.generation === generation &&
+          !generation.shutdownFailureReported
+            ? this.nextBackgroundDiagnostic(
+                generation,
+                "safe-shutdown",
+                "shutdown-failed",
+              )
+            : undefined;
+        if (diagnostic && generation) {
+          generation.shutdownFailureReported = true;
+          void this.writeBackgroundDiagnostic(generation, diagnostic).catch(
+            () => {},
+          );
+        }
+      },
+    );
+    return stopping;
+  }
+
+  private async stopOwned(): Promise<void> {
     const scheduler = this.scheduler;
     const supervisor = this.supervisor;
     const synchronizer = this.githubSynchronizer;
@@ -721,6 +848,9 @@ export class StandaloneService {
           recordFailure("active-work settlement", result.reason);
     });
     await attempt("power stop", () => power?.stop());
+    await attempt("background callback settlement", async () => {
+      await Promise.all([...this.backgroundRuns]);
+    });
     await attempt("supervisor settlement", () => supervisor?.settle());
 
     if (db?.isOpen) await attempt("service database close", () => db.close());
@@ -772,6 +902,125 @@ export class StandaloneService {
         failures.map(({ error }) => error),
         `Service shutdown failed during ${failures.map(({ stage }) => stage).join(", ")}`,
       );
+  }
+
+  private createGeneration(): ServiceGeneration {
+    let resolveFailure!: (diagnostic: BackgroundFailureDiagnostic) => void;
+    const failureNotification = new Promise<BackgroundFailureDiagnostic>(
+      (resolve) => {
+        resolveFailure = resolve;
+      },
+    );
+    const generation: ServiceGeneration = {
+      id: randomUUID(),
+      accepting: true,
+      fatal: false,
+      shutdownFailureReported: false,
+      incident: 0,
+      failureNotification,
+      resolveFailure,
+      diagnosticQueue: Promise.resolve(),
+    };
+    this.generationsByNotification.set(failureNotification, generation);
+    return generation;
+  }
+
+  private observeBackgroundFailure(
+    generation: ServiceGeneration,
+    operation: Exclude<BackgroundFailureOperation, "safe-shutdown">,
+    action: () => Promise<unknown>,
+  ): void {
+    if (this.generation !== generation || !generation.accepting) return;
+    let pending: Promise<unknown>;
+    try {
+      pending = Promise.resolve(action());
+    } catch (error) {
+      this.handleBackgroundFailure(generation, operation, error);
+      return;
+    }
+    const observed = pending.then(
+      () => {},
+      (error: unknown) =>
+        this.handleBackgroundFailure(generation, operation, error),
+    );
+    this.backgroundRuns.add(observed);
+    void observed.then(() => this.backgroundRuns.delete(observed));
+  }
+
+  private handleBackgroundFailure(
+    generation: ServiceGeneration,
+    operation: Exclude<BackgroundFailureOperation, "safe-shutdown">,
+    _error: unknown,
+  ): void {
+    if (this.generation !== generation || generation.fatal) return;
+    generation.accepting = false;
+    generation.fatal = true;
+    const shutdown = this.stop();
+    generation.shutdown = shutdown;
+    void shutdown.catch(() => {});
+    const diagnostic = this.nextBackgroundDiagnostic(
+      generation,
+      operation,
+      "unexpected-background-failure",
+    );
+    if (diagnostic)
+      void this.writeBackgroundDiagnostic(generation, diagnostic).catch(
+        () => {},
+      );
+    generation.resolveFailure(diagnostic!);
+  }
+
+  private nextBackgroundDiagnostic(
+    generation: ServiceGeneration,
+    operation: BackgroundFailureOperation,
+    errorCode: BackgroundFailureCode,
+  ): BackgroundFailureDiagnostic {
+    generation.incident = Math.min(generation.incident + 1, 2);
+    return {
+      serviceId: generation.id,
+      incident: generation.incident,
+      operation,
+      errorCode,
+    };
+  }
+
+  private writeBackgroundDiagnostic(
+    generation: ServiceGeneration,
+    diagnostic: BackgroundFailureDiagnostic,
+  ): Promise<void> {
+    const write = generation.diagnosticQueue.then(async () => {
+      const sink =
+        this.options.backgroundDiagnosticSink ??
+        ((event: BackgroundFailureDiagnostic) => {
+          process.stderr.write(`${JSON.stringify(event)}\n`);
+        });
+      const result = Promise.resolve().then(() => sink(diagnostic));
+      void result.catch(() => {});
+      let timer: NodeJS.Timeout | undefined;
+      const completed = await Promise.race([
+        result.then(
+          () => true,
+          () => false,
+        ),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(
+            () => resolve(false),
+            backgroundDiagnosticTimeoutMs,
+          );
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+      if (!completed && this.generation === generation) {
+        try {
+          process.stderr.write(backgroundDiagnosticFallback);
+        } catch {
+          // The static fallback is best-effort and never calls the sink again.
+        }
+      }
+    });
+    generation.diagnosticQueue = write.catch(() => {});
+    return generation.diagnosticQueue;
   }
 
   list(): ExecutionIntent[] {
@@ -1847,7 +2096,12 @@ export class StandaloneService {
     return undefined;
   }
 
-  private async wakeScheduler(refusalRebindPass = 0): Promise<void> {
+  private async wakeScheduler(
+    refusalRebindPass = 0,
+    generation = this.generation,
+  ): Promise<void> {
+    if (!generation || this.generation !== generation || !generation.accepting)
+      return;
     const scheduler = this.scheduler;
     const store = this.schedulerStore;
     const domain = this.domainState;
@@ -2347,9 +2601,10 @@ export class StandaloneService {
       );
     }
     for (const queued of store.queued()) this.inboxStartup?.capture(queued);
+    if (this.generation !== generation || !generation.accepting) return;
     await scheduler.wake();
     if (refusalRebindPass === 0 && withdrawStaleRefusedDeliveries() > 0)
-      await this.wakeScheduler(1);
+      await this.wakeScheduler(1, generation);
   }
 
   private assignmentPrompt(
@@ -2449,7 +2704,12 @@ export class StandaloneService {
     ].join("\n\n");
   }
 
-  private async attemptRequest(request: TurnRequest): Promise<void> {
+  private async attemptRequest(
+    request: TurnRequest,
+    generation = this.generation,
+  ): Promise<void> {
+    if (!generation || this.generation !== generation || !generation.accepting)
+      return;
     const state = this.requireState();
     const store = this.requireSchedulerStore();
     let workspaceKey: string;
@@ -2625,7 +2885,12 @@ export class StandaloneService {
       const processIdentity = await Promise.resolve(
         runtime.processIdentity?.() ?? null,
       ).catch(() => null);
-      if (this.runtime !== runtime) return;
+      if (
+        this.runtime !== runtime ||
+        this.generation !== generation ||
+        !generation.accepting
+      )
+        return;
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),
@@ -2665,6 +2930,7 @@ export class StandaloneService {
     previous?: ExecutionIntent,
   ): void {
     const power = this.power;
+    const generation = this.generation;
     const action = (async () => {
       try {
         await power?.executionStarted(request.workId);
@@ -2679,7 +2945,10 @@ export class StandaloneService {
       .finally(() => {
         this.active.delete(action);
         this.activeByWorkId.delete(request.workId);
-        void this.wakeScheduler().catch(() => {});
+        if (generation)
+          this.observeBackgroundFailure(generation, "post-turn-wake", () =>
+            this.wakeScheduler(0, generation),
+          );
       })
       .catch(() => {});
   }
