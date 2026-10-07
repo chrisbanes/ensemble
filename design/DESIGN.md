@@ -1,5 +1,9 @@
 # Ensemble UI design handoff
 
+The [workspace inspection and local review handoff](#workspace-inspection-and-local-review--7-october-2026)
+below is the design-only handoff for #793. Chris accepted it as sufficient to
+start implementation on 7 October 2026, with the remaining limits recorded below.
+
 This is a portable reference for planning and implementing the reviewed Ensemble
 web UI without opening Pen. It was refreshed through Pen MCP on 3 October 2026
 after revising the operator UX and migrating the canvas to the installed shadcn Pen library. The editable visual source is
@@ -856,3 +860,489 @@ read back. The relocated image references were saved subsequently, but Pen MCP
 renders still show image placeholders, so comparison-image loading remains
 unverified. Source asset files were checked as valid PNGs. Earlier export and
 persistence statements above describe prior review passes.
+
+## Workspace inspection and local review — 7 October 2026
+
+**Reviewed design handoff; accepted to start implementation.** [#793](https://github.com/chrisbanes/ensemble/issues/793)
+owns this handoff, under [#776](https://github.com/chrisbanes/ensemble/issues/776).
+This adds no application implementation, dispatch, acceptance result or cutover
+authority. #793 closes when this handoff is merged. #782 must consume it before UI
+implementation and then qualify the production desktop, phone and runtime flows.
+
+Read alongside the approved [SPEC](../docs/SPEC.md#task-workspace-inspection--approved-post-mvp-scope-6-october-2026),
+[WI01–WI13](../docs/acceptance.md#post-mvp-task-workspace-inspection), and Agent Briefs
+in [#779](https://github.com/chrisbanes/ensemble/issues/779),
+[#780](https://github.com/chrisbanes/ensemble/issues/780),
+[#781](https://github.com/chrisbanes/ensemble/issues/781) and
+[#782](https://github.com/chrisbanes/ensemble/issues/782).
+Those issues and their comments were read live for this pass. The personal wiki
+was inaccessible (`Operation not permitted`); no personal-context claims depend
+on it. This section extends, rather than replaces, existing task, evidence,
+contextual feedback, execution, approval and recovery flows.
+
+### Visual source and verified references
+
+The additions are in the existing [design.pen](design.pen), in the section starting
+at canvas position **2952, 27789**. Desktop frames are 1366 × 900; phone frames
+are 390 × 844. Read the desktop rows left to right, then the phone rows below.
+The state specimens are review aids, not destinations in the product.
+
+The shared shadcn library remains **Dark / Neutral / Default**. No variables or
+visual system were replaced. The work reuses the installed sidebar and buttons,
+phone header `KthOL`, local-feedback context `xljAv`, and the existing task/result
+compositions. New reusable observation strip `l1wkQX` and selectable code line
+`Idu62` live inside component frame `i8oSV`. The editor revision below adds
+`rccke` in `KlKGO` for separate source, gutter and diff-marker columns. UI uses
+Inter, code/provenance uses JetBrains Mono; supporting text is 12–14px. Desktop
+sidebar is 224px. Inspection editors use edge-to-edge panes and compact toolbars;
+other desktop content retains 20px padding. Phone reading content uses 16–20px
+padding and phone action targets are at least 44 × 44px.
+
+| Composition / render reference | Exact Pen node |
+| --- | --- |
+| 77 · Shared inspection components and section introduction | `i8oSV` |
+| 78 · Current Files, code preview and single-line selection | `unmyA` |
+| 79 · Repository-free generated Markdown output | `pUX8f` |
+| 80 · Branch diff, both sides and deleted-range comment composer | `V0DCi` |
+| 81 · Repository/base selection, comparison menu and Uncommitted | `rlw92` |
+| 82 · Original retained R3 file after workspace removal | `xD63J` |
+| 83 · Complete editable two-file review and summary | `bRkWF` |
+| 84 · Actual latest-turn identity and complete/partial/unavailable alternatives | `dHsfB` |
+| 85 · Raster and PDF output preview alternatives | `JCGmX` |
+| 86 · Inspection, capture, ignored-reveal and workspace states | `oA8pq` |
+| 87 · Current/outdated/unknown/unavailable anchors and Refresh | `SQRtH` |
+| 88 · Phone file list and current observation | `gQhwY` |
+| 89 · Phone Before-side deleted-line range selection | `TEkRK` |
+| 90 · Phone add/edit/remove anchored comment | `J2AwE` |
+| 91 · Phone complete review, first reading position | `aB35C` |
+| 92 · Same complete review, second comment and summary position | `EZasz` |
+| 93 · Phone repository-free Markdown output | `bz4VC` |
+| 94 · Phone sending / original payload locked | `OHIOZ` |
+| 95 · Phone confirmed failure / editable draft / retry | `OBijt` |
+| 96 · Phone unknown outcome / original-operation reconciliation | `X3wI8B` |
+| 97 · Phone confirmed receipt and sent-review access | `CACzF` |
+| 98 · Phone retained result bytes after workspace removal | `KVIG2` |
+| 99 · Phone PDF page and zoom controls | `FCvHl` |
+| 100 · Phone raster fit/zoom/pan | `MKzws` |
+| 101 · Phone comparison/base selection and staged/unstaged filters | `lQbVM` |
+| 102 · Phone unsettled turn, deletion and read recovery | `rD02Q` |
+| 103 · Phone authentication expiry and private-state purge | `OwZka` |
+| 104 · Desktop sent review with original comments and summary | `u0YEF` |
+| 105 · Retained original R3 diff after later workspace changes | `Mn97J` |
+| 106 · Keyboard range selection, editing and focus return | `EKC1J` |
+
+Existing desktop task `gAT6T`, phone task `IuukL`, and result/delivery view
+`M41aTm` are extended in place. Their prior contextual feedback, criteria,
+approval, assignments, execution and source-owned dependency controls remain.
+Desktop task entry nodes: Files `Nid6O`, Changes `O0Eyx4`, Review `wSt5b`,
+retained R3 `Y4ifBs`. Phone entry row: `pi945`. Result/delivery entry row:
+`R2IFU`. References were read from the live document, rather than assumed from
+earlier handoff tables.
+
+### Consistent fictional material
+
+These are design fixtures, not runtime or validation observations. Atlas task
+**AT-142**, Command menu, retains **Mira** as accountable project lead,
+**A-105 / Builder**, source S2, work W-18 and **R3 / b72e910 at 11:40**.
+AP-17 v3 and external dependency #87 remain independently reachable. Current
+workspace inspection is observed at **12:06**. Repository `acme/atlas` has
+authorised root `/tasks/AT-142/atlas`, base `main`, and exact merge base
+`7e9c20d8a15b63f0449d716ef09af6bd8279c311`. Shortened hashes in compact phone
+labels disclose the full value; they do not replace it in the underlying context.
+`acme/design-system` is a second task worktree with its own unknown base.
+
+T-208 / Builder succeeded with observations 11:32–11:39. The later T-209 was
+interrupted, with observations 12:02:11–12:04:38 and partial capture. These are
+alternative moments, not two selectable historical turns. The running T-210
+specimen explicitly distinguishes it from the latest finished capture T-209.
+R3 evidence survives replacement of T-208 and workspace removal. `c-73a1`,
+`c-4e91` and `d-19f2` are illustrative immutable content/capture identities,
+not real hashes. Review operation RV-42 carries two comments and a summary;
+confirmed local receipt LR-42 is shown at 12:14. Sending/failure/unknown/sent
+frames are alternative outcomes of that operation, not simultaneous states.
+
+Repository-free **Fieldnotes / FN-58**, Research brief, also has Mira as lead,
+with root `/tasks/FN-58/outputs`, no Git repository and no holds. Its Markdown
+journey is separate from AT-142's draft; drafts never cross tasks. The existing
+fictional command-menu PNG is reused as an image preview. PDF pages are drawn
+content fixtures, not an implemented PDF renderer or passing keyboard evidence.
+Displayed file sizes/page counts illustrate metadata, not configured limits.
+
+### Connected journey and entry/return map
+
+1. Task → Files opens `unmyA` / phone `gQhwY` at a current observation. Generated
+   output has the same prominence and controls as code. FN-58 opens `pUX8f` /
+   `bz4VC`; raster/PDF open `JCGmX`, `MKzws` or `FCvHl`.
+2. Changes opens the same task's selected repository and comparison. Branch
+   uses `V0DCi`; dropdown/base states use `rlw92` / `lQbVM`; actual-turn views
+   use `dHsfB` / `rD02Q`. Selecting a repository restores its own comparison
+   and baseline, not another repository's main branch.
+3. Select one text line or a range, including either diff side and deleted
+   lines. Add/Edit opens the anchored composer (`V0DCi` / `J2AwE`). Save adds
+   to the task's local draft and returns to the selected range. It does not send.
+4. Move to another file and add another comment. Review opens the **complete**
+   draft (`bRkWF`; phone `aB35C` → scroll → `EZasz`). Every comment, original
+   excerpt, comparison and status can be inspected. Edit/remove and optional
+   summary stay here. The destination is visibly Mira before Send review.
+5. Send freezes that exact logical submission. `OHIOZ` → confirmed failure
+   `OBijt`, unknown `X3wI8B`, or confirmed `CACzF`. Inspect sent review opens
+   the read-only equivalent of `u0YEF`; original context remains accessible.
+6. From R3 evidence or result delivery, open `xD63J` / `KVIG2` (original file)
+   or `Mn97J` (original diff), retaining R3/A-105/b72e910. Opening current
+   contents is a separate explicit navigation; a missing historical capture
+   never redirects there. Returning restores the exact result/evidence anchor.
+
+| Origin | Inspection entry and return contract |
+| --- | --- |
+| Overview `N9G11A` | Open shared task `gAT6T`, then current Files/Changes; return to the same task row, filters and position. |
+| Project/cross-project List `nD0nh` and Board `E7qC9` / `MUFPD`; phone `GWXOi` | Same task entry; return restores project/task filters, selected task, view, board column and scroll. |
+| Inbox `cGjau` / phone `U3RAH` | Retain originating request AP-17, queue filters, selected item and position. Task → inspection does not answer the request. Back returns to that request, not a generic task list. |
+| Result, criterion and evidence | Preserve selected result, assignment/work revision, criterion/source reference and evidence identity, including older results. Existing single-message Ask lead for changes remains distinct from batched review. |
+| Search `WaBk5` / `JPf7F` | Retain query, scope, filters, match and exact historical section through task → inspection → return. |
+| Assignment context `DBsYv` / `tK66S`, delivery `M41aTm` / `eP5LX` | Carry the selected assignment/result into retained evidence; return to the same expanded disclosure and reading position. Current inspection is explicitly labelled. |
+| Direct task/file/comparison/result/review links | Resolve authorised task and exact requested context. Direct historical links stay historical. If missing or forbidden, explain the unavailable destination; never substitute current bytes. Without an in-session origin, offer the task/project as fallback. Exact URL syntax is an implementation choice. |
+| Retained advanced execution, approval and recovery routes | Reachable through task controls / Holds on phone. Keep the original task/request/result return anchor. Inspection never resolves ownership or execution uncertainty. |
+| Context menus, extensions and notifications | No applicable entry points are established by the current design; none are invented in this addition. Native Codex/ChatGPT work remains paused. |
+
+### Desktop, phone and keyboard behaviour
+
+Desktop uses a file tree/list beside the dominant preview. A range composer sits
+beside the diff; complete review has its own reading surface. Files, Changes and
+Review preserve independent reading positions within the task. Full paths wrap
+in provenance disclosure; compact labels must not lose repository or file
+identity. File lists and previews scroll independently; task identity, observation
+controls and access to holds remain reachable. Long code can wrap or horizontally
+scroll with a stable line gutter. Diff panes retain explicit Before/After labels
+and do not confuse old and new line numbers. Large documents use bounded reads,
+with explicit truncation/omission notices rather than an implied complete file.
+
+Phone is list → preview → anchored comment → complete review. It is not a scaled
+desktop split pane. Mobile source and diff rows are 24px high, with 12–13px
+monospace text. Tap a gutter to select a line, or use the labelled 44px Start/End
+controls for precise selection and range adjustment. The selected side is
+explicit; switching sides starts a new selection, never transforms an existing
+anchor. `TEkRK` shows deleted Before lines 41–43 with visible focus/selection.
+Use the same selection controls in source text/Markdown. Rendered Markdown
+offers Source lines; images and PDFs keep ordinary exact-context feedback rather
+than inventing image coordinates or PDF text-line anchors.
+
+`aB35C` and `EZasz` are two scroll positions of **one complete-review page**, not
+a pagination gate or separate batches. Every comment is reachable before Send;
+no arbitrary checkbox or forced reading confirmation is introduced. Content and
+action areas scroll above keyboard/safe-area insets. A pinned action bar, if used,
+must reserve content space. Root `clip:true` defines the viewport; the fixtures
+show bounded excerpts and separate reading positions, not an unscrollable app.
+
+Keyboard path (drawn in `EKC1J`): Tab into the named file tree, arrows move the
+active item and Enter opens it. Tab reaches the preview gutter; arrows move the
+line cursor, Space selects one line, Shift+Up/Down extends the range. Labelled
+side and Start/End controls provide an equivalent explicit path. Tab → Add
+comment → Enter puts focus in the labelled input. Tab/Shift+Tab reach Save and
+Cancel; Escape cancels the edit and returns to the invoking line/comment.
+Saving returns focus to the original selected range. Review has a heading,
+ordered comments and labelled Edit/Remove actions; removing a draft comment
+returns focus to the next comment or the empty-draft heading. Menus close with
+Escape and restore focus to their trigger. The ring is visible; no hover-only
+or mouse-only action is required. Actual browser focus/assistive-technology
+behaviour remains an implementation acceptance obligation.
+
+### Observation, provenance and preview semantics
+
+Three contexts remain unmistakable: **Current workspace · observed time**,
+**Last turn · actual turn/agent/outcome and before/after times**, and **Retained
+result evidence · result/capture time**. Detailed root, repository, baseline,
+content identity, assignment/work/result provenance and capture limits disclose
+below this summary. Material uncertainty is never hidden in the disclosure.
+
+- Current inspection is stable until explicit Refresh. Known changes show a
+  notice; inspecting neither pauses work nor releases any hold. Failed Refresh
+  retains the last successful read and its time. Successful Refresh preserves
+  selected file/comparison/disclosures and reading position where still valid;
+  changed/deleted/unavailable content is stated explicitly. Old comments stay
+  attached to their original bytes/range. A renamed path is evidence of a new
+  location, not authority to retarget an anchor.
+- Branch compares observed current contents with the merge base of the selected
+  repository's task base branch. Show the exact baseline commit and observation
+  time. Unknown base offers only locally available branches; selecting one
+  neither fetches nor checks out. No usable merge base means unavailable.
+- Uncommitted retains staged and unstaged distinctions even for a file appearing
+  in both. Untracked entries have no Before bytes; deleted entries retain a
+  commentable Before side; renames show both paths; binary entries have metadata,
+  not an invented text diff. No arbitrary revision selector is added.
+- Last turn is the latest relevant actual agent turn, never a result revision or
+  completed assignment. Identify separately any currently running turn and the
+  latest finished capture. Only the latter is browsable turn history. Partial
+  failed/interrupted/uncertain observations do not establish that writes ended.
+  Complete means complete within the disclosed capture bound, not the whole tree.
+- Markdown renders inertly and can switch to source; raster has Fit/zoom/pan;
+  PDF has page navigation and fit/zoom. Unsupported/binary, oversized, excluded,
+  changing, failed and missing states explain what is and is not available.
+  There are no editing, terminal, download or export actions.
+- Show ignored / Hide ignored is reversible and initially off. Sensitive
+  exclusions apply to lists, direct previews, captures and retained evidence in
+  both states. Access failures use non-leaking explanations. Unsafe paths,
+  symlink escapes, cross-task anchors and inconsistent reads cannot yield a
+  preview or falsely exact capture. These are required service guarantees,
+  not properties proved by a canvas.
+- Result evidence and bounded review context have lifetimes independent of
+  workspace cleanup and latest-turn replacement. Original file bytes and diffs
+  remain exact through later changes, restart and removal when retained.
+  Excluded/oversized/changing/missing/failed captures record specific gaps
+  without rejecting the result. Older uncaptured R1 remains unavailable;
+  retrying a preview cannot backfill history using newer contents.
+
+### Draft, anchor, submission and privacy semantics
+
+Each comment binds task, authorised root/repository (or explicit no repository),
+original path, immutable content identity, selected range, applicable diff side,
+and the current/comparison/result/actual-turn context. Path and line number alone
+are insufficient. Retain the bounded original excerpt needed to inspect the
+comment, including for current-file reviews without a result record. Show
+**Current at last comparison**, **Outdated** when change/rename/deletion is
+established, **Unknown** when comparison cannot be established, and
+**Unavailable** when original material is absent/inaccessible. Never substitute
+new bytes. A failure to retain an exact new anchor keeps the typed comment but
+blocks adding it until valid context is available. Existing unavailable anchors
+remain inspectable as records with their specific gap; do not silently discard
+them or silently send a partial batch.
+
+Draft comments can be edited or removed; submitted comments cannot. The complete
+draft shows every comment and optional summary. An empty draft has no enabled
+Send action. The named accountable lead is checked again before submission;
+if destination or reviewed material changes, return to the complete review
+instead of silently changing who or what will be sent.
+
+| State | Presentation and permitted next step |
+| --- | --- |
+| Editable | Add/edit/remove comments, inspect original contexts, edit summary, continue inspection, or Send the complete review to Mira. |
+| Sending | Freeze the submitted payload and identity; show progress and inspection access. Do not offer another send. |
+| Confirmed failure | Explicitly no delivery; draft remains editable. Retry the unchanged logical operation safely; edited payload requires a distinct logical submission identity. |
+| Unknown outcome | Preserve original operation and payload for reconciliation. Check status and inspect it; no edited retry or replacement delivery while unresolved. Reconciliation determines confirmed failure or the original receipt. |
+| Sent | Confirmed receipt, destination, task, time and batch scope; inspect exact comments, summary and original contexts. No retraction, formal verdict or thread-resolution controls. |
+
+Submission is one logical local-feedback delivery; a partial delivery cannot
+look complete. It performs no GitHub publication, approval/rejection, readiness
+or completion change, merge-authority grant or release of execution/dependency/
+ownership holds. Existing single-message Ask lead for changes is preserved with
+its own exact context and draft, separate from the multi-comment review.
+
+Authenticated navigation and inspection Refresh preserve draft text, anchors,
+selected file, comparison, disclosures, reading position and return context where
+valid. The current application explicitly purges private task/reply/search/Inbox
+state on authentication expiry or session-identity change
+(`web/src/app.tsx`, `expired` / `acceptSession`, and
+`web/src/task-workspace-state.ts`, `purge`). `OwZka` therefore promises neither
+unsent-draft restoration after expiry nor indefinite client storage. Sign out
+and access loss follow the same privacy boundary. After reauthentication, reload
+authorised context; recover pending/submitted operation records before allowing
+another send. Clearing private client state does not erase an already-recorded
+operation or permit duplication.
+
+#781/#782 must settle and document authenticated draft persistence through
+browser reload, bounded retention/cleanup and operation recovery. This design
+requires navigation/Refresh continuity and safe reconciliation; it does not
+choose a database schema, API/route, renderer, storage quota or retention period.
+An implementation unable to restore a draft must disclose that loss, never
+claim it was saved. Numeric listing/byte/render/time bounds are engineering
+choices; replace illustrative metadata with actual values and truthful limits.
+
+### Coverage against #793 and WI01–WI13
+
+| Requirement | Drawn coverage | Implementation evidence still required |
+| --- | --- | --- |
+| WI01 · task roots, outputs, multiple repositories, ignored and missing workspace | 78, 79, 81, 86, 88, 93, 101 | Authorised filesystem listings, exclusions and repository binding. |
+| WI02 · all preview formats and truthful limits | 78, 79, 85, 86, 93, 99, 100 | Bounded reads/rendering, inert content and unsupported formats. |
+| WI03 · secure scope and inconsistent reads | 86, 87 | Traversal, absolute-path, symlink, cross-task and file-replacement tests; visual states cannot prove enforcement. |
+| WI04 · Branch/Uncommitted and entry kinds | 80, 81, 101 | Real Git staged/unstaged/rename/delete/untracked/binary fixtures, exact per-repository baselines. |
+| WI05 · unknown/unusable local base | 81, 101 | No guessing/fetch/checkout and unavailable merge base. |
+| WI06 · actual latest turn and capture uncertainty | 84, 102 | Bound real turn/agent/time, successive replacement, partial execution and persistence. |
+| WI07 · exact retained evidence and explicit gaps | 82, 86, 98, 105 | Original file/diff bytes after edits, restart, turn replacement and cleanup. |
+| WI08 · stable read and explicit Refresh | 78, 87, 88, 102 | Live concurrent changes, reading-position restoration and unaffected holds. |
+| WI09 · entry/return, desktop/phone/keyboard | Modified task/result screens; 78–106; entry map above | Actual routes, origin/filter/scroll restoration and long-content navigation. |
+| WI10 · single/range/either-side comments and multi-file draft | 78, 80, 83, 89–92, 106 | Anchor validation, edit/remove, invalid-range/excluded/cross-task rejection. |
+| WI11 · original/outdated/unknown/unavailable review context | 82, 87, 98, 104, 105 | Retention through rename/delete/restart/cleanup and honest gaps. |
+| WI12 · review before send and reliable outcomes | 83, 91, 92, 94–97, 104 | One logical delivery and receipt; confirmed rejection versus uncertainty; zero duplicate delivery or authority changes. |
+| WI13 · drafting across views, sent context and privacy | 80, 83, 88–98, 103, 104, 106 | Production desktop/phone/keyboard journeys, auth purge and reconciliation; preserve single-message feedback. |
+
+### Validation, persistence and remaining review
+
+- Every new composition and all three extended existing screens were rendered
+  through Pen MCP and visually inspected. Render references are the exact node
+  IDs in the table; no screen-export files were added. Raster previews visibly
+  loaded the existing `assets/command-menu-after.png` in this pass.
+- Settled resolved-layout checks expand component instances and exclude disabled
+  descendants. Checks cover unintended clipping, sibling/root overlap, readable
+  supporting type, contrasting text, focus/selection, viewport boundaries and
+  phone targets. Four undersized phone arrow/zoom controls were enlarged to 44px.
+  Same-call layout reports during construction were transient; only settled
+  re-reads count as final layout evidence.
+- Final settled audit covered **33 frames** (30 new, three extended): zero
+  visible clipping problems, sibling overlaps, new-root overlaps, undersized
+  phone buttons, text below 12px or remaining placeholders. Checked text/solid
+  background contrast had a minimum ratio of approximately **6:1**. This excludes
+  pixels inside the illustrative raster and does not certify accessibility.
+- **Save/reopen verified.** Native File → Save cleared the Edited indicator.
+  After leaving the document for an empty Untitled document, File → Open reopened
+  `/Users/chris/.codex/worktrees/2fe3/ensemble/design/design.pen`. Native state
+  confirmed that exact URL with no Edited indicator. Pen MCP then read back all
+  30 new roots and three extended roots, their dimensions and cleared
+  placeholders, plus the final second-repository root, corrected 44px control
+  and retained-R3 entry context. Post-reopen clipping count was zero; selected
+  comparison and review frames were rendered again. The saved file was
+  3,235,859 bytes, modified 7 October 2026 at 20:16:36 local time.
+- `git diff --check` passed. Only `design/design.pen` and `design/DESIGN.md`
+  changed; no application build/runtime checks were run for this design-only work.
+- [x] Chris accepted the reviewed handoff on 7 October 2026: “This looks good
+  enough to start. Push up a PR.” See the final review outcome below.
+- [ ] Real resizing/zoom, long content, keyboard/screen-reader behaviour,
+  scrolling and virtual-keyboard/safe-area behaviour.
+- [ ] Production service/UI persistence, authenticated draft reload, retention
+  limits, concurrent reads, exact anchoring, submission reconciliation and
+  bounded real-runtime capture. Static design validation establishes none of
+  these acceptance outcomes.
+
+The scope deliberately excludes workspace editing, terminals, downloads/export,
+whole-workspace snapshots, arbitrary comparisons or older-turn browsing, formal
+review verdicts, retraction, threaded resolution, native integrations, deployment
+and cutover. Source/service policy and delivery authority remain unchanged.
+
+### Files and diff visual revision — 7 October 2026
+
+Chris requested a stronger Codex / VS Code influence after the first visual
+pass. This revision replaces the Files and diff interiors in place, preserving
+their root IDs, entry points and the #793 / WI01–WI13 contracts above. Chris
+accepted this revision to start implementation; see the final review outcome.
+
+References: [Codex code review](https://developers.openai.com/codex/app/review/)
+and [VS Code's changes and diff editor](https://code.visualstudio.com/docs/sourcecontrol/staging-commits).
+The adopted conventions are a navigable file rail, open-file tabs, path
+breadcrumbs, separate line gutters, readable diff hunks and comments close to
+their source. These references do not add their write, staging or commit actions
+to Ensemble.
+
+| Revised composition | Verified root / key render references |
+| --- | --- |
+| Files: explorer, source and single-line selection | `unmyA`; explorer `dM3KL`; editor `w0EoyN`; selection `jNeDu` |
+| Generated Markdown with an output explorer and rendered/source modes | `pUX8f`; document `ZmnP5` |
+| Branch: changed-file rail, split diff and inline deleted-range draft | `V0DCi`; diff `pGGwv`; inline draft `k0qaG` |
+| Repository, comparison and local-base menus; Uncommitted alternatives | `rlw92`; menus `GUH1I`, `A9NYX`; filters `xxayQ` |
+| Original R3 file and diff in the same editor language | `xD63J` / `ChMwt`; `Mn97J` / `i0qqt` |
+| Phone explorer and unified deleted-range selection | `gQhwY` / `Kz0T5`; `TEkRK` / `TOMyK`, `t3rHJu` |
+| Phone generated Markdown and retained original source | `bz4VC` / `Jo87G`; `KVIG2` / `q02M0E` |
+| Shared editor row: number, marker and source | `KlKGO` / `rccke`; children `zUmct`, `kUOqQ`, `nxeiM` |
+
+Desktop uses a 238px file rail beside the existing 224px application sidebar.
+The top task controls, Files/Changes navigation and observation strip together
+occupy 132px. File tabs, breadcrumbs and metadata sit immediately above the
+reading area. The explorer uses 32px rows with folder indentation and file-type
+icons. Changed-file rows pair the filename with its parent path and explicit
+M/U/D/R/B status; color is supplemental. Generated outputs have the same visual
+priority and reading space as source files.
+
+Code is 13px JetBrains Mono with 12px line numbers. A selected line has a blue
+selection fill; diff additions/deletions use restrained green/red fills plus
+explicit +/− markers and Before/After labels. These semantic code colors are
+local to inspection content; the shared Dark / Neutral / Default UI tokens,
+sidebar and buttons are unchanged. The new row component supports code,
+retained evidence and both diff sides. Existing `Idu62` remains for earlier
+focused specimens and is not a second product theme.
+
+`V0DCi` places the draft composer below the selected hunk, with its exact
+Before 41–43 deleted-range anchor visible. Save comment adds to the local draft;
+it does not send. Review opens the existing complete-review screen `bRkWF`.
+Cancel restores focus to the originating range without changing other comments.
+Split/Unified changes presentation only, and hunk arrows move within the same
+comparison. Baseline selection still uses only local branches and retains the
+per-repository baseline. `rlw92` deliberately draws mutually exclusive menus
+and states together as labeled specimens, not as one product screen state.
+
+On phone, the explorer is a full-width destination with 44px file rows. Opening
+a change leads to `TEkRK`'s unified diff, with distinct old/new gutter columns.
+Deleted rows remain selectable. Start/End controls choose the range without
+requiring a precise drag; Clear removes only the selection. Add comment opens
+`J2AwE`, then the complete-review journey remains `aB35C` → `EZasz`. Both phone
+range controls and comment actions are 44px high. Files, Markdown and retained
+evidence use the same compact navigation, without squeezing a desktop rail onto
+the phone.
+
+Following Chris's spacing review, `TEkRK` and `KVIG2` use compact 24px editor
+rows instead of 44px rows. This applies to source and diff reading content;
+explorer rows, range controls and action buttons retain their 44px targets.
+The desktop row component and desktop instances are unchanged.
+Both phone compositions were rendered with no detected clipping. Save/reopen
+readback verified all 13 mobile editor rows at 24px, with placeholders cleared.
+
+Keyboard traversal is task controls → Files/Changes → observation/Refresh →
+explorer → open tabs → preview controls → source selection → comment action.
+Arrow keys navigate the tree; Right/Left expand/collapse; Enter opens a file and
+preserves explorer focus context. Tab enters the line-selection surface. Up/Down
+moves a single-line anchor and Shift+Up/Down extends it on the selected diff
+side. Enter on Add comment focuses the composer. Tab reaches Cancel/Save;
+Escape cancels the composer and restores the original line/range. Saving returns
+focus to its comment marker. The existing keyboard/focus specimens `EKC1J`
+continue to specify comment editing and return from the complete review.
+
+Long filenames elide in the narrow rail; hover/focus discloses the exact path,
+and the selected file's breadcrumb/provenance exposes it without ambiguity.
+Tabs open bounded read-only previews, not editable buffers. Closing a tab only
+closes its preview; it cannot remove a draft comment. Source is unwrapped with
+horizontal scrolling and sticky gutters; Wrap is a presentation toggle that
+keeps logical line numbers. The editor and explorer scroll independently, with
+the task/observation bars and review action remaining reachable. Phone uses one
+vertical reading surface and horizontal code scrolling; scrolling must not
+change the selected side or range. These scroll and focus behaviors remain
+implementation requirements rather than executable canvas interactions.
+
+The current fixture now shows `returnFocus(opener ?? toolbarRef)` while R3
+retains `returnFocus(opener)`, making later contents visibly different. Original
+R3 bytes, return context, capture time and unavailable current anchor remain
+bound to R3; opening them never refreshes into current contents. The known-change
+strip remains stable until explicit Refresh. Existing result/Inbox/task entry
+and return mappings, independent holds, single-message feedback, draft privacy,
+failure/unknown/sent semantics and retention limitations are unchanged. Raster,
+PDF, capture/error and submission specimens continue to apply; no context-menu,
+extension or notification entry was introduced.
+
+Validation for this revision: all ten revised compositions and the reusable row
+were rendered and inspected, including separate enlarged Files/diff reading-area
+renders. Settled layout checks found no visible clipping in these compositions.
+Final save/reopen and structural verification are recorded below.
+
+- [x] Ten revised compositions and one component sheet: zero visible clipping,
+  sibling overlaps, sub-12px text, remaining placeholders or phone buttons below
+  44 × 44px in the settled audit. The new component sheet has no root overlap.
+- [x] Visual reading hierarchy and semantic contrast inspected. A numeric check
+  caught low-contrast line numbers on selection/diff backgrounds; gutters were
+  raised to `#A3A3A3`. Their lowest checked contrast is approximately 5.0:1
+  against the selected-line fill. This is a bounded design check, not an
+  accessibility certification.
+- [x] Final save/reopen verified after the gutter correction. Native state
+  reopened the exact `design/design.pen` URL with no Edited indicator. Pen MCP
+  then read back all eleven revised/new roots, the corrected gutter color and
+  current line contents; post-reopen clipping count was zero. Desktop and phone
+  diffs were rendered again. Saved file: 3,474,302 bytes, modified
+  7 October 2026 at 20:50:59 BST.
+- [x] `git diff --check` passed. This revision changes design artifacts only.
+- [x] Chris accepted the reviewed design to start implementation. Static
+  validation does not establish runtime acceptance.
+
+### Final review outcome — 7 October 2026
+
+Chris accepted the design as sufficient to start implementation after the review
+reported one remaining visual issue: screen 78 (`unmyA`) wraps the explorer
+labels `CommandMenu.tsx` and `CommandMenu.test…` onto two lines. #782 should use
+single-line elision with exact-path disclosure as specified above. This remains
+a small implementation follow-up; the canvas has not been changed to hide it.
+The phone handoff consistently specifies 24px reading rows and 44px selection
+controls after the spacing refinement.
+
+The final review checked desktop Files, generated Markdown, split diff and
+complete review, plus phone deleted-line selection, complete review, unknown
+submission, retained evidence and authentication expiry. No additional material
+contract conflicts were found. Pen MCP's full layout audit could not be rerun
+during this review because the execution API failed; native canvas views were
+used for visual verification. The earlier audit reports above describe Pen's
+preceding design passes, not an independently repeated full audit of the final
+revision. Native save/reopen verified the intended file, and the final Save
+cleared the Edited indicator. Production interaction and WI01–WI13 evidence
+remain with #782 and the service slices.
