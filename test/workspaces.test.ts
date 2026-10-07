@@ -8,7 +8,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import {
+  controlledGit,
+  type ControlledGitEvent,
+} from "./fixtures/controlled-git.js";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,9 +25,10 @@ import {
   type TaskWorkspaceRepositoryInput,
   type WorkspaceCleanupEvidence,
   type WorkspaceBindingStore,
+  type WorkspaceManagerOptions,
 } from "../src/standalone/workspaces.js";
 
-function fixture() {
+function fixture(options: WorkspaceManagerOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), "ensemble-workspaces-"));
   const databasePath = join(root, "standalone.sqlite");
   const workspaceRoot = join(root, "task-workspaces");
@@ -32,6 +37,7 @@ function fixture() {
   let manager = new WorkspaceManager(
     new SqliteWorkspaceBindingStore(db),
     workspaceRoot,
+    options,
   );
   return {
     root,
@@ -39,13 +45,14 @@ function fixture() {
     get manager() {
       return manager;
     },
-    reopen() {
+    reopen(managerOptions: WorkspaceManagerOptions = options) {
       db.close();
       db = new DatabaseSync(databasePath);
       new Store(db).ensureHost("workspace-test");
       manager = new WorkspaceManager(
         new SqliteWorkspaceBindingStore(db),
         workspaceRoot,
+        managerOptions,
       );
       return manager;
     },
@@ -73,6 +80,91 @@ function repository(root: string, name: string): string {
   git(path, "commit", "--quiet", "-m", "initial");
   return path;
 }
+
+async function waitForGitEvent(
+  controlled: ReturnType<typeof controlledGit>,
+  predicate: (event: ControlledGitEvent) => boolean,
+  timeoutMs = 1500,
+): Promise<ControlledGitEvent> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const event = controlled.events().find(predicate);
+    if (event) return event;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(
+    `Controlled Git fixture did not report the expected event: ${JSON.stringify(controlled.events())}`,
+  );
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
+async function stopOwnedTestChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, 250)) return;
+  child.kill("SIGKILL");
+  if (!(await waitForChildExit(child, 1000)))
+    throw new Error(
+      "Workspace test child did not exit within its cleanup bound",
+    );
+}
+
+test("controlled Git cleanup does not signal an unrelated process from a stale identity", async () => {
+  const controlled = controlledGit();
+  const unrelated = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)",
+    ],
+    { stdio: "ignore" },
+  );
+  try {
+    await new Promise<void>((resolve, reject) => {
+      unrelated.once("spawn", resolve);
+      unrelated.once("error", reject);
+    });
+    const pid = unrelated.pid;
+    assert.ok(pid);
+    controlled.recordStaleIdentityForTest(pid);
+    await controlled.cleanup();
+    assert.equal(unrelated.exitCode, null);
+    assert.equal(unrelated.signalCode, null);
+    assert.equal(processIsAlive(pid), true);
+  } finally {
+    try {
+      await stopOwnedTestChild(unrelated);
+    } finally {
+      await controlled.cleanup();
+    }
+  }
+});
 
 const approvedCleanup: WorkspaceCleanupEvidence = {
   deliveryConfirmed: true,
@@ -277,6 +369,356 @@ test("cleanup retains delivered workspaces with uncommitted files and removes cl
   }
 });
 
+test("a completed worktree add followed by a bounded stall is retained without retry after reopen", async (t) => {
+  const controlled = controlledGit();
+  const failureObservations: Parameters<
+    NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+  >[0][] = [];
+  const f = fixture({
+    gitExecutable: controlled.executable,
+    gitTimeoutMs: { "worktree-add": 1000 },
+    gitTerminationGraceMs: 20,
+    gitTerminationObservationMs: 40,
+    gitFailureObserver: (failure) => failureObservations.push(failure),
+  });
+  try {
+    const source = repository(f.root, "uncertain-add-source");
+    controlled.setRule({
+      commandPrefix: "worktree add",
+      behavior: "complete-then-stall",
+      holdPipe: true,
+    });
+    const interrupted = await f.manager.provision("private-task-id", [
+      { repositoryId: "private-repository-id", path: source },
+    ]);
+    const worktreeAddReady = await waitForGitEvent(
+      controlled,
+      ({ event, operation }) =>
+        event === "ready" && operation === "worktree-add",
+    );
+    assert.ok(worktreeAddReady.atMs !== undefined);
+    const elapsedMs = Date.now() - worktreeAddReady.atMs;
+
+    assert.equal(interrupted.state, "held");
+    assert.equal(interrupted.gitUncertain, true);
+    assert.match(interrupted.reason ?? "", /timed-out during worktree-add/);
+    assert.doesNotMatch(
+      interrupted.reason ?? "",
+      /private-task-id|private-repository-id|uncertain-add-source|stderr-secret-shaped-output/,
+    );
+    assert.ok(elapsedMs < 1000 + 20 + 40 + 500, `settled in ${elapsedMs}ms`);
+    t.diagnostic(
+      `bounded-git-stall-evidence ${JSON.stringify({
+        operation: "worktree-add",
+        readyToSettleMs: elapsedMs,
+        configuredTimeoutMs: 1000,
+        termGraceMs: 20,
+        observationMs: 40,
+        childExitSignal: failureObservations.at(-1)?.childExitSignal,
+        inheritedPipeDescendantAliveAtSettlement: true,
+      })}`,
+    );
+    const repositoryBinding = interrupted.repositories[0];
+    assert.ok(repositoryBinding);
+    assert.equal(exists(repositoryBinding.workspacePath), true);
+    assert.ok(
+      controlled
+        .events()
+        .some(
+          ({ event, effectComplete }) => event === "finish" && effectComplete,
+        ),
+    );
+    const descendant = controlled
+      .events()
+      .find(({ event }) => event === "descendant");
+    assert.ok(descendant);
+    assert.equal(processIsAlive(descendant.pid), true);
+
+    assert.deepEqual(failureObservations.at(-1), {
+      operation: "worktree-add",
+      kind: "timed-out",
+      childExitObserved: true,
+      childExitSignal: "SIGKILL",
+    });
+    assert.ok(controlled.events().some(({ event }) => event === "term"));
+
+    const launchesBeforeReopen = controlled
+      .events()
+      .filter(({ event }) => event === "start").length;
+    const reopened = f.reopen();
+    await reopened.recover();
+    assert.equal(
+      controlled.events().filter(({ event }) => event === "start").length,
+      launchesBeforeReopen,
+    );
+    const retained = await reopened.get("private-task-id");
+    assert.equal(retained?.workspaceId, interrupted.workspaceId);
+    assert.equal(retained?.state, "held");
+    assert.equal(retained?.gitUncertain, true);
+    assert.equal(exists(repositoryBinding.workspacePath), true);
+    await controlled.cleanup();
+    assert.equal(
+      processIsAlive(descendant.pid),
+      false,
+      "fixture cleanup stopped its exact inherited-pipe descendant",
+    );
+  } finally {
+    try {
+      await controlled.cleanup();
+    } finally {
+      f.close();
+    }
+  }
+});
+
+test("validation, archive status, and removal uncertainty preserve the binding", async (t) => {
+  const scenarios = [
+    {
+      name: "ready validation",
+      commandPrefix: "rev-parse --show-toplevel",
+      operation: "repository-identity",
+      run: async (manager: WorkspaceManager) => manager.recover(),
+    },
+    {
+      name: "archive status",
+      commandPrefix: "status --porcelain=v1 --untracked-files=all",
+      operation: "archive-status",
+      run: async (manager: WorkspaceManager) =>
+        manager.archiveAndCleanup("uncertain-cleanup", approvedCleanup),
+    },
+    {
+      name: "worktree removal",
+      commandPrefix: "worktree remove",
+      operation: "worktree-remove",
+      run: async (manager: WorkspaceManager) =>
+        manager.archiveAndCleanup("uncertain-cleanup", approvedCleanup),
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const controlled = controlledGit();
+      const failureObservations: Parameters<
+        NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+      >[0][] = [];
+      const f = fixture();
+      try {
+        const source = repository(f.root, `source-${scenario.operation}`);
+        const ready = await f.manager.provision("uncertain-cleanup", [
+          { repositoryId: "repo", path: source },
+        ]);
+        assert.equal(ready.state, "ready");
+        const repo = ready.repositories[0];
+        assert.ok(repo);
+        controlled.setRule({
+          commandPrefix: scenario.commandPrefix,
+          behavior: "stall",
+        });
+        const manager = f.reopen({
+          gitExecutable: controlled.executable,
+          gitTerminationGraceMs: 20,
+          gitTerminationObservationMs: 40,
+          gitFailureObserver: (failure) => failureObservations.push(failure),
+        });
+
+        const pending = scenario.run(manager);
+        const operationReady = await waitForGitEvent(
+          controlled,
+          ({ event, operation }) =>
+            event === "ready" && operation === scenario.operation,
+        );
+        manager.cancelGitWork();
+        const result = await pending;
+        assert.ok(operationReady.atMs !== undefined);
+        const elapsedMs = Date.now() - operationReady.atMs;
+        assert.ok(elapsedMs < 20 + 40 + 500, `settled in ${elapsedMs}ms`);
+        if (scenario.operation === "repository-identity") {
+          assert.equal(result, undefined);
+        } else {
+          assert.equal(result?.outcome, "retained");
+          if (result?.outcome === "retained") {
+            assert.equal(result.binding.state, "held");
+            assert.equal(result.binding.gitUncertain, true);
+            assert.match(
+              result.reason,
+              new RegExp(`cancelled during ${scenario.operation}`),
+            );
+          }
+        }
+
+        const held = await f.reopen().get("uncertain-cleanup");
+        assert.equal(held?.state, "held");
+        assert.equal(held?.gitUncertain, true);
+        assert.equal(held?.workspaceId, ready.workspaceId);
+        assert.equal(exists(repo.workspacePath), true);
+        assert.deepEqual(failureObservations.at(-1), {
+          operation: scenario.operation,
+          kind: "cancelled",
+          childExitObserved: true,
+          childExitSignal: "SIGKILL",
+        });
+        assert.ok(controlled.events().some(({ event }) => event === "term"));
+        if (scenario.operation === "archive-status")
+          assert.equal(
+            controlled
+              .events()
+              .some(
+                ({ event, operation }) =>
+                  event === "start" && operation === "worktree-remove",
+              ),
+            false,
+          );
+      } finally {
+        try {
+          await controlled.cleanup();
+        } finally {
+          f.close();
+        }
+      }
+    });
+  }
+});
+
+test("output overflow and sticky cancellation settle safely and retain uncertainty", async (t) => {
+  await t.test("output overflow", async () => {
+    const controlled = controlledGit();
+    const failureObservations: Parameters<
+      NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+    >[0][] = [];
+    const f = fixture({
+      gitExecutable: controlled.executable,
+      gitTerminationGraceMs: 20,
+      gitTerminationObservationMs: 40,
+      gitFailureObserver: (failure) => failureObservations.push(failure),
+    });
+    try {
+      const source = repository(f.root, "secret-output-source");
+      controlled.setRule({
+        commandPrefix: "rev-parse --show-toplevel",
+        behavior: "overflow",
+      });
+      const binding = await f.manager.provision("secret-task-id", [
+        { repositoryId: "secret-repository-id", path: source },
+      ]);
+      assert.equal(binding.state, "held");
+      assert.equal(binding.gitUncertain, true);
+      assert.match(
+        binding.reason ?? "",
+        /output-limit during repository-identity/,
+      );
+      assert.doesNotMatch(
+        binding.reason ?? "",
+        /secret-task-id|secret-repository-id|secret-output-source|stderr-secret-shaped-output/,
+      );
+      assert.deepEqual(failureObservations.at(-1), {
+        operation: "repository-identity",
+        kind: "output-limit",
+        childExitObserved: true,
+        childExitSignal: "SIGTERM",
+      });
+    } finally {
+      try {
+        await controlled.cleanup();
+      } finally {
+        f.close();
+      }
+    }
+  });
+
+  await t.test("service-owned cancellation is sticky and bounded", async () => {
+    const controlled = controlledGit();
+    const failureObservations: Parameters<
+      NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
+    >[0][] = [];
+    const f = fixture({
+      gitExecutable: controlled.executable,
+      gitTimeoutMs: { "repository-identity": 30_000 },
+      gitTerminationGraceMs: 20,
+      gitTerminationObservationMs: 40,
+      gitFailureObserver: (failure) => failureObservations.push(failure),
+    });
+    try {
+      const source = repository(f.root, "cancel-source");
+      controlled.setRule({
+        commandPrefix: "rev-parse --show-toplevel",
+        behavior: "stall",
+        holdPipe: true,
+      });
+      const provisioning = f.manager.provision("cancelled-task", [
+        { repositoryId: "repo", path: source },
+      ]);
+      const ready = await waitForGitEvent(
+        controlled,
+        ({ event, operation }) =>
+          event === "ready" && operation === "repository-identity",
+      );
+      f.manager.cancelGitWork();
+      const binding = await provisioning;
+      assert.ok(ready.atMs !== undefined);
+      const elapsedMs = Date.now() - ready.atMs;
+      assert.ok(elapsedMs < 20 + 40 + 500, `settled in ${elapsedMs}ms`);
+      assert.equal(binding.state, "held");
+      assert.equal(binding.gitUncertain, true);
+      assert.match(
+        binding.reason ?? "",
+        /cancelled during repository-identity/,
+      );
+      assert.deepEqual(failureObservations.at(-1), {
+        operation: "repository-identity",
+        kind: "cancelled",
+        childExitObserved: true,
+        childExitSignal: "SIGKILL",
+      });
+      await f.manager.settle();
+      const launches = controlled
+        .events()
+        .filter(({ event }) => event === "start").length;
+      await assert.rejects(f.manager.provision("later-task"), /stopping/);
+      assert.equal(
+        controlled.events().filter(({ event }) => event === "start").length,
+        launches,
+      );
+    } finally {
+      try {
+        await controlled.cleanup();
+      } finally {
+        f.close();
+      }
+    }
+  });
+});
+
+test("a legacy binding table migrates git uncertainty to false", () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-workspace-migration-"));
+  const db = new DatabaseSync(join(root, "legacy.sqlite"));
+  try {
+    db.exec(`CREATE TABLE task_workspace_bindings (
+      taskId TEXT PRIMARY KEY,
+      workspaceId TEXT NOT NULL UNIQUE,
+      path TEXT NOT NULL UNIQUE,
+      repositories TEXT NOT NULL,
+      state TEXT NOT NULL,
+      reason TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    )`);
+    db.prepare(`INSERT INTO task_workspace_bindings
+      (taskId, workspaceId, path, repositories, state, reason, createdAt, updatedAt)
+      VALUES (?, ?, ?, '[]', 'held', 'legacy hold', ?, ?)`).run(
+      "legacy-task",
+      randomUUID(),
+      join(root, "workspace"),
+      "2026-10-01T00:00:00.000Z",
+      "2026-10-01T00:00:00.000Z",
+    );
+    const store = new SqliteWorkspaceBindingStore(db);
+    assert.equal(store.get("legacy-task")?.gitUncertain, false);
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("repository-free files are retained until preservation evidence is complete", async () => {
   const f = fixture();
   try {
@@ -357,6 +799,7 @@ test("restored managed bindings reject source-root identity before path access",
     ],
     state: "held",
     reason: "An unrelated persisted hold must not bypass identity validation",
+    gitUncertain: false,
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
@@ -367,6 +810,10 @@ test("restored managed bindings reject source-root identity before path access",
     bindRepository: () => binding,
     update: (_taskId, state, reason) => {
       binding = { ...binding, state, reason };
+      return binding;
+    },
+    markGitUncertain: (_taskId, reason) => {
+      binding = { ...binding, state: "held", reason, gitUncertain: true };
       return binding;
     },
   };

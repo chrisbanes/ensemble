@@ -289,8 +289,9 @@ export class StandaloneService {
         workspacePath,
         this.options.workspaceManager,
       );
-      await workspaces.recover();
       this.workspaces = workspaces;
+      await workspaces.recover();
+      workspaces.assertNotCancelled();
       const state = new ExecutionState(db);
       for (const item of state.list()) {
         const executionBinding = state.taskBinding(item.workId);
@@ -593,6 +594,8 @@ export class StandaloneService {
       this.githubPollTimer.unref();
     } catch (error) {
       const scheduler = this.scheduler;
+      const workspaces = this.workspaces;
+      workspaces?.cancelGitWork();
       scheduler?.stop();
       this.scheduler = undefined;
       try {
@@ -615,6 +618,7 @@ export class StandaloneService {
           await this.githubSynchronizer?.stop().catch(() => {});
           await this.deliveryCoordinator?.stop().catch(() => {});
           await this.runtime?.stop().catch(() => {});
+          await workspaces?.settle();
           try {
             await scheduler?.settle();
           } catch (cleanupError) {
@@ -661,6 +665,7 @@ export class StandaloneService {
     const delivery = this.deliveryCoordinator;
     const runtime = this.runtime;
     const power = this.power;
+    const workspaces = this.workspaces;
     const db = this.db;
     const failures: Array<{ stage: string; error: unknown }> = [];
     const recordFailure = (stage: string, error: unknown) => {
@@ -674,6 +679,11 @@ export class StandaloneService {
       }
     };
 
+    try {
+      workspaces?.cancelGitWork();
+    } catch (error) {
+      recordFailure("workspace Git cancellation", error);
+    }
     try {
       scheduler?.stop();
     } catch (error) {
@@ -702,6 +712,7 @@ export class StandaloneService {
     );
     this.runtime = undefined;
     await attempt("runtime stop", () => runtime?.stop());
+    await attempt("workspace settlement", () => workspaces?.settle());
     await attempt("scheduler settlement", () => scheduler?.settle());
     await attempt("active-work settlement", async () => {
       const settled = await Promise.allSettled([...this.active]);
@@ -1272,14 +1283,21 @@ export class StandaloneService {
         ...evidence,
         writerOwnershipResolved: false,
       });
+    let releaseArchiveHold = false;
     try {
-      return await this.requireWorkspaces().archiveAndCleanup(
+      const result = await this.requireWorkspaces().archiveAndCleanup(
         taskId,
         evidence,
         () => state.confirmArchive(taskId),
       );
+      releaseArchiveHold =
+        result.outcome === "cleaned" ||
+        (result.outcome === "retained" &&
+          result.binding.state === "ready" &&
+          !result.binding.gitUncertain);
+      return result;
     } finally {
-      state.endArchive(taskId);
+      if (releaseArchiveHold) state.endArchive(taskId);
       await this.wakeScheduler();
     }
   }

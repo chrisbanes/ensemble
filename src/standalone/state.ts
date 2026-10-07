@@ -406,10 +406,19 @@ export class ExecutionState {
     INSERT OR IGNORE INTO scheduler_capacity_limits (singleton, globalLimit)
       VALUES (1, 4)`);
     this.migratePreTurnReceipts();
-    // Workspace recovery runs before this state is opened. Any remaining hold
-    // belonged to an interrupted process; the recovered workspace state now
-    // decides whether execution or another cleanup attempt is possible.
-    this.db.exec("DELETE FROM task_archival_holds");
+    // Workspace recovery runs before this state is opened. Keep the archival
+    // hold only when bounded Git work recorded unresolved filesystem effects.
+    const workspaceColumns = this.db
+      .prepare("PRAGMA table_info(task_workspace_bindings)")
+      .all() as Array<{ name: string }>;
+    if (workspaceColumns.some(({ name }) => name === "gitUncertain"))
+      this.db.exec(`DELETE FROM task_archival_holds
+        WHERE NOT EXISTS (
+          SELECT 1 FROM task_workspace_bindings binding
+          WHERE binding.taskId = task_archival_holds.taskId
+            AND binding.gitUncertain = 1
+        )`);
+    else this.db.exec("DELETE FROM task_archival_holds");
     this.db.exec(`INSERT OR IGNORE INTO task_writer_ambiguity_holds (taskId, reason)
       SELECT taskId, reason FROM task_writer_holds
       WHERE reason = 'Legacy work revision order is ambiguous';

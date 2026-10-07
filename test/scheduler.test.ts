@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "./temp.js";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import { controlledGit } from "./fixtures/controlled-git.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import type {
   Runtime,
@@ -11,6 +20,7 @@ import type {
   RuntimeToolResult,
   UnexpectedRequest,
 } from "../src/standalone/codex.js";
+import type { TaskWorkspaceRepositoryInput } from "../src/standalone/workspaces.js";
 
 class GatedRuntime implements Runtime {
   starts = 0;
@@ -96,6 +106,7 @@ async function addReadyAssignment(
   projectId: string,
   profileId: string,
   brief: string,
+  repositories: TaskWorkspaceRepositoryInput[] = [],
 ) {
   const taskId = randomUUID();
   const assignmentId = randomUUID();
@@ -108,7 +119,7 @@ async function addReadyAssignment(
     outcome: brief,
     ready: false,
   });
-  await service.provisionTask(taskId);
+  await service.provisionTask(taskId, repositories);
   execute(service, {
     type: "assignment.create",
     actor: "agent",
@@ -129,6 +140,44 @@ async function addReadyAssignment(
     ready: true,
   });
   return { assignmentId, taskId, workId: `assignment:${assignmentId}:initial` };
+}
+
+function repository(root: string, name: string): string {
+  const path = join(root, name);
+  mkdirSync(path, { recursive: true });
+  execFileSync("git", ["init", "--quiet", path]);
+  execFileSync("git", ["-C", path, "config", "user.name", "Scheduler Test"]);
+  execFileSync("git", [
+    "-C",
+    path,
+    "config",
+    "user.email",
+    "scheduler-test@example.invalid",
+  ]);
+  writeFileSync(join(path, "README.md"), `${name}\n`);
+  execFileSync("git", ["-C", path, "add", "README.md"]);
+  execFileSync("git", ["-C", path, "commit", "--quiet", "-m", "initial"]);
+  return path;
+}
+
+async function waitForControlledGitReady(
+  controlled: ReturnType<typeof controlledGit>,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (
+      controlled
+        .events()
+        .some(
+          ({ event, operation }) =>
+            event === "ready" && operation === "repository-identity",
+        )
+    )
+      return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Scheduler test Git child did not reach its stall");
 }
 
 async function addProfile(service: StandaloneService) {
@@ -325,6 +374,131 @@ test("eligible pending assignments dispatch once and retain request identity aft
   } finally {
     await service.stop();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("service stop cancels ready-workspace Git before scheduler settlement and preserves uncertainty", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-scheduler-git-drain-"));
+  const controlled = controlledGit();
+  const source = repository(root, "source");
+  const failures: Array<{
+    operation: string;
+    kind: string;
+    childExitObserved: boolean;
+    childExitSignal: NodeJS.Signals | null;
+  }> = [];
+  const runtime = new GatedRuntime();
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    {
+      workspaceManager: {
+        gitExecutable: controlled.executable,
+        gitTimeoutMs: { "repository-identity": 30_000 },
+        gitTerminationGraceMs: 20,
+        gitTerminationObservationMs: 40,
+        gitFailureObserver: (failure) => failures.push(failure),
+      },
+    },
+  );
+  try {
+    await service.start();
+    const profileId = await addProfile(service);
+    const projectId = await addProject(service, profileId);
+    const assignment = await addReadyAssignment(
+      service,
+      projectId,
+      profileId,
+      "Bounded Git stop",
+      [{ repositoryId: "repo", path: source }],
+    );
+    const binding = await service.taskWorkspace(assignment.taskId);
+    const repositoryBinding = binding?.repositories[0];
+    assert.ok(repositoryBinding);
+
+    controlled.setRule({
+      commandPrefix: "rev-parse --show-toplevel",
+      behavior: "stall",
+      holdPipe: true,
+    });
+    const pendingSubmission = service
+      .submitTask(
+        "stalled-workspace-validation",
+        assignment.assignmentId,
+        "Run only after workspace validation",
+      )
+      .then(
+        (value) => ({ outcome: "resolved" as const, value }),
+        (error: unknown) => ({ outcome: "rejected" as const, error }),
+      );
+    await waitForControlledGitReady(controlled);
+    const readyEvent = controlled
+      .events()
+      .find(
+        ({ event, operation }) =>
+          event === "ready" && operation === "repository-identity",
+      );
+    assert.ok(readyEvent?.atMs !== undefined);
+
+    const stopStartedAt = Date.now();
+    await service.stop();
+    const stopElapsedMs = Date.now() - (readyEvent.atMs ?? stopStartedAt);
+    assert.ok(
+      stopElapsedMs < 20 + 40 + 700,
+      `stop settled in ${stopElapsedMs}ms`,
+    );
+    t.diagnostic(
+      `bounded-git-stop-evidence ${JSON.stringify({
+        readyToStopSettledMs: stopElapsedMs,
+        termGraceMs: 20,
+        observationMs: 40,
+        childExitSignal: failures.at(-1)?.childExitSignal,
+      })}`,
+    );
+    const submission = await pendingSubmission;
+    assert.equal(submission.outcome, "rejected");
+    if (submission.outcome === "rejected")
+      assert.match(
+        String(submission.error),
+        /Turn request is queued until its task workspace is ready/,
+      );
+    assert.deepEqual(failures.at(-1), {
+      operation: "repository-identity",
+      kind: "cancelled",
+      childExitObserved: true,
+      childExitSignal: "SIGKILL",
+    });
+
+    const database = new DatabaseSync(join(root, "data", "standalone.sqlite"));
+    const stored = database
+      .prepare(
+        "SELECT workspaceId, path, state, gitUncertain FROM task_workspace_bindings WHERE taskId = ?",
+      )
+      .get(assignment.taskId) as
+      | {
+          workspaceId: string;
+          path: string;
+          state: string;
+          gitUncertain: number;
+        }
+      | undefined;
+    database.close();
+    assert.equal(stored?.workspaceId, binding?.workspaceId);
+    assert.equal(stored?.path, binding?.path);
+    assert.equal(stored?.state, "held");
+    assert.equal(stored?.gitUncertain, 1);
+    assert.equal(existsSync(repositoryBinding.workspacePath), true);
+  } finally {
+    try {
+      await service.stop();
+    } finally {
+      try {
+        await controlled.cleanup();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   }
 });
 
