@@ -425,6 +425,96 @@ failed check with an agent-owned repair does not itself create operator attentio
 an independent question, approval or recovery problem remains visible. Capacity
 waiting is normal progress unless a separate intervention is required.
 
+### Task workspace inspection — approved post-MVP scope, 6 October 2026
+
+Chris confirmed this product scope during triage of #776 on 6 October 2026.
+It is not an implementation claim or dispatch authority. Design and review the
+desktop/phone experience in Pen before UI implementation; GitHub owns delivery
+decomposition and sequencing. This post-MVP scope adds no release/cutover gate
+to #649 and does not reopen the paused integrations in #734.
+
+- Give reviewing code changes and inspecting generated outputs equal weight,
+  including repository-free task outputs.
+- Preview text/code, Markdown, common raster images and PDFs. The initial
+  experience is preview-only: unsupported files remain visible with metadata,
+  without file downloads or workspace export.
+- Preserve bounded copies of result-linked files and diffs so that exact result
+  evidence remains inspectable after later workspace changes or removal. Do not
+  promise a retained snapshot of the entire result workspace.
+- Hide ignored clutter initially and allow the operator to reveal ignored files.
+  Sensitive/private-path exclusions remain enforced in every inspection surface.
+- Offer a comparison dropdown with Branch, Last turn and Uncommitted targets.
+  Uncommitted supports staged and unstaged filters. Branch compares current
+  contents against the merge base with the task's base branch, displaying that
+  branch and exact baseline commit.
+- Last turn means the actual most recent agent turn that could change the task
+  workspace, not the latest reported result or completed assignment. It requires
+  bounded before/after change capture, identifies the agent and discloses
+  incomplete capture. Existing result/work revisions alone do not provide it.
+- Keep only the latest finished turn's capture as turn history. Evidence retained
+  with a result has its own lifetime and must not disappear when that turn
+  capture is replaced.
+- Keep the displayed inspection stable until explicit refresh, with observation
+  time and known changes disclosed. Inspection does not pause agents or clear
+  any execution, dependency or ownership hold.
+- A capture that is excluded, oversized, unavailable or changing records a
+  specific evidence gap rather than blocking the result. Never substitute later
+  bytes for the missing historical capture.
+- When the base branch cannot be established, show the missing baseline and let
+  the operator select a locally available base branch for inspection. This does
+  not fetch, check out a branch or silently substitute a guessed baseline.
+- For a failed, interrupted or uncertain latest turn, show any available partial
+  observation with its recorded outcome, time and unsettled state. Missing
+  capture remains unavailable; observing a diff cannot establish that execution
+  or further writes have ended.
+- Identify each repository and its own comparison baseline. Repository-free
+  workspaces support file inspection and turn capture; Git comparisons are
+  unavailable there. Include untracked, deleted and renamed files where
+  applicable, with truthful binary/unsupported states.
+- Restrict every listing, preview and capture to authorised task contents.
+  Reject unsafe paths and symlink escapes; enforce bounded reads and rendering
+  without exposing excluded content or executing inspected content as the app.
+  Exact storage, routes, renderers and documented numeric limits are engineering
+  choices within these contracts. Existing historical results are not backfilled
+  with later bytes. Editing, terminals, whole-workspace snapshots, arbitrary
+  revision comparison and native desktop integration remain outside this scope.
+
+The [post-MVP inspection acceptance scenarios](acceptance.md#post-mvp-task-workspace-inspection)
+define the required evidence without claiming any scenario has passed.
+
+#### Local code review amendment — 6 October 2026
+
+Chris approved adding line-level feedback and batched local code reviews to this
+scope. File inspection remains read-only; review drafts and submission are
+explicit local feedback actions.
+
+- Select a single line or range in supported text previews or either diff side,
+  including deleted lines. Collect comments across files within the same task;
+  add, edit or remove draft comments and supply an optional overall summary.
+- Bind each comment to exact task/repository/file content identity, line range,
+  applicable diff side and source comparison/result/turn context. Retain bounded
+  reviewed context independently of latest-turn replacement or workspace cleanup;
+  this extends retention to review anchors, not whole workspace snapshots.
+- Later changes mark affected comments outdated without silently moving them to
+  newer contents. Unavailable or unknown comparisons remain explicit; file paths
+  and line numbers alone cannot establish exact identity. Retention limits and
+  access exclusions still apply, and missing original context is never replaced
+  with newer bytes.
+- Let the operator inspect the complete draft and named project-lead destination
+  before Send review. Submit the comments and optional summary together as one
+  logical review, with a receipt and exact anchors available to the lead.
+- Preserve drafts through navigation and refresh under existing session/privacy
+  rules. Confirmed failures retain editable content; uncertain submissions keep
+  their original payload and identity for reconciliation without duplicate sends.
+- A review delivers local feedback only. It does not publish to GitHub, approve
+  or reject work, change readiness/completion, grant merge authority or clear
+  holds. Submitted reviews remain recorded feedback; draft removal does not
+  retract a submitted review. Retraction, threaded resolution and formal review
+  verdicts are outside this initial scope.
+- Design and qualify the draft, line selection, outdated-context and submission
+  journeys on desktop, phone and keyboard across file/diff and result entry
+  points. Preserve the existing single-message contextual feedback workflow.
+
 ### Task overview and evidence — design direction, 3 October 2026
 
 Chris approved bringing the task brief, delegation, latest result and supporting
