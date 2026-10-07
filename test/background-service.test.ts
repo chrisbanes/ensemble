@@ -14,6 +14,7 @@ import {
   LocalOperatorHttp,
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
+import { OperatorWebBundle } from "../src/standalone/operator-web.js";
 import {
   TurnScheduler,
   type SchedulerStore,
@@ -1244,6 +1245,240 @@ test("production operator CLI joins an already-fatal service and closes the live
         .then((service) => service.stop().catch(() => {}))
         .catch(() => {});
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("operator CLI consumes fatal failures before first accessor and after bundle loading", async () => {
+  await withCapturedIntervals(async (intervals) => {
+    for (const timing of [
+      "before-first-accessor",
+      "during-bundle-open",
+    ] as const) {
+      const priorExitCode = process.exitCode;
+      const priorAuthFile = process.env.ENSEMBLE_OPERATOR_AUTH_FILE;
+      const priorOrigin = process.env.ENSEMBLE_OPERATOR_ORIGIN;
+      const root = mkdtempSync(join(tmpdir(), `ensemble-operator-${timing}-`));
+      chmodSync(root, 0o700);
+      const data = join(root, "data");
+      const workspace = join(root, "workspace");
+      const authFile = join(root, "operator-auth.json");
+      mkdirSync(workspace);
+      process.env.ENSEMBLE_OPERATOR_AUTH_FILE = authFile;
+      process.env.ENSEMBLE_OPERATOR_ORIGIN = "http://127.0.0.1:8792";
+      const diagnostics: BackgroundFailureDiagnostic[] = [];
+      const bundleEntered = deferred<void>();
+      const releaseBundle = deferred<void>();
+      let service: StandaloneService | undefined;
+      let restart: StandaloneService | undefined;
+      let runtime: FixtureRuntime | undefined;
+      let notification: Promise<BackgroundFailureDiagnostic> | undefined;
+      let auth: OperatorAuth | undefined;
+      let authCloses = 0;
+      let listenerStarts = 0;
+      let bundleOpens = 0;
+      let accessorsAfterFatal = 0;
+      let pollInjected = false;
+      const authOpenDescriptor = Object.getOwnPropertyDescriptor(
+        OperatorAuth,
+        "open",
+      );
+      const bundleOpenDescriptor = Object.getOwnPropertyDescriptor(
+        OperatorWebBundle,
+        "open",
+      );
+      const listenerStartDescriptor = Object.getOwnPropertyDescriptor(
+        LocalOperatorHttp.prototype,
+        "start",
+      );
+      const originalAuthOpen = OperatorAuth.open;
+      const originalBundleOpen = OperatorWebBundle.open;
+      try {
+        process.exitCode = 0;
+        await OperatorAuth.initialize(authFile, "fixture password");
+        Object.defineProperty(OperatorAuth, "open", {
+          configurable: true,
+          value: async (options: Parameters<typeof OperatorAuth.open>[0]) => {
+            auth = await originalAuthOpen.call(OperatorAuth, options);
+            const close = auth.close.bind(auth);
+            auth.close = () => {
+              authCloses++;
+              close();
+            };
+            return auth;
+          },
+        });
+        Object.defineProperty(OperatorWebBundle, "open", {
+          configurable: true,
+          value: async (directory: string) => {
+            bundleOpens++;
+            if (timing === "during-bundle-open") {
+              bundleEntered.resolve();
+              await releaseBundle.promise;
+            }
+            return originalBundleOpen.call(OperatorWebBundle, directory);
+          },
+        });
+        Object.defineProperty(LocalOperatorHttp.prototype, "start", {
+          configurable: true,
+          value: async () => {
+            listenerStarts++;
+            throw new Error("fatal operator setup must not start a listener");
+          },
+        });
+
+        const command = main(["operator", data, "0"], (directory) => {
+          runtime = new FixtureRuntime();
+          service = makeService(directory, runtime, diagnostics, {
+            github: { intervalMs: 1000 },
+          });
+          const actualStart = service.start.bind(service);
+          service.start = async () => {
+            await actualStart();
+            runtime!.waitFailure = new Error("fixture execution remains held");
+            try {
+              const held = await service!.submit(
+                "operator-held-work",
+                "fixture prompt",
+                workspace,
+              );
+              assert.equal(held.state, "held");
+            } finally {
+              runtime!.waitFailure = undefined;
+            }
+          };
+          const actualWait = service.waitForBackgroundFailure.bind(service);
+          service.waitForBackgroundFailure = () => {
+            notification = actualWait();
+            return notification;
+          };
+          const actualObserved =
+            service.backgroundFailureObserved.bind(service);
+          service.backgroundFailureObserved = (failureNotification) => {
+            if (timing === "before-first-accessor" && !pollInjected) {
+              pollInjected = true;
+              fireInterval(intervals, 1000);
+            }
+            return actualObserved(failureNotification);
+          };
+          const checkAfterFatal = () => {
+            if (
+              notification &&
+              service!.backgroundFailureObserved(notification)
+            )
+              accessorsAfterFatal++;
+          };
+          const actualDomain = service.domain.bind(service);
+          service.domain = () => {
+            checkAfterFatal();
+            return actualDomain();
+          };
+          const actualCoordinationView = service.coordinationView.bind(service);
+          service.coordinationView = () => {
+            checkAfterFatal();
+            return actualCoordinationView();
+          };
+          const actualGitHubSources = service.githubSources.bind(service);
+          service.githubSources = () => {
+            checkAfterFatal();
+            return actualGitHubSources();
+          };
+          serviceAccess(service).refreshGitHub = () => {
+            throw new Error("private fixture poll failure");
+          };
+          return service;
+        });
+
+        if (timing === "during-bundle-open") {
+          await bundleEntered.promise;
+          assert.ok(service);
+          assert.ok(notification);
+          fireInterval(intervals, 1000);
+          assertSafeDiagnostic(await notification, "github-poll");
+          await service.waitForBackgroundShutdown(notification);
+          assert.equal(serviceAccess(service).db, undefined);
+
+          restart = new StandaloneService(data, () => new FixtureRuntime());
+          await restart.start();
+          assert.equal(
+            restart
+              .list()
+              .find((intent) => intent.workId === "operator-held-work")?.state,
+            "held",
+          );
+          await restart.stop();
+          restart = undefined;
+          releaseBundle.resolve();
+        }
+
+        await command;
+        if (timing === "before-first-accessor") {
+          assert.ok(service);
+          assert.ok(notification);
+          assertSafeDiagnostic(await notification, "github-poll");
+          await service.waitForBackgroundShutdown(notification);
+          assert.equal(serviceAccess(service).db, undefined);
+          restart = new StandaloneService(data, () => new FixtureRuntime());
+          await restart.start();
+          assert.equal(
+            restart
+              .list()
+              .find((intent) => intent.workId === "operator-held-work")?.state,
+            "held",
+          );
+          await restart.stop();
+          restart = undefined;
+        }
+        assert.equal(process.exitCode, 1);
+        assert.equal(listenerStarts, 0);
+        assert.equal(authCloses, 1);
+        assert.throws(() => auth!.createAnonymousSession());
+        assert.equal(accessorsAfterFatal, 0);
+        assert.equal(bundleOpens, timing === "before-first-accessor" ? 0 : 1);
+        assert.equal(pollInjected, timing === "before-first-accessor");
+        assert.equal(diagnostics.length, 1);
+        assert.equal(diagnostics[0]?.operation, "github-poll");
+      } finally {
+        releaseBundle.resolve();
+        if (restart) await restart.stop().catch(() => {});
+        if (service) {
+          if (notification && service.backgroundFailureObserved(notification))
+            await service
+              .waitForBackgroundShutdown(notification)
+              .catch(() => {});
+          else await service.stop().catch(() => {});
+        }
+        if (auth && authCloses === 0) auth.close();
+        if (authOpenDescriptor)
+          Object.defineProperty(OperatorAuth, "open", authOpenDescriptor);
+        else delete (OperatorAuth as unknown as Record<string, unknown>).open;
+        if (bundleOpenDescriptor)
+          Object.defineProperty(
+            OperatorWebBundle,
+            "open",
+            bundleOpenDescriptor,
+          );
+        else
+          delete (OperatorWebBundle as unknown as Record<string, unknown>).open;
+        if (listenerStartDescriptor)
+          Object.defineProperty(
+            LocalOperatorHttp.prototype,
+            "start",
+            listenerStartDescriptor,
+          );
+        else
+          delete (
+            LocalOperatorHttp.prototype as unknown as Record<string, unknown>
+          ).start;
+        process.exitCode = priorExitCode;
+        if (priorAuthFile === undefined)
+          delete process.env.ENSEMBLE_OPERATOR_AUTH_FILE;
+        else process.env.ENSEMBLE_OPERATOR_AUTH_FILE = priorAuthFile;
+        if (priorOrigin === undefined)
+          delete process.env.ENSEMBLE_OPERATOR_ORIGIN;
+        else process.env.ENSEMBLE_OPERATOR_ORIGIN = priorOrigin;
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 });

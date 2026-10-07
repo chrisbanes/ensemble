@@ -71,9 +71,27 @@ export async function main(
       : undefined;
   let fatalBackgroundFailure = false;
   let failureNotification: Promise<BackgroundFailureDiagnostic> | undefined;
+  const joinFatalBackgroundFailure = async (
+    notification: Promise<BackgroundFailureDiagnostic>,
+  ) => {
+    fatalBackgroundFailure = true;
+    process.exitCode = 1;
+    try {
+      await service.waitForBackgroundShutdown(notification);
+    } catch {
+      // The service emitted its fixed safe-shutdown diagnostic; do not expose its error.
+    }
+  };
   try {
     await service.start();
     failureNotification = service.waitForBackgroundFailure();
+    if (
+      command === "operator" &&
+      service.backgroundFailureObserved(failureNotification)
+    ) {
+      await joinFatalBackgroundFailure(failureNotification);
+      return;
+    }
     if (command === "run") {
       const [workId, prompt, workspace, previousWorkId] = args;
       if (!workId || !prompt || !workspace)
@@ -108,6 +126,10 @@ export async function main(
       const bundle = await OperatorWebBundle.open(
         fileURLToPath(new URL("../../operator", import.meta.url)),
       );
+      if (service.backgroundFailureObserved(failureNotification)) {
+        await joinFatalBackgroundFailure(failureNotification);
+        return;
+      }
       const ui = new LocalOperatorHttp(
         new LocalOperatorUi(
           service.domain(),
