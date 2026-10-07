@@ -21,7 +21,10 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Store } from "../src/core/store.js";
 import { StandaloneDataDirectory } from "../src/standalone/data-directory.js";
-import { StandaloneService } from "../src/standalone/service.js";
+import {
+  StandaloneService,
+  type StandaloneServiceOptions,
+} from "../src/standalone/service.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import type { Runtime } from "../src/standalone/codex.js";
 import {
@@ -43,10 +46,12 @@ class FakeRuntime implements Runtime {
   onThreadEntered: (() => void) | undefined;
   turnGate: Promise<void> | undefined;
   onTurnEntered: (() => void) | undefined;
+  onStop: (() => void) | undefined;
   async start() {
     if (this.failAt === "start") throw new Error("login unavailable");
   }
   async stop() {
+    this.onStop?.();
     if (this.failStop) {
       this.failStop = false;
       throw new Error("injected stop failure");
@@ -79,6 +84,59 @@ class FakeRuntime implements Runtime {
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void) {
     this.onRequest = listener;
   }
+}
+
+type ServiceShutdownAccess = {
+  db?: DatabaseSync;
+  state?: ExecutionState;
+  githubSynchronizer?: { stop(): Promise<void> };
+  deliveryCoordinator?: { stop(): Promise<void> };
+  scheduler?: {
+    stop(): void;
+    settle(): Promise<void>;
+    timer?: NodeJS.Timeout;
+  };
+  supervisor?: { cancelObservations(): void; settle(): Promise<void> };
+  power?: { stop(): Promise<void> };
+  githubPollTimer?: NodeJS.Timeout;
+  powerPollTimer?: NodeJS.Timeout;
+};
+
+function shutdownAccess(service: StandaloneService): ServiceShutdownAccess {
+  return service as unknown as ServiceShutdownAccess;
+}
+
+function shutdownPowerOptions(
+  calls: string[],
+): NonNullable<StandaloneServiceOptions["power"]> {
+  return {
+    enabled: true,
+    pollIntervalMs: 60_000,
+    eventSource: {
+      async readSince(cursor) {
+        return {
+          complete: true,
+          fromCursor: cursor,
+          cursor: cursor ?? { version: 1 as const, value: "baseline" },
+          events: [],
+        };
+      },
+      async stop() {
+        calls.push("power-event-source-stop");
+      },
+    },
+    assertion: {
+      on() {
+        return this;
+      },
+      async start() {
+        calls.push("assertion-start");
+      },
+      async stop() {
+        calls.push("assertion-stop");
+      },
+    } as never,
+  };
 }
 
 const ownerScript = `
@@ -826,6 +884,245 @@ test("failed stop closes SQLite and allows restart on the same service object", 
     db.close();
   } finally {
     await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shutdown preserves ordered failures, settles active work, and retains durable holds", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-stop-order-"));
+  const data = join(root, "data");
+  const heldWorkspace = join(root, "held-work");
+  const activeWorkspace = join(root, "active-work");
+  mkdirSync(heldWorkspace);
+  mkdirSync(activeWorkspace);
+  const calls: string[] = [];
+  const runtime = new FakeRuntime();
+  const service = new StandaloneService(data, () => runtime, undefined, {
+    power: shutdownPowerOptions(calls),
+    github: { intervalMs: 1000 },
+  });
+  let releaseTurn!: () => void;
+  let enteredTurn!: () => void;
+  let reachedRuntimeStop!: () => void;
+  const turnStarted = new Promise<void>((resolve) => {
+    enteredTurn = resolve;
+  });
+  const runtimeStopStarted = new Promise<void>((resolve) => {
+    reachedRuntimeStop = resolve;
+  });
+  const syncFailure = new Error("injected synchronization stop failure");
+  const deliveryFailure = new Error("injected delivery stop failure");
+
+  try {
+    await service.start();
+    runtime.failAt = "turn";
+    const held = await service.submit(
+      "uncertain-before-shutdown",
+      "test",
+      heldWorkspace,
+    );
+    assert.equal(held.state, "held");
+    const heldReason = held.reason;
+
+    runtime.failAt = undefined;
+    runtime.turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    runtime.onTurnEntered = enteredTurn;
+    runtime.onStop = () => {
+      calls.push("runtime-stop");
+      reachedRuntimeStop();
+    };
+    const active = service.submit(
+      "active-during-shutdown",
+      "test",
+      activeWorkspace,
+    );
+    await turnStarted;
+
+    const access = shutdownAccess(service);
+    const db = access.db;
+    const synchronizer = access.githubSynchronizer;
+    const delivery = access.deliveryCoordinator;
+    const scheduler = access.scheduler;
+    const supervisor = access.supervisor;
+    const power = access.power;
+    assert.ok(db?.isOpen);
+    assert.ok(synchronizer && delivery && scheduler && supervisor && power);
+
+    synchronizer.stop = async () => {
+      calls.push("sync-stop");
+      throw syncFailure;
+    };
+    delivery.stop = async () => {
+      calls.push("delivery-stop");
+      throw deliveryFailure;
+    };
+    const schedulerStop = scheduler.stop.bind(scheduler);
+    scheduler.stop = () => {
+      calls.push("scheduler-stop");
+      schedulerStop();
+    };
+    const schedulerSettle = scheduler.settle.bind(scheduler);
+    scheduler.settle = async () => {
+      calls.push("scheduler-settle");
+      await schedulerSettle();
+    };
+    const cancelObservations = supervisor.cancelObservations.bind(supervisor);
+    supervisor.cancelObservations = () => {
+      calls.push("supervisor-cancel");
+      cancelObservations();
+    };
+    const supervisorSettle = supervisor.settle.bind(supervisor);
+    supervisor.settle = async () => {
+      calls.push("supervisor-settle");
+      await supervisorSettle();
+    };
+    const powerStop = power.stop.bind(power);
+    power.stop = async () => {
+      calls.push("power-stop");
+      await powerStop();
+    };
+
+    const stopping = service.stop().then(
+      () => ({ rejected: false as const, error: undefined }),
+      (error: unknown) => ({ rejected: true as const, error }),
+    );
+    await runtimeStopStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      db.isOpen,
+      true,
+      "SQLite remains open until active work settles",
+    );
+    assert.equal(access.githubPollTimer, undefined);
+    assert.equal(access.powerPollTimer, undefined);
+    assert.equal(scheduler.timer, undefined);
+    assert.throws(
+      () => StandaloneDataDirectory.openExclusive(data),
+      /already owned/,
+    );
+
+    releaseTurn();
+    const completed = await active;
+    assert.equal(completed.state, "completed");
+    const result = await stopping;
+    assert.equal(result.rejected, true);
+    assert.ok(result.error instanceof AggregateError);
+    assert.deepEqual(result.error.errors, [syncFailure, deliveryFailure]);
+    assert.match(result.error.message, /GitHub synchronization stop/);
+    assert.match(result.error.message, /delivery stop/);
+    assert.equal(db.isOpen, false);
+
+    const orderedStages = [
+      "scheduler-stop",
+      "supervisor-cancel",
+      "sync-stop",
+      "delivery-stop",
+      "runtime-stop",
+      "scheduler-settle",
+      "power-stop",
+      "supervisor-settle",
+    ].map((stage) => calls.indexOf(stage));
+    assert.ok(orderedStages.every((index) => index >= 0));
+    assert.deepEqual(
+      orderedStages,
+      [...orderedStages].sort((a, b) => a - b),
+    );
+    assert.ok(calls.includes("power-event-source-stop"));
+
+    const reacquired = StandaloneDataDirectory.openExclusive(data);
+    reacquired.close();
+    await service.start();
+    const afterRestart = service
+      .list()
+      .find((item) => item.workId === "uncertain-before-shutdown");
+    assert.equal(afterRestart?.state, "held");
+    assert.equal(afterRestart?.reason, heldReason);
+    await service.stop();
+  } finally {
+    releaseTurn?.();
+    await service.stop().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shutdown preserves an undefined delivery rejection and still releases the owner", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-stop-undefined-"));
+  const data = join(root, "data");
+  const runtime = new FakeRuntime();
+  const service = new StandaloneService(data, () => runtime);
+  let runtimeStopped = false;
+  try {
+    await service.start();
+    const delivery = shutdownAccess(service).deliveryCoordinator;
+    assert.ok(delivery);
+    delivery.stop = async () => {
+      throw undefined;
+    };
+    runtime.onStop = () => {
+      runtimeStopped = true;
+    };
+
+    const result = await service.stop().then(
+      () => ({ rejected: false as const, error: undefined }),
+      (error: unknown) => ({ rejected: true as const, error }),
+    );
+    assert.deepEqual(result, { rejected: true, error: undefined });
+    assert.equal(runtimeStopped, true);
+    const owner = StandaloneDataDirectory.openExclusive(data);
+    owner.close();
+  } finally {
+    await service.stop().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("service shutdown retains an open database owner and can retry close", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-s02-stop-db-close-"));
+  const data = join(root, "data");
+  const service = new StandaloneService(data, () => new FakeRuntime());
+  try {
+    await service.start();
+    const db = shutdownAccess(service).db;
+    assert.ok(db?.isOpen);
+    const originalClose = db.close.bind(db);
+    const closeFailure = new Error("injected service database close failure");
+    let failOnce = true;
+    Object.defineProperty(db, "close", {
+      configurable: true,
+      value: () => {
+        if (failOnce) {
+          failOnce = false;
+          throw closeFailure;
+        }
+        originalClose();
+      },
+    });
+
+    const result = await service.stop().then(
+      () => ({ rejected: false as const, error: undefined }),
+      (error: unknown) => ({ rejected: true as const, error }),
+    );
+    assert.equal(result.rejected, true);
+    assert.equal(result.error, closeFailure);
+    assert.match(closeFailure.message, /database close/);
+    assert.equal(db.isOpen, true);
+    assert.throws(
+      () => StandaloneDataDirectory.openExclusive(data),
+      /already owned/,
+    );
+
+    Object.defineProperty(db, "close", {
+      configurable: true,
+      value: originalClose,
+    });
+    await service.stop();
+    assert.equal(db.isOpen, false);
+    const owner = StandaloneDataDirectory.openExclusive(data);
+    owner.close();
+  } finally {
+    await service.stop().catch(() => {});
     rmSync(root, { recursive: true, force: true });
   }
 });

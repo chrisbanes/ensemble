@@ -247,7 +247,8 @@ export class StandaloneService {
   }
 
   async start(): Promise<void> {
-    if (this.db) throw new Error("Service already started");
+    if (this.db || this.owner)
+      throw new Error("Service already started or shutdown is incomplete");
     this.lastCompletedWorkId = undefined;
     const dataDirectory = StandaloneDataDirectory.openExclusive(this.dataDir, {
       markerWriter: this.markerWriter,
@@ -655,80 +656,111 @@ export class StandaloneService {
 
   async stop(): Promise<void> {
     const scheduler = this.scheduler;
-    scheduler?.stop();
-    this.scheduler = undefined;
+    const supervisor = this.supervisor;
+    const synchronizer = this.githubSynchronizer;
+    const delivery = this.deliveryCoordinator;
+    const runtime = this.runtime;
+    const power = this.power;
+    const db = this.db;
+    const failures: Array<{ stage: string; error: unknown }> = [];
+    const recordFailure = (stage: string, error: unknown) => {
+      failures.push({ stage, error });
+    };
+    const attempt = async (stage: string, action: () => unknown) => {
+      try {
+        await action();
+      } catch (error) {
+        recordFailure(stage, error);
+      }
+    };
+
+    try {
+      scheduler?.stop();
+    } catch (error) {
+      recordFailure("scheduler stop", error);
+    }
     if (this.githubPollTimer) clearInterval(this.githubPollTimer);
     this.githubPollTimer = undefined;
-    await this.githubSynchronizer?.stop();
-    await this.deliveryCoordinator?.stop();
     if (this.powerPollTimer) clearInterval(this.powerPollTimer);
     this.powerPollTimer = undefined;
-    const supervisor = this.supervisor;
-    supervisor?.cancelObservations();
-    const runtime = this.runtime;
-    let failure: unknown;
     try {
+      supervisor?.cancelObservations();
+    } catch (error) {
+      recordFailure("supervisor observation cancellation", error);
+    }
+
+    await attempt("GitHub synchronization stop", () => synchronizer?.stop());
+    await attempt("delivery stop", () => delivery?.stop());
+    await attempt("runtime-question invalidation", () => {
       if (this.db?.isOpen)
         this.coordination?.invalidateRuntimeQuestions(
           "Service stopped; native endpoints lost",
         );
-    } catch (error) {
-      failure = error;
-    }
+    });
+    await attempt("conversation-capture cleanup", () =>
+      this.clearConversationCaptures(),
+    );
     this.runtime = undefined;
-    this.clearConversationCaptures();
-    try {
-      if (runtime) await runtime.stop();
-    } catch (error) {
-      if (failure === undefined) failure = error;
+    await attempt("runtime stop", () => runtime?.stop());
+    await attempt("scheduler settlement", () => scheduler?.settle());
+    await attempt("active-work settlement", async () => {
+      const settled = await Promise.allSettled([...this.active]);
+      for (const result of settled)
+        if (result.status === "rejected")
+          recordFailure("active-work settlement", result.reason);
+    });
+    await attempt("power stop", () => power?.stop());
+    await attempt("supervisor settlement", () => supervisor?.settle());
+
+    if (db?.isOpen) await attempt("service database close", () => db.close());
+    if (!db?.isOpen) {
+      if (this.db === db) this.db = undefined;
+      const owner = this.owner;
+      if (owner) {
+        let released = false;
+        await attempt("data-directory owner release", () => {
+          owner.close();
+          released = true;
+        });
+        if (released && this.owner === owner) this.owner = undefined;
+      }
+
+      this.state = undefined;
+      this.domainState = undefined;
+      this.githubSourceStore = undefined;
+      this.githubSynchronizer = undefined;
+      this.coordination = undefined;
+      this.deliveryCoordinator = undefined;
+      this.deliveryStore = undefined;
+      this.runtime = undefined;
+      this.runtimeSpawnSnapshot = undefined;
+      this.routingAttempts = undefined;
+      this.routingCoordinators.clear();
+      this.schedulerStore = undefined;
+      this.scheduler = undefined;
+      this.supervisor = undefined;
+      this.power = undefined;
+      this.workspaces = undefined;
+      this.workspaceBindings = undefined;
+      this.conversationHistory = undefined;
+      this.activeByWorkId.clear();
+      this.nativeWaiters.clear();
+      this.callbacks.clear();
+    } else {
+      // Keep the runtime available for another stop attempt while the database
+      // and its data-directory owner remain held.
+      this.runtime = runtime;
     }
-    try {
-      await scheduler?.settle();
-    } catch (error) {
-      if (failure === undefined) failure = error;
+
+    if (failures.length === 1) {
+      const [failure] = failures;
+      if (failure) throw failure.error;
     }
-    await Promise.allSettled(this.active);
-    const power = this.power;
-    this.power = undefined;
-    try {
-      await power?.stop();
-    } catch (error) {
-      if (failure === undefined) failure = error;
-    }
-    await supervisor?.settle();
-    this.supervisor = undefined;
-    const db = this.db;
-    this.db = undefined;
-    this.state = undefined;
-    this.domainState = undefined;
-    this.githubSourceStore = undefined;
-    this.githubSynchronizer = undefined;
-    this.coordination = undefined;
-    this.deliveryCoordinator = undefined;
-    this.deliveryStore = undefined;
-    this.runtimeSpawnSnapshot = undefined;
-    this.routingAttempts = undefined;
-    this.routingCoordinators.clear();
-    this.schedulerStore = undefined;
-    this.workspaces = undefined;
-    this.workspaceBindings = undefined;
-    this.conversationHistory = undefined;
-    this.activeByWorkId.clear();
-    this.nativeWaiters.clear();
-    this.callbacks.clear();
-    try {
-      db?.close();
-    } catch (error) {
-      if (failure === undefined) failure = error;
-    }
-    try {
-      this.owner?.close();
-    } catch (error) {
-      if (failure === undefined) failure = error;
-    } finally {
-      this.owner = undefined;
-    }
-    if (failure !== undefined) throw failure;
+    if (failures.length > 1)
+      throw new AggregateError(
+        failures.map(({ error }) => error),
+        `Service shutdown failed during ${failures.map(({ stage }) => stage).join(", ")}`,
+      );
   }
 
   list(): ExecutionIntent[] {

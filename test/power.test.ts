@@ -30,6 +30,7 @@ interface PowerEventSource {
 }
 
 interface CaffeinateAssertionPort {
+  on(event: string, listener: (reason: unknown) => void): this;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -75,6 +76,9 @@ class FakePowerEvents implements PowerEventSource {
   cursor: PowerEventCursor | null = null;
   complete = true;
   events: TestPowerEvent[] = [];
+  stopCalls = 0;
+  failStop = false;
+  stopFailure: unknown;
 
   async readSince(cursor: PowerEventCursor | null) {
     const requested = cursor;
@@ -87,6 +91,11 @@ class FakePowerEvents implements PowerEventSource {
       cursor: this.cursor,
       events: first < 0 ? [] : this.events.slice(first),
     };
+  }
+
+  async stop() {
+    this.stopCalls++;
+    if (this.failStop) throw this.stopFailure;
   }
 }
 
@@ -244,6 +253,104 @@ test("assertion child failure is visible without releasing execution state", asy
     assert.equal(hasWriterOrCapacity(db, active.workId), true);
   } finally {
     await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("power stop attempts event-source cleanup after assertion failure and preserves holds", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-stop-assertion-"));
+  const path = join(root, "power.sqlite");
+  const { db, state } = powerStore(path);
+  const active = begin(state, "active-at-power-stop", "/workspace/a");
+  assert.equal(state.bindThread(active.id, "thread-a"), true);
+  assert.equal(state.bindTurn(active.id, "turn-a"), true);
+  state.holdPowerAdmission("Injected power-admission hold");
+  const events = new FakePowerEvents();
+  const assertionFailure = new Error("injected assertion stop failure");
+  let assertionStops = 0;
+  const assertion: CaffeinateAssertionPort = {
+    on() {
+      return this;
+    },
+    async start() {},
+    async stop() {
+      assertionStops++;
+      throw assertionFailure;
+    },
+  };
+  const power = new ExecutionPower(state, events, assertion, async () => {});
+  try {
+    await power.start();
+    await power.executionStarted(active.workId);
+    const result = await power.stop().then(
+      () => ({ rejected: false as const, error: undefined }),
+      (error: unknown) => ({ rejected: true as const, error }),
+    );
+    assert.equal(result.rejected, true);
+    assert.equal(result.error, assertionFailure);
+    assert.equal(assertionStops, 1);
+    assert.equal(events.stopCalls, 1);
+    assert.equal(state.get(active.id).state, "running");
+    assert.equal(state.powerAdmissionState().held, true);
+
+    db.close();
+    const reopened = new DatabaseSync(path);
+    try {
+      const persisted = new ExecutionState(reopened);
+      assert.equal(persisted.get(active.id).state, "running");
+      assert.equal(persisted.powerAdmissionState().held, true);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    if (db.isOpen) db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("power stop reports assertion and event-source failures in shutdown order", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-stop-both-"));
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const queued = state.create("queued-at-power-stop", "prompt", "/workspace/a");
+  state.holdPowerAdmission("Injected power-admission hold");
+  const events = new FakePowerEvents();
+  const assertionFailure = new Error("injected assertion stop failure");
+  const eventSourceFailure = new Error("injected event-source stop failure");
+  events.failStop = true;
+  events.stopFailure = eventSourceFailure;
+  const power = new ExecutionPower(
+    state,
+    events,
+    {
+      on() {
+        return this;
+      },
+      async start() {},
+      async stop() {
+        throw assertionFailure;
+      },
+    },
+    async () => {},
+  );
+  try {
+    await power.start();
+    const result = await power.stop().then(
+      () => ({ rejected: false as const, error: undefined }),
+      (error: unknown) => ({ rejected: true as const, error }),
+    );
+    assert.equal(result.rejected, true);
+    assert.ok(result.error instanceof AggregateError);
+    assert.deepEqual(result.error.errors, [
+      assertionFailure,
+      eventSourceFailure,
+    ]);
+    assert.match(result.error.message, /assertion stop/);
+    assert.match(result.error.message, /power event source stop/);
+    assert.equal(events.stopCalls, 1);
+    assert.equal(state.get(queued.id).state, "ready");
+    assert.equal(state.powerAdmissionState().held, true);
+  } finally {
     db.close();
     rmSync(root, { recursive: true, force: true });
   }

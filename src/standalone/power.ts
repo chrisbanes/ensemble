@@ -597,7 +597,25 @@ export class ExecutionPower {
     this.started = false;
     this.activeWork.clear();
     await this.polling?.catch(() => {});
-    await this.assertion.stop();
-    await this.events.stop?.();
+    const failures: Array<{ stage: string; error: unknown }> = [];
+    try {
+      await this.assertion.stop();
+    } catch (error) {
+      failures.push({ stage: "assertion stop", error });
+    }
+    try {
+      await this.events.stop?.();
+    } catch (error) {
+      failures.push({ stage: "power event source stop", error });
+    }
+    if (failures.length === 1) {
+      const [failure] = failures;
+      if (failure) throw failure.error;
+    }
+    if (failures.length > 1)
+      throw new AggregateError(
+        failures.map(({ error }) => error),
+        `Execution power shutdown failed during ${failures.map(({ stage }) => stage).join(", ")}`,
+      );
   }
 }
