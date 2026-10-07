@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "issues": [745, 697],
-  "status": "UI07 and S07a native gates completed; S07b deterministic release-candidate integration and local checks qualified; independent review and final-head remote gates pending; operational release remains unqualified",
+  "issues": [745, 697, 698],
+  "status": "UI07, S07a and S07b native gates completed; S08b final recovery and cutover proposal qualified locally; independent review and final-head remote gates pending; operational release remains unqualified",
   "baseline": {
     "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
     "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
@@ -320,12 +320,12 @@
   ],
   "remainingGates": [
     {
-      "issue": 697,
-      "status": "S07b independent integrated review/publication/remote final-head gates; local checks passed; shared finite UI07 journey reused, no new live attempt"
+      "issue": 698,
+      "status": "S08b independent integrated candidate/proposal review and final-head remote gates; local final check passed"
     },
     {
-      "issues": [698, 732, 761],
-      "status": "Final operations/recovery/cutover and physical sleep/wake remain outside #697; completed #704 preparation retained separately"
+      "issues": [732, 761],
+      "status": "Physical sleep/wake before operational use and separately authorized actual cutover, with verified old-work disposition and no competing writers"
     },
     {
       "epic": 734,
@@ -814,14 +814,16 @@
       },
       {
         "id": "R06",
-        "disposition": "Fresh-database separation qualified in S02/S05; #704 S08a backup/restore preparation retained separately. Final operations/recovery/cutover #698/#761 remain outside #697 and unqualified here.",
+        "disposition": "Fresh-database separation and retained S08a preparation passed. S08b current-schema CLI restore and exact owned-child/effect recovery qualified locally; executable Haze proposal prepared. Independent proposal review pending. Actual old-work disposition/deployment/cutover remains #761; R06 operational completion is unproved.",
         "references": [
           "docs/acceptance.md",
           "docs/evidence/s05-local-qualification.md",
           "docs/evidence/s02-bootstrap-2026-09-28.md",
-          "docs/evidence/s08a-operations-2026-09-30.md"
+          "docs/evidence/s08a-operations-2026-09-30.md",
+          "docs/evidence/s08b-final-recovery.md",
+          "docs/operations/standalone-cutover-proposal.md"
         ],
-        "applicability": "Retained report identities and bounded/partial outcomes apply; no new real runtime, paid routing, remote-provider or physical-power qualification was run."
+        "applicability": "Actual macOS owned harmless process plus final-schema deterministic fake-runtime/provider evidence; no new model/provider effect, deployment, physical power or actual cutover qualification."
       },
       {
         "id": "R07",
@@ -863,7 +865,7 @@
       }
     ],
     "releaseReady": false,
-    "deferredScope": "Physical R03 #732; final R06 #698/#761; X01-X08 remain deferred/paused and do not gate this slice.",
+    "deferredScope": "Physical R03 #732; actual R06 cutover #761; X01-X08 remain deferred/paused. S08b #698 technical recovery/proposal is recorded separately.",
     "sourceTree": "06233a4718d4373c18d34083cd0860bea6e55e6c",
     "sourceTreeScope": "Exact staged seven owned source/test paths plus baseline documentation; final evidence/status follow-up is documentation only",
     "sourceInputs": {
@@ -898,5 +900,52 @@
       "checkedSourceTree": "06233a4718d4373c18d34083cd0860bea6e55e6c",
       "documentationFollowUpOnly": true
     }
+  },
+  "s08b": {
+    "issue": 698,
+    "plan": "https://github.com/chrisbanes/ensemble/issues/698#issuecomment-5996272405",
+    "base": "b972978895957400cf808d3a8e6ab18224d79af2",
+    "sourceTree": "9758b0dacc3f58c2b33d43e3dca3c83c38c466cc",
+    "sourceTreeScope": "Five owned source/test paths with baseline documentation; final evidence/operations/proposal/inventory follow-up is documentation only",
+    "sourceInputs": {
+      "src/standalone/termination.ts": "ad1322285dc302aafc5cf6a242d0cfdee3d6d8714941a4b19f27a0693c739ee2",
+      "test/termination.test.ts": "68c9a9ce831cd51fc084bdf64a4f5b8608b425e23b90507e7dc3bbe1b6c585e8",
+      "test/operations-final-candidate.test.ts": "1a806d84261dced325048e7569a9240436c9eb8a4bf6f8defac725d56815ee92",
+      "test/fixtures/s07b-delivery.ts": "26d46f4dcf6808e128f6817e896103b4114165614c51e226679d1e38dca6bceb",
+      "test/s08b/owned-recovery.mjs": "e04126aaf5dd949b2b2496a3430e72078051a835b5aa41218202162ecf6ba455"
+    },
+    "evidence": "docs/evidence/s08b-final-recovery.md",
+    "proposal": "docs/operations/standalone-cutover-proposal.md",
+    "proposalSha256": "e0f94a3772e968779b2f1b18ec109e835e597d258c52f1e94be40852325eea6e",
+    "schemaFingerprint": "35889091802f03126403c83c0136d32d68faed443ba8c3201883290860fe90a4",
+    "tables": 105,
+    "ownedChild": {
+      "durationMs": 259,
+      "children": 1,
+      "observedDescendants": 0,
+      "modelCalls": 0,
+      "providerCalls": 0,
+      "cleanupVerified": true
+    },
+    "validation": {
+      "node": "24.21.0",
+      "npm": "12.2.0",
+      "installation": "passed",
+      "fixturePreflight": "3/3 passed",
+      "focusedChecks": "116/116 passed",
+      "affectedTests": "23/23 passed",
+      "fullCheck": "passed",
+      "tests": 957,
+      "passed": 957,
+      "failed": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "testDurationMs": 64113.412458,
+      "fullCheckLogSha256": "42dad627f9af63c39550a3680a627d078182ca0cf914d1887c384f4200926353",
+      "failedFirstCheck": "956/957; existing browser timing fixture; targeted8/8 and unchanged renewed957/957",
+      "proposalValidation": "One-off shell syntax and CLI arities passed; no proposal commands executed"
+    },
+    "releaseReady": false,
+    "pendingGates": "Independent proposal/candidate review and final-head remote gates; #732 before operational use; #761 execution approval, verified old-work disposition and actual cutover"
   }
 }
