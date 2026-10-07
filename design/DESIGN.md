@@ -1372,3 +1372,79 @@ preceding design passes, not an independently repeated full audit of the final
 revision. Native save/reopen verified the intended file, and the final Save
 cleared the Edited indicator. Production interaction and WI01–WI13 evidence
 remain with #782 and the service slices.
+
+## Operator refinement proposal — #800 T1, 7 October 2026
+
+[#800](https://github.com/chrisbanes/ensemble/issues/800) owns this design-only
+proposal. The exact implementation plan remains the published
+[approval comment](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6047644893).
+T1 prepares a concrete native canvas and this handoff; T2 still requires Chris's
+explicit review of both the Pen composition and implementation plan before any
+UI or application source work. Existing product contracts and #793 source,
+return, and task anchors remain unchanged.
+
+The new canvas section is `qIVmm` (`#800 · Operator refinement review`). It
+contains eight static compositions, all using the installed Dark / Neutral /
+Default shadcn library, Inter, JetBrains Mono where identifiers appear, and a
+12px minimum supporting-text size. It adds no new reusable components, theme,
+entry point, or product behavior.
+
+| Canvas composition | Node | Size | Review purpose |
+| --- | --- | --- | --- |
+| Tablet Overview / List | `h23qD` | 1024 × 768 | Existing drawer, attention summary, compact task rows, and List/Board switch. |
+| Compact tablet Inbox / question | `FsTwL` | 800 × 768 | Queue and selected question share the constrained viewport. |
+| Tablet task detail / evidence | `dUUIS` | 1024 × 768 | Task situation and next actor stay distinct from the evidence rail. |
+| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Query, filters, exact match context, selected preview, and return origin. |
+| Tablet composer / validation disclosure | `LBzlj` | 1024 × 768 | Optional summaries, expanded dependency error, focus treatment, and both actions. |
+| Tablet project Board | `nKHGv` | 1024 × 768 | Ready, Running and Waiting columns; a Ready task with a hold remains Ready. |
+| Phone question / short viewport | `Sejey` | 390 × 480 | Long question body in an independent scroll viewport with Submit retained. |
+| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries with Save draft and Create and start retained. |
+
+The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
+`E7qC9` / `MUFPD` (Board), `cGjau` (Inbox), `RyH7J` (task detail),
+`WaBk5` (Search), and `Z315o` / `MhM7z` (collapsed/full composer). Existing
+phone references remain `pmu7r` / `YzbOM` / `m6ZUJR` (question), `i3glx`
+(composer), and `wXiWx` / `JX4dm` (expanded/collapsed validation). The new
+tablet frames propose using the existing navigation drawer at 1024px and keeping
+Inbox queue and detail side by side at 800px. These are review widths, not
+approved CSS breakpoints; implementation must measure and verify the final
+thresholds rather than infer them from these static samples.
+
+The List, Board, Inbox, Search and composer specimens preserve current routing
+and state semantics. The selected Inbox response remains a local draft until
+submission. Search keeps its query, filters, selected result, and return origin.
+Task evidence does not decide source ownership or release a hold. The Board
+does not move a Ready-but-blocked task into Waiting and does not imply drag or
+state mutation. Composer summaries show the supplied context, references,
+assignee and dependency; expanding the dependency reveals the validation error
+without discarding its value. The disabled Create and start action remains
+visible beside Save draft. These labels and data are fictional review fixtures.
+
+The entry and recovery inventory is limited to existing references: desktop
+sidebar `X:PV1ln`; phone header `KthOL`; authentication expiry and private-state
+purge `OwZka`; interrupted-read recovery `rD02Q`; retained original file
+`xD63J` / `KVIG2` and diff `Mn97J`; Markdown `pUX8f` / `bz4VC`; and raster/PDF
+specimens `JCGmX`, `MKzws` and `FCvHl`. This proposal adds no dedicated
+account-settings, guided-login, or retained-HTML viewer composition. Their
+route and recovery obligations remain in the specification; this canvas does
+not show a browser renderer for retained HTML. No context-menu, extension, or
+notification entry point is introduced. The five existing comparison-image
+references still render placeholders in Pen MCP, so comparison-image loading
+remains unverified.
+
+The short phone frames intentionally clip `wHhpl`, the long question body inside
+the 390 × 480 question scroll viewport. That is the only detected bounds issue
+in the eight new compositions; the other frame and component bounds are inside
+their viewports. The proposed scroll owner is the named body or queue region,
+not the page. Board columns may scroll horizontally; the phone question and
+composer keep their primary action visible in the 480px frame. A client still
+needs to apply real bottom safe-area insets. It must preserve the selected
+answer, draft, text selection and caret while these regions scroll or resize.
+
+Canvas review does not prove keyboard traversal or focus restoration, forced-
+colour contrast, scrollbar ownership/chaining, virtual-keyboard behavior,
+safe-area insets, textarea growth and caret retention, or real-device viewport,
+zoom and text-scale behavior. Those need browser and physical-device evidence.
+No application build or test was run for this design-only proposal. Native
+save/reopen, resolved bounds and exported review images are recorded in the
+T1 evidence packet; production interaction remains for the implementation gate.
