@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext } from "react";
+import { z } from "zod";
 import {
   localReviewDraftReadSchema,
+  localReviewListReadSchema,
   localReviewOperationReadSchema,
   retainedReviewAnchorReadSchema,
   type CommandReceipt,
@@ -16,7 +18,41 @@ import type {
 } from "./task-workspace-state.js";
 import { Textarea } from "./ui/textarea.js";
 
-type Lead = { assignmentId: string; version: number; name: string };
+type Lead = {
+  assignmentId: string;
+  version: number;
+  name: string;
+  state: string;
+};
+const leadReceives = (lead: Lead | null) =>
+  lead?.state === "pending" || lead?.state === "running";
+
+// Mirrors LocalReviewSend: sessionStorage is not trusted data.
+const storedSendSchema = z
+  .object({
+    key: z.string().min(1),
+    expectedDraftVersion: z.number().int().nonnegative(),
+    recipientAssignmentId: z.string().min(1),
+    expectedAssignmentVersion: z.number().int().nonnegative(),
+    recipientName: z.string(),
+    status: z.enum([
+      "sending",
+      "unknown",
+      "recorded",
+      "rejected",
+      "not-recorded",
+    ]),
+    reason: z.string().optional(),
+  })
+  .strict();
+
+const anchorStatusLabel = {
+  current: "Current at last comparison",
+  outdated: "Outdated",
+  unknown: "Unknown",
+  unavailable: "Unavailable",
+} as const;
+const timeLabel = (value: number) => new Date(value).toLocaleString();
 type DraftRead = ReturnType<typeof localReviewDraftReadSchema.parse>["data"];
 
 const sendStorageKey = (taskId: string) =>
@@ -37,10 +73,10 @@ function restoredSend(taskId: string): LocalReviewSend | null {
   try {
     const raw = sessionStorage.getItem(sendStorageKey(taskId));
     if (!raw) return null;
-    const value = JSON.parse(raw) as LocalReviewSend;
-    return typeof value.key === "string"
-      ? { ...value, status: "unknown" }
-      : null;
+    const value = storedSendSchema.safeParse(JSON.parse(raw));
+    if (!value.success) return null;
+    const { reason, ...rest } = value.data;
+    return { ...rest, status: "unknown", ...(reason ? { reason } : {}) };
   } catch {
     return null;
   }
@@ -72,6 +108,16 @@ function useLocalReviewController({
     loader,
   );
   const draft = resource.state.data?.data ?? null;
+  const listPath = `/api/operator/tasks/${taskId}/local-reviews`;
+  const listLoader = useCallback(
+    (signal: AbortSignal) =>
+      client.read(listPath, localReviewListReadSchema, signal),
+    [client, listPath],
+  );
+  const sentList = useOperatorResource(
+    `${session.csrfToken}:${listPath}`,
+    listLoader,
+  );
   if (!state.send) {
     const pending = draft?.pendingOperation;
     const stored = restoredSend(taskId);
@@ -117,6 +163,13 @@ function useLocalReviewController({
     await resource.refresh();
     return result;
   };
+  const focusLater = (selector: string, fallback?: string) =>
+    requestAnimationFrame(() =>
+      (
+        document.querySelector<HTMLElement>(selector) ??
+        (fallback ? document.querySelector<HTMLElement>(fallback) : null)
+      )?.focus(),
+    );
 
   const settleSend = (send: LocalReviewSend, result: CommandState) => {
     if (result.state === "recorded") {
@@ -132,6 +185,10 @@ function useLocalReviewController({
       // Refused before any operation was recorded.
       send.status = "rejected";
       send.reason = "too large to send; shorten or remove comments";
+    } else if (result.code === "local-review-recipient-unavailable") {
+      // Definitive: the lead can no longer receive the message, nothing was queued.
+      send.status = "rejected";
+      send.reason = "the project lead can no longer receive a review";
     } else {
       // Without a receipt the send may still have committed; only the same-key
       // reconciliation can confirm delivery or a no-delivery outcome.
@@ -145,6 +202,7 @@ function useLocalReviewController({
   return {
     draft,
     resource,
+    sentList,
     lead,
     open(originKey: string, label: string, anchor: ReviewAnchorCandidate) {
       state.composer = {
@@ -165,12 +223,17 @@ function useLocalReviewController({
       const composer = state.composer;
       state.composer = null;
       changed();
-      // The trigger may re-render; prefer the live control for the same origin.
+      // Return to the selected line when it is still rendered, else the origin's
+      // button; the trigger may re-render, so prefer live controls.
       requestAnimationFrame(() => {
-        const live = composer
-          ? document.querySelector<HTMLElement>(
-              `[data-review-origin="${CSS.escape(composer.originKey)}"]`,
-            )
+        const origin = composer ? CSS.escape(composer.originKey) : null;
+        const live = origin
+          ? (document.querySelector<HTMLElement>(
+              `[data-review-return="${origin}"]`,
+            ) ??
+            document.querySelector<HTMLElement>(
+              `[data-review-origin="${origin}"]`,
+            ))
           : null;
         const target = live ?? composer?.returnFocus;
         if (target?.isConnected) target.focus();
@@ -225,6 +288,9 @@ function useLocalReviewController({
     },
     async updateComment(commentId: string, body: string | null) {
       if (!draft) return;
+      const comments = draft.draft.comments;
+      const index = comments.findIndex((c) => c.commentId === commentId);
+      const neighbour = comments[index + 1] ?? comments[index - 1];
       state.pending = true;
       changed();
       const result = await saveDraft(
@@ -247,6 +313,21 @@ function useLocalReviewController({
           ? ""
           : `Draft change failed (${failure(result)}). Your text is kept.`;
       changed();
+      if (result.state !== "recorded") return;
+      if (body !== null)
+        focusLater(`[data-review-edit="${CSS.escape(commentId)}"]`);
+      else
+        focusLater(
+          neighbour
+            ? `[data-comment-id="${CSS.escape(neighbour.commentId)}"]`
+            : "#local-review-heading",
+          "#local-review-heading",
+        );
+    },
+    cancelEdit(commentId: string) {
+      delete state.editing[commentId];
+      changed();
+      focusLater(`[data-review-edit="${CSS.escape(commentId)}"]`);
     },
     async saveSummary() {
       if (!draft || state.summary === null) return;
@@ -265,7 +346,7 @@ function useLocalReviewController({
       changed();
     },
     async send() {
-      if (!draft || !lead || state.send) return;
+      if (!draft || !leadReceives(lead) || !lead || state.send) return;
       const send: LocalReviewSend = {
         key: crypto.randomUUID(),
         expectedDraftVersion: draft.version,
@@ -286,7 +367,7 @@ function useLocalReviewController({
         expectedAssignmentVersion: send.expectedAssignmentVersion,
       });
       settleSend(send, result);
-      await resource.refresh();
+      await Promise.all([resource.refresh(), sentList.refresh()]);
       changed();
     },
     async reconcile() {
@@ -304,7 +385,7 @@ function useLocalReviewController({
         expectedAssignmentVersion: send.expectedAssignmentVersion,
       });
       settleSend(send, result);
-      await resource.refresh();
+      await Promise.all([resource.refresh(), sentList.refresh()]);
       changed();
     },
     async startNew() {
@@ -332,7 +413,8 @@ function useLocalReviewController({
       await resource.refresh();
       changed();
     },
-    acknowledgeRejection() {
+    /** Clears the current send state: after a rejection, or to dismiss a recorded send's banner. */
+    clearSend() {
       state.send = null;
       storeSend(taskId, null);
       changed();
@@ -527,7 +609,8 @@ function AnchorContext({ anchorId }: { anchorId: string }) {
   if (data.state === "unavailable")
     return (
       <p role="status">
-        Original context is unavailable ({data.reason}). Current bytes are not
+        <StatusBadge>{anchorStatusLabel.unavailable}</StatusBadge> Original
+        context is unavailable ({data.reason}). Current bytes are not
         substituted.
       </p>
     );
@@ -544,10 +627,11 @@ function AnchorContext({ anchorId }: { anchorId: string }) {
         {a.side !== "file"
           ? ` · ${a.side === "left" ? "Before" : "After"}`
           : ""}{" "}
-        ·{" "}
-        <StatusBadge>
-          {data.status === "unavailable" ? "unavailable" : data.status}
-        </StatusBadge>
+        · <StatusBadge>{anchorStatusLabel[data.status]}</StatusBadge>
+        {" · "}
+        {a.observedAt
+          ? `observed ${timeLabel(a.observedAt)}`
+          : `captured ${timeLabel(a.capturedAt)}`}
       </p>
       {excerpt !== null ? (
         <pre className="review-anchor-excerpt">
@@ -595,6 +679,7 @@ function SentReview({ operationKey }: { operationKey: string }) {
     <section className="sent-review" aria-label="Sent review">
       <p>
         Review {data.reviewId} · <StatusBadge>{data.state}</StatusBadge>
+        {data.recordedAt ? ` · recorded ${timeLabel(data.recordedAt)}` : ""}
         {data.eventId ? ` · event ${data.eventId}` : ""}
       </p>
       {data.summary === null ? (
@@ -627,6 +712,52 @@ function SentReview({ operationKey }: { operationKey: string }) {
   );
 }
 
+/** Earlier sent reviews of this task; each stays inspectable after Start a new review. */
+function SentReviews() {
+  const review = useLocalReview();
+  if (!review) return null;
+  const { sentList, state, lead } = review;
+  const reviews = sentList.state.data?.data.reviews ?? [];
+  if (reviews.length === 0)
+    return sentList.state.error && !sentList.state.data ? (
+      <p className="muted" role="status">
+        Earlier sent reviews could not be listed.
+      </p>
+    ) : null;
+  return (
+    <section aria-label="Sent reviews">
+      <h4>Sent reviews</h4>
+      <ul className="review-comments">
+        {reviews.map((item) => (
+          <li key={item.operationId}>
+            <p>
+              {timeLabel(item.recordedAt)} · to{" "}
+              {lead?.assignmentId === item.recipientAssignmentId
+                ? lead.name
+                : `assignment ${item.recipientAssignmentId}`}{" "}
+              · review {item.reviewId}
+            </p>
+            <Button
+              variant="secondary"
+              aria-label={`Inspect review ${item.reviewId}`}
+              aria-pressed={state.inspectKey === item.operationId}
+              onClick={() => {
+                state.inspectKey =
+                  state.inspectKey === item.operationId
+                    ? null
+                    : item.operationId;
+                review.changed();
+              }}
+            >
+              Inspect
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** The complete draft, its named destination and the one logical send. */
 export function LocalReviewPanel() {
   const review = useLocalReview();
@@ -641,7 +772,7 @@ export function LocalReviewPanel() {
   const comments = draft?.draft.comments ?? [];
   return (
     <section id="local-review" aria-labelledby="local-review-heading">
-      <h3 id="local-review-heading" className="section-heading">
+      <h3 id="local-review-heading" className="section-heading" tabIndex={-1}>
         Local review
       </h3>
       <p>
@@ -666,7 +797,11 @@ export function LocalReviewPanel() {
           {comments.map((comment) => {
             const editing = state.editing[comment.commentId];
             return (
-              <li key={comment.commentId}>
+              <li
+                key={comment.commentId}
+                data-comment-id={comment.commentId}
+                tabIndex={-1}
+              >
                 {comment.anchorGroupIds.flatMap((groupId) =>
                   (groupAnchors.get(groupId) ?? []).map((anchorId) => (
                     <AnchorContext key={anchorId} anchorId={anchorId} />
@@ -681,12 +816,19 @@ export function LocalReviewPanel() {
                     </label>
                     <Textarea
                       id={`edit-${comment.commentId}`}
+                      autoFocus
                       autoGrow
                       maxLength={4000}
                       value={editing}
                       onChange={(event) => {
                         state.editing[comment.commentId] = event.target.value;
                         review.changed();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          review.cancelEdit(comment.commentId);
+                        }
                       }}
                     />
                   </>
@@ -696,6 +838,7 @@ export function LocalReviewPanel() {
                     {editing === undefined ? (
                       <Button
                         variant="secondary"
+                        data-review-edit={comment.commentId}
                         disabled={state.pending}
                         onClick={() => {
                           state.editing[comment.commentId] = comment.body;
@@ -719,10 +862,7 @@ export function LocalReviewPanel() {
                         </Button>
                         <Button
                           variant="secondary"
-                          onClick={() => {
-                            delete state.editing[comment.commentId];
-                            review.changed();
-                          }}
+                          onClick={() => review.cancelEdit(comment.commentId)}
                         >
                           Cancel edit
                         </Button>
@@ -780,7 +920,7 @@ export function LocalReviewPanel() {
           </p>
           <Button
             disabled={
-              !review.lead ||
+              !leadReceives(review.lead) ||
               locked ||
               state.pending ||
               state.summary !== null ||
@@ -791,6 +931,12 @@ export function LocalReviewPanel() {
             Send review ({comments.length} comment
             {comments.length === 1 ? "" : "s"})
           </Button>
+          {review.lead && !leadReceives(review.lead) && (
+            <p role="status">
+              The project lead's assignment is {review.lead.state} and cannot
+              receive a review. Your comments stay in the draft.
+            </p>
+          )}
           {(state.summary !== null ||
             Object.keys(state.editing).length > 0) && (
             <p className="muted">Save or cancel open edits before sending.</p>
@@ -825,10 +971,7 @@ export function LocalReviewPanel() {
               {send.reason ? ` (${send.reason})` : ""}. Your comments remain
               editable.
             </p>
-            <Button
-              variant="secondary"
-              onClick={() => review.acknowledgeRejection()}
-            >
+            <Button variant="secondary" onClick={() => review.clearSend()}>
               Return to draft
             </Button>
           </div>
@@ -839,15 +982,13 @@ export function LocalReviewPanel() {
             Review sent to {send.recipientName}. One local message was queued.
           </p>
           {draft?.state !== "sent" && (
-            <Button
-              variant="secondary"
-              onClick={() => review.acknowledgeRejection()}
-            >
+            <Button variant="secondary" onClick={() => review.clearSend()}>
               Dismiss
             </Button>
           )}
         </div>
       )}
+      <SentReviews />
       {state.inspectKey && <SentReview operationKey={state.inspectKey} />}
       {draft?.state === "sent" && (
         <Button

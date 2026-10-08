@@ -105,6 +105,6 @@ export function useOperatorResource<T>(
   }, [resource, loader, scope, autoLoad]);
   return {
     state: snapshot.scope === scope ? snapshot.state : resource.state,
-    refresh: () => void resource.load(loader),
+    refresh: () => resource.load(loader),
   };
 }

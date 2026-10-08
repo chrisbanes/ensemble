@@ -270,7 +270,9 @@ test("production local review composes exact multi-origin anchors and sends one 
     web.password,
   );
   await review
-    .getByText(/An unsent draft was removed when its session ended or its access changed/)
+    .getByText(
+      /An unsent draft was removed when its session ended or its access changed/,
+    )
     .waitFor();
   assert.equal(await page.getByText("Unsent private note").count(), 0);
 

@@ -36,6 +36,24 @@ import { LocalReviewPanel, LocalReviewProvider } from "./local-review.js";
 
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
+const sectionIds = [
+  "brief",
+  "files",
+  "review",
+  "context",
+  "changes",
+  "local-review",
+  "history",
+  "reply",
+];
+function showSection(target: HTMLElement) {
+  target.scrollIntoView();
+  const heading = target.querySelector<HTMLElement>("h3,h4");
+  if (heading) {
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }
+}
 const sourceGap =
   "Retained source body and checklist coverage are unavailable. Source fields are retained only up to 16,000 characters; private or missing material may also be unavailable. Consult the external source or ask the lead.";
 function ChecklistCoverage({
@@ -391,17 +409,12 @@ export function TaskWorkspace({
           p.get("section") ?? (p.has("result") ? "review" : "brief"),
         );
         if (target) {
-          target.scrollIntoView();
+          showSection(target);
           anchor.current = null;
           state.historyAnchor = null;
           bottom.current = false;
           state.scrollY = scrollY;
           restoreReadingFocus.current = false;
-          const heading = target.querySelector<HTMLElement>("h3,h4");
-          if (heading) {
-            heading.tabIndex = -1;
-            heading.focus({ preventScroll: true });
-          }
           return;
         }
       }
@@ -435,28 +448,13 @@ export function TaskWorkspace({
         ? [...document.querySelectorAll<HTMLElement>("[data-record-id]")].find(
             (e) => e.dataset.recordId === record,
           )
-        : section &&
-            [
-              "brief",
-              "files",
-              "review",
-              "context",
-              "changes",
-              "local-review",
-              "history",
-              "reply",
-            ].includes(section)
+        : section && sectionIds.includes(section)
           ? document.getElementById(section)
           : null;
       if (target && state.scrollY === 0) {
-        target.scrollIntoView();
-        if (section && !state.focusRecord && !state.historyAnchor) {
-          const heading = target.querySelector<HTMLElement>("h3,h4");
-          if (heading) {
-            heading.tabIndex = -1;
-            heading.focus({ preventScroll: true });
-          }
-        }
+        if (section && !state.focusRecord && !state.historyAnchor)
+          showSection(target);
+        else target.scrollIntoView();
       } else scrollTo(0, state.scrollY);
       if (state.focusRecord)
         readingFocusTarget()?.focus({ preventScroll: true });
@@ -867,6 +865,7 @@ export function TaskWorkspace({
               assignmentId: lead.assignmentId,
               version: lead.version,
               name: data.lead?.name ?? "Project lead",
+              state: lead.state,
             }
           : null
       }
@@ -981,16 +980,7 @@ export function TaskWorkspace({
           )}
         </section>
         <nav className="task-actions" aria-label="Task sections">
-          {[
-            "brief",
-            "files",
-            "review",
-            "context",
-            "changes",
-            "local-review",
-            "history",
-            "reply",
-          ].map((s) => (
+          {sectionIds.map((s) => (
             <ActionLink
               variant="secondary"
               key={s}
@@ -1001,12 +991,7 @@ export function TaskWorkspace({
                 if (!target || event.metaKey || event.ctrlKey || event.shiftKey)
                   return;
                 event.preventDefault();
-                target.scrollIntoView();
-                const heading = target.querySelector<HTMLElement>("h3,h4");
-                if (heading) {
-                  heading.tabIndex = -1;
-                  heading.focus({ preventScroll: true });
-                }
+                showSection(target);
               }}
             >
               {s[0]?.toUpperCase()}
