@@ -11,10 +11,8 @@ import {
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import {
-  CodexRuntime,
-  MacProcessTerminationVerifier,
-} from "../../dist/src/standalone/index.js";
+import { CodexRuntime } from "../../dist/src/standalone/index.js";
+import { MacProcessTerminationVerifier } from "../../dist/src/standalone/termination.js";
 import {
   createTurnCaptureHarness,
   turnCaptureHarnessBudgets,

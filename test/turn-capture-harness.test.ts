@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
 } from "node:fs";
@@ -80,6 +82,36 @@ async function login(web: { origin: string; password: string }) {
 function disposeAttemptDirectory(path: string) {
   rmSync(path, { recursive: true, force: true });
 }
+
+test("WI03 live entry refuses default invocation before fixture or runtime setup", (t) => {
+  const tempRoot = mkdtempSync(
+    join(tmpdir(), "ensemble-wi03-default-refusal-"),
+  );
+  chmodSync(tempRoot, 0o700);
+  t.after(() => disposeAttemptDirectory(tempRoot));
+
+  const result = spawnSync(
+    process.execPath,
+    [join(process.cwd(), "test/wi03/live-turn-capture.mjs")],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: { ...process.env, TMPDIR: tempRoot },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  if (result.error)
+    assert.fail(`entry subprocess failed: ${result.error.message}`);
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr.split(/\r?\n/).filter(Boolean).at(-1),
+    "Refusing actual Codex execution without exactly --live --one-attempt.",
+  );
+  assert.doesNotMatch(result.stderr, /does not provide an export named/);
+  assert.deepEqual(readdirSync(tempRoot), []);
+});
 
 test("the offline live-harness path captures one exact turn through authenticated read and reopen", async (t) => {
   const contexts: RuntimeSpawnContext[] = [];
