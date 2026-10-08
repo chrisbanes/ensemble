@@ -50,7 +50,8 @@ function diagnosticStream() {
 
 export async function runTestProcess(args, options = {}) {
   const started = performance.now();
-  const deadlineMs = options.deadlineMs ?? 600000;
+  // The serial suite includes Chromium and WebKit journeys; keep headroom under the 30-minute CI job.
+  const deadlineMs = options.deadlineMs ?? 900000;
   const graceMs = options.graceMs ?? 5000;
   const forceWaitMs = options.forceWaitMs ?? 5000;
   for (const limit of [deadlineMs, graceMs, forceWaitMs])

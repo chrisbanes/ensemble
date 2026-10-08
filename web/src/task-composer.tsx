@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   composerOptionsSchema,
   taskSchema,
@@ -55,7 +56,8 @@ export function TaskComposer({
       !state.recovered || state.phase === "unknown",
     ),
     [linkText, setLinkText] = useState(state.input.links.join("\n")),
-    [dependencyQuery, setDependencyQuery] = useState("");
+    [dependencyQuery, setDependencyQuery] = useState(""),
+    [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const input = state.input,
     locked = state.phase !== "editable";
   const optionsLoader = useCallback(
@@ -82,6 +84,43 @@ export function TaskComposer({
     taskLoader,
   );
   const edit = (patch: Partial<ComposerInput>) => state.edit(patch);
+  // Fresh options can show a stored selection is no longer permitted before submit.
+  const fresh =
+    state.phase === "editable" && options.state.status === "fresh"
+      ? options.state.data?.data
+      : undefined;
+  const unavailable: Record<string, string> = {};
+  if (
+    fresh &&
+    input.profileId &&
+    !fresh.profiles.some((p) => p.id === input.profileId)
+  )
+    unavailable.profileId = "Choose a currently permitted assignee.";
+  if (
+    fresh &&
+    input.blockerTaskIds.some(
+      (id) => !fresh.dependencies.some((d) => d.id === id),
+    )
+  )
+    unavailable.blockerTaskIds =
+      "Choose existing dependencies in this project.";
+  const unavailableFields = Object.keys(unavailable).join();
+  useEffect(() => {
+    if (!unavailableFields) return;
+    setExpanded((open) => {
+      const next = new Set(open);
+      for (const field of unavailableFields.split(","))
+        next.add(sectionOf[field] ?? field);
+      return next;
+    });
+  }, [unavailableFields]);
+  // Collapsed sections stay mounted, so an error target only needs its section opened.
+  const reveal = (field: string) => {
+    flushSync(() =>
+      setExpanded((open) => new Set(open).add(sectionOf[field] ?? field)),
+    );
+    document.getElementById(`composer-${field}`)?.focus();
+  };
   async function submit(ready: boolean) {
     if (
       state.phase === "editable" &&
@@ -93,32 +132,18 @@ export function TaskComposer({
       render((n) => n + 1);
       return;
     }
-    if (state.phase === "editable" && options.state.data) {
-      const o = options.state.data.data;
-      if (
-        input.profileId &&
-        !o.profiles.some((p) => p.id === input.profileId)
-      ) {
-        state.errors.profileId = "Choose a currently permitted assignee.";
-        render((n) => n + 1);
-        return;
-      }
-      if (
-        input.blockerTaskIds.some(
-          (id) => !o.dependencies.some((d) => d.id === id),
-        )
-      ) {
-        state.errors.blockerTaskIds =
-          "Choose existing dependencies in this project.";
-        render((n) => n + 1);
-        return;
-      }
+    const blocked = Object.keys(unavailable)[0];
+    if (blocked) {
+      state.errors[blocked] = unavailable[blocked] as string;
+      render((n) => n + 1);
+      reveal(blocked);
+      return;
     }
     const isCurrent = state.captureScope();
     await state.submit(client, session.csrfToken, ready);
     if (!isCurrent()) return;
     const first = Object.keys(state.errors)[0];
-    if (first) document.getElementById(`composer-${first}`)?.focus();
+    if (first) reveal(first);
     if (state.phase === "recorded") onRecorded();
   }
   if (state.recovered && !resumed && state.phase === "editable")
@@ -201,13 +226,53 @@ export function TaskComposer({
         </a>
       </section>
     );
-  const error = (field: string) =>
-    state.errors[field] && (
-      <span role="alert" className="body error-text">
-        {state.errors[field]}
-      </span>
+  const error = (field: string) => {
+    const message = state.errors[field] ?? unavailable[field];
+    return (
+      message && (
+        <span role="alert" className="body error-text">
+          {message}
+        </span>
+      )
     );
+  };
   const o = options.state.data?.data;
+  const disclosure = (
+    section: string,
+    label: string,
+    summary: string,
+    children: ReactNode,
+  ) => (
+    <details
+      className="composer-disclosure"
+      open={expanded.has(section)}
+      onToggle={(e) => {
+        const open = e.currentTarget.open;
+        setExpanded((current) => {
+          const next = new Set(current);
+          if (open) next.add(section);
+          else next.delete(section);
+          return next;
+        });
+      }}
+    >
+      <summary>
+        <span className="small-heading">{label}</span>
+        <span className="metadata muted">{summary}</span>
+      </summary>
+      {children}
+    </details>
+  );
+  const assigneeName = input.profileId
+    ? !o
+      ? "Loading assignee options"
+      : (o.profiles.find((p) => p.id === input.profileId)?.name ??
+        "Selected assignee unavailable")
+    : o?.routingEnabled
+      ? "Automatic allocation via project routing"
+      : "Default project lead allocation";
+  const count = (n: number, one: string, many: string) =>
+    n === 0 ? "None" : `${n} ${n === 1 ? one : many}`;
   return (
     <section className="composer" aria-label="Task composer">
       <p className="introduction muted">
@@ -321,6 +386,8 @@ export function TaskComposer({
               aria-label="Desired outcome"
               className="control outcome-input"
               rows={9}
+              autoGrow
+              maxAutoGrowHeight={480}
               value={input.outcome}
               onChange={(e) => edit({ outcome: e.target.value })}
               aria-invalid={Boolean(state.errors.outcome)}
@@ -331,121 +398,157 @@ export function TaskComposer({
             </span>
             {error("outcome")}
           </label>
-          <label className="field body" htmlFor="composer-context">
-            Optional context
-            <Textarea
-              id="composer-context"
-              aria-label="Optional context"
-              className="control"
-              rows={5}
-              value={input.context}
-              onChange={(e) => edit({ context: e.target.value })}
-            />
-            {error("context")}
-          </label>
-          <label className="field body" htmlFor="composer-links">
-            Reference links
-            <Textarea
-              id="composer-links"
-              aria-label="Reference links"
-              className="control"
-              rows={3}
-              value={linkText}
-              onChange={(e) => {
-                setLinkText(e.target.value);
-                edit({ links: e.target.value.split("\n").filter(Boolean) });
-              }}
-            />
-            <span className="metadata muted">
-              One HTTP or HTTPS link per line. References are passive context
-              and grant no repository access.
-            </span>
-            {error("links")}
-          </label>
-          <label className="field body" htmlFor="composer-profileId">
-            Assignee
-            <NativeSelect
-              id="composer-profileId"
-              aria-label="Assignee"
-              value={input.profileId}
-              onChange={(e) => edit({ profileId: e.target.value })}
+          {disclosure(
+            "context",
+            "Optional context",
+            input.context.trim()
+              ? `${input.context.trim().length.toLocaleString()} characters`
+              : "None",
+            <label className="field body" htmlFor="composer-context">
+              Optional context
+              <Textarea
+                id="composer-context"
+                aria-label="Optional context"
+                className="control"
+                rows={5}
+                autoGrow
+                value={input.context}
+                onChange={(e) => edit({ context: e.target.value })}
+              />
+              {error("context")}
+            </label>,
+          )}
+          {disclosure(
+            "links",
+            "Reference links",
+            count(
+              input.links.filter((link) => link.trim()).length,
+              "link",
+              "links",
+            ),
+            <label className="field body" htmlFor="composer-links">
+              Reference links
+              <Textarea
+                id="composer-links"
+                aria-label="Reference links"
+                className="control"
+                rows={3}
+                value={linkText}
+                onChange={(e) => {
+                  setLinkText(e.target.value);
+                  edit({ links: e.target.value.split("\n").filter(Boolean) });
+                }}
+              />
+              <span className="metadata muted">
+                One HTTP or HTTPS link per line. References are passive context
+                and grant no repository access.
+              </span>
+              {error("links")}
+            </label>,
+          )}
+          {disclosure(
+            "assignee",
+            "Assignee",
+            assigneeName,
+            <label className="field body" htmlFor="composer-profileId">
+              Assignee
+              <NativeSelect
+                id="composer-profileId"
+                aria-label="Assignee"
+                value={input.profileId}
+                onChange={(e) => edit({ profileId: e.target.value })}
+                disabled={!o || options.state.status !== "fresh"}
+              >
+                <option value="">
+                  {o?.routingEnabled
+                    ? "Automatic allocation via project routing"
+                    : "Default project lead allocation"}
+                </option>
+                {o?.profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name ?? "Name unavailable"}
+                  </option>
+                ))}
+              </NativeSelect>
+              <span className="metadata muted">
+                An explicit permitted assignee bypasses routing, while all
+                admission holds still apply. The project lead remains
+                accountable.
+              </span>
+              {error("profileId")}
+            </label>,
+          )}
+          {disclosure(
+            "dependencies",
+            "Dependencies",
+            [
+              count(input.blockerTaskIds.length, "selected", "selected"),
+              unavailable.blockerTaskIds &&
+                `${input.blockerTaskIds.filter((id) => !fresh?.dependencies.some((d) => d.id === id)).length} unavailable`,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            <fieldset
+              className="dependency-options"
               disabled={!o || options.state.status !== "fresh"}
             >
-              <option value="">
-                {o?.routingEnabled
-                  ? "Automatic allocation via project routing"
-                  : "Default project lead allocation"}
-              </option>
-              {o?.profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name ?? "Name unavailable"}
-                </option>
-              ))}
-            </NativeSelect>
-            <span className="metadata muted">
-              An explicit permitted assignee bypasses routing, while all
-              admission holds still apply. The project lead remains accountable.
-            </span>
-            {error("profileId")}
-          </label>
-          <fieldset
-            className="dependency-options"
-            disabled={!o || options.state.status !== "fresh"}
-          >
-            <legend className="small-heading">Dependencies</legend>
-            <p className="body muted">
-              Choose existing tasks in this project. These must finish before
-              execution can begin.
-            </p>
-            <label className="field body" htmlFor="dependency-search">
-              Find dependencies
-              <Input
-                id="dependency-search"
-                className="control"
-                value={dependencyQuery}
-                onChange={(e) => setDependencyQuery(e.target.value)}
-              />
-            </label>
-            <div
-              id="composer-blockerTaskIds"
-              className="dependency-list"
-              tabIndex={-1}
-            >
-              {o?.dependencies
-                .filter(
-                  (d) =>
-                    !dependencyQuery ||
-                    d.title
-                      ?.toLocaleLowerCase()
-                      .includes(dependencyQuery.toLocaleLowerCase()),
-                )
-                .map((d) => (
-                  <label className="dependency-choice body" key={d.id}>
-                    <input
-                      type="checkbox"
-                      aria-label={d.title ?? "Title unavailable"}
-                      checked={input.blockerTaskIds.includes(d.id)}
-                      onChange={(e) =>
-                        edit({
-                          blockerTaskIds: e.target.checked
-                            ? [...input.blockerTaskIds, d.id]
-                            : input.blockerTaskIds.filter((id) => id !== d.id),
-                        })
-                      }
-                    />
-                    <span>{d.title ?? "Title unavailable"}</span>
-                    <span className="metadata muted">
-                      {d.state}
-                      {d.source ? ` · GitHub #${d.source.number ?? "?"}` : ""}
-                    </span>
-                  </label>
-                ))}
-            </div>
-            {o?.dependencies.length === 0 && (
-              <p className="body muted">No existing tasks in this project.</p>
-            )}
-            {error("blockerTaskIds")}
-          </fieldset>
+              <legend className="small-heading">Dependencies</legend>
+              <p className="body muted">
+                Choose existing tasks in this project. These must finish before
+                execution can begin.
+              </p>
+              <label className="field body" htmlFor="dependency-search">
+                Find dependencies
+                <Input
+                  id="dependency-search"
+                  className="control"
+                  value={dependencyQuery}
+                  onChange={(e) => setDependencyQuery(e.target.value)}
+                />
+              </label>
+              <div
+                id="composer-blockerTaskIds"
+                className="dependency-list"
+                tabIndex={-1}
+              >
+                {o?.dependencies
+                  .filter(
+                    (d) =>
+                      !dependencyQuery ||
+                      d.title
+                        ?.toLocaleLowerCase()
+                        .includes(dependencyQuery.toLocaleLowerCase()),
+                  )
+                  .map((d) => (
+                    <label className="dependency-choice body" key={d.id}>
+                      <input
+                        type="checkbox"
+                        aria-label={d.title ?? "Title unavailable"}
+                        checked={input.blockerTaskIds.includes(d.id)}
+                        onChange={(e) =>
+                          edit({
+                            blockerTaskIds: e.target.checked
+                              ? [...input.blockerTaskIds, d.id]
+                              : input.blockerTaskIds.filter(
+                                  (id) => id !== d.id,
+                                ),
+                          })
+                        }
+                      />
+                      <span>{d.title ?? "Title unavailable"}</span>
+                      <span className="metadata muted">
+                        {d.state}
+                        {d.source ? ` · GitHub #${d.source.number ?? "?"}` : ""}
+                      </span>
+                    </label>
+                  ))}
+              </div>
+              {o?.dependencies.length === 0 && (
+                <p className="body muted">No existing tasks in this project.</p>
+              )}
+              {error("blockerTaskIds")}
+            </fieldset>,
+          )}
         </fieldset>
         {!locked && (
           <div className="composer-actions">
@@ -472,3 +575,10 @@ export function TaskComposer({
     </section>
   );
 }
+
+const sectionOf: Record<string, string> = {
+  context: "context",
+  links: "links",
+  profileId: "assignee",
+  blockerTaskIds: "dependencies",
+};

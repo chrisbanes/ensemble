@@ -1372,3 +1372,145 @@ preceding design passes, not an independently repeated full audit of the final
 revision. Native save/reopen verified the intended file, and the final Save
 cleared the Edited indicator. Production interaction and WI01–WI13 evidence
 remain with #782 and the service slices.
+
+## Operator refinement proposal — #800 T1, 7 October 2026
+
+[#800](https://github.com/chrisbanes/ensemble/issues/800) owns this design proposal.
+The exact implementation plan remains the published
+[implementation plan](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6047644893).
+Chris explicitly approved both that plan and the Pen composition in
+[resume comment 6062834729](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6062834729).
+Implementation and its browser evidence proceed within that unchanged scope.
+Existing product contracts and #793 source, return, and task anchors remain
+unchanged.
+
+The new canvas section is `qIVmm` (`#800 · Operator refinement review`). It
+contains eight static compositions, all using the installed Dark / Neutral /
+Default shadcn library, Inter, JetBrains Mono where identifiers appear, and a
+12px minimum supporting-text size. It adds no new reusable components, theme,
+entry point, or product behavior.
+
+| Canvas composition | Node | Size | Review purpose |
+| --- | --- | --- | --- |
+| Tablet Overview / List | `h23qD` | 1024 × 768 | Existing drawer, attention summary, compact task rows, and List/Board switch. |
+| Compact tablet Inbox / question | `FsTwL` | 800 × 768 | Fieldnotes Q-204/r2 is one three-question form with one disabled Submit answers action while Q2 exceeds its limit; the task remains Paused. |
+| Tablet task detail / evidence | `dUUIS` | 1024 × 768 | Task situation and next actor stay distinct from the evidence rail. |
+| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Canonical Atlas AT-142 identity, source, next actor and return anchor; AT-155 is the separate running cold-start task and A-108 its recorded Eli repair assignment. |
+| Tablet composer / validation disclosure | `LBzlj` | 1024 × 768 | Optional summaries, expanded dependency error, focus treatment, and both actions. |
+| Tablet all-projects Board | `nKHGv` | 1024 × 768 | Ready 0, Running 2, Waiting 3 and Paused 1; Stopping and Uncertain remain reachable. Held Ready work remains Ready and is grouped in Waiting. |
+| Phone question / short viewport | `Sejey` | 390 × 480 | Q-204/r2 Q2–Q3 scroll position, retained Q1 selection, over-limit Q2 error, Q3 draft, and one disabled Submit answers action. |
+| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries; unavailable dependency shows its error before submit while Save draft and Create and start stay enabled. |
+
+The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
+`E7qC9` / `MUFPD` (Board), `cGjau` (Inbox), `RyH7J` (task detail),
+`WaBk5` (Search), and `Z315o` / `MhM7z` (collapsed/full composer). Existing
+phone references remain `pmu7r` / `YzbOM` / `m6ZUJR` (question), `i3glx`
+(composer), and `wXiWx` / `JX4dm` (expanded/collapsed validation). The new
+tablet frames use the existing navigation drawer at 1024px and keep the Inbox
+queue and detail side by side at 800px. The shell implementation switches to
+the navigation drawer through 1120 CSS pixels. The 224px sidebar plus the
+existing 40px horizontal page padding leaves 857px of task content at 1121px;
+the production browser test checks 1119, 1120, and 1121px as well as 759, 760,
+and 800px. This measured shell breakpoint does not qualify the task-row,
+Inbox, or reading layouts by itself. The approved proposal also uses a textarea
+growth cap measured against content and scrolling inside each named viewport;
+the implementation differences below record their browser evidence. The
+approved rules supersede conflicting historical
+224px sidebar, 760px drawer, and fixed 260px desktop / 180px phone
+outcome-editor guidance for this work; retain those values as historical
+evidence. Continue to record measured textarea cap, scroll ownership, safe
+areas, focus, and input-resize evidence as those slices are implemented.
+
+The List, Board, Inbox, Search and composer specimens preserve current routing
+and state semantics. Q-204/r2 is one unsubmitted three-answer group: Q1 is valid,
+Q2 has all three fixed choices selected and exceeds its 1–2 limit, and Q3 retains
+its supplied text. The single Submit answers action stays disabled until the
+answers are valid. Recording answers does not resume Fieldnotes F-203 or clear
+independent holds. Search keeps its query, filters, selected result, and return
+origin; selected Atlas AT-142 retains `acme/atlas#142`, Mira, A-105 / Builder,
+source S2, W-18, R3 `b72e910` at 11:40, and its next actor. The separate cold-start result is task AT-155; A-108 names Eli's recorded
+repair assignment. Task evidence does not decide source ownership or
+release a hold. The All-projects Board preserves Ready readiness while grouping
+tasks with dependency holds in Waiting; Q-204 remains Paused until separately
+resumed. The cold-start fixture is running task AT-155: its latest check failed,
+Eli's check-repair assignment A-108 is recorded, and no operator request is
+recorded. Overview, Board, Search, and detail preserve that same state and next
+actor. `Document retry policy` remains Waiting with the operator action to
+choose retry limits and Jonas as lead in both List and Board. List / Board changes
+presentation only and does not imply drag or state mutation. Composer summaries
+show the supplied context,
+references, assignee and dependency; expanding the dependency reveals the
+validation error without discarding its value. Save draft and Create and start
+stay enabled; either one focuses the error and sends no command. The supplied-values panel keeps its
+unfinished-input notice concise and omits creation-receipt/admission explanation
+before submission. Implementation notes stay in this handoff: measure navigation
+and textarea behavior, verify scroll ownership and caret retention, and validate
+focus before submission. These labels and data are fictional review fixtures.
+
+The entry and recovery inventory is limited to existing references: desktop
+sidebar `X:PV1ln`; phone header `KthOL`; authentication expiry and private-state
+purge `OwZka`; interrupted-read recovery `rD02Q`; retained original file
+`xD63J` / `KVIG2` and diff `Mn97J`; Markdown `pUX8f` / `bz4VC`; and raster/PDF
+specimens `JCGmX`, `MKzws` and `FCvHl`. This proposal adds no dedicated
+account-settings, guided-login, or retained-HTML viewer composition. Their
+route and recovery obligations remain in the specification; this canvas does
+not show a browser renderer for retained HTML. No context-menu, extension, or
+notification entry point is introduced. The five existing comparison-image
+references still render placeholders in Pen MCP, so comparison-image loading
+remains unverified.
+
+The short phone question frame intentionally clips `wHhpl`, the long answer body
+inside the 390 × 480 scroll viewport; the Q2–Q3 view ends at the pinned action
+area. Three disabled `Card Actions` slots in reused option components are
+zero-sized and do not appear in the render. Other visible-node bounds are inside
+their viewports. The proposed scroll owner is the named body or queue region,
+not the page. Board columns may scroll horizontally; the phone question and
+composer keep their primary action visible in the 480px frame. A client still
+needs to apply real bottom safe-area insets. It must preserve the selected
+answer, draft, text selection and caret while these regions scroll or resize.
+
+Canvas review does not prove keyboard traversal or focus restoration, forced-
+colour contrast, scrollbar ownership/chaining, virtual-keyboard behavior,
+safe-area insets, textarea growth and caret retention, or real-device viewport,
+zoom and text-scale behavior. Those need browser and physical-device evidence.
+No application build or test was run for this design-only proposal. Native
+save/reopen, resolved bounds and exported review images are recorded in the
+T1 evidence packet; production interaction remains for the implementation gate.
+
+Implementation differences recorded on 8 October 2026:
+
+- Question actions sit in flow directly below the bounded question body rather
+  than sticking to the page. A page-sticky footer covered the last field after
+  it scrolled into view. At 390 × 480 the actions are reached by scrolling the
+  task page, or the bounded Inbox detail, which is the Inbox's only question
+  scroll owner. They are not always on screen as in `Sejey`.
+- Create and start is not disabled for an unavailable assignee or dependency.
+  When fresh options show a stored selection is no longer permitted, the
+  composer opens that section with its error before submit. Either action then
+  refocuses the error and sends no command. The frames were updated to match on
+  8 October 2026: a disabled button explains nothing, and the same check also
+  blocks Save draft.
+- Browser evidence covers Chromium and Playwright WebKit (`ux800-matrix`,
+  `ui08-shell`, `ui05-questions` and the task/composer suites). Forced colours
+  are emulated in Chromium only. The safe-area inset is checked through an
+  emulated custom property. Physical Safari/iPhone, virtual keyboards, the
+  recovery route and the retained HTML operator remain outside this matrix.
+
+Consistency pass on 8 October 2026 across `h23qD`–`g5wmIu`:
+
+- Screen and task titles use 18/600 and section headings 16/600, matching the
+  desktop and phone baselines.
+- Phone composer `g5wmIu` shows the same four Context / References /
+  Assignee / Dependencies rows as `LBzlj` and the production composer. It is
+  shown scrolled to its end, so the unavailable dependency and its error sit
+  above the enabled actions.
+- `Sejey` shows the Q2 limit error in the destructive colour, as `FsTwL` does.
+- Search and Overview now describe AT-155 and Q-204/r2 with the same state and
+  next actor as Board.
+- The tablet Overview header drops the extra product label, and the dependency
+  field uses the shared 6px radius.
+- Identifiers inside sentences remain Inter across the canvas. Board column
+  tabs keep the library's 2px radius.
+
+The file was saved in Pen, reopened and read back. Only the intended scroll
+regions `wHhpl` and `fTREM` clip.

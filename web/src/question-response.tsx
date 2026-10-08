@@ -60,11 +60,18 @@ export function QuestionResponse({
     formElement = useRef<HTMLFormElement>(null);
   const state = data?.form ? states.forQuestion(data) : null;
   useLayoutEffect(() => {
-    if (content.current && state) {
-      content.current.scrollTop = state.scrollTop;
-      if (state.focusId)
-        document.getElementById(state.focusId)?.focus({ preventScroll: true });
-    }
+    // The bounded Inbox detail owns question scrolling there; elsewhere the body does.
+    const owner =
+      content.current?.closest<HTMLElement>(".inbox-detail") ?? content.current;
+    if (!owner || !state) return;
+    owner.scrollTop = state.scrollTop;
+    if (state.focusId)
+      document.getElementById(state.focusId)?.focus({ preventScroll: true });
+    const record = () => {
+      state.scrollTop = owner.scrollTop;
+    };
+    owner.addEventListener("scroll", record);
+    return () => owner.removeEventListener("scroll", record);
   }, [state]);
   const sameForm =
     state &&
@@ -196,13 +203,7 @@ export function QuestionResponse({
                   be retargeted.
                 </p>
               )}
-              <div
-                className="question-content"
-                ref={content}
-                onScroll={(e) => {
-                  state.scrollTop = e.currentTarget.scrollTop;
-                }}
-              >
+              <div className="question-content" ref={content}>
                 {state.form.questions.map((q, questionIndex) => {
                   const answer = (data.status === "recorded" && data.answers
                       ? data.answers
@@ -237,6 +238,7 @@ export function QuestionResponse({
                           {q.label}
                           <Textarea
                             id={`${qid}-text`}
+                            autoGrow
                             value={answer.text}
                             disabled={!canEdit}
                             maxLength={q.maxLength ?? 16000}
@@ -308,6 +310,7 @@ export function QuestionResponse({
                               Custom answer: {q.label}
                               <Textarea
                                 id={`${qid}-custom`}
+                                autoGrow
                                 disabled={!canEdit}
                                 value={answer.text}
                                 maxLength={q.maxLength ?? 16000}

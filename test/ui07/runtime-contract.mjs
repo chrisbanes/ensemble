@@ -696,6 +696,8 @@ export async function runQualification(options = {}) {
       await page
         .getByLabel("Desired outcome", { exact: true })
         .fill(instructions);
+      // The assignee lives in a collapsed composer disclosure.
+      await page.locator("summary", { hasText: "Assignee" }).click();
       await page.getByLabel("Assignee", { exact: true }).selectOption("");
       await page
         .getByRole("button", { name: "Create and start", exact: true })

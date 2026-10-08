@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+:root {
+  --operator-safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -29,6 +33,52 @@ p {
 :focus-visible:not([data-slot]) {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+
+[data-slot="button"]:focus-visible,
+[data-slot="input"]:focus-visible,
+[data-slot="native-select"]:focus-visible,
+[data-slot="textarea"]:focus-visible,
+[data-slot="sheet-content"]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+
+.control:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.drawer {
+  overscroll-behavior: contain;
+  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
+}
+
+@media (forced-colors: active) {
+  [data-slot="button"]:focus-visible,
+  [data-slot="input"]:focus-visible,
+  [data-slot="native-select"]:focus-visible,
+  [data-slot="textarea"]:focus-visible,
+  [data-slot="sheet-content"]:focus-visible,
+  :focus-visible:not([data-slot]) {
+    outline-color: Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control,
+  [data-slot="button"],
+  [data-slot="input"],
+  [data-slot="native-select"],
+  [data-slot="textarea"],
+  [data-slot="sheet-content"] {
+    transition: none;
+    animation: none;
+    scroll-behavior: auto;
+  }
+
+  .control:not(:disabled):active {
+    transform: none;
+  }
 }
 
 .muted {
@@ -72,10 +122,11 @@ p {
 .shell {
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 224px) minmax(0, 1fr);
 }
 
 .sidebar {
+  min-width: 0;
   padding: var(--space-24) var(--space-16);
   background: var(--sidebar);
   border-right: 1px solid var(--border);
@@ -106,6 +157,7 @@ nav h2 {
   border-radius: var(--radius-md);
   text-decoration: none;
   color: var(--sidebar-foreground);
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -203,20 +255,19 @@ nav h2 {
 }
 
 .task-filters {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
   gap: var(--space-12);
   margin-top: var(--space-24);
 }
 
 .task-filters .field {
-  margin: 0 0 var(--space-12);
-  min-width: 120px;
-  flex: 1;
+  margin: 0;
+  min-width: 0;
 }
 
 .task-filters .field:first-child {
-  flex-basis: 240px;
+  grid-column: span 2;
 }
 
 .task-title {
@@ -229,14 +280,18 @@ nav h2 {
 
 .task-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 1.6fr) minmax(180px, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-auto-flow: row dense;
   align-items: start;
   column-gap: var(--space-16);
   row-gap: var(--space-4);
   padding: var(--space-16) 0;
   border-bottom: 1px solid var(--border);
   overflow-wrap: anywhere;
+}
+
+.task-row > * {
+  min-width: 0;
 }
 
 .task-row p,
@@ -253,33 +308,24 @@ nav h2 {
 
 .task-row .task-project-metadata {
   grid-column: 1;
-  grid-row: 1;
 }
 
 .task-row .task-title {
-  grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-column: 1;
+  grid-row: 1;
   align-self: center;
 }
 
-.task-row .task-status,
-.task-row .task-source-state {
-  grid-column: 3;
-}
-
 .task-row .task-status {
+  grid-column: 2;
   grid-row: 1;
 }
 
 .task-row .task-lead {
-  grid-column: 1;
-  grid-row: 2;
+  grid-column: 2;
 }
 
-.task-row .task-source-state {
-  grid-row: 2;
-}
-
+.task-row .task-source-state,
 .task-row .task-reason {
   grid-column: 1 / -1;
 }
@@ -348,8 +394,26 @@ nav h2 {
 
 .composer .outcome-input {
   min-height: 260px;
-  resize: vertical;
   line-height: 1.5;
+}
+
+.composer-disclosure {
+  border-top: 1px solid var(--border);
+  padding: var(--space-12) 0;
+}
+
+.composer-disclosure summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-4) var(--space-12);
+  min-height: 44px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.composer-disclosure[open] summary {
+  margin-bottom: var(--space-12);
 }
 
 .composer-policy {
@@ -391,7 +455,8 @@ nav h2 {
   display: flex;
   gap: var(--space-12);
   flex-wrap: wrap;
-  padding: var(--space-16) 0;
+  padding: var(--space-16) 0
+    calc(var(--space-16) + var(--operator-safe-area-inset-bottom));
   margin-top: var(--space-24);
 }
 
@@ -550,13 +615,12 @@ nav h2 {
   outline-offset: 2px;
 }
 
-@media (max-width: 759px) {
+@media (max-width: 1120px) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .sidebar,
-  .desktop-context {
+  .sidebar {
     display: none;
   }
 
@@ -564,8 +628,16 @@ nav h2 {
     display: block;
   }
 
-  [data-slot="sheet-content"] .nav-link {
+  .phone-nav [data-slot="button"],
+  .drawer [data-slot="button"],
+  .drawer .nav-link {
     min-height: 44px;
+  }
+}
+
+@media (max-width: 759px) {
+  .desktop-context {
+    display: none;
   }
 
   .topbar {
@@ -578,6 +650,10 @@ nav h2 {
 
   .page-title {
     flex-wrap: wrap;
+  }
+
+  .task-filters .field:first-child {
+    grid-column: 1 / -1;
   }
 
   .legacy-operator {
@@ -796,6 +872,9 @@ nav h2 {
   width: 100%;
   min-height: 5rem;
 }
+textarea[data-auto-grow="true"] {
+  resize: none;
+}
 .question-option {
   display: flex;
   align-items: flex-start;
@@ -820,12 +899,17 @@ nav h2 {
 }
 .question-content {
   overflow: auto;
+  overscroll-behavior: contain;
   max-height: min(55dvh, 42rem);
   min-height: 0;
   padding: 0.5rem 0.25rem;
 }
 .question-submit {
-  padding: 1rem 0 calc(1rem + env(safe-area-inset-bottom));
+  padding: 0.75rem 0
+    calc(
+      0.75rem +
+      var(--operator-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))
+    );
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
@@ -854,6 +938,17 @@ nav h2 {
 .inbox-queue,
 .inbox-detail {
   min-width: 0;
+  min-height: 0;
+}
+.inbox-detail {
+  max-height: min(70dvh, calc(100dvh - 12rem));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+/* The bounded detail is the only scroll owner; a nested bound traps scrolling. */
+.inbox-detail .question-content {
+  max-height: none;
+  overflow: visible;
 }
 .inbox-filters {
   display: flex;
@@ -870,7 +965,8 @@ nav h2 {
   max-width: 100%;
 }
 .inbox-rows {
-  max-height: 65vh;
+  max-height: min(65dvh, calc(100dvh - 16rem));
+  min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -894,13 +990,6 @@ nav h2 {
   display: inline-block;
   margin: 0.5rem 0.75rem 0.5rem 0;
 }
-.question-submit {
-  position: sticky;
-  bottom: 0;
-  background: var(--background);
-  padding-block: 0.75rem;
-  z-index: 1;
-}
 @media (max-width: 760px) {
   .action-inbox {
     grid-template-columns: minmax(0, 1fr);
@@ -908,12 +997,6 @@ nav h2 {
   .action-inbox:not(.inbox-selected) .inbox-detail,
   .action-inbox.inbox-selected .inbox-queue {
     display: none;
-  }
-  .inbox-rows {
-    max-height: none;
-  }
-  .inbox-detail .question-content {
-    max-height: 55dvh;
   }
   .question-submit button {
     min-height: 44px;

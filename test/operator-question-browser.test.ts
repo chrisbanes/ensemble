@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chromium, type Browser } from "playwright";
+import { chromium, webkit, type Browser } from "playwright";
 import {
   browserSuite,
   captureBrowserEvidence,
@@ -243,7 +243,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
         submitTop &&
         lastField.y >= 0 &&
         lastField.y + lastField.height <= submitTop.y,
-      "Last field remains fully reachable above reserved submission actions",
+      `Last field remains fully reachable above reserved submission actions: ${JSON.stringify({ lastField, submitTop, height, content: await form.locator(".question-content").boundingBox() })}`,
     );
     await page.evaluate(
       () =>
@@ -261,6 +261,447 @@ test("production mixed form preserves literal schema, keyboard input, field erro
     await page.getByText("Exact typed answer", { exact: true }).count(),
     0,
   );
+});
+
+test("opt-in answer textarea grows to its measured bound and preserves selection across Chromium and WebKit resize", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedOwnQuestion(f),
+    web = await j.start("fixture.web", () => f.startWeb());
+  const engines = [
+    { name: "chromium", type: chromium },
+    { name: "webkit", type: webkit },
+  ] as const;
+  for (const engine of engines) {
+    browser = await j.start(`browser.launch.${engine.name}`, () =>
+      engine.type.launch(),
+    );
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 480 },
+    });
+    j.observe(page);
+    page.setDefaultTimeout(5000);
+    let commandWrites = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/operator/commands"
+      )
+        commandWrites++;
+    });
+    await page.goto(
+      `${web.origin}/app/tasks/${a.taskId}?request=${a.interactionId}`,
+    );
+    await page.getByLabel("Password").fill(web.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    const form = page.getByRole("region", { name: "Exact question response" });
+    const answer = form.getByRole("textbox", { name: "Explain", exact: true });
+    await answer.waitFor();
+    await answer.focus();
+    const ordinaryFocus = await answer.evaluate((element) => ({
+      outlineStyle: getComputedStyle(element).outlineStyle,
+      outlineWidth: getComputedStyle(element).outlineWidth,
+    }));
+    assert.deepEqual(ordinaryFocus, {
+      outlineStyle: "solid",
+      outlineWidth: "2px",
+    });
+    if (engine.name === "chromium") {
+      await page.emulateMedia({ forcedColors: "active" });
+      const forcedFocus = await answer.evaluate((element) => ({
+        active: document.activeElement === element,
+        outlineStyle: getComputedStyle(element).outlineStyle,
+        outlineWidth: getComputedStyle(element).outlineWidth,
+        outlineColor: getComputedStyle(element).outlineColor,
+      }));
+      assert.equal(forcedFocus.active, true);
+      assert.equal(forcedFocus.outlineStyle, "solid");
+      assert.equal(forcedFocus.outlineWidth, "2px");
+      assert.notEqual(forcedFocus.outlineColor, "rgba(0, 0, 0, 0)");
+      await page.emulateMedia({ forcedColors: "none" });
+    }
+    await page.addStyleTag({
+      content: ":root { --operator-safe-area-inset-bottom: 24px; }",
+    });
+    const inset = await form.locator(".question-submit").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        top: Number.parseFloat(style.paddingTop),
+        bottom: Number.parseFloat(style.paddingBottom),
+      };
+    });
+    assert.ok(
+      inset.bottom >= inset.top + 24,
+      `The action footer keeps the emulated 24px inset: ${JSON.stringify(inset)}`,
+    );
+
+    const longAnswer = "Review evidence and recovery status. ".repeat(36);
+    await answer.fill(longAnswer);
+    const initial = await answer.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement;
+      return {
+        value: textarea.value,
+        height: textarea.clientHeight,
+        scrollHeight: textarea.scrollHeight,
+        overflowY: getComputedStyle(textarea).overflowY,
+      };
+    });
+    assert.equal(initial.value, longAnswer);
+    assert.ok(
+      initial.height >= 96 && initial.height <= 320,
+      JSON.stringify(initial),
+    );
+    assert.ok(initial.scrollHeight > initial.height, JSON.stringify(initial));
+    assert.equal(initial.overflowY, "auto");
+    await captureBrowserEvidence(page, `${engine.name}-390x480-answer-cap`, {
+      fullPage: false,
+    });
+
+    const selection = { start: 81, end: 117 };
+    await answer.evaluate((element, range) => {
+      const textarea = element as HTMLTextAreaElement;
+      textarea.focus();
+      textarea.setSelectionRange(range.start, range.end, "forward");
+    }, selection);
+    await page.setViewportSize({ width: 800, height: 480 });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    const resized = await answer.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement;
+      return {
+        value: textarea.value,
+        height: textarea.clientHeight,
+        start: textarea.selectionStart,
+        end: textarea.selectionEnd,
+        direction: textarea.selectionDirection,
+        focused: document.activeElement === textarea,
+      };
+    });
+    assert.equal(resized.value, longAnswer);
+    assert.equal(
+      resized.height <= initial.height,
+      true,
+      JSON.stringify(resized),
+    );
+    assert.equal(resized.start, selection.start);
+    assert.equal(resized.end, selection.end);
+    assert.equal(resized.direction, "forward");
+    assert.equal(resized.focused, true);
+    await page.keyboard.insertText("EDIT");
+    const edited = `${longAnswer.slice(0, selection.start)}EDIT${longAnswer.slice(selection.end)}`;
+    assert.equal(await answer.inputValue(), edited);
+    await page.setViewportSize({ width: 390, height: 480 });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    const content = form.locator(".question-content");
+    const contentMetrics = await content.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return {
+        height: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+        overscroll: getComputedStyle(element).overscrollBehaviorY,
+      };
+    });
+    assert.ok(contentMetrics.scrollHeight > contentMetrics.height);
+    assert.ok(contentMetrics.scrollTop > 0);
+    assert.equal(contentMetrics.overscroll, "contain");
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+    );
+    await form.locator(".question-submit").scrollIntoViewIfNeeded();
+    const actions = await form
+      .locator(".question-submit button")
+      .evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const rect = button.getBoundingClientRect();
+          return (
+            rect.top >= 0 &&
+            rect.bottom <= innerHeight &&
+            document
+              .elementFromPoint(
+                rect.x + rect.width / 2,
+                rect.y + rect.height / 2,
+              )
+              ?.closest("button") === button
+          );
+        }),
+      );
+    assert.ok(actions.every(Boolean), JSON.stringify(actions));
+    assert.equal(commandWrites, 0);
+    j.diagnostics.push(
+      JSON.stringify({
+        milestone: `${engine.name}-textarea-growth-resize`,
+        initial,
+        resized,
+        inset,
+        contentMetrics,
+        commandWrites,
+        browser: browser.version(),
+      }),
+    );
+    await captureBrowserEvidence(
+      page,
+      `${engine.name}-800x480-resized-answer`,
+      {
+        fullPage: false,
+      },
+    );
+    await browser.close();
+    browser = undefined;
+  }
+});
+
+test("Inbox queue and selected detail scroll independently at phone heights", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const questions = [];
+  for (let index = 0; index < 7; index++)
+    questions.push(
+      await seedOwnQuestion(
+        f,
+        undefined,
+        `Scrollable request ${index + 1} ${"project recovery review ".repeat(4)}`,
+      ),
+    );
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch.chromium", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(5000);
+  let commandWrites = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/operator/commands"
+    )
+      commandWrites++;
+  });
+  await page.goto(`${web.origin}/app/inbox`);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .locator(".inbox-row")
+    .nth(questions.length - 1)
+    .waitFor();
+  assert.equal(await page.locator(".inbox-row").count(), questions.length);
+  const rows = page.locator(".inbox-rows");
+  for (const height of [844, 480]) {
+    await page.setViewportSize({ width: 390, height });
+    const metrics = await rows.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      maxHeight: getComputedStyle(element).maxHeight,
+      overscroll: getComputedStyle(element).overscrollBehaviorY,
+    }));
+    assert.ok(
+      metrics.scrollHeight > metrics.clientHeight,
+      JSON.stringify(metrics),
+    );
+    assert.equal(metrics.overscroll, "contain");
+    await rows.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await rows.scrollIntoViewIfNeeded();
+    const rowBox = await rows.boundingBox();
+    assert.ok(rowBox);
+    await page.mouse.move(
+      rowBox.x + rowBox.width / 2,
+      rowBox.y + rowBox.height / 2,
+    );
+    await page.mouse.wheel(0, 10000);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    const atEnd = await rows.evaluate((element) => ({
+      scrollTop: element.scrollTop,
+      max: element.scrollHeight - element.clientHeight,
+    }));
+    assert.ok(
+      atEnd.scrollTop > 0 && atEnd.scrollTop >= atEnd.max - 1,
+      JSON.stringify({ atEnd, rowBox, height }),
+    );
+    await captureBrowserEvidence(page, `390x${height}-inbox-queue-end`, {
+      fullPage: false,
+    });
+  }
+
+  await page.setViewportSize({ width: 390, height: 480 });
+  await rows.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await rows.scrollIntoViewIfNeeded();
+  const queuePageScroll = await page.evaluate(() => window.scrollY);
+  // A page that cannot scroll up would make the no-chaining check vacuous.
+  assert.ok(queuePageScroll > 0, String(queuePageScroll));
+  const rowBox = await rows.boundingBox();
+  assert.ok(rowBox && rowBox.y >= 0 && rowBox.y + rowBox.height <= 480);
+  await page.mouse.move(
+    rowBox.x + rowBox.width / 2,
+    rowBox.y + rowBox.height / 2,
+  );
+  await page.mouse.wheel(0, -800);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  assert.equal(await page.evaluate(() => window.scrollY), queuePageScroll);
+  await rows
+    .locator(".inbox-row")
+    .filter({ hasText: "Scrollable request 1" })
+    .click();
+  const detail = page.locator(".inbox-detail");
+  const form = page.getByRole("region", { name: "Exact question response" });
+  await form.getByRole("textbox", { name: "Explain", exact: true }).waitFor();
+  const detailMetrics = await detail.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overscroll: getComputedStyle(element).overscrollBehaviorY,
+  }));
+  assert.ok(
+    detailMetrics.scrollHeight > detailMetrics.clientHeight,
+    JSON.stringify(detailMetrics),
+  );
+  assert.equal(detailMetrics.overscroll, "contain");
+  // The detail is the only question scroll owner; a nested bound would trap the wheel.
+  const questionMetrics = await form
+    .locator(".question-content")
+    .evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+  assert.ok(
+    questionMetrics.scrollHeight <= questionMetrics.clientHeight + 1,
+    JSON.stringify(questionMetrics),
+  );
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await detail.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  const detailPageScroll = await page.evaluate(() => window.scrollY);
+  const detailBox = await detail.boundingBox();
+  assert.ok(detailBox && detailBox.y + detailBox.height <= 480);
+  const submit = form.getByRole("button", {
+    name: "Submit answer",
+    exact: true,
+  });
+  // Wheel over the detail, as a reader would, until the action shows.
+  let actionBox = null,
+    visibleDetail = null;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await page.mouse.move(
+      detailBox.x + detailBox.width / 2,
+      detailBox.y + detailBox.height / 2,
+    );
+    await page.mouse.wheel(0, 200);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    actionBox = await submit.boundingBox();
+    visibleDetail = await detail.boundingBox();
+    if (
+      actionBox &&
+      visibleDetail &&
+      actionBox.y >= visibleDetail.y &&
+      actionBox.y + actionBox.height <=
+        visibleDetail.y + visibleDetail.height &&
+      actionBox.y + actionBox.height <= 480
+    )
+      break;
+  }
+  assert.ok(
+    actionBox &&
+      visibleDetail &&
+      actionBox.y >= Math.max(0, visibleDetail.y) &&
+      actionBox.y + actionBox.height <=
+        Math.min(480, visibleDetail.y + visibleDetail.height),
+    JSON.stringify({ actionBox, visibleDetail }),
+  );
+  // Further wheeling at the detail end does not chain into the page.
+  await page.mouse.wheel(0, 800);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  assert.equal(await page.evaluate(() => window.scrollY), detailPageScroll);
+  await captureBrowserEvidence(page, "390x480-inbox-question-detail", {
+    fullPage: false,
+  });
+
+  // Each request keeps its own reading position in the shared detail scroller.
+  await page.setViewportSize({ width: 1024, height: 600 });
+  // Earlier wheel input can leave a smooth-scroll animation running; wait it out.
+  const settledScrollTop = () =>
+    detail.evaluate(
+      (element) =>
+        new Promise<number>((resolve) => {
+          let last = -1,
+            stable = 0;
+          const step = () => {
+            stable = element.scrollTop === last ? stable + 1 : 0;
+            last = element.scrollTop;
+            if (stable >= 10) resolve(last);
+            else requestAnimationFrame(step);
+          };
+          step();
+        }),
+    );
+  await settledScrollTop();
+  const open = async (title: string) => {
+    await rows.locator(".inbox-row").filter({ hasText: title }).click();
+    await page
+      .getByRole("region", { name: "Exact question response" })
+      .getByRole("textbox", { name: "Explain", exact: true })
+      .waitFor();
+    return settledScrollTop();
+  };
+  await open("Scrollable request 1");
+  await detail.evaluate((element) => {
+    element.scrollTop = 150;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const first = await detail.evaluate((element) => element.scrollTop);
+  assert.ok(first > 0, String(first));
+  assert.equal(await open("Scrollable request 2"), 0);
+  assert.equal(await open("Scrollable request 1"), first);
+  assert.equal(commandWrites, 0);
 });
 
 test("action Inbox preserves drafts across exact task entry, filter and phone queue/detail; resolved selection stays explicit", async (_t, j) => {
