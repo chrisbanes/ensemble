@@ -173,7 +173,10 @@ function rateLimitResumeAt(response: Response): number | undefined {
     now + Number(retryAfter ?? Number.NaN) * 1000,
   ].filter(Number.isFinite);
   // ponytail: a limit with no usable reset time waits one minute; tune if GitHub documents a better bound.
-  return times.length ? Math.max(...times) : now + 60_000;
+  // Headers are external input: cap at GitHub's one-hour primary window so they cannot pause discovery indefinitely.
+  return times.length
+    ? Math.min(Math.max(...times), now + 3_600_000)
+    : now + 60_000;
 }
 
 function safeReason(error: unknown): string {

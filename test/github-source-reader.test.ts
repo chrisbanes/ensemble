@@ -434,6 +434,21 @@ test("403 with an exhausted limit or 429 with retry-after reports a rate-limited
   );
 });
 
+test("a rate-limit pause from external headers is capped at one hour", async () => {
+  const before = Date.now();
+  const result = await limitedReader(
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "999999999" },
+      }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(result.reason, "rate-limited");
+  const resumeAt = result.complete === false ? (result.resumeAt ?? 0) : 0;
+  assert.ok(resumeAt >= before + 3_600_000 && resumeAt <= after + 3_600_000);
+});
+
 test("a 403 without rate-limit headers stays an http failure", async () => {
   const denied = await limitedReader(
     () => new Response("denied", { status: 403 }),
