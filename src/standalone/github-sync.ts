@@ -5,9 +5,11 @@ import {
 import type { DomainStore } from "../core/domain.js";
 import {
   GitHubHttpSourceReader,
+  type BlockerSnapshot,
   type GitHubSourceReader,
   type IssueReference,
   type IssueSnapshot,
+  type IssueStatus,
   type SelectionSnapshot,
 } from "./github-source.js";
 
@@ -103,7 +105,6 @@ export class GitHubSynchronizer {
         if (!committed) continue;
         if (!snapshot.complete) continue;
         for (const issue of snapshot.issues) {
-          if (this.paused(credentialRef)) break;
           if (!this.readsBlockers(issue)) continue;
           const reference: IssueReference = {
             nodeId: issue.nodeId,
@@ -111,11 +112,14 @@ export class GitHubSynchronizer {
             repositoryName: issue.repositoryName,
             number: issue.number,
           };
-          const blockers = await reader.readBlockers(reference).catch(() => ({
-            complete: false,
-            blockers: [],
-            reason: "reader-error",
-          }));
+          // Paused issues are recorded as unknown, never left with an earlier "clear".
+          const blockers: BlockerSnapshot = this.paused(credentialRef)
+            ? { complete: false, blockers: [], reason: "rate-limited" }
+            : await reader.readBlockers(reference).catch(() => ({
+                complete: false,
+                blockers: [],
+                reason: "reader-error",
+              }));
           if (this.stopped) return;
           this.notePause(credentialRef, blockers);
           this.sources.reconcileBlockers(issue.nodeId, blockers, {
@@ -132,16 +136,20 @@ export class GitHubSynchronizer {
       if (this.stopped) return;
       const config = this.domain.githubConfiguration(retained.projectId);
       const credentialRef = config.credentialRef;
-      if (credentialRef && this.paused(credentialRef)) continue;
-      const reader = credentialRef
-        ? this.readerFactory(credentialRef)
-        : undefined;
-      const status = reader
-        ? await reader.readIssueStatus(retained.reference).catch(() => ({
-            status: "unknown" as const,
-            reason: "reader-error",
-          }))
-        : { status: "unknown" as const, reason: "missing-credential" };
+      const paused = credentialRef ? this.paused(credentialRef) : false;
+      const reader =
+        credentialRef && !paused
+          ? this.readerFactory(credentialRef)
+          : undefined;
+      // A paused read must not leave an earlier "closed" clearing a local dependent.
+      const status: IssueStatus = paused
+        ? { status: "unknown", reason: "rate-limited" }
+        : reader
+          ? await reader.readIssueStatus(retained.reference).catch(() => ({
+              status: "unknown" as const,
+              reason: "reader-error",
+            }))
+          : { status: "unknown", reason: "missing-credential" };
       if (this.stopped) return;
       if (credentialRef) this.notePause(credentialRef, status);
       this.sources.recordIssueStatus(retained.reference.nodeId, status, {
