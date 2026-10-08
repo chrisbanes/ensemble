@@ -36,6 +36,13 @@ import {
   ArchivedResumeRejectedError,
   archivedResumeRejectionSchema,
 } from "./pre-turn-recovery.js";
+import type {
+  RuntimeNativeEndpointHistory,
+  RuntimeSafetyPort,
+  RuntimeTerminalEvidence,
+  RuntimeTerminalFailureEvidence,
+  RuntimeThreadQualification,
+} from "./runtime-retention.js";
 
 const rpc = z.object({
   id: z.union([z.string(), z.number()]).optional(),
@@ -112,6 +119,93 @@ export interface RuntimeToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+}
+
+interface RuntimeThreadSettings {
+  model: string;
+  modelProvider: string;
+  reasoningEffort: string | null;
+  serviceTier: string | null;
+}
+
+interface RuntimeThreadSnapshot {
+  tools?: readonly RuntimeToolDefinition[];
+  settings?: RuntimeThreadSettings;
+}
+
+const maxSettledThreadSnapshots = 128;
+const maxSettledThreadSnapshotBytes = 256 * 1024;
+
+function threadSnapshotBytes(
+  threadId: string,
+  snapshot: RuntimeThreadSnapshot,
+): number {
+  return Buffer.byteLength(JSON.stringify([threadId, snapshot]) ?? "", "utf8");
+}
+
+/** One joint bounded cache for tool definitions and thread-start settings. */
+class BoundedThreadSnapshotCache extends Map<string, RuntimeThreadSnapshot> {
+  constructor(private readonly isPinned: (threadId: string) => boolean) {
+    super();
+  }
+
+  override get(threadId: string): RuntimeThreadSnapshot | undefined {
+    const snapshot = super.get(threadId);
+    if (snapshot !== undefined) {
+      super.delete(threadId);
+      super.set(threadId, snapshot);
+    }
+    return snapshot;
+  }
+
+  override set(threadId: string, snapshot: RuntimeThreadSnapshot): this {
+    super.delete(threadId);
+    super.set(threadId, snapshot);
+    this.trimSettledEntries();
+    return this;
+  }
+
+  settledStats(): {
+    count: number;
+    utf8Bytes: number;
+    pinnedCount: number;
+    pinnedUtf8Bytes: number;
+  } {
+    let count = 0;
+    let utf8Bytes = 0;
+    let pinnedCount = 0;
+    let pinnedUtf8Bytes = 0;
+    for (const [threadId, snapshot] of this) {
+      const bytes = threadSnapshotBytes(threadId, snapshot);
+      if (this.isPinned(threadId)) {
+        pinnedCount++;
+        pinnedUtf8Bytes += bytes;
+      } else {
+        count++;
+        utf8Bytes += bytes;
+      }
+    }
+    return { count, utf8Bytes, pinnedCount, pinnedUtf8Bytes };
+  }
+
+  trimSettledEntries(): void {
+    while (true) {
+      const stats = this.settledStats();
+      if (
+        stats.count <= maxSettledThreadSnapshots &&
+        stats.utf8Bytes <= maxSettledThreadSnapshotBytes
+      )
+        return;
+      let evicted = false;
+      for (const threadId of this.keys()) {
+        if (this.isPinned(threadId)) continue;
+        super.delete(threadId);
+        evicted = true;
+        break;
+      }
+      if (!evicted) return;
+    }
+  }
 }
 
 export interface RuntimeToolCall {
@@ -249,11 +343,9 @@ export function parseFailureEvidence(
   return retryAfterMs === undefined ? evidence : { ...evidence, retryAfterMs };
 }
 
-function makeFailureEvidence(
-  threadId: string,
-  turnId: string,
+function makeFailureClassification(
   rawCode: string | undefined,
-): FailureEvidence {
+): RuntimeTerminalFailureEvidence {
   const parsed =
     rawCode === undefined ? undefined : codexErrorInfoSchema.safeParse(rawCode);
   const code = parsed?.success ? parsed.data : undefined;
@@ -264,9 +356,6 @@ function makeFailureEvidence(
         ? "permanent"
         : "unknown";
   return {
-    threadId,
-    turnId,
-    status: "failed",
     classification,
     reasonCode: code ?? "unknown",
     source: code ? "codexErrorInfo" : "missing",
@@ -417,6 +506,9 @@ interface NativeEndpoint {
   resolved: boolean;
   order: number;
   orderedReceipt?: RuntimeUserInputOutcome["orderedReceipt"];
+  writeInFlight: boolean;
+  outcomeRecorded: boolean;
+  turnEnded: boolean;
 }
 
 /** One private stdio App Server process. It never sends an approval grant. */
@@ -426,15 +518,12 @@ export class CodexRuntime implements Runtime {
   private nativeExecutable:
     | { codexVersion: string; executableHash: string }
     | undefined;
-  private readonly nativeQualifications = new Map<
-    string,
-    NativeInputProtocolQualification
-  >();
   private readonly nativeEndpoints = new Map<string, NativeEndpoint>();
-  private readonly nativeThreadSettings = new Map<
-    string,
-    Record<string, unknown>
-  >();
+  private readonly nativeEndpointsByTurn = new Map<string, Set<string>>();
+  private readonly nativeEndpointsByRpcId = new Map<string, Set<string>>();
+  private readonly threadSnapshots = new BoundedThreadSnapshotCache(
+    (threadId) => this.isThreadSnapshotPinned(threadId),
+  );
   private readonly nativeTurns = new Map<string, string>();
   private readonly invalidNativeTurns = new Set<string>();
   private readonly nativeReadbacks = new Map<
@@ -477,19 +566,40 @@ export class CodexRuntime implements Runtime {
     )
       return;
     endpoint.state = outcome;
-    this.nativeOutcome?.({
-      ...endpoint.call.identity,
-      ...endpoint.intent,
-      outcome,
-      reason,
-      ...(endpoint.orderedReceipt
-        ? { orderedReceipt: { ...endpoint.orderedReceipt } }
-        : {}),
-    });
+    endpoint.outcomeRecorded = false;
+    try {
+      if (this.nativeOutcome) {
+        this.nativeOutcome({
+          ...endpoint.call.identity,
+          ...endpoint.intent,
+          outcome,
+          reason,
+          ...(endpoint.orderedReceipt
+            ? { orderedReceipt: { ...endpoint.orderedReceipt } }
+            : {}),
+        });
+        endpoint.outcomeRecorded = true;
+      }
+      if (
+        outcome !== "sent-unconfirmed" &&
+        endpoint.outcomeRecorded &&
+        !endpoint.writeInFlight &&
+        (outcome !== "confirmed" || endpoint.turnEnded)
+      )
+        this.retireNativeEndpoint(endpoint.call.identity);
+    } catch {
+      endpoint.state = "uncertain";
+      this.unexpected?.({
+        method: "native-outcome-could-not-be-recorded",
+        threadId: endpoint.call.identity.threadId,
+        turnId: endpoint.call.identity.turnId,
+      });
+    }
   }
   cancelUserInput(identity: NativeInputEndpointIdentity, reason: string): void {
     const endpoint = this.nativeEndpoints.get(nativeEndpointKey(identity));
     if (endpoint) {
+      if (endpoint.state === "writing" && endpoint.resolved) return;
       const waiting = this.nativeReadbacks.get(identity.threadId);
       if (
         waiting &&
@@ -510,12 +620,56 @@ export class CodexRuntime implements Runtime {
     turnId: string,
     reason: string,
   ): void {
-    for (const endpoint of this.nativeEndpoints.values())
-      if (
-        endpoint.call.identity.threadId === threadId &&
-        endpoint.call.identity.turnId === turnId
-      )
-        this.cancelUserInput(endpoint.call.identity, reason);
+    for (const endpoint of this.nativeEndpointsForTurn(threadId, turnId))
+      this.cancelUserInput(endpoint.call.identity, reason);
+  }
+
+  private retireNativeTurn(
+    threadId: string,
+    turnId: string,
+    reason: string,
+  ): void {
+    const activeTurn = this.nativeTurns.get(threadId);
+    const waiting = this.nativeReadbacks.get(threadId);
+    const waitingRequest = waiting
+      ? nativeInputRequestSchema.safeParse(waiting.input)
+      : undefined;
+    const waitingTurn = waitingRequest?.success
+      ? waitingRequest.data.turnId
+      : undefined;
+    const turnStartPending = [...this.pending.values()].some((pending) => {
+      if (pending.method !== "turn/start") return false;
+      const params = z
+        .object({ threadId: z.string() })
+        .safeParse(pending.params);
+      return params.success && params.data.threadId === threadId;
+    });
+    const ownsThreadState =
+      activeTurn === turnId ||
+      (activeTurn === undefined &&
+        !turnStartPending &&
+        (waiting === undefined || waitingTurn === turnId));
+    this.cancelNativeTurn(threadId, turnId, reason);
+    for (const endpoint of this.nativeEndpointsForTurn(threadId, turnId)) {
+      endpoint.turnEnded = true;
+      if (endpoint.outcomeRecorded && !endpoint.writeInFlight)
+        this.retireNativeEndpoint(endpoint.call.identity);
+    }
+    if (waiting) {
+      const request = nativeInputRequestSchema.safeParse(waiting.input);
+      if (request.success && request.data.turnId === turnId) {
+        waiting.invalid = true;
+        this.nativeReadbacks.delete(threadId);
+      }
+    }
+    const turnKey = `${threadId}:${turnId}`;
+    this.invalidNativeTurns.delete(turnKey);
+    if (this.nativeTurns.get(threadId) === turnId)
+      this.nativeTurns.delete(threadId);
+    if (ownsThreadState) {
+      this.threadSnapshots.delete(threadId);
+    }
+    this.threadSnapshots.trimSettledEntries();
   }
   async replyUserInput(
     identity: NativeInputEndpointIdentity,
@@ -552,22 +706,31 @@ export class CodexRuntime implements Runtime {
           throw new Error("Native endpoint changed before write");
         endpoint.intent = { ...intent };
         endpoint.state = "writing";
+        endpoint.writeInFlight = true;
         const orderedReceipt = {
           writeInitiated: ++endpoint.order,
         } as NonNullable<RuntimeUserInputOutcome["orderedReceipt"]>;
         endpoint.orderedReceipt = orderedReceipt;
         child.stdin.write(line, (error) => {
+          endpoint.writeInFlight = false;
           if (
             error ||
             this.child !== child ||
             endpoint.state === "uncertain" ||
             endpoint.state === "unavailable"
           ) {
-            this.emitNative(
-              endpoint,
-              "uncertain",
-              "Native write failed or endpoint lost",
-            );
+            if (
+              (endpoint.state === "uncertain" ||
+                endpoint.state === "unavailable") &&
+              endpoint.outcomeRecorded
+            )
+              this.retireNativeEndpoint(endpoint.call.identity);
+            else
+              this.emitNative(
+                endpoint,
+                "uncertain",
+                "Native write failed or endpoint lost",
+              );
             reject(error ?? new Error("Native endpoint unavailable"));
             return;
           }
@@ -582,6 +745,7 @@ export class CodexRuntime implements Runtime {
           resolve();
         });
       } catch (error) {
+        endpoint.writeInFlight = false;
         if (endpoint.intent)
           this.emitNative(endpoint, "uncertain", "Native write failed");
         reject(error);
@@ -623,8 +787,10 @@ export class CodexRuntime implements Runtime {
       /* General runtime remains usable without native qualification. */
     }
   }
-  private captureNativeQualification(threadId: string, input: unknown): void {
-    this.nativeQualifications.delete(threadId);
+  private captureNativeQualification(
+    threadId: string,
+    input: unknown,
+  ): NativeInputProtocolQualification | undefined {
     const parsed = z
       .object({
         thread: z.object({ id: z.literal(threadId) }),
@@ -642,23 +808,37 @@ export class CodexRuntime implements Runtime {
         }),
       })
       .safeParse(input);
-    const prior = this.nativeThreadSettings.get(threadId);
-    if (
-      !parsed.success ||
-      !prior ||
-      !this.nativeExecutable ||
-      !this.nativeGeneration
-    )
-      return;
+    const snapshot = this.threadSnapshots.get(threadId);
+    const startedSettings = snapshot?.settings;
+    if (!parsed.success || !this.nativeExecutable || !this.nativeGeneration)
+      return undefined;
     const data = parsed.data;
     if (
-      ["model", "modelProvider", "reasoningEffort", "serviceTier"].some(
-        (key) => prior[key] !== data[key as keyof typeof data],
-      ) ||
       data.collaborationMode.settings.model !== data.model ||
       data.collaborationMode.settings.reasoning_effort !== data.reasoningEffort
     )
-      return;
+      return undefined;
+    if (
+      startedSettings &&
+      ["model", "modelProvider", "reasoningEffort", "serviceTier"].some(
+        (key) =>
+          startedSettings[key as keyof typeof startedSettings] !==
+          data[key as keyof typeof data],
+      )
+    )
+      return undefined;
+    const definitions = snapshot?.tools;
+    if (!definitions) return undefined;
+    const toolDigest = createHash("sha256")
+      .update(JSON.stringify(definitions))
+      .digest("hex");
+    let prior: RuntimeThreadQualification | null;
+    try {
+      prior = this.options.safety.threadQualification(threadId);
+    } catch {
+      return undefined;
+    }
+    if (!prior || prior.toolDigest !== toolDigest) return undefined;
     const qualification = nativeInputQualificationSchema.safeParse({
       ...this.nativeExecutable,
       threadId,
@@ -677,8 +857,50 @@ export class CodexRuntime implements Runtime {
         .digest("hex"),
       continuation: "synchronous",
     });
-    if (qualification.success)
-      this.nativeQualifications.set(threadId, qualification.data);
+    if (!qualification.success) return undefined;
+    const observed = {
+      threadId,
+      toolDigest,
+      codexVersion: this.nativeExecutable.codexVersion,
+      executableHash: this.nativeExecutable.executableHash,
+      model: data.model,
+      modelProvider: data.modelProvider,
+      reasoningEffort: data.reasoningEffort,
+      serviceTier: data.serviceTier,
+      developerInstructionsDigest:
+        qualification.data.developerInstructionsDigest,
+    };
+    const priorFacts = [
+      prior.codexVersion,
+      prior.executableHash,
+      prior.model,
+      prior.modelProvider,
+      prior.reasoningEffort,
+      prior.serviceTier,
+      prior.developerInstructionsDigest,
+    ];
+    try {
+      if (priorFacts.every((value) => value === null)) {
+        if (!startedSettings) return undefined;
+        this.options.safety.recordThreadQualification(observed);
+      } else if (
+        JSON.stringify(priorFacts) !==
+        JSON.stringify([
+          observed.codexVersion,
+          observed.executableHash,
+          observed.model,
+          observed.modelProvider,
+          observed.reasoningEffort,
+          observed.serviceTier,
+          observed.developerInstructionsDigest,
+        ])
+      ) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    return qualification.data;
   }
   private receiveNativeRequest(
     child: ChildProcessWithoutNullStreams,
@@ -692,7 +914,6 @@ export class CodexRuntime implements Runtime {
       const threadId = request.threadId;
       if (
         !this.nativeExecutable ||
-        !this.nativeThreadSettings.has(threadId) ||
         !this.nativeRequest ||
         !this.nativeGeneration
       )
@@ -700,12 +921,16 @@ export class CodexRuntime implements Runtime {
       const digest = createHash("sha256")
         .update(JSON.stringify(input))
         .digest("hex");
-      const knownRequest = [...this.nativeEndpoints.values()].find(
-        (endpoint) =>
-          endpoint.call.identity.runtimeGeneration === this.nativeGeneration &&
-          endpoint.call.identity.threadId === threadId &&
-          endpoint.call.identity.requestId === id,
-      );
+      const identity = {
+        requestId: id,
+        runtimeGeneration: this.nativeGeneration,
+        threadId,
+        turnId: request.turnId,
+        itemId: request.itemId,
+      };
+      const knownRequest = this.nativeEndpointByRpcId(identity);
+      const terminal = this.persistedTerminal(threadId, request.turnId);
+      const history = this.options.safety.nativeEndpointHistory(identity);
       const prior = this.nativeReadbacks.get(threadId);
       // Resume retransmission can arrive after the operator has already answered.
       // It is the same request, never permission to expose or reply a second time.
@@ -719,13 +944,16 @@ export class CodexRuntime implements Runtime {
         prior.requested &&
         prior.responded &&
         prior.replays === 0 &&
+        knownRequest !== undefined &&
+        nativeEndpointKey(knownRequest.call.identity) ===
+          nativeEndpointKey(identity) &&
+        history === "exact-identity-seen" &&
         this.nativeTurns.get(threadId) === request.turnId &&
         !this.invalidNativeTurns.has(`${threadId}:${request.turnId}`) &&
-        !this.terminalHistory.has(`${threadId}:${request.turnId}`) &&
-        (!knownRequest ||
-          ["pending", "writing", "sent-unconfirmed", "confirmed"].includes(
-            knownRequest.state,
-          ))
+        terminal === null &&
+        ["pending", "writing", "sent-unconfirmed", "confirmed"].includes(
+          knownRequest.state,
+        )
       ) {
         prior.replays++;
         return true;
@@ -743,7 +971,9 @@ export class CodexRuntime implements Runtime {
         ),
       };
       if (
-        this.terminalHistory.has(`${threadId}:${request.turnId}`) ||
+        terminal !== null ||
+        (history !== "new" && history !== "exact-identity-seen") ||
+        (history === "exact-identity-seen" && !knownRequest) ||
         (knownRequest &&
           (knownRequest.state !== "pending" ||
             knownRequest.call.identity.turnId !== request.turnId ||
@@ -776,18 +1006,16 @@ export class CodexRuntime implements Runtime {
         return true;
       }
       if (prior) {
-        const endpoint = [...this.nativeEndpoints.values()].find(
-          (e) =>
-            e.call.identity.threadId === threadId &&
-            e.call.identity.turnId === request.turnId,
-        );
+        const endpoint = this.nativeEndpointsForTurn(
+          threadId,
+          request.turnId,
+        )[0];
         prior.invalid = true;
         if (endpoint)
           this.cancelUserInput(
             endpoint.call.identity,
             "Conflicting or repeated native request",
           );
-        this.nativeQualifications.delete(threadId);
         this.unexpected?.({
           method: "conflicting-native-input",
           nativeReplay,
@@ -830,14 +1058,16 @@ export class CodexRuntime implements Runtime {
       const resumed = thread.parse(rawResponse);
       if (resumed.thread.id !== threadId)
         throw new Error("Native resume identity mismatch");
-      this.captureNativeQualification(threadId, rawResponse);
-      const qualification = this.nativeQualifications.get(threadId);
+      const qualification = this.captureNativeQualification(
+        threadId,
+        rawResponse,
+      );
       if (!qualification || pending.invalid || this.child !== pending.child)
         throw new Error("Native request unqualified");
       const request = parseNativeInputRequest(pending.input, qualification);
       if (
         this.nativeTurns.get(threadId) !== request.turnId ||
-        this.terminalHistory.has(`${threadId}:${request.turnId}`) ||
+        this.persistedTerminal(threadId, request.turnId) !== null ||
         this.invalidNativeTurns.has(`${threadId}:${request.turnId}`)
       )
         throw new Error("Native turn unavailable");
@@ -848,18 +1078,21 @@ export class CodexRuntime implements Runtime {
         turnId: request.turnId,
         itemId: request.itemId,
       };
+      if (this.options.safety.nativeEndpointHistory(identity) !== "new")
+        throw new Error("Native endpoint history is not fresh");
       const call = { identity, request, qualification };
-      this.nativeEndpoints.set(nativeEndpointKey(identity), {
+      this.addNativeEndpoint({
         call,
         digest: pending.digest,
         state: "pending",
         resolved: false,
         order: 0,
+        writeInFlight: false,
+        outcomeRecorded: false,
+        turnEnded: false,
       });
       this.nativeRequest?.(call);
     } catch {
-      if (this.nativeReadbacks.get(threadId) === pending)
-        this.nativeQualifications.delete(threadId);
       const turnId = nativeInputRequestSchema.parse(pending.input).turnId;
       this.unexpected?.({
         method: "unqualified-native-input",
@@ -878,16 +1111,20 @@ export class CodexRuntime implements Runtime {
         .safeParse(params);
       if (!parsed.success) return;
       const waiting = this.nativeReadbacks.get(parsed.data.threadId);
+      const endpoint = this.nativeGeneration
+        ? this.nativeEndpointByRpcId({
+            requestId: parsed.data.requestId,
+            runtimeGeneration: this.nativeGeneration,
+            threadId: parsed.data.threadId,
+            turnId: "",
+            itemId: "",
+          })
+        : undefined;
       if (
         waiting &&
         waiting.child === this.child &&
         waiting.id === parsed.data.requestId &&
-        ![...this.nativeEndpoints.values()].some(
-          (e) =>
-            e.call.identity.runtimeGeneration === this.nativeGeneration &&
-            e.call.identity.threadId === parsed.data.threadId &&
-            e.call.identity.requestId === parsed.data.requestId,
-        )
+        !endpoint
       ) {
         waiting.invalid = true;
         this.unexpected?.({
@@ -896,14 +1133,7 @@ export class CodexRuntime implements Runtime {
         });
         return;
       }
-      for (const endpoint of this.nativeEndpoints.values()) {
-        const identity = endpoint.call.identity;
-        if (
-          identity.runtimeGeneration !== this.nativeGeneration ||
-          identity.requestId !== parsed.data.requestId ||
-          identity.threadId !== parsed.data.threadId
-        )
-          continue;
+      if (endpoint) {
         if (endpoint.state === "pending")
           this.emitNative(
             endpoint,
@@ -958,7 +1188,6 @@ export class CodexRuntime implements Runtime {
             turnId,
             "Unqualified asynchronous input origin",
           );
-          this.nativeQualifications.delete(threadId);
           this.unexpected?.({
             method: "unqualified-async-input",
             threadId,
@@ -983,15 +1212,8 @@ export class CodexRuntime implements Runtime {
     }
   >();
   private readonly events = new EventEmitter();
-  private readonly terminals = new Map<string, "completed" | "failed">();
-  private readonly terminalHistory = new Map<string, "completed" | "failed">();
-  private readonly failures = new Map<string, FailureEvidence>();
   private unexpected?: (request: UnexpectedRequest) => void;
   private toolCall?: (call: RuntimeToolCall) => Promise<RuntimeToolResult>;
-  private readonly threadTools = new Map<
-    string,
-    readonly RuntimeToolDefinition[]
-  >();
   private terminalAnomaly?: (anomaly: {
     threadId?: string;
     turnId?: string;
@@ -1008,9 +1230,153 @@ export class CodexRuntime implements Runtime {
   private conversationOverflowIdentityCapExceeded = false;
   private failure: Error | undefined;
 
+  private isThreadSnapshotPinned(threadId: string): boolean {
+    if (this.nativeTurns.has(threadId) || this.nativeReadbacks.has(threadId))
+      return true;
+    for (const pending of this.pending.values()) {
+      if (pending.method !== "thread/resume" && pending.method !== "turn/start")
+        continue;
+      const params = z
+        .object({ threadId: z.string().min(1) })
+        .safeParse(pending.params);
+      if (params.success && params.data.threadId === threadId) return true;
+    }
+    return [...this.nativeEndpoints.values()].some(
+      (endpoint) =>
+        endpoint.call.identity.threadId === threadId && !endpoint.turnEnded,
+    );
+  }
+
+  private nativeTurnKey(threadId: string, turnId: string): string {
+    return JSON.stringify([threadId, turnId]);
+  }
+
+  private nativeRpcKey(identity: NativeInputEndpointIdentity): string {
+    return JSON.stringify([
+      identity.runtimeGeneration,
+      identity.threadId,
+      typeof identity.requestId,
+      String(identity.requestId),
+    ]);
+  }
+
+  private addNativeEndpoint(endpoint: NativeEndpoint): void {
+    const key = nativeEndpointKey(endpoint.call.identity);
+    this.nativeEndpoints.set(key, endpoint);
+    const turnKey = this.nativeTurnKey(
+      endpoint.call.identity.threadId,
+      endpoint.call.identity.turnId,
+    );
+    const turnKeys =
+      this.nativeEndpointsByTurn.get(turnKey) ?? new Set<string>();
+    turnKeys.add(key);
+    this.nativeEndpointsByTurn.set(turnKey, turnKeys);
+    const rpcKey = this.nativeRpcKey(endpoint.call.identity);
+    const rpcKeys =
+      this.nativeEndpointsByRpcId.get(rpcKey) ?? new Set<string>();
+    rpcKeys.add(key);
+    this.nativeEndpointsByRpcId.set(rpcKey, rpcKeys);
+  }
+
+  private nativeEndpointByRpcId(
+    identity: NativeInputEndpointIdentity,
+  ): NativeEndpoint | undefined {
+    const keys = this.nativeEndpointsByRpcId.get(this.nativeRpcKey(identity));
+    if (!keys || keys.size === 0) return undefined;
+    if (keys.size !== 1)
+      throw new Error("Active native RPC identity is ambiguous");
+    const key = keys.values().next().value as string | undefined;
+    return key ? this.nativeEndpoints.get(key) : undefined;
+  }
+
+  private nativeEndpointsForTurn(
+    threadId: string,
+    turnId: string,
+  ): NativeEndpoint[] {
+    const keys = this.nativeEndpointsByTurn.get(
+      this.nativeTurnKey(threadId, turnId),
+    );
+    if (!keys) return [];
+    return [...keys]
+      .map((key) => this.nativeEndpoints.get(key))
+      .filter((endpoint): endpoint is NativeEndpoint => endpoint !== undefined);
+  }
+
+  private retireNativeEndpoint(identity: NativeInputEndpointIdentity): void {
+    const key = nativeEndpointKey(identity);
+    const endpoint = this.nativeEndpoints.get(key);
+    if (!endpoint) return;
+    this.nativeEndpoints.delete(key);
+    const turnKey = this.nativeTurnKey(identity.threadId, identity.turnId);
+    const turnKeys = this.nativeEndpointsByTurn.get(turnKey);
+    turnKeys?.delete(key);
+    if (turnKeys?.size === 0) this.nativeEndpointsByTurn.delete(turnKey);
+    const rpcKey = this.nativeRpcKey(identity);
+    const rpcKeys = this.nativeEndpointsByRpcId.get(rpcKey);
+    rpcKeys?.delete(key);
+    if (rpcKeys?.size === 0) this.nativeEndpointsByRpcId.delete(rpcKey);
+    this.threadSnapshots.trimSettledEntries();
+  }
+
+  private persistedTerminal(
+    threadId: string,
+    turnId: string,
+  ): RuntimeTerminalEvidence | null {
+    const generation = this.nativeGeneration;
+    if (!generation) throw new Error("Runtime stopped");
+    try {
+      return this.options.safety.terminal(threadId, turnId, generation);
+    } catch {
+      this.terminalAnomaly?.({
+        threadId,
+        turnId,
+        reason: "Terminal evidence could not be read",
+      });
+      throw new Error("Runtime terminal evidence unavailable");
+    }
+  }
+
+  private terminalOutcome(
+    threadId: string,
+    turnId: string,
+  ): "completed" | "failed" | null {
+    const generation = this.nativeGeneration;
+    if (!generation) throw new Error("Runtime stopped");
+    let evidence: RuntimeTerminalEvidence | null;
+    try {
+      evidence = this.options.safety.terminalForWait(
+        threadId,
+        turnId,
+        generation,
+      );
+    } catch {
+      this.terminalAnomaly?.({
+        threadId,
+        turnId,
+        reason: "Terminal evidence could not be verified for the bound turn",
+      });
+      throw new Error("Runtime terminal evidence unavailable");
+    }
+    if (!evidence) return null;
+    if (
+      evidence.workId === null ||
+      evidence.conflicted ||
+      evidence.firstStatus === null
+    ) {
+      this.terminalAnomaly?.({
+        threadId,
+        turnId,
+        reason: "Terminal evidence is incomplete or conflicting",
+      });
+      throw new Error("Runtime terminal evidence is uncertain");
+    }
+    return evidence.firstStatus;
+  }
+
   constructor(
     private readonly executable = "codex",
     private readonly options: {
+      safety: RuntimeSafetyPort;
       spawnEnvironment?: () => NodeJS.ProcessEnv;
       /** Test-only executable identity for deterministic stdio fixtures. */
       qualifiedExecutableHash?: string;
@@ -1018,7 +1384,7 @@ export class CodexRuntime implements Runtime {
       captureProcessIdentity?: (
         pid: number | undefined,
       ) => Promise<RuntimeProcessIdentity | null>;
-    } = {},
+    },
   ) {}
 
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
@@ -1050,13 +1416,13 @@ export class CodexRuntime implements Runtime {
   async start(): Promise<void> {
     if (this.child) throw new Error("Runtime already started");
     this.failure = undefined;
-    this.failures.clear();
     this.clearConversationCaptures();
     const environment = this.options.spawnEnvironment?.() ?? process.env;
     this.nativeGeneration = randomUUID();
-    this.nativeQualifications.clear();
     this.nativeEndpoints.clear();
-    this.nativeThreadSettings.clear();
+    this.nativeEndpointsByTurn.clear();
+    this.nativeEndpointsByRpcId.clear();
+    this.threadSnapshots.clear();
     this.nativeTurns.clear();
     this.invalidNativeTurns.clear();
     this.nativeReadbacks.clear();
@@ -1116,15 +1482,19 @@ export class CodexRuntime implements Runtime {
   async stop(): Promise<void> {
     const child = this.child;
     if (!child) return;
-    for (const endpoint of this.nativeEndpoints.values())
+    for (const endpoint of [...this.nativeEndpoints.values()])
       this.cancelUserInput(endpoint.call.identity, "Runtime stopped");
     this.nativeGeneration = undefined;
-    this.nativeQualifications.clear();
     this.child = undefined;
     this.processIdentityValue = null;
     this.fail(new Error("Runtime stopped"));
-    this.terminals.clear();
-    this.failures.clear();
+    this.nativeEndpoints.clear();
+    this.nativeEndpointsByTurn.clear();
+    this.nativeEndpointsByRpcId.clear();
+    this.threadSnapshots.clear();
+    this.nativeTurns.clear();
+    this.invalidNativeTurns.clear();
+    this.nativeReadbacks.clear();
     this.clearConversationCaptures();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
@@ -1158,7 +1528,6 @@ export class CodexRuntime implements Runtime {
     tools: readonly RuntimeToolDefinition[] = [],
   ): Promise<string> {
     const definitions = registeredTools(tools);
-    let rawResponse: unknown;
     const response = thread.parse(
       await this.request(
         "thread/start",
@@ -1170,23 +1539,39 @@ export class CodexRuntime implements Runtime {
           ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
         },
         (raw) => {
-          rawResponse = raw;
           const started = thread.parse(raw);
-          this.threadTools.set(started.thread.id, definitions);
+          const toolDigest = createHash("sha256")
+            .update(JSON.stringify(definitions))
+            .digest("hex");
+          try {
+            this.options.safety.registerThreadTools(
+              started.thread.id,
+              toolDigest,
+            );
+          } catch {
+            throw new Error("Runtime thread safety baseline unavailable");
+          }
+          const settings = z
+            .object({
+              model: z.string(),
+              modelProvider: z.string(),
+              reasoningEffort: z.string().nullable(),
+              serviceTier: z.string().nullable(),
+            })
+            .safeParse(raw);
+          this.threadSnapshots.set(started.thread.id, {
+            tools: definitions,
+            ...(settings.success && this.nativeExecutable
+              ? { settings: settings.data }
+              : {}),
+          });
+          if (!this.threadSnapshots.has(started.thread.id))
+            throw new Error(
+              "Runtime thread snapshot could not be retained safely",
+            );
         },
       ),
     );
-    this.threadTools.set(response.thread.id, definitions);
-    const settings = z
-      .object({
-        model: z.string(),
-        modelProvider: z.string(),
-        reasoningEffort: z.string().nullable(),
-        serviceTier: z.string().nullable(),
-      })
-      .safeParse(rawResponse);
-    if (settings.success && this.nativeExecutable)
-      this.nativeThreadSettings.set(response.thread.id, settings.data);
     return response.thread.id;
   }
 
@@ -1194,21 +1579,46 @@ export class CodexRuntime implements Runtime {
     threadId: string,
     tools?: readonly RuntimeToolDefinition[],
   ): Promise<void> {
-    const definitions = registeredTools(
-      tools ?? this.threadTools.get(threadId) ?? [],
+    let snapshot = this.threadSnapshots.get(threadId);
+    let restoredEmptyTools = false;
+    if (!snapshot && tools === undefined) {
+      const emptyToolDigest = createHash("sha256").update("[]").digest("hex");
+      try {
+        restoredEmptyTools =
+          this.options.safety.threadQualification(threadId)?.toolDigest ===
+          emptyToolDigest;
+      } catch {
+        // A missing or malformed durable baseline cannot establish tools.
+      }
+      if (restoredEmptyTools) snapshot = { tools: [] };
+    }
+    const definitions = registeredTools(tools ?? snapshot?.tools ?? []);
+    await this.request(
+      "thread/resume",
+      {
+        threadId,
+        approvalPolicy: "never",
+        sandbox: "workspace-write",
+        ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
+      },
+      (raw) => {
+        const resumed = thread.parse(raw);
+        if (resumed.thread.id !== threadId)
+          throw new Error("Resumed thread identity mismatch");
+        if (tools !== undefined || restoredEmptyTools) {
+          const nextSnapshot: RuntimeThreadSnapshot = {
+            ...(snapshot?.settings ? { settings: snapshot.settings } : {}),
+            tools: definitions,
+          };
+          this.threadSnapshots.set(threadId, nextSnapshot);
+          if (!this.threadSnapshots.has(threadId))
+            throw new Error(
+              "Runtime thread snapshot could not be retained safely",
+            );
+        }
+        this.captureNativeQualification(threadId, raw);
+      },
     );
-    const rawResponse = await this.request("thread/resume", {
-      threadId,
-      approvalPolicy: "never",
-      sandbox: "workspace-write",
-      ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
-    });
-    const resumed = thread.parse(rawResponse);
-    if (resumed.thread.id !== threadId)
-      throw new Error("Resumed thread identity mismatch");
-    this.captureNativeQualification(threadId, rawResponse);
-    if (tools !== undefined || !this.threadTools.has(threadId))
-      this.threadTools.set(threadId, definitions);
   }
 
   async startTurn(
@@ -1220,10 +1630,10 @@ export class CodexRuntime implements Runtime {
     // Saved endpoints/receipts and disqualified turn identities remain historical.
     const previousTurn = this.nativeTurns.get(threadId);
     if (previousTurn)
-      this.cancelNativeTurn(threadId, previousTurn, "New turn requested");
-    this.nativeTurns.delete(threadId);
-    this.nativeReadbacks.delete(threadId);
-    this.nativeQualifications.delete(threadId);
+      this.retireNativeTurn(threadId, previousTurn, "New turn requested");
+    else {
+      this.nativeReadbacks.delete(threadId);
+    }
     const response = turn.parse(
       await this.request("turn/start", {
         threadId,
@@ -1234,7 +1644,13 @@ export class CodexRuntime implements Runtime {
       }),
     );
     this.nativeTurns.set(threadId, response.turn.id);
-    void this.qualifyNativeRequest(threadId);
+    if (this.persistedTerminal(threadId, response.turn.id) !== null)
+      this.retireNativeTurn(
+        threadId,
+        response.turn.id,
+        "Turn ended before native request qualification",
+      );
+    else void this.qualifyNativeRequest(threadId);
     return response.turn.id;
   }
 
@@ -1265,8 +1681,31 @@ export class CodexRuntime implements Runtime {
     turnId: string,
   ): FailureEvidence | undefined {
     if (!threadId || !turnId) return undefined;
-    const evidence = this.failures.get(`${threadId}:${turnId}`);
-    return evidence ? { ...evidence } : undefined;
+    const generation = this.nativeGeneration;
+    if (!generation) return undefined;
+    try {
+      const evidence = this.options.safety.terminal(
+        threadId,
+        turnId,
+        generation,
+      );
+      if (
+        !evidence ||
+        evidence.firstStatus !== "failed" ||
+        evidence.conflicted ||
+        !evidence.workId ||
+        !evidence.failure
+      )
+        return undefined;
+      return parseFailureEvidence({
+        threadId,
+        turnId,
+        status: "failed",
+        ...evidence.failure,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   async waitForTurn(
@@ -1274,12 +1713,8 @@ export class CodexRuntime implements Runtime {
     turnId: string,
   ): Promise<"completed" | "failed"> {
     if (this.failure) throw this.failure;
-    const key = `${threadId}:${turnId}`;
-    const observed = this.terminals.get(key);
-    if (observed) {
-      this.terminals.delete(key);
-      return observed;
-    }
+    const observed = this.terminalOutcome(threadId, turnId);
+    if (observed) return observed;
     return await new Promise((resolve, reject) => {
       const onTerminal = (data: unknown) => {
         const parsed = z
@@ -1295,10 +1730,18 @@ export class CodexRuntime implements Runtime {
         )
           return;
         cleanup();
-        this.terminals.delete(key);
-        resolve(
-          parsed.data.turn.status === "completed" ? "completed" : "failed",
-        );
+        try {
+          const persisted = this.terminalOutcome(threadId, turnId);
+          if (!persisted)
+            throw new Error("Runtime terminal evidence is missing");
+          resolve(persisted);
+        } catch (error) {
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("Runtime terminal evidence unavailable"),
+          );
+        }
       };
       const onFailure = (error: Error) => {
         cleanup();
@@ -1330,6 +1773,7 @@ export class CodexRuntime implements Runtime {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.threadSnapshots.trimSettledEntries();
         reject(new Error(`${method} timed out`));
       }, 15000);
       this.pending.set(id, {
@@ -1420,34 +1864,38 @@ export class CodexRuntime implements Runtime {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(Number(message.id));
-      if (message.error !== undefined) {
-        const params = z
-          .object({ threadId: z.string() })
-          .safeParse(pending.params);
-        const rejection = archivedResumeRejectionSchema.safeParse({
-          method: pending.method,
-          requestId: message.id,
-          threadId: params.success ? params.data.threadId : undefined,
-          processIdentity: pending.processIdentity,
-          error: message.error,
-        });
-        pending.reject(
-          rejection.success &&
-            message.method === undefined &&
-            message.params === undefined &&
-            message.result === undefined
-            ? new ArchivedResumeRejectedError(rejection.data)
-            : new Error(JSON.stringify(message.error)),
-        );
-      } else {
-        try {
-          pending.beforeResolve?.(message.result);
-          pending.resolve(message.result);
-        } catch (error) {
+      try {
+        if (message.error !== undefined) {
+          const params = z
+            .object({ threadId: z.string() })
+            .safeParse(pending.params);
+          const rejection = archivedResumeRejectionSchema.safeParse({
+            method: pending.method,
+            requestId: message.id,
+            threadId: params.success ? params.data.threadId : undefined,
+            processIdentity: pending.processIdentity,
+            error: message.error,
+          });
           pending.reject(
-            error instanceof Error ? error : new Error(String(error)),
+            rejection.success &&
+              message.method === undefined &&
+              message.params === undefined &&
+              message.result === undefined
+              ? new ArchivedResumeRejectedError(rejection.data)
+              : new Error(JSON.stringify(message.error)),
           );
+        } else {
+          try {
+            pending.beforeResolve?.(message.result);
+            pending.resolve(message.result);
+          } catch (error) {
+            pending.reject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
         }
+      } finally {
+        this.threadSnapshots.trimSettledEntries();
       }
       return;
     }
@@ -1460,14 +1908,57 @@ export class CodexRuntime implements Runtime {
           reason: "Missing terminal identity or status",
         });
       } else {
-        const waiting = this.nativeReadbacks.get(terminal.data.threadId);
-        if (
-          waiting &&
-          nativeInputRequestSchema.parse(waiting.input).turnId ===
-            terminal.data.turn.id
-        )
-          waiting.invalid = true;
-        this.cancelNativeTurn(
+        const runtimeGeneration = this.nativeGeneration;
+        if (!runtimeGeneration) {
+          this.terminalAnomaly?.({
+            threadId: terminal.data.threadId,
+            turnId: terminal.data.turn.id,
+            reason: "Terminal event has no current runtime generation",
+          });
+          this.failChild(
+            child,
+            new Error("Runtime terminal evidence unavailable"),
+          );
+          return;
+        }
+        const status =
+          terminal.data.turn.status === "completed" ? "completed" : "failed";
+        let evidence: RuntimeTerminalEvidence;
+        try {
+          evidence = this.options.safety.recordTerminal({
+            threadId: terminal.data.threadId,
+            turnId: terminal.data.turn.id,
+            status,
+            runtimeGeneration,
+            ...(terminal.data.turn.status === "failed"
+              ? {
+                  failure: makeFailureClassification(
+                    terminal.data.turn.error?.codexErrorInfo,
+                  ),
+                }
+              : {}),
+          });
+        } catch {
+          this.terminalAnomaly?.({
+            threadId: terminal.data.threadId,
+            turnId: terminal.data.turn.id,
+            reason: "Terminal status could not be durably recorded",
+          });
+          this.failChild(
+            child,
+            new Error("Runtime terminal evidence unavailable"),
+          );
+          return;
+        }
+        if (evidence.conflicted || evidence.firstStatus === null)
+          this.terminalAnomaly?.({
+            threadId: terminal.data.threadId,
+            turnId: terminal.data.turn.id,
+            reason: evidence.conflicted
+              ? "Conflicting terminal status"
+              : "Terminal status is unknown",
+          });
+        this.retireNativeTurn(
           terminal.data.threadId,
           terminal.data.turn.id,
           "Turn ended before native receipt",
@@ -1476,27 +1967,6 @@ export class CodexRuntime implements Runtime {
           terminal.data.threadId,
           terminal.data.turn.id,
         );
-        const key = `${terminal.data.threadId}:${terminal.data.turn.id}`;
-        if (terminal.data.turn.status === "failed")
-          this.failures.set(
-            key,
-            makeFailureEvidence(
-              terminal.data.threadId,
-              terminal.data.turn.id,
-              terminal.data.turn.error?.codexErrorInfo,
-            ),
-          );
-        const status =
-          terminal.data.turn.status === "completed" ? "completed" : "failed";
-        const prior = this.terminalHistory.get(key);
-        if (prior && prior !== status)
-          this.terminalAnomaly?.({
-            threadId: terminal.data.threadId,
-            turnId: terminal.data.turn.id,
-            reason: "Conflicting terminal status",
-          });
-        this.terminalHistory.set(key, status);
-        this.terminals.set(key, prior && prior !== status ? "failed" : status);
       }
     }
     if (message.method)
@@ -1652,7 +2122,11 @@ export class CodexRuntime implements Runtime {
     itemId: string,
   ): PendingConversationTurn | undefined {
     const key = this.conversationTurnKey(threadId, turnId);
-    if (this.terminalHistory.has(`${threadId}:${turnId}`)) return undefined;
+    try {
+      if (this.persistedTerminal(threadId, turnId)) return undefined;
+    } catch {
+      return undefined;
+    }
     const existing = this.conversationTurns.get(key);
     if (existing) return existing;
     if (this.conversationCaptureSaturated) {
@@ -1806,7 +2280,9 @@ export class CodexRuntime implements Runtime {
     params: unknown,
   ): void {
     const call = parseRuntimeToolCall(params);
-    const definitions = call ? this.threadTools.get(call.threadId) : undefined;
+    const definitions = call
+      ? this.threadSnapshots.get(call.threadId)?.tools
+      : undefined;
     const registered = definitions?.some((tool) => tool.name === call?.tool);
     if (!call || !registered || !this.toolCall) {
       let holdFailed = false;
@@ -1877,10 +2353,16 @@ export class CodexRuntime implements Runtime {
 
   private fail(error: Error): void {
     if (this.failure) return;
-    for (const endpoint of this.nativeEndpoints.values())
+    for (const endpoint of [...this.nativeEndpoints.values()])
       this.cancelUserInput(endpoint.call.identity, "Runtime lost");
     this.nativeGeneration = undefined;
-    this.nativeQualifications.clear();
+    this.threadSnapshots.clear();
+    this.nativeTurns.clear();
+    this.invalidNativeTurns.clear();
+    this.nativeReadbacks.clear();
+    this.nativeEndpoints.clear();
+    this.nativeEndpointsByTurn.clear();
+    this.nativeEndpointsByRpcId.clear();
     this.failure = error;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);

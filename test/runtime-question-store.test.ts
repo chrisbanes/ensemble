@@ -336,6 +336,7 @@ test("native immutable intent and exact receipt are monotonic and close only del
       ...intent,
       outcome: "sent-unconfirmed",
       reason: "stdin",
+      orderedReceipt: { writeInitiated: 1, stdinSucceeded: 2 },
     });
     f.reopen();
     assert.equal(
@@ -347,8 +348,22 @@ test("native immutable intent and exact receipt are monotonic and close only del
       ...intent,
       outcome: "confirmed",
       reason: "resolution",
+      orderedReceipt: {
+        writeInitiated: 1,
+        stdinSucceeded: 2,
+        matchingResolution: 3,
+      },
     });
     assert.equal(confirmed.deliveryState, "confirmed");
+    assert.equal(
+      f.coordination.runtimeQuestionByEndpoint(native.identity)?.deliveryState,
+      "confirmed",
+      "durable resolution must remain queryable before the runtime retires its endpoint",
+    );
+    assert.equal(
+      f.coordination.runtimeNativeEndpointHistory(native.identity),
+      "exact-identity-seen",
+    );
     assert.equal(
       f.coordination.recordRuntimeReplyOutcome({
         ...native.identity,

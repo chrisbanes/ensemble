@@ -109,6 +109,7 @@ import {
   type TaskExecutionBinding,
   type TaskExecutionContext,
 } from "./state.js";
+import type { RuntimeSafetyPort } from "./runtime-retention.js";
 import {
   CaffeinateAssertion,
   ExecutionPower,
@@ -134,6 +135,7 @@ const immutableRevisionMismatches = new Set([
 
 export interface RuntimeSpawnContext {
   spawnEnvironment: () => NodeJS.ProcessEnv;
+  safety: RuntimeSafetyPort;
 }
 export interface StandaloneServiceOptions {
   delivery?: {
@@ -345,25 +347,27 @@ export class StandaloneService {
       await workspaces.recover();
       workspaces.assertNotCancelled();
       const state = new ExecutionState(db);
-      for (const item of state.list()) {
-        const executionBinding = state.taskBinding(item.workId);
-        const workspaceBinding = executionBinding
-          ? workspaceBindings.get(executionBinding.taskId)
-          : undefined;
-        const bindingRootMismatch =
-          workspaceBinding !== undefined &&
-          workspaceBinding.path !==
-            join(workspacePath, workspaceBinding.workspaceId);
-        if (bindingRootMismatch) continue;
-        this.options.workspaceManager?.beforePathAccess?.(item.workspace);
-        let workspaceKey: string;
-        try {
-          workspaceKey = realpathSync(item.workspace);
-        } catch {
-          workspaceKey = resolve(item.workspace);
+      let afterWorkspaceRowId = 0;
+      for (;;) {
+        const page = state.workspaceNormalizationPage(afterWorkspaceRowId);
+        if (page.length === 0) break;
+        for (const item of page) {
+          afterWorkspaceRowId = item.cursor;
+          const bindingRootMismatch =
+            item.workspacePath !== null &&
+            item.workspaceId !== null &&
+            item.workspacePath !== join(workspacePath, item.workspaceId);
+          if (bindingRootMismatch) continue;
+          this.options.workspaceManager?.beforePathAccess?.(item.workspace);
+          let workspaceKey: string;
+          try {
+            workspaceKey = realpathSync(item.workspace);
+          } catch {
+            workspaceKey = resolve(item.workspace);
+          }
+          if (workspaceKey !== item.workspace)
+            state.setWorkspaceKey(item.id, workspaceKey);
         }
-        if (workspaceKey !== item.workspace)
-          state.setWorkspaceKey(item.id, workspaceKey);
       }
       state.holdUnfinishedOnOpen();
       this.state = state;
@@ -382,6 +386,21 @@ export class StandaloneService {
         "Service restarted; native endpoints cannot be reconstructed",
       );
       this.coordination = coordination;
+      const runtimeSafety: RuntimeSafetyPort = {
+        recordTerminal: (input) => state.recordRuntimeTerminal(input),
+        terminal: (threadId, turnId, runtimeGeneration) =>
+          state.runtimeTerminal(threadId, turnId, runtimeGeneration),
+        terminalForWait: (threadId, turnId, runtimeGeneration) =>
+          state.runtimeTerminalForWait(threadId, turnId, runtimeGeneration),
+        registerThreadTools: (threadId, toolDigest) =>
+          state.registerRuntimeThreadTools(threadId, toolDigest),
+        threadQualification: (threadId) =>
+          state.runtimeThreadQualification(threadId),
+        recordThreadQualification: (input) =>
+          state.recordRuntimeThreadQualification(input),
+        nativeEndpointHistory: (identity) =>
+          coordination.runtimeNativeEndpointHistory(identity),
+      };
       const deliveryStore = new DeliveryStore(db);
       deliveryStore.migrate();
       this.deliveryStore = deliveryStore;
@@ -475,6 +494,7 @@ export class StandaloneService {
             )),
       });
       const context: RuntimeSpawnContext = {
+        safety: runtimeSafety,
         spawnEnvironment: () => {
           const policies = domain
             .projects()
@@ -495,30 +515,27 @@ export class StandaloneService {
         this.options.terminationVerifier ?? new MacProcessTerminationVerifier(),
       );
       runtime.onUnexpectedRequest((request) => {
-        const executions = state.list();
-        const active = executions.filter(
-          (item) => item.state === "submitting" || item.state === "running",
-        );
-        const attributable = executions.filter(
-          (item) =>
-            item.state === "completed" ||
-            item.state === "held" ||
-            item.state === "submitting" ||
-            item.state === "running",
-        );
+        const active = state.activeExecutions();
         const bound =
           request.threadId && request.turnId
-            ? attributable.filter(
-                (item) =>
-                  item.threadId === request.threadId &&
-                  item.turnId === request.turnId,
-              )
+            ? state
+                .executionsForTerminalIdentity(request.threadId, request.turnId)
+                .filter((item) =>
+                  ["completed", "held", "submitting", "running"].includes(
+                    item.state,
+                  ),
+                )
             : [];
         if (bound.length === 0 && request.threadId && request.turnId) {
-          const awaiting = attributable.filter(
-            (item) =>
-              item.threadId === request.threadId && item.turnId === null,
-          );
+          const awaiting = state
+            .executionsForRuntimeIdentity(request.threadId, request.turnId)
+            .filter(
+              (item) =>
+                item.turnId === null &&
+                ["completed", "held", "submitting", "running"].includes(
+                  item.state,
+                ),
+            );
           const pending = awaiting.length === 1 ? awaiting[0] : undefined;
           if (
             pending &&
@@ -564,21 +581,13 @@ export class StandaloneService {
         this.receiveConversationEvent(event),
       );
       runtime.onTerminalAnomaly?.((anomaly) => {
-        const items = state.list();
         const matched =
           anomaly.threadId && anomaly.turnId
-            ? items.filter(
-                (item) =>
-                  item.threadId === anomaly.threadId &&
-                  item.turnId === anomaly.turnId,
+            ? state.executionsForTerminalIdentity(
+                anomaly.threadId,
+                anomaly.turnId,
               )
-            : items.filter(
-                (item) =>
-                  item.state === "submitting" ||
-                  item.state === "running" ||
-                  (item.state === "completed" &&
-                    item.workId === this.lastCompletedWorkId),
-              );
+            : state.activeOrLastCompleted(this.lastCompletedWorkId);
         for (const item of matched) {
           this.retractWriterAndSuccessors(item, anomaly.reason);
           this.supervisor?.noteAnomaly(item.workId);
@@ -658,13 +667,9 @@ export class StandaloneService {
       scheduler?.stop();
       this.scheduler = undefined;
       try {
-        if (this.state)
-          for (const item of this.state.list())
-            if (item.state === "ready")
-              this.state.hold(
-                item.id,
-                "Runtime or login unavailable during startup",
-              );
+        this.state?.holdReadyOnStartupFailure(
+          "Runtime or login unavailable during startup",
+        );
       } finally {
         try {
           if (this.powerPollTimer) clearInterval(this.powerPollTimer);
@@ -1569,12 +1574,19 @@ export class StandaloneService {
     this.domain().task(taskId);
     const state = this.requireState();
     const targets = state.stopTask(taskId);
-    for (const question of this.coordination?.runtimeQuestions(taskId) ?? [])
-      if (targets.some((target) => target.workId === question.requestingWorkId))
-        this.runtime?.cancelUserInput?.(
-          question.identity,
-          "Task stopped before native receipt",
-        );
+    const runtimeGeneration = this.runtime?.currentUserInputGeneration?.();
+    if (runtimeGeneration) {
+      for (const target of targets)
+        for (const question of this.coordination?.runtimeQuestionsForWork(
+          target.workId,
+          true,
+          runtimeGeneration,
+        ) ?? [])
+          this.runtime?.cancelUserInput?.(
+            question.identity,
+            "Task stopped before native receipt",
+          );
+    }
     return this.requireSupervisor().observeStop(taskId, targets);
   }
 
@@ -1698,14 +1710,11 @@ export class StandaloneService {
       });
       this.registerExecutionCallback(binding.workId, pending);
     } catch {
-      const execution = state
-        .list()
-        .find(
-          (intent) =>
-            intent.threadId === call.identity.threadId &&
-            (intent.turnId === call.identity.turnId || intent.turnId === null),
-        );
-      if (execution) {
+      const executions = state.executionsForRuntimeIdentity(
+        call.identity.threadId,
+        call.identity.turnId,
+      );
+      for (const execution of executions) {
         state.hold(execution.id, "Native callback could not be durably bound");
         this.supervisor?.noteAnomaly(execution.workId);
       }
@@ -1738,11 +1747,34 @@ export class StandaloneService {
         }
       }
     } catch {
-      const record = coordination
-        .runtimeQuestions()
-        .find(
-          (q) => nativeEndpointKey(q.identity) === nativeEndpointKey(outcome),
-        );
+      const record = coordination.runtimeQuestionByEndpoint({
+        requestId: outcome.requestId,
+        runtimeGeneration: outcome.runtimeGeneration,
+        threadId: outcome.threadId,
+        turnId: outcome.turnId,
+        itemId: outcome.itemId,
+      });
+      if (
+        record &&
+        !["confirmed", "uncertain", "unavailable"].includes(
+          record.deliveryState,
+        )
+      )
+        try {
+          coordination.recordRuntimeReplyOutcome({
+            ...record.identity,
+            ...(record.replyIntentId
+              ? {
+                  replyIntentId: record.replyIntentId,
+                  answerDigest: record.answerDigest ?? undefined,
+                }
+              : {}),
+            outcome: record.replyIntentId ? "uncertain" : "unavailable",
+            reason: "Native outcome could not be durably committed",
+          });
+        } catch {
+          // Keep the writer held if the uncertainty update fails too.
+        }
       const workId = waiter?.workId ?? record?.requestingWorkId;
       const execution = workId ? this.state?.byWorkId(workId) : undefined;
       if (execution) {
@@ -1805,14 +1837,10 @@ export class StandaloneService {
     if (this.supervisor?.hasKnownRisk(question.requestingWorkId))
       reasons.push("known-execution-risk");
     if (
-      state
-        .list()
-        .some(
-          (other) =>
-            other.workId !== question.requestingWorkId &&
-            ["submitting", "running", "held"].includes(other.state) &&
-            state.taskBinding(other.workId)?.taskId === question.taskId,
-        )
+      state.hasCompetingTaskExecution(
+        question.taskId,
+        question.requestingWorkId,
+      )
     )
       reasons.push("competing-task-generation");
     if (!this.nativeWaiters.has(nativeEndpointKey(question.identity)))
@@ -1821,52 +1849,64 @@ export class StandaloneService {
   }
   private flushRuntimeAnswers(): void {
     const coordination = this.coordination;
-    if (!coordination || !this.runtime?.replyUserInput) return;
-    for (const question of coordination.runtimeQuestions()) {
-      if (
-        !question.answers ||
-        question.replyIntentId ||
-        question.requestState !== "available"
-      )
-        continue;
-      const reasons = this.runtimeAnswerEligibility(question);
-      if (reasons.length) {
-        coordination.holdRuntimeAnswer(
-          question.interactionId,
-          reasons.join("; "),
-        );
-        continue;
-      }
-      void this.runtime
-        .replyUserInput(
-          question.identity,
-          encodeNativeInputReply(question.request, question.answers),
-          () => {
-            const reasons = this.runtimeAnswerEligibility(question);
-            if (reasons.length) {
-              coordination.holdRuntimeAnswer(
-                question.interactionId,
-                reasons.join("; "),
-              );
-              throw new Error("Native reply held");
-            }
-            return coordination.beginRuntimeReply(
-              question.interactionId,
-              question.identity,
-            );
-          },
+    const runtimeGeneration = this.runtime?.currentUserInputGeneration?.();
+    if (!coordination || !runtimeGeneration || !this.runtime?.replyUserInput)
+      return;
+    let cursor = "";
+    for (;;) {
+      const page = coordination.pendingRuntimeAnswersPage(
+        runtimeGeneration,
+        cursor,
+      );
+      if (page.length === 0) break;
+      for (const question of page) {
+        cursor = question.interactionId;
+        if (
+          !question.answers ||
+          question.replyIntentId ||
+          question.requestState !== "available"
         )
-        .catch(() => {
-          const current = this.coordination
-            ?.runtimeQuestions(question.taskId)
-            .find((q) => q.interactionId === question.interactionId);
-          if (current?.replyIntentId) {
-            this.runtime?.cancelUserInput?.(
-              question.identity,
-              "Native reply failed",
+          continue;
+        const reasons = this.runtimeAnswerEligibility(question);
+        if (reasons.length) {
+          coordination.holdRuntimeAnswer(
+            question.interactionId,
+            reasons.join("; "),
+          );
+          continue;
+        }
+        void this.runtime
+          .replyUserInput(
+            question.identity,
+            encodeNativeInputReply(question.request, question.answers),
+            () => {
+              const reasons = this.runtimeAnswerEligibility(question);
+              if (reasons.length) {
+                coordination.holdRuntimeAnswer(
+                  question.interactionId,
+                  reasons.join("; "),
+                );
+                throw new Error("Native reply held");
+              }
+              return coordination.beginRuntimeReply(
+                question.interactionId,
+                question.identity,
+              );
+            },
+          )
+          .catch(() => {
+            const current = this.coordination?.runtimeQuestionByInteractionId(
+              question.interactionId,
+              question.taskId,
             );
-          }
-        });
+            if (current?.replyIntentId) {
+              this.runtime?.cancelUserInput?.(
+                question.identity,
+                "Native reply failed",
+              );
+            }
+          });
+      }
     }
   }
 
@@ -2994,12 +3034,16 @@ export class StandaloneService {
         threadId,
       );
       submissionStage = "turn";
+      const prebindingGeneration = runtime.currentUserInputGeneration?.();
       const turnId = await runtime.startTurn(
         threadId,
         workspace,
         this.executionPrompt(request),
       );
-      let turnBound = state.bindTurn(intent.id, turnId);
+      const runtimeGeneration = runtime.currentUserInputGeneration?.();
+      let turnBound = runtimeGeneration
+        ? state.bindTurn(intent.id, turnId, runtimeGeneration)
+        : state.bindTurn(intent.id, turnId);
       let nativeRejected = false;
       if (!turnBound) {
         const reconciliation = state.reconcileNativeTurnStartResponse({
@@ -3009,19 +3053,77 @@ export class StandaloneService {
           turnId,
           runtimeGeneration: runtime.currentUserInputGeneration?.(),
         });
-        turnBound = reconciliation === "matched";
-        if (reconciliation === "rejected") {
+        turnBound = reconciliation.status === "matched";
+        if (reconciliation.status === "rejected") {
           nativeRejected = true;
+          const proof = reconciliation.prebinding;
+          const binding = state.runtimeQuestionBinding(
+            proof.threadId,
+            proof.turnId,
+          );
+          const bindingMatchesProof =
+            proof.workId === request.workId &&
+            proof.intentId === intent.id &&
+            proof.threadId === threadId &&
+            proof.runtimeGeneration === prebindingGeneration &&
+            binding !== undefined &&
+            (
+              [
+                "workId",
+                "taskId",
+                "assignmentId",
+                "assignmentVersion",
+                "instructionsRevision",
+                "profileRevision",
+                "conversationRevision",
+              ] as const
+            ).every((key) => binding[key] === proof[key]);
+          const rejectedQuestions = bindingMatchesProof
+            ? (
+                this.coordination?.runtimeQuestionsForWork(request.workId) ?? []
+              ).filter(
+                (question) =>
+                  question.requestingWorkId === proof.workId &&
+                  question.requestingAssignmentId === proof.assignmentId &&
+                  question.identity.threadId === proof.threadId &&
+                  question.identity.turnId === proof.turnId &&
+                  question.identity.runtimeGeneration ===
+                    proof.runtimeGeneration &&
+                  !["confirmed", "uncertain", "unavailable"].includes(
+                    question.deliveryState,
+                  ),
+              )
+            : [];
           state.hold(
             intent.id,
             "Native turn start response disagrees with admitted prebinding",
           );
-          for (const question of this.coordination?.runtimeQuestions() ?? [])
-            if (question.requestingWorkId === request.workId)
-              runtime.cancelUserInput?.(
-                question.identity,
-                "Native prebinding rejected",
-              );
+          for (const question of rejectedQuestions) {
+            runtime.cancelUserInput?.(
+              question.identity,
+              "Native prebinding rejected",
+            );
+            const current = this.coordination?.runtimeQuestionByEndpoint(
+              question.identity,
+            );
+            if (
+              current &&
+              !["confirmed", "uncertain", "unavailable"].includes(
+                current.deliveryState,
+              )
+            )
+              this.handleUserInputOutcome({
+                ...current.identity,
+                ...(current.replyIntentId
+                  ? {
+                      replyIntentId: current.replyIntentId,
+                      answerDigest: current.answerDigest ?? undefined,
+                    }
+                  : {}),
+                outcome: current.replyIntentId ? "uncertain" : "unavailable",
+                reason: "Native prebinding rejected",
+              });
+          }
         }
       }
       if (!nativeRejected)

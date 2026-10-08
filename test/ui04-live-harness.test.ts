@@ -74,6 +74,37 @@ test("UI04 timed-out browser creation settles and closes its late resource withi
   assert.equal(r.cleanup.verified, true, JSON.stringify(r.cleanup));
 });
 
+test("UI04 timed-out service startup keeps its late service-stop owner without racing runtime shutdown", async () => {
+  const r = await module.runQualification({
+    fixture: { delayRuntimeStart: 4200 },
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.failure.reason, /service-start-deadline/);
+  assert.equal(r.counts.threads, 0);
+  assert.equal(r.counts.turns, 0);
+  assert.equal(r.cleanup.operations["pending-setup-settlement"], "unresolved");
+  assert.equal(
+    r.cleanup.stages.find(
+      ({ operation }: { operation: string }) =>
+        operation === "pending-setup-settlement",
+    )?.state,
+    "unresolved",
+  );
+  assert.equal(r.cleanup.operations["exact-runtime-stop"], undefined);
+  assert.equal(r.cleanup.operations["service-close"], undefined);
+  assert.equal(r.cleanup.verified, false);
+  const observationDeadline = Date.now() + 1000;
+  while (
+    (!r.cleanup.lateResources[0] || !r.cleanup.lateVerification) &&
+    Date.now() < observationDeadline
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(r.cleanup.lateResources[0]?.state, "settled");
+  assert.equal(r.cleanup.lateResources[0]?.settledWithinCleanupDeadline, false);
+  assert.equal(r.cleanup.lateVerification?.kind, "verified");
+  assert.equal(r.cleanup.verified, false);
+});
+
 test("UI04 grant consumption atomically rejects replay and retains immutable scoped marker", () => {
   const consumedMarker = join(
     mkdtempSync(join(tmpdir(), "ui04-grant-test-")),

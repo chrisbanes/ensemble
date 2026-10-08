@@ -233,8 +233,16 @@ test("production service rejects installed approval and unknown request forms wi
   const workspace = join(root, "work");
   mkdirSync(workspace);
   const { executable, proofPath } = executableFixture(root, "all-forms");
-  let runtime = new CodexRuntime(executable);
-  let service = new StandaloneService(data, () => runtime, undefined, powerOff);
+  let runtime!: CodexRuntime;
+  const runtimeFactory = (
+    context: ConstructorParameters<typeof CodexRuntime>[1],
+  ) => (runtime = new CodexRuntime(executable, context));
+  let service = new StandaloneService(
+    data,
+    runtimeFactory,
+    undefined,
+    powerOff,
+  );
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
     await service.start();
@@ -309,8 +317,7 @@ test("production service rejects installed approval and unknown request forms wi
     await service.stop();
     assertExited(child);
 
-    runtime = new CodexRuntime(executable);
-    service = new StandaloneService(data, () => runtime, undefined, powerOff);
+    service = new StandaloneService(data, runtimeFactory, undefined, powerOff);
     await service.start();
     assert.equal(
       service.list().find((item) => item.workId === "s05-approval")?.state,
@@ -337,10 +344,10 @@ test("production callback binds an exact approval during a delayed turn response
   const workspace = join(root, "work");
   mkdirSync(workspace);
   const { executable, proofPath } = executableFixture(root, "delayed-exact");
-  const runtime = new CodexRuntime(executable);
+  let runtime!: CodexRuntime;
   const service = new StandaloneService(
     data,
-    () => runtime,
+    (context) => (runtime = new CodexRuntime(executable, context)),
     undefined,
     powerOff,
   );
@@ -382,10 +389,13 @@ test("malformed identity holds the active production execution and denial-pipe f
     const workspace = join(root, "work");
     mkdirSync(workspace);
     const { executable, proofPath } = executableFixture(root, mode);
-    let runtime = new CodexRuntime(executable);
+    let runtime!: CodexRuntime;
+    const runtimeFactory = (
+      context: ConstructorParameters<typeof CodexRuntime>[1],
+    ) => (runtime = new CodexRuntime(executable, context));
     let service = new StandaloneService(
       data,
-      () => runtime,
+      runtimeFactory,
       undefined,
       powerOff,
     );
@@ -419,8 +429,12 @@ test("malformed identity holds the active production execution and denial-pipe f
       await service.stop();
       assertExited(firstChild);
 
-      runtime = new CodexRuntime(executable);
-      service = new StandaloneService(data, () => runtime, undefined, powerOff);
+      service = new StandaloneService(
+        data,
+        runtimeFactory,
+        undefined,
+        powerOff,
+      );
       await service.start();
       assert.equal(
         service.list().find((item) => item.workId === "s05-fail-closed")?.state,

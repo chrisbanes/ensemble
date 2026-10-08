@@ -57,6 +57,7 @@ const realGit = ${JSON.stringify(realGit)};
 const fixtureToken = ${JSON.stringify(fixtureToken)};
 const executable = ${JSON.stringify(executable)};
 const descendantExecutable = ${JSON.stringify(descendantExecutable)};
+let ownProcessStartedAt;
 const args = process.argv.slice(2);
 const cwdIndex = args.indexOf("-C");
 const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : process.cwd();
@@ -72,10 +73,13 @@ const classify = (value) => {
   return "other";
 };
 const processIdentity = (pid, processPath) => {
+  if (pid === process.pid && ownProcessStartedAt !== undefined)
+    return { fixtureToken, processPath, processStartedAt: ownProcessStartedAt };
   const result = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1000 });
   const processStartedAt = !result.error && result.status === 0
     ? result.stdout.trim().split(/\\s+/).join(" ")
     : null;
+  if (pid === process.pid) ownProcessStartedAt = processStartedAt;
   return { fixtureToken, processPath, processStartedAt };
 };
 const writeEvent = (value) => {
@@ -83,6 +87,18 @@ const writeEvent = (value) => {
   const identity = processIdentity(value.pid, processPath);
   appendFileSync(eventsPath, JSON.stringify({ ...value, ...(identity ?? {}), atMs: Date.now() }) + "\\n");
 };
+const onTerm = () => {
+  writeEvent({ event: "term", pid: process.pid });
+  if (
+    control.behavior === "overflow" &&
+    command.startsWith(control.commandPrefix) &&
+    (!control.cwd || control.cwd === cwd)
+  ) {
+    process.removeListener("SIGTERM", onTerm);
+    process.kill(process.pid, "SIGTERM");
+  }
+};
+process.on("SIGTERM", onTerm);
 const operation = classify(command);
 const startedAt = Date.now();
 const control = JSON.parse(readFileSync(controlPath, "utf8"));
@@ -96,7 +112,6 @@ if (control.behavior && command.startsWith(control.commandPrefix) && (!control.c
   const hang = (effectComplete = false) => {
     if (effectComplete)
       writeEvent({ event: "finish", pid: process.pid, operation, elapsedMs: Date.now() - startedAt, exitCode: 0, effectComplete: true });
-    process.on("SIGTERM", () => writeEvent({ event: "term", pid: process.pid }));
     if (control.holdPipe) {
       const descendant = spawn(process.execPath, [descendantExecutable, fixtureToken], { stdio: "inherit" });
       writeEvent({ event: "descendant", pid: descendant.pid });
