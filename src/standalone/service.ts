@@ -3275,16 +3275,12 @@ export class StandaloneService {
           }).reasons;
           if (
             this.requireSchedulerStore()
-              .list()
+              .heldWorkIds(assignmentId, request.workId)
               .some(
-                (older) =>
-                  older.assignmentId === assignmentId &&
-                  older.workId !== request.workId &&
-                  older.state === "held" &&
-                  this.coordination?.recoveryDispositionForWork(
-                    older.workId,
-                  ) === "operator-reconciled" &&
-                  !this.coordination.hasRecoveryContinuation(older.workId),
+                (olderWorkId) =>
+                  this.coordination?.recoveryDispositionForWork(olderWorkId) ===
+                    "operator-reconciled" &&
+                  !this.coordination.hasRecoveryContinuation(olderWorkId),
               )
           )
             reasons.push("recovery-continuation-unresolved");

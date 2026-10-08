@@ -558,3 +558,122 @@ test("search items sharing a repository look the repository up once", async () =
     1,
   );
 });
+
+const redirect = (status: number, location: string) =>
+  new Response(null, { status, headers: { location } });
+
+function redirectingReader(
+  routes: Record<string, () => Response>,
+  calls: Array<{
+    url: string;
+    method?: string;
+    redirect?: RequestRedirect;
+  }> = [],
+) {
+  const reader = new GitHubHttpSourceReader(
+    "fixture-token",
+    async (input, init) => {
+      const url = String(input);
+      calls.push({
+        url,
+        ...(init?.method ? { method: init.method } : {}),
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+      });
+      const route = routes[url];
+      if (!route) throw new Error(`unexpected request ${url}`);
+      return route();
+    },
+  );
+  return { reader, calls };
+}
+
+const repositoryBody = () =>
+  new Response(JSON.stringify({ node_id: "R_1", full_name: "org/repo" }));
+const emptyIssues = () => new Response("[]");
+const issuesUrl =
+  "https://api.github.com/repos/org/repo/issues?state=all&per_page=100";
+
+test("a GET follows up to three same-origin redirects and a fourth fails", async () => {
+  const calls: Array<{ url: string; redirect?: RequestRedirect }> = [];
+  const routes = {
+    "https://api.github.com/repos/org/repo": () =>
+      redirect(301, "/repositories/1"),
+    "https://api.github.com/repositories/1": () =>
+      redirect(302, "https://api.github.com/repositories/2"),
+    "https://api.github.com/repositories/2": () =>
+      redirect(307, "/repositories/3"),
+    "https://api.github.com/repositories/3": repositoryBody,
+    [issuesUrl]: emptyIssues,
+  };
+  const followed = await redirectingReader(routes, calls).reader.readSelection(
+    repoSelection,
+  );
+  assert.equal(followed.complete, true);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      "https://api.github.com/repos/org/repo",
+      "https://api.github.com/repositories/1",
+      "https://api.github.com/repositories/2",
+      "https://api.github.com/repositories/3",
+      issuesUrl,
+    ],
+  );
+  assert.ok(calls.every((call) => call.redirect === "manual"));
+
+  const tooMany = await redirectingReader({
+    ...routes,
+    "https://api.github.com/repositories/3": () =>
+      redirect(301, "/repositories/4"),
+    "https://api.github.com/repositories/4": repositoryBody,
+  }).reader.readSelection(repoSelection);
+  assert.equal(tooMany.complete, false);
+  assert.equal(tooMany.reason, "invalid-provider-origin");
+});
+
+test("a GET refuses a redirect away from the API origin without sending the credential there", async () => {
+  for (const location of [
+    "https://evil.example/repos/org/repo",
+    "http://api.github.com/repos/org/repo",
+    "https://api.github.com.evil.example/repos/org/repo",
+  ]) {
+    const { reader, calls } = redirectingReader({
+      "https://api.github.com/repos/org/repo": () => redirect(302, location),
+    });
+    const result = await reader.readSelection(repoSelection);
+    assert.equal(result.complete, false, location);
+    assert.equal(result.reason, "invalid-provider-origin", location);
+    assert.equal(calls.length, 1, location);
+  }
+});
+
+test("a redirect without a Location is an error, not an empty success", async () => {
+  const { reader } = redirectingReader({
+    "https://api.github.com/repos/org/repo": () =>
+      new Response(null, { status: 301 }),
+  });
+  const result = await reader.readSelection(repoSelection);
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "invalid-provider-origin");
+});
+
+test("a POST refuses redirects instead of replaying the body", async () => {
+  const { reader, calls } = redirectingReader({
+    "https://api.github.com/graphql": () =>
+      redirect(307, "https://api.github.com/graphql"),
+  });
+  const result = await reader.readSelection({
+    id: "project",
+    kind: "project",
+    projectNodeId: "P_1",
+    filter: "status:ready",
+  });
+  assert.equal(result.complete, false);
+  assert.deepEqual(calls, [
+    {
+      url: "https://api.github.com/graphql",
+      method: "POST",
+      redirect: "error",
+    },
+  ]);
+});

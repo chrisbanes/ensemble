@@ -192,7 +192,10 @@ test("caffeinate holds exactly one idle-sleep assertion only while execution is 
     await power.executionStarted("work-a");
     await power.executionStarted("work-b");
     assert.deepEqual(invocations, [
-      { command: "/usr/bin/caffeinate", args: ["-i"] },
+      {
+        command: "/usr/bin/caffeinate",
+        args: ["-i", "-w", String(process.pid)],
+      },
     ]);
     await power.executionEnded("work-a");
     assert.equal(
@@ -304,7 +307,7 @@ test("assertion child failure is visible without releasing execution state", asy
   const assertion = new CaffeinateAssertion(
     (command: string, args: string[]) => {
       assert.equal(command, "/usr/bin/caffeinate");
-      assert.deepEqual(args, ["-i"]);
+      assert.deepEqual(args, ["-i", "-w", String(process.pid)]);
       const child = new FakeChild();
       children.push(child);
       return child;

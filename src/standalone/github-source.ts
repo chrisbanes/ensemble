@@ -14,6 +14,7 @@ export type {
   BlockerSnapshot,
   IssueReference,
 } from "../core/github-source.js";
+import { githubApi as api, githubFetch, nextPageLink } from "./github-http.js";
 
 const name = z.string().min(1);
 const issueSchema = z
@@ -119,19 +120,12 @@ export interface GitHubSourceReader {
 }
 
 const MAX_PAGES = 100;
-const api = "https://api.github.com";
 
 function nextLink(response: Response): string | null {
-  const header = response.headers.get("link");
-  if (!header) return null;
-  const links = header.split(",");
-  const next = links.find((part) => /;\s*rel="next"/.test(part));
-  if (!next) return null;
-  const match = /<([^>]+)>/.exec(next);
-  if (!match?.[1]) throw new Error("invalid-pagination");
-  const url = new URL(match[1]);
-  if (url.origin !== api) throw new Error("invalid-pagination-origin");
-  return url.href;
+  const url = nextPageLink(response, () => new Error("invalid-pagination"));
+  if (url !== null && new URL(url).origin !== api)
+    throw new Error("invalid-pagination-origin");
+  return url;
 }
 
 function issueFromRest(
@@ -221,16 +215,21 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
     if (!this.token) throw new Error("missing-credential");
     const target = new URL(url);
     if (target.origin !== api) throw new Error("invalid-provider-origin");
-    const response = await this.fetcher(target.href, {
-      method: body ? "POST" : "GET",
-      signal: AbortSignal.timeout(15_000),
-      headers: {
-        authorization: `Bearer ${this.token}`,
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
+    const response = await githubFetch(
+      this.fetcher,
+      target.href,
+      {
+        method: body ? "POST" : "GET",
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
+      () => new Error("invalid-provider-origin"),
+    );
     if (!response.ok) {
       const resumeAt = rateLimitResumeAt(response);
       if (resumeAt !== undefined) throw new RateLimitedError(resumeAt);

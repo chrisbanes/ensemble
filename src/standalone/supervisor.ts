@@ -339,17 +339,11 @@ export class ExecutionSupervisor {
     for (const target of initialTargets)
       if (target.interruptState === "pending") this.interrupt(target);
 
-    if (initialTargets.length > 0) {
-      const startedAt = this.clock.monotonicNow();
-      const remaining = Math.max(
-        0,
-        this.observationMs - (this.clock.monotonicNow() - startedAt),
-      );
+    if (initialTargets.length > 0)
       await Promise.race([
-        this.clock.sleep(remaining, signal).catch(() => {}),
+        this.clock.sleep(this.observationMs, signal).catch(() => {}),
         this.waitForTerminal(taskId, signal),
       ]);
-    }
     return this.currentObservation(taskId, initialTargets);
   }
 

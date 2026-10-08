@@ -11,7 +11,10 @@ import type {
   RuntimeToolResult,
   UnexpectedRequest,
 } from "../src/standalone/codex.js";
-import { ConversationHistoryStore } from "../src/standalone/conversation-history.js";
+import {
+  ConversationHistoryCapture,
+  ConversationHistoryStore,
+} from "../src/standalone/conversation-history.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import { tmpdir } from "./temp.js";
 
@@ -782,6 +785,70 @@ test("assignment history reads are scoped, re-redacted, and bounded in sequence 
     assert.equal(projection.items.at(-1)?.text, "history 200 [redacted]");
     assert.ok(
       projection.items.every((item) => !item.text?.includes("current-value")),
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("current exclusions are computed only for completed items", () => {
+  const db = new DatabaseSync(":memory:");
+  const history = new ConversationHistoryStore(db);
+  const binding = {
+    workId: "work-1",
+    taskId: "task-1",
+    assignmentId: "assignment-1",
+    assignmentVersion: 1,
+    instructionsRevision: 1,
+    profileRevision: 1,
+    conversationRevision: 1,
+    workRevision: 1,
+    threadId: "thread-1",
+    turnId: "turn-1",
+  };
+  let exclusionCalls = 0;
+  const capture = new ConversationHistoryCapture({
+    store: history,
+    workId: binding.workId,
+    threadId: binding.threadId,
+    captureStartExclusions: ["start-value"],
+    currentExclusions: () => {
+      exclusionCalls += 1;
+      return ["current-value"];
+    },
+  });
+  const event = { threadId: binding.threadId, turnId: binding.turnId };
+
+  try {
+    assert.equal(capture.bind(binding), true);
+    capture.receive({ ...event, itemId: "item-1", kind: "started" });
+    capture.receive({ ...event, itemId: "item-1", kind: "delta", bytes: 5 });
+    capture.receive({
+      ...event,
+      itemId: "item-2",
+      kind: "omitted",
+      reason: "size-limit",
+    });
+    assert.equal(exclusionCalls, 0);
+    capture.receive({
+      ...event,
+      itemId: "item-1",
+      kind: "completed",
+      text: "start-value and current-value",
+    });
+    assert.equal(exclusionCalls, 1);
+    const projection = history.readAssignment(
+      "task-1",
+      "assignment-1",
+      200,
+      [],
+    );
+    assert.deepEqual(
+      projection.items.map((item) => [item.itemId, item.lifecycle, item.text]),
+      [
+        ["item-1", "completed", "[redacted] and [redacted]"],
+        ["item-2", "omitted", null],
+      ],
     );
   } finally {
     db.close();

@@ -8,7 +8,7 @@ import {
   TypeSafeClient,
 } from "@typesafe-ai/sdk";
 import { z } from "zod";
-import type { Database } from "../core/store.js";
+import { transaction, type Database } from "../core/store.js";
 
 export const routingModel = "jev-1.13.0" as const;
 const maxAttempts = 2;
@@ -280,18 +280,6 @@ function parseJson<T>(
     throw new Error(`Persisted ${label} is malformed`);
   }
   return schema.parse(parsed);
-}
-
-function transaction<T>(db: Database, action: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = action();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
 }
 
 export class RoutingAttemptStore {

@@ -39,7 +39,7 @@ import {
   actionKinds,
   type RuntimeDeliveryCaller,
 } from "./delivery.js";
-import type { Database } from "./store.js";
+import { transaction, type Database } from "./store.js";
 
 const uuid = z.string().uuid();
 const summarySchema = z.string().trim().min(1).max(16000);
@@ -469,8 +469,7 @@ export class CoordinationStore {
 
   migrate(): void {
     new TaskReviewStore(this.db).migrate();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db.exec(`CREATE TABLE IF NOT EXISTS coordination_external_delivery_notices (taskId TEXT NOT NULL REFERENCES domain_tasks(id),identity TEXT NOT NULL,eventId TEXT NOT NULL,PRIMARY KEY(taskId,identity));
       CREATE TABLE IF NOT EXISTS coordination_receipts (
         threadId TEXT NOT NULL, turnId TEXT NOT NULL, callId TEXT NOT NULL,
@@ -676,11 +675,7 @@ export class CoordinationStore {
         WHERE routingOperationId IS NOT NULL;`);
       new TaskReviewStore(this.db).populateMissingWithinTransaction();
       new RetainedEvidenceStore(this.db).migrate();
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   private migrateRuntimeQuestionIdentity(): void {
@@ -843,20 +838,14 @@ export class CoordinationStore {
     caller: RuntimeDeliveryCaller,
     response: CoordinationToolResponse,
   ): CoordinationToolResponse {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const prior = this.cachedToolResponse(call);
       if (prior) {
-        this.db.exec("COMMIT");
         return prior;
       }
       this.insertToolReceipt(call, caller as unknown as Row, response);
-      this.db.exec("COMMIT");
       return response;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
   /** Matching lost-response retries replay before any current-generation query. */
   receipt(input: CoordinationCall): CoordinationReceipt | undefined {
@@ -1159,11 +1148,9 @@ export class CoordinationStore {
     externalAdmission: () => boolean = () => true,
   ): CoordinationToolResponse {
     const call = delegateCallSchema.parse(input);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.cachedToolResponse(call);
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const binding = this.currentBinding(call.threadId, call.turnId);
@@ -1221,12 +1208,8 @@ export class CoordinationStore {
         success: true,
       };
       this.insertToolReceipt(call, binding, response);
-      this.db.exec("COMMIT");
       return response;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   requestQuestion(input: CoordinationCall): CoordinationToolResponse {
@@ -1258,17 +1241,6 @@ export class CoordinationStore {
     });
   }
 
-  private runtimeTransaction<T>(action: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = action();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
   private parseRuntimeQuestion(row: Row): RuntimeQuestionRecord {
     const identity = nativeInputEndpointIdentitySchema.parse(
       JSON.parse(String(row.identityJson)),
@@ -1476,7 +1448,7 @@ export class CoordinationStore {
       throw new Error("Native request identity mismatch");
     const key = nativeEndpointKey(identity);
     const digest = payloadHash(request);
-    return this.runtimeTransaction(() => {
+    return transaction(this.db, () => {
       const prior = this.one(
         "SELECT interactionId,requestDigest FROM coordination_runtime_questions WHERE endpointKey = ?",
         key,
@@ -1548,7 +1520,7 @@ export class CoordinationStore {
   ): RuntimeQuestionAnswerReceipt {
     const command = runtimeQuestionAnswerCommandSchema.parse(input);
     const { key: _key, actor: _actor, ...payload } = command;
-    return this.runtimeTransaction(() => {
+    return transaction(this.db, () => {
       const prior = this.one(
         `SELECT payloadHash,result FROM coordination_operator_receipts WHERE scope='answer-runtime-question' AND commandKey=?`,
         command.key,
@@ -1621,7 +1593,7 @@ export class CoordinationStore {
     interactionId: string,
     identity: NativeInputEndpointIdentity,
   ): RuntimeReplyIntent {
-    return this.runtimeTransaction(() => {
+    return transaction(this.db, () => {
       const question = this.runtimeQuestionByInteractionId(interactionId);
       if (
         !question ||
@@ -1653,7 +1625,7 @@ export class CoordinationStore {
       orderedReceipt: _receipt,
       ...identity
     } = outcome;
-    return this.runtimeTransaction(() => {
+    return transaction(this.db, () => {
       const question = this.runtimeQuestionByEndpoint(identity);
       if (!question) throw new Error("Unknown native outcome identity");
       if (
@@ -1690,7 +1662,7 @@ export class CoordinationStore {
     });
   }
   invalidateRuntimeQuestions(reason: string): void {
-    this.runtimeTransaction(() => {
+    transaction(this.db, () => {
       this.db
         .prepare(
           `UPDATE coordination_runtime_questions SET requestState='unavailable',deliveryState=CASE WHEN replyIntentId IS NULL THEN 'unavailable' ELSE 'uncertain' END,reason=? WHERE deliveryState<>'confirmed'`,
@@ -1742,15 +1714,13 @@ export class CoordinationStore {
       expectedRevision: command.expectedRevision,
       answer: command.answer,
     };
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.replayOperatorEvent(
         "answer-question",
         command.key,
         payload,
       );
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const interaction = this.required(
@@ -1799,12 +1769,8 @@ export class CoordinationStore {
         payload,
         event.eventId,
       );
-      this.db.exec("COMMIT");
       return event;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   questionForm(interactionId: string): {
@@ -1942,7 +1908,7 @@ export class CoordinationStore {
       .strict()
       .parse(input);
     const { key: _key, actor: _actor, ...payload } = command;
-    return this.runtimeTransaction(() => {
+    return transaction(this.db, () => {
       const replay = this.replayOperatorEvent(
         "answer-question-form",
         command.key,
@@ -2021,15 +1987,13 @@ export class CoordinationStore {
       materialHash:
         command.material === undefined ? null : payloadHash(command.material),
     };
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.replayOperatorEvent(
         "decide-approval",
         command.key,
         payload,
       );
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const interaction = this.required(
@@ -2102,12 +2066,8 @@ export class CoordinationStore {
         payload,
         event.eventId,
       );
-      this.db.exec("COMMIT");
       return event;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   postOperatorMessage(input: {
@@ -2127,15 +2087,13 @@ export class CoordinationStore {
       message: command.message,
       ...(command.reference ? { reference: command.reference } : {}),
     };
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.replayOperatorEvent(
         "operator-message",
         command.key,
         payload,
       );
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const assignment = this.required(
@@ -2178,12 +2136,8 @@ export class CoordinationStore {
         event.eventId,
       );
       this.recordRecoveryContinuation(event, command.key, payloadHash(payload));
-      this.db.exec("COMMIT");
       return event;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   authorizationFor(input: {
@@ -2236,11 +2190,9 @@ export class CoordinationStore {
 
   requestFollowUp(input: CoordinationCall): CoordinationToolResponse {
     const call = followUpCallSchema.parse(input);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.cachedToolResponse(call);
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const caller = this.currentBinding(call.threadId, call.turnId);
@@ -2300,7 +2252,6 @@ export class CoordinationStore {
           success: true,
         };
         this.insertToolReceipt(call, caller, response);
-        this.db.exec("COMMIT");
         return response;
       }
       const nextVersion = Number(result.version) + 1;
@@ -2348,12 +2299,8 @@ export class CoordinationStore {
         success: true,
       };
       this.insertToolReceipt(call, caller, response);
-      this.db.exec("COMMIT");
       return response;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   followUps(taskId?: string): FollowUpRequest[] {
@@ -2374,11 +2321,9 @@ export class CoordinationStore {
 
   requestTaskCompletion(input: CoordinationCall): CoordinationToolResponse {
     const call = completionCallSchema.parse(input);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.cachedToolResponse(call);
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const lead = this.currentBinding(call.threadId, call.turnId);
@@ -2424,7 +2369,6 @@ export class CoordinationStore {
           success: true,
         };
         this.insertToolReceipt(call, lead, response);
-        this.db.exec("COMMIT");
         return response;
       }
       const requestId = randomUUID();
@@ -2447,12 +2391,8 @@ export class CoordinationStore {
         success: true,
       };
       this.insertToolReceipt(call, lead, response);
-      this.db.exec("COMMIT");
       return response;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   completionRequests(taskId?: string): TaskCompletionRequest[] {
@@ -2525,8 +2465,7 @@ export class CoordinationStore {
 
   recordSuccessfulTerminal(workId: string): ReportingRepair | undefined {
     const work = z.string().min(1).max(512).parse(workId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const binding = this.one(
         `SELECT binding.taskId, binding.assignmentId,
         binding.assignmentVersion, binding.conversationRevision,
@@ -2555,7 +2494,6 @@ export class CoordinationStore {
           Number(binding.workRevision),
         )
       ) {
-        this.db.exec("COMMIT");
         return undefined;
       }
 
@@ -2611,7 +2549,6 @@ export class CoordinationStore {
           SET state = 'resolved', reason = NULL, updatedAt = unixepoch()
           WHERE assignmentId = ? AND assignmentVersion = ? AND state = 'queued'`)
           .run(assignmentId, assignmentVersion);
-        this.db.exec("COMMIT");
         return undefined;
       }
 
@@ -2639,7 +2576,6 @@ export class CoordinationStore {
           assignmentId,
           assignmentVersion,
         );
-        this.db.exec("COMMIT");
         return result ? this.parseReportingRepair(result) : undefined;
       }
 
@@ -2664,12 +2600,8 @@ export class CoordinationStore {
         assignmentId,
         assignmentVersion,
       );
-      this.db.exec("COMMIT");
       return result ? this.parseReportingRepair(result) : undefined;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   finalizeTaskCompletion(input: {
@@ -2684,8 +2616,7 @@ export class CoordinationStore {
   } {
     const { deliveryValidation, ...material } = input;
     const command = completionFinalizeSchema.parse(material);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const raw = this.required(
         `SELECT requestId, taskId, leadAssignmentId,
         leadWorkId, leadWorkRevision, taskVersion, reviewedResultIds,
@@ -2697,11 +2628,9 @@ export class CoordinationStore {
       if (request.leadWorkId !== command.workId)
         throw new Error("Completion terminal work does not match the request");
       if (request.status === "finalized") {
-        this.db.exec("COMMIT");
         return { completed: true, reasons: [], request };
       }
       if (request.status === "rejected") {
-        this.db.exec("COMMIT");
         return {
           completed: false,
           reasons: request.rejectionReasons,
@@ -2767,7 +2696,6 @@ export class CoordinationStore {
             );
         }
         const rejected = this.parseCompletionRequest(rejectedRow);
-        this.db.exec("COMMIT");
         return {
           completed: false,
           reasons: rejected.rejectionReasons,
@@ -2838,12 +2766,8 @@ export class CoordinationStore {
       if (!finalizedRow)
         throw new Error("Completion request changed during finalization");
       const finalized = this.parseCompletionRequest(finalizedRow);
-      this.db.exec("COMMIT");
       return { completed: true, reasons: [], request: finalized };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   reconcileResultRecipient(input: {
@@ -2859,15 +2783,13 @@ export class CoordinationStore {
       expectedRevision: command.expectedRevision,
       recipientAssignmentId: command.recipientAssignmentId,
     };
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.replayOperatorEvent(
         "reconcile-result-recipient",
         command.key,
         payload,
       );
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const hold = this.required(
@@ -2915,12 +2837,8 @@ export class CoordinationStore {
         payload,
         String(event.eventId),
       );
-      this.db.exec("COMMIT");
       return this.parseEvent(event);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   results(taskId?: string): AssignmentResult[] {
@@ -2980,8 +2898,7 @@ export class CoordinationStore {
       reason: command.reason,
       evidence: command.evidence,
     });
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const existing = this.one(
         "SELECT sequence, eventId, taskId, recipientAssignmentId, eventType, resultId, interactionId, payload, createdAt FROM coordination_inbox_events WHERE routingOperationId = ?",
         command.routingOperationId,
@@ -2995,7 +2912,6 @@ export class CoordinationStore {
         )
           throw new Error("Routing fallback event conflict");
         const event = this.parseEvent(existing);
-        this.db.exec("COMMIT");
         return event;
       }
       const event = this.newEvent(
@@ -3007,12 +2923,8 @@ export class CoordinationStore {
         null,
         command.routingOperationId,
       );
-      this.db.exec("COMMIT");
       return event;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   ensureSourceHoldEvent(input: {
@@ -3030,8 +2942,7 @@ export class CoordinationStore {
       reason: input.reason,
       disposition: "safe-stop-new-work",
     });
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const existing = this.one(
         `SELECT event.sequence, event.eventId, event.taskId, event.recipientAssignmentId,
         event.eventType, event.resultId, event.interactionId, event.payload, event.createdAt
@@ -3048,7 +2959,6 @@ export class CoordinationStore {
           existing.payload !== payload
         )
           throw new Error("Source hold notice conflict");
-        this.db.exec("COMMIT");
         return this.parseEvent(existing);
       }
       const event = this.newEvent(
@@ -3063,12 +2973,8 @@ export class CoordinationStore {
           "INSERT INTO coordination_source_hold_notices (nodeId, generation, recipientAssignmentId, eventId) VALUES (?, ?, ?, ?)",
         )
         .run(input.nodeId, input.generation, recipient, event.eventId);
-      this.db.exec("COMMIT");
       return event;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   pendingEvents(recipientAssignmentId: string): InboxEvent[] {
@@ -3167,8 +3073,7 @@ export class CoordinationStore {
       assignmentVersion === undefined
         ? undefined
         : z.number().int().positive().parse(assignmentVersion);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const sameWork = this.one(
         "SELECT batchId, recipientAssignmentId, state FROM coordination_delivery_batches WHERE deliveryWorkId = ?",
         workId,
@@ -3195,10 +3100,8 @@ export class CoordinationStore {
           recipientState !== "pending" &&
           recipientState !== "running"
         ) {
-          this.db.exec("COMMIT");
           return undefined;
         }
-        this.db.exec("COMMIT");
         return batch;
       }
       const recipientState = this.required(
@@ -3206,7 +3109,6 @@ export class CoordinationStore {
         recipient,
       ).state;
       if (recipientState !== "pending" && recipientState !== "running") {
-        this.db.exec("COMMIT");
         return undefined;
       }
       const active = this.one(
@@ -3215,7 +3117,6 @@ export class CoordinationStore {
       );
       if (active) {
         const batch = this.delivery(String(active.batchId));
-        this.db.exec("COMMIT");
         return batch;
       }
       const pending = this.db
@@ -3228,7 +3129,6 @@ export class CoordinationStore {
         ORDER BY event.sequence`)
         .all(recipient) as Row[];
       if (pending.length === 0) {
-        this.db.exec("COMMIT");
         return undefined;
       }
       const taskId = String(pending[0]?.taskId);
@@ -3257,18 +3157,13 @@ export class CoordinationStore {
           .run(String(event.eventId), batchId, index + 1);
       });
       const batch = this.delivery(batchId);
-      this.db.exec("COMMIT");
       return batch;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   completeDeliveryBatch(deliveryWorkId: string): InboxDelivery {
     const workId = z.string().min(1).max(512).parse(deliveryWorkId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const row = this.required(
         "SELECT batchId, state FROM coordination_delivery_batches WHERE deliveryWorkId = ?",
         workId,
@@ -3280,12 +3175,8 @@ export class CoordinationStore {
           )
           .run(String(row.batchId));
       const result = this.delivery(String(row.batchId));
-      this.db.exec("COMMIT");
       return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   /** Historical exceptions never bypass the current generation's independent gates. */
@@ -3460,8 +3351,7 @@ export class CoordinationStore {
    * to the current project/profile instruction revisions. */
   withdrawStaleRefusedDelivery(deliveryWorkId: string): boolean {
     const workId = z.string().min(1).max(512).parse(deliveryWorkId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const batch = this.one(
         `SELECT batch.batchId, batch.taskId, batch.recipientAssignmentId,
           batch.assignmentVersion, batch.highWaterSequence, batch.state,
@@ -3541,7 +3431,6 @@ export class CoordinationStore {
         batch.revoked !== 0 ||
         !this.isNeverAdmittedRefusedAssignmentWork?.(workId)
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
 
@@ -3550,7 +3439,6 @@ export class CoordinationStore {
           .assignmentAdmission(String(batch.recipientAssignmentId))
           .reasons.some((reason) => reason !== "project-paused")
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
 
@@ -3558,7 +3446,6 @@ export class CoordinationStore {
       try {
         candidateProfileIds = JSON.parse(String(batch.candidateProfileIds));
       } catch {
-        this.db.exec("COMMIT");
         return false;
       }
       const permittedCandidates = z.array(uuid).safeParse(candidateProfileIds);
@@ -3575,7 +3462,6 @@ export class CoordinationStore {
           String(batch.taskId),
         )
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
 
@@ -3604,7 +3490,6 @@ export class CoordinationStore {
         Math.max(...events.map((event) => event.sequence)) !==
           batch.highWaterSequence
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
 
@@ -3622,12 +3507,8 @@ export class CoordinationStore {
       );
       if (remains)
         throw new Error("Refused delivery batch changed during withdrawal");
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   private currentBinding(threadId: string, turnId: string): Row | undefined {
@@ -3826,11 +3707,9 @@ export class CoordinationStore {
     },
   ): CoordinationToolResponse {
     const call = generalCallSchema.parse(input);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const replay = this.cachedToolResponse(call);
       if (replay) {
-        this.db.exec("COMMIT");
         return replay;
       }
       const binding = this.currentBinding(call.threadId, call.turnId);
@@ -3901,12 +3780,8 @@ export class CoordinationStore {
         success: true,
       };
       this.insertToolReceipt(call, binding, response);
-      this.db.exec("COMMIT");
       return response;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   private cachedToolResponse(

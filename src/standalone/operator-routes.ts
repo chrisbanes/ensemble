@@ -25,7 +25,7 @@ type RegisteredRoute = OperatorRoute & {
   segments: string[];
 };
 
-function containsControlCharacters(value: string): boolean {
+export function containsControlCharacters(value: string): boolean {
   return value.split("").some((character) => {
     const code = character.charCodeAt(0);
     return code < 32 || code === 127;
@@ -93,7 +93,7 @@ function routesOverlap(left: string[], right: string[]): boolean {
   );
 }
 
-function decodeSegment(segment: string): string | undefined {
+export function decodeSegment(segment: string): string | undefined {
   try {
     const decoded = decodeURIComponent(segment);
     if (

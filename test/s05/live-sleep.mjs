@@ -1075,7 +1075,10 @@ async function runLiveJourney(approval) {
 
     eventSource = new ObservedMacPowerEventSource();
     const assertion = new powerTypes.CaffeinateAssertion((file, args) => {
-      if (file !== "/usr/bin/caffeinate" || args.join(" ") !== "-i")
+      if (
+        file !== "/usr/bin/caffeinate" ||
+        args.join(" ") !== `-i -w ${process.pid}`
+      )
         throw fail("unexpected-assertion-command");
       caffeinateStartCount++;
       caffeinateChild = spawn(file, args, { stdio: "ignore" });
