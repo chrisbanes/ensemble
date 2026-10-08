@@ -1080,7 +1080,7 @@ export class RetainedEvidenceStore {
         checked.length
     )
       throw new Error("Review anchor task or identity mismatch");
-    return transaction(this.db, () => {
+    const stage = () => {
       const prior = this.reviewAnchorOperation(
         taskId,
         operationId,
@@ -1163,7 +1163,29 @@ export class RetainedEvidenceStore {
         response,
       );
       return response;
-    });
+    };
+    return this.db.isTransaction === true
+      ? stage()
+      : transaction(this.db, stage);
+  }
+
+  /** Called inside a coordination transaction; keeps the #781 stage contract intact. */
+  stageReviewAnchorDraftWithinTransaction(
+    taskId: string,
+    operationId: string,
+    materialHash: string,
+    candidates: readonly RetainedReviewAnchorCandidate[],
+  ): RetainedReviewAnchorStageResponse {
+    if (this.db.isTransaction === false)
+      throw new Error(
+        "Review anchor staging requires the coordination transaction",
+      );
+    return this.stageReviewAnchorDraft(
+      taskId,
+      operationId,
+      materialHash,
+      candidates,
+    );
   }
 
   sealReviewAnchorDraft(
@@ -1183,7 +1205,7 @@ export class RetainedEvidenceStore {
       new Set(checkedIds).size !== checkedIds.length
     )
       throw new Error("Invalid review anchor references");
-    return transaction(this.db, () => {
+    const seal = () => {
       const prior = this.reviewAnchorOperation(
         taskId,
         operationId,
@@ -1267,7 +1289,29 @@ export class RetainedEvidenceStore {
         response,
       );
       return response;
-    });
+    };
+    return this.db.isTransaction === true ? seal() : transaction(this.db, seal);
+  }
+
+  /** Called inside SendLocalReview's one outer transaction. */
+  sealReviewAnchorDraftWithinTransaction(
+    taskId: string,
+    draftId: string,
+    operationId: string,
+    materialHash: string,
+    anchorIds: readonly string[],
+  ): RetainedReviewAnchorSealResponse {
+    if (this.db.isTransaction === false)
+      throw new Error(
+        "Review anchor sealing requires the coordination transaction",
+      );
+    return this.sealReviewAnchorDraft(
+      taskId,
+      draftId,
+      operationId,
+      materialHash,
+      anchorIds,
+    );
   }
 
   discardReviewAnchorDraft(
@@ -1280,7 +1324,7 @@ export class RetainedEvidenceStore {
     uuid.parse(draftId);
     uuid.parse(operationId);
     hash.parse(materialHash);
-    return transaction(this.db, () => {
+    const discard = () => {
       const prior = this.reviewAnchorOperation(
         taskId,
         operationId,
@@ -1335,7 +1379,29 @@ export class RetainedEvidenceStore {
         response,
       );
       return response;
-    });
+    };
+    return this.db.isTransaction === true
+      ? discard()
+      : transaction(this.db, discard);
+  }
+
+  /** Called inside a coordination transaction when reclaiming an unreferenced draft group. */
+  discardReviewAnchorDraftWithinTransaction(
+    taskId: string,
+    draftId: string,
+    operationId: string,
+    materialHash: string,
+  ): RetainedReviewAnchorDiscardResponse {
+    if (this.db.isTransaction === false)
+      throw new Error(
+        "Review anchor discard requires the coordination transaction",
+      );
+    return this.discardReviewAnchorDraft(
+      taskId,
+      draftId,
+      operationId,
+      materialHash,
+    );
   }
 
   reviewAnchorDraft(

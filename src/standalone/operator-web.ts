@@ -1,11 +1,16 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { OperatorApiError, type OperatorApi } from "./operator-api.js";
+import {
+  OperatorApiError,
+  type OperatorApi,
+  type OperatorReviewSessionContext,
+} from "./operator-api.js";
 import type { WorkspaceInspectionRequest } from "./workspace-inspection.js";
 import { workspaceComparisonReadRequestSchema } from "../operator/contracts.js";
 const mime: Record<string, string> = {
   js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8",
   woff2: "font/woff2",
 };
@@ -124,7 +129,7 @@ export class OperatorWebBundle {
     if (!assets.isDirectory() || assets.isSymbolicLink())
       throw Error("Operator build unavailable");
     for (const name of await readdir(assetPath)) {
-      if (!/^[A-Za-z0-9_.-]+\.(js|css|woff2)$/.test(name))
+      if (!/^[A-Za-z0-9_.-]+\.(js|mjs|css|woff2)$/.test(name))
         throw Error("Unsupported operator build asset");
       const path = join(assetPath, name),
         stat = await lstat(path);
@@ -178,9 +183,32 @@ export class OperatorWebBoundary {
       path.startsWith("/api/")
     );
   }
-  async read(path: string, query = new URLSearchParams(), rawSearch?: string) {
+  async read(
+    path: string,
+    query = new URLSearchParams(),
+    rawSearch?: string,
+    reviewSession?: OperatorReviewSessionContext,
+  ) {
     if (path === "/api/operator/search") return this.api.readSearch(query);
     if (path === "/api/operator/inbox") return this.api.readInbox(query);
+    const reviewDraft = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/review-draft$/,
+    );
+    if (reviewDraft) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return this.api.readLocalReviewDraft(reviewDraft[1] ?? "", reviewSession);
+    }
+    const localReview = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/local-reviews\/([^/]+)$/,
+    );
+    if (localReview) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return this.api.readLocalReviewOperation(
+        localReview[1] ?? "",
+        localReview[2] ?? "",
+        reviewSession,
+      );
+    }
     const retainedEvidence = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/results\/([^/]+)\/evidence(?:\/([^/]+))?$/,
     );
@@ -343,6 +371,9 @@ export class OperatorWebBoundary {
         path,
       ) ||
       /^\/api\/operator\/tasks\/[^/]+\/review-anchors\/[^/]+$/.test(path) ||
+      /^\/api\/operator\/tasks\/[^/]+\/(?:review-draft|local-reviews\/[^/]+)$/.test(
+        path,
+      ) ||
       /^\/api\/operator\/tasks\/[^/]+\/comparisons$/.test(path) ||
       /^\/api\/operator\/tasks\/[^/]+\/questions\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||

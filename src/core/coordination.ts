@@ -40,6 +40,7 @@ import {
   type RuntimeDeliveryCaller,
 } from "./delivery.js";
 import type { Database } from "./store.js";
+import { LocalReviewStore } from "./local-review.js";
 
 const uuid = z.string().uuid();
 const summarySchema = z.string().trim().min(1).max(16000);
@@ -173,6 +174,59 @@ const operatorMessageSchema = z
     expectedAssignmentVersion: z.number().int().positive(),
     message: summarySchema,
     reference: feedbackReferenceSchema.optional(),
+  })
+  .strict();
+const localReviewCommentSchema = z
+  .object({
+    commentId: uuid,
+    body: z.string().trim().min(1).max(4000),
+    anchorGroupIds: z.array(uuid).max(32),
+  })
+  .strict();
+const localReviewDraftContentSchema = z
+  .object({
+    summary: z.string().trim().max(4000),
+    comments: z.array(localReviewCommentSchema).max(32),
+  })
+  .strict()
+  .superRefine((draft, ctx) => {
+    const comments = draft.comments.map((comment) => comment.commentId);
+    const groups = draft.comments.flatMap((comment) => comment.anchorGroupIds);
+    if (
+      new Set(comments).size !== comments.length ||
+      new Set(groups).size !== groups.length
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "duplicate-local-review-reference",
+      });
+    if (Buffer.byteLength(JSON.stringify(draft), "utf8") > 16_000)
+      ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
+  });
+const localReviewRequestSchema = z
+  .object({
+    key: uuid,
+    taskId: uuid,
+    expectedDraftVersion: z.number().int().nonnegative().safe(),
+    recipientAssignmentId: uuid,
+    expectedAssignmentVersion: z.number().int().positive().safe(),
+  })
+  .strict();
+const localReviewOperationStateSchema = z.enum([
+  "prepared",
+  "recorded",
+  "rejected",
+  "not-recorded",
+]);
+const localReviewOperationResponseSchema = z
+  .object({
+    operationId: uuid,
+    taskId: uuid,
+    reviewId: uuid,
+    state: localReviewOperationStateSchema,
+    eventId: uuid.optional(),
+    recipientAssignmentId: uuid.optional(),
+    reason: z.string().max(128).optional(),
   })
   .strict();
 const routingFallbackAttentionSchema = z
@@ -337,6 +391,19 @@ export interface InboxEvent {
   createdAt: number;
 }
 
+export type LocalReviewDraftContent = z.infer<
+  typeof localReviewDraftContentSchema
+>;
+export type LocalReviewOperationResponse = z.infer<
+  typeof localReviewOperationResponseSchema
+>;
+export type LocalReviewSyncIdentity = {
+  projectId: string;
+  taskVersion: number;
+  visibility: string;
+  workspaceVisibility: string;
+};
+
 export interface RoutingFallbackAttention {
   routingOperationId: string;
   taskId: string;
@@ -455,6 +522,29 @@ export class CoordinationStore {
 
   retainedEvidence(): RetainedEvidenceStore {
     return new RetainedEvidenceStore(this.db);
+  }
+
+  localReviews(): LocalReviewStore {
+    return new LocalReviewStore(this.db, this.retainedEvidence(), {
+      createMessage: (taskId, recipientAssignmentId, message) =>
+        this.newEvent(
+          taskId,
+          recipientAssignmentId,
+          "operator-message",
+          null,
+          JSON.stringify({ message }),
+        ),
+      saveReceipt: (key, request, eventId) =>
+        this.saveOperatorReceipt("local-review-send", key, request, eventId),
+      readEvent: (eventId) =>
+        this.parseEvent(
+          this.required(
+            `SELECT sequence,eventId,taskId,recipientAssignmentId,eventType,resultId,interactionId,payload,createdAt
+        FROM coordination_inbox_events WHERE eventId=?`,
+            eventId,
+          ),
+        ),
+    });
   }
 
   hasResultForWork(workId: string, workRevision: number): boolean {
@@ -676,6 +766,7 @@ export class CoordinationStore {
         WHERE routingOperationId IS NOT NULL;`);
       new TaskReviewStore(this.db).populateMissingWithinTransaction();
       new RetainedEvidenceStore(this.db).migrate();
+      this.localReviews().migrate();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

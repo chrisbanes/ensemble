@@ -1,6 +1,9 @@
 import { questionCommandRawLimit } from "../operator/contracts.js";
 import type { OperatorWebBoundary } from "./operator-web.js";
-import { OperatorApiError } from "./operator-api.js";
+import {
+  OperatorApiError,
+  type OperatorReviewSessionContext,
+} from "./operator-api.js";
 import { apiErrorSchema, sessionSchema } from "../operator/contracts.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -919,6 +922,7 @@ export class LocalOperatorHttp {
         }
         const id = cookieId(request);
         session = id ? this.auth.getSession(id) : undefined;
+        this.purgeExpiredReviewOwners();
 
         if (this.web && (await this.handleWeb(request, response, url, session)))
           return;
@@ -1012,7 +1016,8 @@ export class LocalOperatorHttp {
             writeHtml(response, 403, "<main><h1>Request denied</h1></main>");
             return;
           }
-          this.auth.logout(authorized.id);
+          const ownerKey = this.auth.logout(authorized.id);
+          if (ownerKey) this.web?.api.purgeLocalReviewDrafts(ownerKey);
           response
             .writeHead(303, {
               ...RESPONSE_HEADERS,
@@ -1197,7 +1202,28 @@ export class LocalOperatorHttp {
 
   private currentSession(session: OperatorSession | undefined): boolean {
     const current = session && this.auth.getSession(session.id);
+    this.purgeExpiredReviewOwners();
     return !!current?.authenticated && current.csrfToken === session?.csrfToken;
+  }
+  private reviewSession(
+    session: OperatorSession | undefined,
+  ): OperatorReviewSessionContext | undefined {
+    if (!session?.authenticated) return undefined;
+    const ownerKey = this.auth.reviewOwnerKey(session.id);
+    if (!ownerKey) {
+      this.purgeExpiredReviewOwners();
+      return undefined;
+    }
+    return {
+      ownerKey,
+      current: () => this.auth.reviewOwnerKey(session.id) === ownerKey,
+    };
+  }
+  private purgeExpiredReviewOwners(): void {
+    const owners = this.auth.takeInvalidatedReviewOwnerKeys();
+    if (!this.web) return;
+    for (const ownerKey of owners)
+      this.web.api.purgeLocalReviewDrafts(ownerKey);
   }
   private requireCurrentSession(
     response: ServerResponse,
@@ -1250,7 +1276,7 @@ export class LocalOperatorHttp {
     const headers = {
       ...RESPONSE_HEADERS,
       "content-security-policy":
-        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
     };
     const json = (
       status: number,
@@ -1365,7 +1391,8 @@ export class LocalOperatorHttp {
         }
         if (path === "/api/operator/logout") {
           z.object({}).strict().parse(body);
-          this.auth.logout(session.id);
+          const ownerKey = this.auth.logout(session.id);
+          if (ownerKey) web.api.purgeLocalReviewDrafts(ownerKey);
           json(
             200,
             { authenticated: false },
@@ -1383,7 +1410,7 @@ export class LocalOperatorHttp {
           json(200, data);
           return true;
         }
-        const data = await web.api.execute(body);
+        const data = await web.api.execute(body, this.reviewSession(session));
         if (!this.currentSession(session)) {
           deny(401, "unauthenticated");
           return true;
@@ -1413,7 +1440,12 @@ export class LocalOperatorHttp {
         response.end(data.body);
         return true;
       }
-      const data = await web.read(path, url.searchParams, url.search);
+      const data = await web.read(
+        path,
+        url.searchParams,
+        url.search,
+        this.reviewSession(session),
+      );
       if (!this.currentSession(session)) {
         deny(401, "unauthenticated");
         return true;

@@ -406,6 +406,7 @@ export class StandaloneService {
             : undefined,
       );
       coordination.migrate();
+      coordination.localReviews().purgeEditableDrafts();
       this.inboxStartup = new InboxStartupReconciliation(db, domain);
       coordination.invalidateRuntimeQuestions(
         "Service restarted; native endpoints cannot be reconstructed",
@@ -1125,6 +1126,11 @@ export class StandaloneService {
     return this.coordination.taskReview();
   }
 
+  localReviews() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.localReviews();
+  }
+
   retainedEvidence() {
     if (!this.coordination) throw Error("Service not started");
     return this.coordination.retainedEvidence();
@@ -1208,6 +1214,97 @@ export class StandaloneService {
       materialHash,
       candidates,
     );
+  }
+
+  async stageLocalReviewAnchorGroup(input: {
+    commandKey: string;
+    taskId: string;
+    ownerKey: string;
+    expectedDraftVersion: number;
+    requestHash: string;
+    anchors: RetainedReviewAnchorStageRequest["anchors"];
+  }) {
+    const command = {
+      commandKey: input.commandKey,
+      taskId: input.taskId,
+      ownerKey: input.ownerKey,
+      requestHash: input.requestHash,
+    };
+    const prior = this.localReviews().replayStage(command);
+    if (prior) return prior;
+    const request = retainedReviewAnchorStageRequestSchema.parse({
+      taskId: input.taskId,
+      operationId: randomUUID(),
+      anchors: input.anchors,
+    });
+    const task = this.domain().task(request.taskId);
+    const evidence = this.retainedEvidence();
+    const operatorApi = new OperatorApi(this, [
+      this.dataDir,
+      process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+    ]);
+    const currentPolicy = async () => {
+      const policy = await operatorApi.retainedEvidencePolicy(request.taskId);
+      return policy
+        ? {
+            taskVersion: policy.taskVersion,
+            fingerprint: policy.fingerprint,
+            excluded: policy.excluded,
+            authorizedRepositoryIds: policy.authorizedRepositoryIds,
+          }
+        : undefined;
+    };
+    const currentWorkspace = () =>
+      this.turnWorkspaceInspectionCurrent(request.taskId);
+    const initialWorkspace = await currentWorkspace();
+    if (initialWorkspace.taskVersion !== Number(task.version))
+      throw new Error("Review anchor task version changed");
+    const initialPolicy = await currentPolicy();
+    if (!initialPolicy || initialPolicy.taskVersion !== Number(task.version))
+      throw new Error("Review anchor policy is unavailable");
+    const candidates = [];
+    for (const selection of request.anchors)
+      candidates.push(
+        await captureRetainedReviewAnchor({
+          selection,
+          identity: {
+            taskId: request.taskId,
+            captureTaskVersion: Number(task.version),
+          },
+          currentWorkspace,
+          currentPolicy,
+          exportComparison: (comparisonId) =>
+            this.workspaceComparisonExport(request.taskId, comparisonId),
+          comparisonOwner: (comparisonId) =>
+            this.workspaceComparisons?.comparisonOwner(comparisonId),
+          retainedEvidence: evidence,
+        }),
+      );
+    const [latestPolicy, latestWorkspace] = await Promise.all([
+      currentPolicy(),
+      currentWorkspace(),
+    ]);
+    if (
+      !latestPolicy ||
+      latestPolicy.taskVersion !== initialPolicy.taskVersion ||
+      latestPolicy.fingerprint !== initialPolicy.fingerprint ||
+      latestWorkspace.taskVersion !== initialWorkspace.taskVersion ||
+      latestWorkspace.visibility !== initialWorkspace.visibility
+    )
+      throw new Error(
+        "Review anchor task or access binding changed during capture",
+      );
+    return this.localReviews().stageGroup({
+      commandKey: input.commandKey,
+      taskId: request.taskId,
+      ownerKey: input.ownerKey,
+      expectedDraftVersion: input.expectedDraftVersion,
+      requestHash: input.requestHash,
+      stageOperationId: request.operationId,
+      stageMaterialHash: retainedReviewAnchorMaterialHash(request),
+      candidates,
+      accessFingerprint: initialPolicy.fingerprint,
+    });
   }
 
   sealReviewAnchorDraft(input: {

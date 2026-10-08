@@ -29,6 +29,8 @@ import { useOperatorResource } from "./resource.js";
 import type { TaskWorkspaceState } from "./task-workspace-state.js";
 import { NativeSelect } from "./ui/native-select.js";
 import { Textarea } from "./ui/textarea.js";
+import { TaskFiles } from "./task-files.js";
+import { TaskWorkspaceChanges } from "./inspection-changes.js";
 
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
@@ -408,6 +410,7 @@ export function TaskWorkspace({
         : section &&
             [
               "brief",
+              "files",
               "review",
               "context",
               "changes",
@@ -928,14 +931,20 @@ export function TaskWorkspace({
         )}
       </section>
       <nav className="task-actions" aria-label="Task sections">
-        {["brief", "review", "context", "changes", "history", "reply"].map(
-          (s) => (
-            <ActionLink variant="secondary" key={s} href={`#${s}`}>
-              {s[0]?.toUpperCase()}
-              {s.slice(1)}
-            </ActionLink>
-          ),
-        )}
+        {[
+          "brief",
+          "files",
+          "review",
+          "context",
+          "changes",
+          "history",
+          "reply",
+        ].map((s) => (
+          <ActionLink variant="secondary" key={s} href={`#${s}`}>
+            {s[0]?.toUpperCase()}
+            {s.slice(1)}
+          </ActionLink>
+        ))}
       </nav>
       {updates && (
         <Button
@@ -1087,6 +1096,12 @@ export function TaskWorkspace({
           <p>No local dependency recorded.</p>
         )}
       </section>
+      <TaskFiles
+        client={client}
+        session={session}
+        taskId={taskId}
+        state={state.files}
+      />
       <section id="review">
         <h3 className="section-heading">Evidence review</h3>
         <p>{changes}</p>
@@ -1232,6 +1247,11 @@ export function TaskWorkspace({
       <Changes
         data={data}
         selected={meta}
+        client={client}
+        session={session}
+        taskId={taskId}
+        state={state}
+        changed={changed}
         refresh={() =>
           void command({
             type: "delivery.refresh",
@@ -1896,12 +1916,22 @@ function Artifact({
 function Changes({
   data,
   selected,
+  client,
+  session,
+  taskId,
+  state,
+  changed,
   refresh,
 }: {
   data: TaskRead["data"];
   selected:
     | NonNullable<TaskRead["data"]["review"]>["results"][number]
     | undefined;
+  client: OperatorClient;
+  session: Session;
+  taskId: string;
+  state: TaskWorkspaceState;
+  changed: () => void;
   refresh: () => void;
 }) {
   const changes = selected?.metadata.changes,
@@ -1909,6 +1939,15 @@ function Changes({
   return (
     <section id="changes">
       <h3 className="section-heading">Changes and delivery</h3>
+      <TaskWorkspaceChanges
+        client={client}
+        session={session}
+        taskId={taskId}
+        assignments={data.assignments}
+        taskLeadName={data.lead?.name ?? null}
+        state={state.changes}
+        changed={changed}
+      />
       {changes ? (
         <>
           <p>Recorded files: {changes.files.join(", ") || "not supplied"}</p>

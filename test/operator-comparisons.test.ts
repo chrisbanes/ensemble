@@ -879,6 +879,7 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
         outcome: string;
         threadId?: string;
         turnId?: string;
+        beforeObservedAt?: number;
       };
     };
   };
@@ -886,6 +887,10 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
   assert.equal(pendingBody.data.pending.outcome, "running");
   assert.equal(pendingBody.data.pending.threadId, "fixture-thread");
   assert.equal(pendingBody.data.pending.turnId, "fixture-turn-1");
+  assert.ok(
+    pendingBody.data.pending.beforeObservedAt !== undefined,
+    "the pending API returns the actual pre-turn observation timestamp",
+  );
   assert.ok(!pendingText.includes(binding.path));
   writeFileSync(
     join(binding.path, "http-turn.md"),
@@ -909,6 +914,9 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
         profileId: string;
         threadId?: string;
         turnId?: string;
+        startedAt: number;
+        beforeObservedAt?: number;
+        observedAt: number;
         entries: Array<{
           path: string;
           right?: { sha256?: string };
@@ -924,6 +932,19 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
   assert.equal(firstBody.data.comparison.profileId, task.profileId);
   assert.equal(firstBody.data.comparison.threadId, "fixture-thread");
   assert.equal(firstBody.data.comparison.turnId, "fixture-turn-1");
+  assert.equal(
+    firstBody.data.comparison.beforeObservedAt,
+    pendingBody.data.pending.beforeObservedAt,
+    "the finished response preserves the exact before observation exposed while pending",
+  );
+  assert.ok(
+    firstBody.data.comparison.startedAt <=
+      firstBody.data.comparison.beforeObservedAt!,
+  );
+  assert.ok(
+    firstBody.data.comparison.observedAt >=
+      firstBody.data.comparison.beforeObservedAt!,
+  );
   const marker = firstBody.data.comparison.entries.find(
     (entry) => entry.path === "http-turn.md",
   );
@@ -997,7 +1018,11 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
     data: {
       state: string;
       comparisonId: string;
-      comparison: { workId: string };
+      comparison: {
+        workId: string;
+        beforeObservedAt?: number;
+        observedAt: number;
+      };
     };
   };
   assert.equal(latestBody.data.state, "available");
@@ -1021,6 +1046,55 @@ test("last-turn HTTP reads distinguish pending and finished captures and never r
     ((await wrongTask.json()) as { data: { state: string } }).data.state,
     "unavailable",
   );
+
+  const thirdAction = f.service.submitTask(
+    "http-turn-three",
+    task.assignmentId,
+    "keep the previous finished capture visible while this turn is pending",
+  );
+  await until(() => f.runtime.turns === 3, "third fake turn start");
+  await until(() => f.runtime.hasPending(3), "third fake turn wait");
+  const thirdPending = await get(endpoint);
+  const thirdPendingBody = (await thirdPending.json()) as {
+    data: {
+      state: string;
+      pending: { comparisonId: string };
+      latestFinished?: {
+        comparisonId: string;
+        workId: string;
+        beforeObservedAt?: number;
+        observedAt: number;
+      };
+    };
+  };
+  assert.equal(thirdPendingBody.data.state, "unsettled");
+  assert.equal(
+    thirdPendingBody.data.pending.comparisonId ===
+      thirdPendingBody.data.latestFinished?.comparisonId,
+    false,
+  );
+  assert.equal(
+    thirdPendingBody.data.latestFinished?.comparisonId,
+    latestBody.data.comparisonId,
+  );
+  assert.equal(
+    thirdPendingBody.data.latestFinished?.workId,
+    "http-turn-two",
+    "the unsettled projection retains the exact latest finished snapshot",
+  );
+  assert.equal(
+    thirdPendingBody.data.latestFinished?.beforeObservedAt,
+    latestBody.data.comparison.beforeObservedAt,
+    "the pending projection retains the exact latest finished before-observation timestamp",
+  );
+  assert.equal(
+    thirdPendingBody.data.latestFinished?.observedAt,
+    latestBody.data.comparison.observedAt,
+    "the pending projection retains the exact latest finished after-observation timestamp",
+  );
+  f.runtime.complete(3);
+  await thirdAction;
+  assert.equal(f.service.taskHold(task.taskId), undefined);
 });
 
 test("last-turn reads reject a finished slot replaced during stored projection", async (t) => {

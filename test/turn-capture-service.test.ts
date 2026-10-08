@@ -340,6 +340,18 @@ test("successive repository-free turns retain exact identity, export bytes, and 
   );
   const copiedSides = structuredClone(copied.sides);
 
+  const secondTurnObservations: WorkspaceTurnObservation[] = [];
+  const serviceInternals = f.service as unknown as {
+    observeTurnWorkspace(taskId: string): Promise<WorkspaceTurnObservation>;
+  };
+  const observeTurnWorkspace = serviceInternals.observeTurnWorkspace.bind(
+    f.service,
+  );
+  serviceInternals.observeTurnWorkspace = async (taskId) => {
+    const observation = await observeTurnWorkspace(taskId);
+    secondTurnObservations.push(observation);
+    return observation;
+  };
   const gate = f.runtime.holdNextWait();
   const secondAction = f.service.submitTask(
     "second-turn",
@@ -351,6 +363,8 @@ test("successive repository-free turns retain exact identity, export bytes, and 
   assert.equal(during.latestFinished?.comparisonId, first.comparisonId);
   assert.equal(during.pending?.captureState, "pending");
   assert.equal(during.pending?.outcome, "running");
+  const beforeObservedAt = during.pending?.before?.observedAt;
+  assert.notEqual(beforeObservedAt, undefined);
   assert.equal(during.pending?.comparison, undefined);
   assert.ok(
     during.pending?.before?.files.some((file) => file.path === "state.txt"),
@@ -368,6 +382,7 @@ test("successive repository-free turns retain exact identity, export bytes, and 
   assert.equal(latest.pending, undefined);
   const second = latest.latestFinished;
   assert.ok(second);
+  assert.equal(secondTurnObservations.length, 2);
   assert.notEqual(second.comparisonId, first.comparisonId);
   assert.equal(second.identity.taskId, f.taskId);
   assert.equal(second.identity.assignmentId, f.assignmentId);
@@ -390,6 +405,15 @@ test("successive repository-free turns retain exact identity, export bytes, and 
   assert.equal(second.comparison?.profileId, f.profileId);
   assert.equal(second.comparison?.threadId, second.threadId);
   assert.equal(second.comparison?.turnId, second.turnId);
+  assert.equal(second.comparison?.beforeObservedAt, beforeObservedAt);
+  assert.equal(
+    second.comparison?.beforeObservedAt,
+    secondTurnObservations[0]?.observedAt,
+  );
+  assert.equal(
+    second.comparison?.observedAt,
+    secondTurnObservations[1]?.observedAt,
+  );
 
   const changed = second.comparison?.entries.find(
     (entry) => entry.path === "state.txt",
@@ -424,9 +448,71 @@ test("successive repository-free turns retain exact identity, export bytes, and 
   const recovered = await f.reopen();
   const afterRestart = storeFor(recovered).latestTurnCaptures(f.taskId);
   assert.equal(afterRestart.latestFinished?.comparisonId, second.comparisonId);
+  assert.equal(
+    afterRestart.latestFinished?.comparison?.beforeObservedAt,
+    beforeObservedAt,
+  );
+  assert.equal(
+    afterRestart.latestFinished?.comparison?.observedAt,
+    secondTurnObservations[1]?.observedAt,
+  );
   assert.deepEqual(
     storeFor(recovered).exportComparison(f.taskId, second.comparisonId)?.sides,
     exported.sides,
+  );
+
+  const reopenedDb = (
+    storeFor(recovered) as unknown as {
+      db: {
+        prepare(sql: string): {
+          get(...params: string[]): { payloadJson: string } | undefined;
+          run(...params: string[]): unknown;
+        };
+      };
+    }
+  ).db;
+  const stored = reopenedDb
+    .prepare(
+      "SELECT payloadJson FROM workspace_turn_captures WHERE comparisonId = ?",
+    )
+    .get(second.comparisonId);
+  assert.ok(stored);
+  const historicalPayload = JSON.parse(stored.payloadJson) as {
+    comparison: Record<string, unknown>;
+  };
+  delete historicalPayload.comparison.beforeObservedAt;
+  reopenedDb
+    .prepare(
+      "UPDATE workspace_turn_captures SET payloadJson = ? WHERE comparisonId = ?",
+    )
+    .run(JSON.stringify(historicalPayload), second.comparisonId);
+  const storedLegacy = reopenedDb
+    .prepare(
+      "SELECT payloadJson FROM workspace_turn_captures WHERE comparisonId = ?",
+    )
+    .get(second.comparisonId);
+  assert.ok(storedLegacy);
+  assert.equal(
+    (
+      JSON.parse(storedLegacy.payloadJson) as {
+        comparison: Record<string, unknown>;
+      }
+    ).comparison.beforeObservedAt,
+    undefined,
+    "the stored historical payload no longer contains the optional before timestamp",
+  );
+
+  const legacyRecovered = await f.reopen();
+  const legacy = storeFor(legacyRecovered).latestTurnCaptures(
+    f.taskId,
+  ).latestFinished;
+  assert.ok(legacy);
+  assert.equal(legacy.comparison?.comparisonId, second.comparisonId);
+  assert.equal(legacy.comparison?.beforeObservedAt, undefined);
+  assert.equal(
+    legacy.comparison?.observedAt,
+    secondTurnObservations[1]?.observedAt,
+    "older immutable captures keep their after timestamp without synthesizing a before timestamp",
   );
 });
 

@@ -1044,6 +1044,8 @@ test("turn observations retain exact BOM bytes and emit bound immutable side anc
       sides.set(entryIndex, item);
     },
   );
+  assert.equal(comparison.beforeObservedAt, before.observedAt);
+  assert.equal(comparison.observedAt, after.observedAt);
   const bom = comparison.entries.find((item) => item.path === "bom.md");
   assert.ok(bom?.left?.sha256);
   assert.ok(bom.right?.sha256);

@@ -38,6 +38,7 @@ type PasswordRecord = {
 type SessionRecord = {
   idHash: string;
   csrfToken: string;
+  reviewOwnerKey: string;
   authenticated: boolean;
   createdAt: number;
   lastUsedAt: number;
@@ -208,6 +209,7 @@ export class OperatorAuth {
   readonly origin: string;
 
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly invalidatedReviewOwners = new Set<string>();
   private readonly now: () => number;
   private readonly randomBytes: RandomBytes;
   private readonly derivePassword: (password: string) => Promise<Buffer>;
@@ -408,8 +410,21 @@ export class OperatorAuth {
     );
   }
 
-  logout(id: string): void {
+  reviewOwnerKey(id: string): string | undefined {
+    const record = this.lookup(id);
+    return record?.authenticated ? record.reviewOwnerKey : undefined;
+  }
+
+  takeInvalidatedReviewOwnerKeys(): string[] {
+    const owners = [...this.invalidatedReviewOwners];
+    this.invalidatedReviewOwners.clear();
+    return owners;
+  }
+
+  logout(id: string): string | undefined {
+    const ownerKey = this.reviewOwnerKey(id);
     this.deleteSession(id);
+    return ownerKey;
   }
 
   close(): void {
@@ -431,11 +446,13 @@ export class OperatorAuth {
     }
     const id = random(this.randomBytes, 32).toString("base64url");
     const csrfToken = random(this.randomBytes, 32).toString("base64url");
+    const reviewOwnerKey = random(this.randomBytes, 32).toString("base64url");
     const now = this.now();
     const idHash = sha256(id).toString("hex");
     this.sessions.set(idHash, {
       idHash,
       csrfToken,
+      reviewOwnerKey,
       authenticated,
       createdAt: now,
       lastUsedAt: now,
@@ -455,6 +472,8 @@ export class OperatorAuth {
       now - record.createdAt >= this.absoluteTimeoutMs
     ) {
       this.sessions.delete(idHash);
+      if (record.authenticated)
+        this.invalidatedReviewOwners.add(record.reviewOwnerKey);
       return undefined;
     }
     return record;
@@ -473,6 +492,8 @@ export class OperatorAuth {
         now - session.createdAt >= this.absoluteTimeoutMs
       ) {
         this.sessions.delete(idHash);
+        if (session.authenticated)
+          this.invalidatedReviewOwners.add(session.reviewOwnerKey);
       }
     }
   }

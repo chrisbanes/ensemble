@@ -24,9 +24,13 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   await mkdir(join(bundlePath, "assets"), { recursive: true });
   await writeFile(
     join(bundlePath, "index.html"),
-    '<html><link rel="stylesheet" href="/assets/main.css"><script src="/assets/main.js"></script></html>',
+    '<html><link rel="stylesheet" href="/assets/main.css"><script src="/assets/main.js"></script><script type="module" src="/assets/pdf.worker.mjs"></script></html>',
   );
   await writeFile(join(bundlePath, "assets/main.js"), 'console.log("static");');
+  await writeFile(
+    join(bundlePath, "assets/pdf.worker.mjs"),
+    'export const workerFixture = "same-origin";',
+  );
   await writeFile(
     join(bundlePath, "assets/main.css"),
     "body { color: white; }",
@@ -67,6 +71,20 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   assert.equal(stylesheet.status, 200);
   assert.match(stylesheet.headers.get("content-type") ?? "", /text\/css/);
   assert.equal(await stylesheet.text(), "body { color: white; }");
+  const worker = await fetch(`${origin}/assets/pdf.worker.mjs`);
+  assert.equal(worker.status, 200);
+  assert.match(
+    worker.headers.get("content-type") ?? "",
+    /^text\/javascript; charset=utf-8$/,
+  );
+  assert.equal(
+    await worker.text(),
+    'export const workerFixture = "same-origin";',
+  );
+  assert.match(
+    worker.headers.get("content-security-policy") ?? "",
+    /worker-src 'self'/,
+  );
   assert.equal((await fetch(`${origin}/api/operator/workspace`)).status, 401);
   for (const path of [
     "/api/operator/task-list",

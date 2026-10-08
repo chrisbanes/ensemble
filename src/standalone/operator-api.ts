@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, resolve, sep } from "node:path";
 import { setImmediate as yieldTraversal } from "node:timers/promises";
 import { z } from "zod";
@@ -63,6 +63,15 @@ import {
   type GitHubSourceReader,
 } from "./github-source.js";
 import type { StandaloneService } from "./service.js";
+import {
+  retainedReviewAnchorStageRequestSchema,
+  type RetainedReviewAnchorStageRequest,
+} from "./retained-evidence.js";
+import { materialDigest } from "../core/delivery.js";
+import type {
+  LocalReviewRequest,
+  LocalReviewSyncIdentity,
+} from "../core/local-review.js";
 import { ArtifactUnavailable, previewRecordedArtifact } from "./task-review.js";
 import {
   compareRepository,
@@ -238,12 +247,30 @@ export class OperatorApiError extends Error {
       | "forbidden"
       | "conflict"
       | "unavailable"
+      | "unauthenticated"
       | "command-outcome-unknown",
     readonly fieldPaths?: readonly string[],
   ) {
     super(code);
   }
 }
+
+export type OperatorReviewSessionContext = {
+  ownerKey: string;
+  current: () => boolean;
+};
+
+type LocalReviewCommand = Extract<
+  z.infer<typeof operatorCommandSchema>,
+  {
+    type:
+      | "review.anchor.stage"
+      | "review.draft.save"
+      | "review.draft.discard"
+      | "review.send"
+      | "review.send.reconcile";
+  }
+>;
 const conflicts = new Set([
   "Question requesting work is stale, cancelled or ambiguous",
   "Structured question unavailable or already answered",
@@ -261,6 +288,8 @@ const conflicts = new Set([
 ]);
 export class OperatorApi {
   private readonly commands: DomainCommands;
+  private readonly activeReviewSends = new Map<string, string>();
+  private readonly activeReviewStages = new Map<string, string>();
   constructor(
     private readonly service: StandaloneService,
     private readonly controlPaths: readonly string[] = [],
@@ -3575,9 +3604,571 @@ export class OperatorApi {
       throw error;
     }
   }
-  async execute(input: unknown) {
+  private requireReviewSession(
+    context: OperatorReviewSessionContext | undefined,
+  ): OperatorReviewSessionContext {
+    if (!context || !context.current())
+      throw new OperatorApiError(401, "unauthenticated");
+    if (context.ownerKey.length < 32 || context.ownerKey.length > 128)
+      throw new OperatorApiError(403, "forbidden");
+    return context;
+  }
+
+  purgeLocalReviewDrafts(ownerKey: string): void {
+    if (ownerKey.length < 32 || ownerKey.length > 128) return;
+    this.service.localReviews().purgeEditableDrafts(ownerKey);
+  }
+
+  private reviewSyncIdentity(taskId: string): LocalReviewSyncIdentity {
+    const task = this.requireTask(taskId);
+    this.requireProject(String(task.projectId));
+    return {
+      projectId: String(task.projectId),
+      taskVersion: Number(task.version),
+      visibility: this.visibilityToken(),
+      workspaceVisibility: this.service.taskWorkspaceVisibility(taskId),
+    };
+  }
+
+  private reviewTaskIsOpen(taskId: string): boolean {
+    const task = this.requireTask(taskId);
+    this.requireProject(String(task.projectId));
+    return task.state === "open";
+  }
+
+  private async currentReviewPolicy(
+    taskId: string,
+    session: OperatorReviewSessionContext,
+  ) {
+    const policy = await this.retainedEvidencePolicy(taskId);
+    if (!policy) throw new OperatorApiError(503, "unavailable");
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    this.assertReviewPolicy(taskId, policy);
+    return policy;
+  }
+
+  private assertReviewPolicy(
+    taskId: string,
+    policy: NonNullable<
+      Awaited<ReturnType<OperatorApi["retainedEvidencePolicy"]>>
+    >,
+  ) {
+    const current = this.reviewSyncIdentity(taskId);
+    if (
+      current.projectId !== policy.projectId ||
+      current.taskVersion !== policy.taskVersion ||
+      current.visibility !== policy.visibility ||
+      current.workspaceVisibility !== policy.workspaceVisibility
+    )
+      throw new OperatorApiError(409, "conflict");
+  }
+
+  async readLocalReviewDraft(
+    taskId: string,
+    context?: OperatorReviewSessionContext,
+  ) {
+    const session = this.requireReviewSession(context);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    if (!policy) throw new OperatorApiError(503, "unavailable");
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    this.assertReviewPolicy(taskId, policy);
+    const store = this.service.localReviews();
+    let draft = store.readDraft(taskId, session.ownerKey);
+    if (
+      draft.accessFingerprint &&
+      draft.accessFingerprint !== policy.fingerprint
+    ) {
+      store.purgeEditableDrafts(session.ownerKey, taskId);
+      draft = store.readDraft(taskId, session.ownerKey);
+    }
+    return { data: draft, observedAt: Date.now() };
+  }
+
+  async readLocalReviewOperation(
+    taskId: string,
+    operationId: string,
+    context?: OperatorReviewSessionContext,
+  ) {
+    const session = this.requireReviewSession(context);
+    uuid.parse(operationId);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    if (!policy) throw new OperatorApiError(404, "not-found");
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    this.assertReviewPolicy(taskId, policy);
+    const value = this.service.localReviews().operationMaterial(operationId);
+    if (!value || value.response.taskId !== taskId)
+      throw new OperatorApiError(404, "not-found");
+    const payload = value.payload;
+    const comments = payload?.comments.map((comment) => {
+      const body = this.safe(comment.body, policy.excluded);
+      return {
+        commentId: comment.commentId,
+        body: body === comment.body ? body : null,
+        anchorGroupIds: comment.anchorGroupIds,
+      };
+    });
+    const groups = [];
+    for (const group of payload?.groups ?? []) {
+      const anchors = [];
+      for (const anchorId of group.anchorIds) {
+        try {
+          const read = await this.readRetainedReviewAnchor(taskId, anchorId);
+          const data = read.data;
+          anchors.push(
+            data.state === "unavailable"
+              ? { anchorId, state: data.state, reason: data.reason }
+              : {
+                  anchorId,
+                  state: data.state,
+                  ...(data.state === "available"
+                    ? { status: data.status }
+                    : {}),
+                  path: data.anchor.path,
+                  context: data.anchor.context,
+                  startLine: data.anchor.startLine,
+                  endLine: data.anchor.endLine,
+                },
+          );
+        } catch {
+          anchors.push({
+            anchorId,
+            state: "unavailable" as const,
+            reason: "unavailable" as const,
+          });
+        }
+      }
+      groups.push({ groupId: group.groupId, anchors });
+    }
+    const latest = await this.retainedEvidencePolicy(taskId);
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    if (!this.sameRetainedPolicy(latest, policy))
+      throw new OperatorApiError(503, "unavailable");
+    return {
+      data: {
+        ...value.response,
+        ...(payload
+          ? {
+              summary: this.safe(payload.summary, policy.excluded),
+              comments,
+              groups,
+            }
+          : {}),
+      },
+      observedAt: Date.now(),
+    };
+  }
+
+  private async executeLocalReview(
+    c: LocalReviewCommand,
+    context?: OperatorReviewSessionContext,
+  ) {
+    const session = this.requireReviewSession(context);
+    const store = this.service.localReviews();
+    if (c.type === "review.anchor.stage") {
+      const parsed = retainedReviewAnchorStageRequestSchema.parse({
+        taskId: c.taskId,
+        operationId: randomUUID(),
+        anchors: c.anchors,
+      });
+      const requestHash = materialDigest({
+        taskId: c.taskId,
+        expectedDraftVersion: c.expectedDraftVersion,
+        anchors: parsed.anchors,
+      });
+      const active = this.activeReviewStages.get(c.key);
+      if (active) {
+        if (active !== requestHash) throw new OperatorApiError(409, "conflict");
+        throw new OperatorApiError(503, "command-outcome-unknown");
+      }
+      const replay = store.replayStage({
+        commandKey: c.key,
+        taskId: c.taskId,
+        ownerKey: session.ownerKey,
+        requestHash,
+      });
+      if (replay)
+        return commandReceiptSchema.parse({
+          kind: "local-review-anchor",
+          key: c.key,
+          taskId: c.taskId,
+          groupId: replay.groupId,
+          anchorIds: replay.anchorIds,
+          draftVersion: replay.draftVersion,
+          state: "staged",
+        });
+      this.activeReviewStages.set(c.key, requestHash);
+      try {
+        const result = await this.service.stageLocalReviewAnchorGroup({
+          commandKey: c.key,
+          taskId: c.taskId,
+          ownerKey: session.ownerKey,
+          expectedDraftVersion: c.expectedDraftVersion,
+          requestHash,
+          anchors: parsed.anchors,
+        });
+        if (!session.current()) {
+          store.purgeEditableDrafts(session.ownerKey, c.taskId);
+          throw new OperatorApiError(401, "unauthenticated");
+        }
+        return commandReceiptSchema.parse({
+          kind: "local-review-anchor",
+          key: c.key,
+          taskId: c.taskId,
+          groupId: result.groupId,
+          anchorIds: result.anchorIds,
+          draftVersion: result.draftVersion,
+          state: "staged",
+        });
+      } finally {
+        this.activeReviewStages.delete(c.key);
+      }
+    }
+
+    if (c.type === "review.send") return this.sendLocalReview(c, session);
+    if (c.type === "review.send.reconcile")
+      return this.reconcileLocalReview(c, session);
+
+    const policy = await this.retainedEvidencePolicy(c.taskId);
+    if (!policy) throw new OperatorApiError(503, "unavailable");
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    this.assertReviewPolicy(c.taskId, policy);
+    if (c.type === "review.draft.save") {
+      const values = [
+        c.draft.summary,
+        ...c.draft.comments.map((comment) => comment.body),
+      ];
+      if (values.some((value) => this.safe(value, policy.excluded) !== value))
+        throw new OperatorApiError(403, "forbidden");
+      const requestHash = materialDigest({
+        taskId: c.taskId,
+        expectedDraftVersion: c.expectedDraftVersion,
+        draft: c.draft,
+      });
+      const result = store.saveDraft({
+        commandKey: c.key,
+        taskId: c.taskId,
+        ownerKey: session.ownerKey,
+        expectedDraftVersion: c.expectedDraftVersion,
+        draft: c.draft,
+        requestHash,
+        accessFingerprint: policy.fingerprint,
+      });
+      return commandReceiptSchema.parse({
+        kind: "local-review-draft",
+        key: c.key,
+        taskId: c.taskId,
+        version: result.version,
+        state: "editable",
+      });
+    }
+    const requestHash = materialDigest({
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+    });
+    const result = store.discardDraft({
+      commandKey: c.key,
+      taskId: c.taskId,
+      ownerKey: session.ownerKey,
+      expectedDraftVersion: c.expectedDraftVersion,
+      requestHash,
+      accessFingerprint: policy.fingerprint,
+    });
+    return commandReceiptSchema.parse({
+      kind: "local-review-draft",
+      key: c.key,
+      taskId: c.taskId,
+      version: result.version,
+      state: "discarded",
+    });
+  }
+
+  private async sendLocalReview(
+    c: Extract<LocalReviewCommand, { type: "review.send" }>,
+    session: OperatorReviewSessionContext,
+  ) {
+    const request: LocalReviewRequest = {
+      key: c.key,
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+      recipientAssignmentId: c.recipientAssignmentId,
+      expectedAssignmentVersion: c.expectedAssignmentVersion,
+    };
+    const requestHash = materialDigest({
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+      recipientAssignmentId: c.recipientAssignmentId,
+      expectedAssignmentVersion: c.expectedAssignmentVersion,
+    });
+    this.reviewSyncIdentity(c.taskId);
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    const store = this.service.localReviews();
+    const active = this.activeReviewSends.get(c.key);
+    if (active) {
+      const policy = await this.currentReviewPolicy(c.taskId, session);
+      if (active !== requestHash) throw new OperatorApiError(409, "conflict");
+      const current = store.operationMaterial(c.key);
+      if (
+        current?.response.taskId === c.taskId &&
+        current.requestHash === requestHash
+      )
+        return this.localReviewReceipt(c.key, current.response);
+      throw new OperatorApiError(503, "command-outcome-unknown");
+    }
+    const existing = store.operationMaterial(c.key);
+    if (
+      existing &&
+      (existing.response.taskId !== c.taskId ||
+        existing.requestHash !== requestHash)
+    ) {
+      await this.currentReviewPolicy(c.taskId, session);
+      throw new OperatorApiError(409, "conflict");
+    }
+    if (existing && existing.response.state !== "prepared") {
+      await this.currentReviewPolicy(c.taskId, session);
+      return this.localReviewReceipt(c.key, existing.response);
+    }
+    if (!existing && !this.reviewTaskIsOpen(c.taskId))
+      throw new OperatorApiError(409, "conflict");
+    this.activeReviewSends.set(c.key, requestHash);
+    try {
+      const prepared = store.prepareSend({
+        request,
+        ownerKey: session.ownerKey,
+        requestHash,
+      });
+      if (prepared.response.state !== "prepared") {
+        await this.currentReviewPolicy(c.taskId, session);
+        return this.localReviewReceipt(c.key, prepared.response);
+      }
+      if (!prepared.payload)
+        throw new OperatorApiError(503, "command-outcome-unknown");
+      const initial = await this.currentReviewPolicy(c.taskId, session);
+      if (prepared.accessFingerprint !== initial.fingerprint) {
+        const rejected = store.rejectSend(c.key, requestHash, "policy-changed");
+        if (!rejected)
+          throw new OperatorApiError(503, "command-outcome-unknown");
+        return this.localReviewReceipt(c.key, rejected);
+      }
+      if (!this.reviewTaskIsOpen(c.taskId)) {
+        const rejected = store.rejectSend(c.key, requestHash, "task-not-open");
+        if (!rejected)
+          throw new OperatorApiError(503, "command-outcome-unknown");
+        return this.localReviewReceipt(c.key, rejected);
+      }
+      if (
+        this.safe(prepared.payload.message, initial.excluded) !==
+        prepared.payload.message
+      ) {
+        const rejected = store.rejectSend(
+          c.key,
+          requestHash,
+          "excluded-content",
+        );
+        if (!rejected)
+          throw new OperatorApiError(503, "command-outcome-unknown");
+        return this.localReviewReceipt(c.key, rejected);
+      }
+      for (const group of prepared.payload.groups)
+        for (const anchorId of group.anchorIds) {
+          let read;
+          try {
+            read = await this.readRetainedReviewAnchor(c.taskId, anchorId);
+          } catch {
+            await this.currentReviewPolicy(c.taskId, session);
+            return this.localReviewReceipt(c.key, prepared.response);
+          }
+          if (!session.current())
+            throw new OperatorApiError(401, "unauthenticated");
+          if (read.data.state === "unavailable") {
+            if (read.data.reason === "excluded") {
+              const rejected = store.rejectSend(
+                c.key,
+                requestHash,
+                "excluded-anchor",
+              );
+              if (!rejected)
+                throw new OperatorApiError(503, "command-outcome-unknown");
+              return this.localReviewReceipt(c.key, rejected);
+            }
+            return this.localReviewReceipt(c.key, prepared.response);
+          }
+          if (
+            read.data.state === "available" &&
+            this.safe(read.data.anchor.path, initial.excluded) !==
+              read.data.anchor.path
+          ) {
+            const rejected = store.rejectSend(
+              c.key,
+              requestHash,
+              "excluded-anchor",
+            );
+            if (!rejected)
+              throw new OperatorApiError(503, "command-outcome-unknown");
+            return this.localReviewReceipt(c.key, rejected);
+          }
+        }
+      const latest = await this.retainedEvidencePolicy(c.taskId);
+      if (!latest || !session.current())
+        throw new OperatorApiError(503, "unavailable");
+      this.assertReviewPolicy(c.taskId, latest);
+      if (!this.sameRetainedPolicy(latest, initial))
+        return this.localReviewReceipt(c.key, prepared.response);
+      if (
+        prepared.accessFingerprint !== latest.fingerprint ||
+        !this.reviewTaskIsOpen(c.taskId)
+      ) {
+        const rejected = store.rejectSend(
+          c.key,
+          requestHash,
+          this.reviewTaskIsOpen(c.taskId) ? "policy-changed" : "task-not-open",
+        );
+        if (!rejected)
+          throw new OperatorApiError(503, "command-outcome-unknown");
+        return this.localReviewReceipt(c.key, rejected);
+      }
+      let committed;
+      try {
+        committed = store.commitSend({
+          request,
+          requestHash,
+          payload: prepared.payload,
+          accessFingerprint: latest.fingerprint,
+          expectedIdentity: {
+            projectId: latest.projectId,
+            taskVersion: latest.taskVersion,
+            visibility: latest.visibility,
+            workspaceVisibility: latest.workspaceVisibility,
+          },
+          currentIdentity: () => this.reviewSyncIdentity(c.taskId),
+        });
+      } catch (error) {
+        try {
+          const observed = store.operationMaterial(c.key)?.response;
+          if (observed?.state === "prepared") {
+            const rejected = store.rejectSend(
+              c.key,
+              requestHash,
+              "commit-transaction-rolled-back",
+            );
+            if (rejected) return this.localReviewReceipt(c.key, rejected);
+          } else if (observed) {
+            return this.localReviewReceipt(c.key, observed);
+          }
+        } catch {
+          // An unreadable or still-open transaction remains frozen for exact reconciliation.
+        }
+        throw error;
+      }
+      if (committed.response.state === "recorded")
+        await this.coordination().notifyOperatorCommand();
+      return this.localReviewReceipt(c.key, committed.response);
+    } finally {
+      this.activeReviewSends.delete(c.key);
+    }
+  }
+
+  private async reconcileLocalReview(
+    c: Extract<LocalReviewCommand, { type: "review.send.reconcile" }>,
+    session: OperatorReviewSessionContext,
+  ) {
+    const request: LocalReviewRequest = {
+      key: c.key,
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+      recipientAssignmentId: c.recipientAssignmentId,
+      expectedAssignmentVersion: c.expectedAssignmentVersion,
+    };
+    const requestHash = materialDigest({
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+      recipientAssignmentId: c.recipientAssignmentId,
+      expectedAssignmentVersion: c.expectedAssignmentVersion,
+    });
+    this.reviewSyncIdentity(c.taskId);
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    const store = this.service.localReviews();
+    const active = this.activeReviewSends.get(c.key);
+    if (active) {
+      const policy = await this.currentReviewPolicy(c.taskId, session);
+      if (active !== requestHash) throw new OperatorApiError(409, "conflict");
+      if (this.activeReviewSends.get(c.key) === requestHash) {
+        const current = store.operationMaterial(c.key);
+        if (
+          current?.response.taskId === c.taskId &&
+          current.requestHash === requestHash
+        )
+          return this.localReviewReceipt(c.key, current.response);
+        throw new OperatorApiError(503, "command-outcome-unknown");
+      }
+      const result = store.reconcileSend({
+        request,
+        ownerKey: session.ownerKey,
+        requestHash,
+        currentIdentity: this.reviewSyncIdentity(c.taskId),
+        currentAccessFingerprint: policy.fingerprint,
+      });
+      return this.localReviewReceipt(c.key, result);
+    }
+    const policy = await this.currentReviewPolicy(c.taskId, session);
+    const activeAfterPolicy = this.activeReviewSends.get(c.key);
+    if (activeAfterPolicy) {
+      if (activeAfterPolicy !== requestHash)
+        throw new OperatorApiError(409, "conflict");
+      const current = store.operationMaterial(c.key);
+      if (
+        current?.response.taskId === c.taskId &&
+        current.requestHash === requestHash
+      )
+        return this.localReviewReceipt(c.key, current.response);
+      throw new OperatorApiError(503, "command-outcome-unknown");
+    }
+    const result = store.reconcileSend({
+      request,
+      ownerKey: session.ownerKey,
+      requestHash,
+      currentIdentity: this.reviewSyncIdentity(c.taskId),
+      currentAccessFingerprint: policy.fingerprint,
+    });
+    return this.localReviewReceipt(c.key, result);
+  }
+
+  private localReviewReceipt(
+    key: string,
+    response: {
+      taskId: string;
+      reviewId: string;
+      state: string;
+      eventId?: string | undefined;
+      recipientAssignmentId?: string | undefined;
+    },
+  ) {
+    return commandReceiptSchema.parse({
+      kind: "local-review-operation",
+      key,
+      taskId: response.taskId,
+      reviewId: response.reviewId,
+      state: response.state,
+      ...(response.eventId ? { eventId: response.eventId } : {}),
+      ...(response.recipientAssignmentId
+        ? { recipientAssignmentId: response.recipientAssignmentId }
+        : {}),
+    });
+  }
+
+  async execute(input: unknown, reviewSession?: OperatorReviewSessionContext) {
     const c = operatorCommandSchema.parse(input);
     try {
+      if (
+        c.type === "review.anchor.stage" ||
+        c.type === "review.draft.save" ||
+        c.type === "review.draft.discard" ||
+        c.type === "review.send" ||
+        c.type === "review.send.reconcile"
+      )
+        return await this.executeLocalReview(
+          c as LocalReviewCommand,
+          reviewSession,
+        );
       if (
         c.type === "comment.review" ||
         c.type === "comment.confirm" ||
@@ -3930,7 +4521,7 @@ export class OperatorApi {
         throw error;
       if (
         error instanceof Error &&
-        /^Feedback (?:source|result|work|criterion|artifact)/.test(
+        /^(?:Feedback (?:source|result|work|criterion|artifact)|Local review|Review anchor)/.test(
           error.message,
         )
       )

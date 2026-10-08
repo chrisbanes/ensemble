@@ -4,7 +4,95 @@ import type {
 } from "../../src/operator/contracts.js";
 import type { z } from "zod";
 import type { feedbackReferenceSchema } from "../../src/core/task-review.js";
+import type {
+  workspaceDirectoryReadSchema,
+  workspacePreviewReadSchema,
+} from "../../src/operator/contracts.js";
+import type { WorkspaceComparisonRead } from "../../src/operator/contracts.js";
 type FeedbackReference = z.infer<typeof feedbackReferenceSchema>;
+type WorkspaceDirectory = z.infer<typeof workspaceDirectoryReadSchema>["data"];
+type WorkspacePreview = z.infer<typeof workspacePreviewReadSchema>["data"];
+
+export type TaskChangeSelection = {
+  entryKey: string;
+  path: string;
+  repositoryId: string | null;
+  context: "branch" | "uncommitted" | "turn";
+  comparisonId: string;
+  side: "left" | "right";
+  currentLine: number;
+  rangeAnchorLine: number;
+  startLine: number;
+  endLine: number;
+  contentSha256: string;
+  minLine: number;
+  maxLine: number;
+  rangeStartSet: boolean;
+  rangeEndSet: boolean;
+  workId?: string;
+  threadId?: string;
+  turnId?: string;
+};
+
+export class TaskFileTabState {
+  constructor(
+    readonly key: string,
+    readonly scope: WorkspaceDirectory["scope"],
+    readonly path: string[],
+  ) {}
+  preview: WorkspacePreview | null = null;
+  previewKey: string | null = null;
+  observedAt: number | null = null;
+  sourceMode: "rendered" | "source" = "rendered";
+  wrapSource = false;
+  selectedLine: number | null = null;
+  readingScrollTop = 0;
+  imageScrollLeft = 0;
+  imageScrollTop = 0;
+  imageFit = true;
+  imageZoom = 1;
+  pdfScrollLeft = 0;
+  pdfScrollTop = 0;
+  pdfPage = 1;
+  pdfZoom = 1;
+}
+
+export class TaskFilesState {
+  scope: WorkspaceDirectory["scope"] = { kind: "workspace" };
+  path: string[] = [];
+  showIgnored = false;
+  mobileView: "list" | "preview" = "list";
+  tabs: TaskFileTabState[] = [];
+  activeTabKey: string | null = null;
+  explorerFocusKey: string | null = null;
+  returnFocusEntryKey: string | null = null;
+  focusAfterDirectoryKey: string | null = null;
+  focusEntryAfterNavigation: string | null = null;
+  directory: WorkspaceDirectory | null = null;
+  directoryKey: string | null = null;
+  directoryObservedAt: number | null = null;
+}
+
+export class TaskChangesState {
+  target: "branch" | "last-turn" | "uncommitted" = "branch";
+  repositoryId: string | null = null;
+  baseBranchByRepository: Record<string, string> = {};
+  baseBranchOptions: string[] = [];
+  baseBranchOptionsScopeKey: string | null = null;
+  changeSetByRepository: Record<string, "all" | "staged" | "unstaged"> = {};
+  layout: "split" | "unified" = "split";
+  mobileView: "list" | "preview" = "list";
+  selectedEntryKey: string | null = null;
+  selection: TaskChangeSelection | null = null;
+  notice = "";
+  comparisonReads: Record<string, WorkspaceComparisonRead["data"]> = {};
+  repositoryIds: string[] = [];
+  repositoryState: WorkspaceDirectory["state"] | null = null;
+  repositoryObservedAt: number | null = null;
+  repositoryReadFailed = false;
+  readingScrollTop = 0;
+}
+
 class TaskReplyState {
   sourceObservation: "known" | "pending" | "unknown" = "known";
   sourceRefreshFailed = false;
@@ -41,6 +129,8 @@ class TaskReplyState {
 }
 export class TaskWorkspaceState {
   constructor(private readonly reply = new TaskReplyState()) {}
+  readonly files = new TaskFilesState();
+  readonly changes = new TaskChangesState();
   expanded = new Set<string>();
   chronological = false;
   get sourceObservation() {

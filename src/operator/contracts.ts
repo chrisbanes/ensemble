@@ -190,8 +190,37 @@ const workspacePreviewDataSchema = z.discriminatedUnion("kind", [
       width: z.number().int().positive().safe().optional(),
       height: z.number().int().positive().safe().optional(),
       maxDisplayedPages: z.number().int().positive().max(10).safe().optional(),
+      maxCanvasPixels: z
+        .number()
+        .int()
+        .positive()
+        .max(16_000_000)
+        .safe()
+        .optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, context) => {
+      if (value.mime === "application/pdf") {
+        if (value.maxDisplayedPages === undefined)
+          context.addIssue({
+            code: "custom",
+            message: "PDF preview requires a displayed-page limit",
+          });
+        if (value.maxCanvasPixels === undefined)
+          context.addIssue({
+            code: "custom",
+            message: "PDF preview requires a canvas-pixel limit",
+          });
+      } else if (
+        value.maxDisplayedPages !== undefined ||
+        value.maxCanvasPixels !== undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "PDF limits are only valid for PDF previews",
+        });
+      }
+    }),
 ]);
 export const workspacePreviewReadSchema = envelope(
   z
@@ -583,6 +612,7 @@ const workspaceTurnComparisonSchema = z
     state: z.enum(["available", "gap", "unavailable"]),
     outcome: z.enum(["completed", "failed", "unknown"]),
     startedAt: time,
+    beforeObservedAt: time.optional(),
     observedAt: time,
     taskVersion: revision.optional(),
     workId: z.string().min(1).max(512),
@@ -1387,6 +1417,35 @@ export const assignmentHistorySchema = envelope(
 );
 const base = { key: uuid };
 const domainBase = { ...base, projectId: uuid };
+const localReviewCommentSchema = z
+  .object({
+    commentId: uuid,
+    body: z.string().trim().min(1).max(4000),
+    anchorGroupIds: z.array(uuid).max(32),
+  })
+  .strict();
+const localReviewDraftContentSchema = z
+  .object({
+    summary: z.string().trim().max(4000),
+    comments: z.array(localReviewCommentSchema).max(32),
+  })
+  .strict()
+  .superRefine((draft, ctx) => {
+    const ids = draft.comments.flatMap((comment) => comment.anchorGroupIds);
+    if (
+      new Set(draft.comments.map((comment) => comment.commentId)).size !==
+        draft.comments.length ||
+      new Set(ids).size !== ids.length
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "duplicate-local-review-reference",
+      });
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(draft)).byteLength;
+    if (bytes > 16000)
+      ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
+  });
 export const operatorCommandSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -1453,6 +1512,52 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       expectedAssignmentVersion: revision,
       message: z.string().trim().min(1).max(16000),
       reference: feedbackReferenceSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.anchor.stage"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      anchors: z.array(z.unknown()).min(1).max(32),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.draft.save"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      draft: localReviewDraftContentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.draft.discard"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.send"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      recipientAssignmentId: uuid,
+      expectedAssignmentVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.send.reconcile"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      recipientAssignmentId: uuid,
+      expectedAssignmentVersion: revision,
     })
     .strict(),
   z
@@ -2034,6 +2139,37 @@ export const questionCommandRawLimit =
   2;
 
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("local-review-draft"),
+      key: uuid,
+      taskId: uuid,
+      version: revision,
+      state: z.enum(["editable", "discarded"]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("local-review-anchor"),
+      key: uuid,
+      taskId: uuid,
+      groupId: uuid,
+      anchorIds: z.array(uuid).max(32),
+      draftVersion: revision,
+      state: z.literal("staged"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("local-review-operation"),
+      key: uuid,
+      taskId: uuid,
+      reviewId: uuid,
+      state: z.enum(["prepared", "recorded", "rejected", "not-recorded"]),
+      eventId: uuid.optional(),
+      recipientAssignmentId: uuid.optional(),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("native-question"),

@@ -3,12 +3,14 @@ import { CoordinationStore } from "../../src/core/coordination.js";
 import { ConversationHistoryStore } from "../../src/standalone/conversation-history.js";
 import { ExecutionState } from "../../src/standalone/state.js";
 import type { ReviewMetadata } from "../../src/core/task-review.js";
+import type { TaskWorkspaceRepositoryInput } from "../../src/standalone/workspaces.js";
 import type { createOperatorFixture } from "./operator-web.js";
 export async function seedReviewTask(
   f: Awaited<ReturnType<typeof createOperatorFixture>>,
   name = "Review project",
   title = "Restore command focus",
   body = "- [ ] Restore focus\n- [ ] Retain drafts",
+  repositories: TaskWorkspaceRepositoryInput[] = [],
 ) {
   const profileId = randomUUID(),
     projectId = randomUUID(),
@@ -43,7 +45,7 @@ export async function seedReviewTask(
   });
   const assignment = d.ensureLeadAssignment(taskId);
   if (!assignment) throw Error("Fixture lead absent");
-  await f.service.provisionTask(taskId);
+  await f.service.provisionTask(taskId, repositories);
   const assignmentId = String(assignment.id),
     source = f.service.taskReview().sources(taskId)[0]!;
   function result(
