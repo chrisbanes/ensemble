@@ -117,7 +117,7 @@ function hasSettledShutdownState(checkpoint: TurnCaptureHarnessCheckpoint) {
   );
 }
 
-function privateCheckpointDirectory(path: string) {
+export function privateCheckpointDirectory(path: string) {
   const directoryStat = lstatSync(dirname(path));
   const uid = process.getuid?.();
   if (
@@ -129,9 +129,9 @@ function privateCheckpointDirectory(path: string) {
     throw new Error("turn-capture-checkpoint-directory-not-private");
 }
 
-function writeCheckpointAtomically(
+export function writeCheckpointAtomically(
   path: string,
-  checkpoint: TurnCaptureHarnessCheckpoint,
+  checkpoint: object,
   createOnly = false,
 ) {
   privateCheckpointDirectory(path);

@@ -55,20 +55,86 @@ extension or notification inspection entry points exist, and none were added.
   outcomes without a receipt could show as "not delivered"; and an unknown send
   could be recovered only from the original tab. All three are fixed.
 - A lead that has completed its assignment cannot receive a local review,
-  matching ordinary messages. The live journey therefore sends its review
-  before any result is reported.
+  matching ordinary messages. The reduced live journey therefore sends no
+  review; review delivery is qualified offline.
 
 ## Actual-runtime journey
 
-Not run. It needs a separately reviewed #782 grant; #780's spent journey does
-not cover it. The deterministic lifecycle fixes the supported three-start
-order. A real model may report a result in its first or repair turn, which
-would complete the lead before the review is delivered; the grant request
-must settle how the journey handles that.
+Not run. The guarded entry exists but needs the owner's separately reviewed
+#782 grant; #780's spent journey does not cover it and its one-attempt guard is
+unchanged.
+
+The approved reduced journey has no local review. Review delivery is qualified
+offline only (`local-review`, `operator-local-review-browser` and
+`inspection-review-lifecycle`). One disposable repository-free task, one
+service lifetime and one Codex process make at most three `Runtime.startTurn`
+calls in a single attempt:
+
+1. **T1**, the lead's initial turn, writes `marker-1.txt` = A and reports R1
+   with `review.changes.files: ["marker-1.txt"]`. Expected: completed, finished
+   capture C1 bound to T1's thread and turn, and R1 retains bytes A.
+2. **T2**, an operator-created assignment on the same task (same profile, result
+   destination lead), overwrites `marker-1.txt` with B, creates `marker-2.txt`
+   and reports. Expected: C2 replaces C1 as the latest finished capture, and R1
+   still retains A (WI07).
+3. **T3**, a third operator-created assignment, writes `marker-3.txt` and then
+   runs a bounded `sleep 900`. Stop is requested once T3's thread and turn are
+   bound and its pending capture exists. Expected: an interrupted or failed
+   terminal, an unsettled or partial capture disclosure, and a Stop hold. The
+   hold is not released.
+
+The project is created paused and is unpaused only while one armed start is
+admitted, then paused again. `InspectionJourneyGuard`
+(`test/fixtures/inspection-journey-harness.ts`) persists a private checkpoint.
+It accepts a start only for the armed role's exact work identity, workspace and
+deadline. Any other start, including a fourth start, an automatic reporting
+repair or a delivery, is refused before it reaches the runtime and is recorded,
+and the journey stops. If T1 or T2 ends without a result, its automatic repair
+is queued while admission is paused. The next admission then refuses to arm,
+so the journey stops with the remaining rows unproved. It never makes a second
+attempt.
+
+After T3 settles, the entry makes authenticated HTTP reads of
+`comparisons?target=last-turn`, R1's evidence and its `marker-1.txt` item, and
+asserts exact identities and bytes. A production Chromium pass at 1366 and
+390 px then screenshots Last turn and the retained R1 evidence and asserts
+identity text, R1's bytes A, the absence of B, and no console errors other
+than documented 503 read races. The service stops, the exact Codex process is
+verified to have exited on the same boot, and SQLite is reopened read-only to
+check the capture slots, R1's retained bytes and the hold. The fixture and
+attempt directory are always retained, and their paths are recorded in the
+mode-0600 evidence JSON.
+
+Command, run from the repository root after `npm ci` and `npm run build`, only
+with the grant and the controller-verified executable hash:
+
+```sh
+ENSEMBLE_WI782_CODEX_SHA256=<sha256> node test/wi782/live-inspection-journey.mjs --live --three-turns
+```
+
+Any other argument set exits with status 2 before anything loads or starts.
+
+| Budget (`inspectionJourneyBudgets`) | ms |
+| --- | ---: |
+| Start limit | 3 starts |
+| Admission (arm to start entered) | 30,000 |
+| T1/T2 start to terminal | 300,000 |
+| Terminal to settled result and capture | 30,000 |
+| T3 start to Stop observed and settled | 60,000 |
+| Authenticated reads | 60,000 |
+| Production UI pass | 180,000 |
+| Shutdown to verified exit | 10,000 |
+| Total, from arming T1 | 1,200,000 |
+
+Model behaviour is uncontrolled. A missing T1/T2 result, a T3 that completes
+before Stop, a missing hold or a capture without an uncertainty disclosure is
+recorded as an unproved row, not retried. Offline coverage is in
+`inspection-journey-harness.test.ts`, which uses fake runtimes.
 
 ## Limits
 
 Accepted S01 runtime trust, containment and history limits are unchanged.
 Model-originated behaviour in the live journey is uncontrolled. Comparison
 response time can still exceed 5 seconds when child cleanup or binding
-validation waits.
+validation waits. Verified exit of the Codex process does not prove that
+descendants such as T3's `sleep` stopped or that all filesystem effects ended.

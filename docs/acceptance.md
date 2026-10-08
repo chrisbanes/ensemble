@@ -306,9 +306,11 @@ candidate and historical results preserve their earlier behavior.
 ### #782 integrated UI and review evidence map
 
 Deterministic production-browser and service suites cover the #782 UI and
-local review scope. The bounded actual-runtime journey is recorded separately
-in the [#782 evidence record](evidence/wi01-wi13-workspace-review.md); it is
-not covered by #780's spent journey.
+local review scope. The guarded reduced actual-runtime journey
+(`test/wi782/live-inspection-journey.mjs`; three starts, no local review) is
+described in the [#782 evidence record](evidence/wi01-wi13-workspace-review.md).
+It has not been run and is not covered by #780's spent journey. Review
+delivery is qualified offline only.
 
 | Criteria | Deterministic evidence |
 | --- | --- |
