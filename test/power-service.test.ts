@@ -97,6 +97,8 @@ class FakeRuntime implements Runtime {
   inspectionGate: Promise<void> | undefined;
   firstTurnEntered: (() => void) | undefined;
   firstTurnGate: Promise<void> | undefined;
+  identityEntered: (() => void) | undefined;
+  identityGate: Promise<void> | undefined;
   private toolCall:
     | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
     | undefined;
@@ -112,12 +114,16 @@ class FakeRuntime implements Runtime {
   }
   async interruptTurn() {}
   onUnexpectedRequest() {}
-  processIdentity(): RuntimeProcessIdentity {
-    return {
+  processIdentity(): RuntimeProcessIdentity | Promise<RuntimeProcessIdentity> {
+    const identity = {
       processId: "fake-pid",
       processStartedAt: "fake-start",
       bootId: "fake-boot",
     };
+    const gate = this.identityGate;
+    if (!gate) return identity;
+    this.identityEntered?.();
+    return gate.then(() => identity);
   }
   async waitForTurn(threadId: string, turnId: string) {
     await this.toolCall?.({
@@ -403,6 +409,51 @@ test("a post-turn power poll that resumes admission does not deadlock the schedu
       // Reconciliation clears the hold and admissionResumed wakes the scheduler.
       await waitUntil(() => runtime.starts === 2);
       assert.equal(service.powerStatus()?.admissionHeld, false);
+    },
+  );
+});
+
+test("a turn ending while admission awaits still requires a later power poll", async () => {
+  await postTurnPowerFixture(
+    async ({ service, runtime, events, secondWorkspace, queued }) => {
+      const power = (
+        service as unknown as {
+          power: {
+            poll(): Promise<void>;
+            executionEnded(workId: string): Promise<void>;
+          };
+        }
+      ).power;
+      // Make the observation fresh so only the mid-admission end can stale it.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      await power.poll();
+      const identity = deferred();
+      const identityEntered = deferred();
+      runtime.identityGate = identity.promise;
+      runtime.identityEntered = identityEntered.resolve;
+      const submitted = service.submit(
+        "second",
+        "second prompt",
+        secondWorkspace,
+      );
+      await identityEntered.promise;
+      runtime.identityGate = undefined;
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      await power.executionEnded("other-turn");
+      const read = deferred();
+      events.readGate = read.promise;
+      const readsBefore = events.reads;
+      identity.resolve();
+      const second = await submitted;
+      assert.equal(second.state, "ready");
+      assert.equal(runtime.starts, 1, "not admitted after a mid-admission end");
+      assert.equal(queued().state, "queued");
+      assert.equal(queued().reason, "Waiting for power-event observation");
+      await waitUntil(() => events.reads > readsBefore);
+      assert.equal(runtime.starts, 1, "not admitted while the poll is running");
+
+      read.resolve();
+      await waitUntil(() => runtime.starts === 2);
     },
   );
 });
