@@ -1,5 +1,5 @@
 {
-  "version": "2.20",
+  "version": "2.21",
   "children": [
     {
       "type": "frame",
@@ -89975,7 +89975,10 @@
                 {
                   "type": "text",
                   "id": "Awx3q",
+                  "x": 72,
+                  "y": 21.5,
                   "name": "Ensemble wordmark",
+                  "enabled": false,
                   "fill": "$X:--foreground",
                   "textGrowth": "fixed-width",
                   "width": 90,
@@ -90371,7 +90374,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Paused  ·  Question Q-204 · answering does not resume work",
+                          "content": "Paused  ·  Next: you · answer Q-204/r2; answering does not resume work",
                           "fontFamily": "Inter",
                           "fontSize": 12,
                           "fontWeight": "normal"
@@ -90769,7 +90772,7 @@
                           "content": "Shape the first-run guide",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
-                          "fontSize": 20,
+                          "fontSize": 18,
                           "fontWeight": "600"
                         },
                         {
@@ -91452,7 +91455,7 @@
                       "content": "Reduce cold-start latency",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
-                      "fontSize": 22,
+                      "fontSize": 18,
                       "fontWeight": "600"
                     },
                     {
@@ -91617,7 +91620,7 @@
                       "content": "Latest result evidence",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
-                      "fontSize": 15,
+                      "fontSize": 16,
                       "fontWeight": "600"
                     },
                     {
@@ -92148,7 +92151,7 @@
                               "fill": "$X:--muted-foreground",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Atlas · AT-155 · Running",
+                              "content": "Atlas · AT-155 · Running · check failed",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -92263,7 +92266,7 @@
                           "content": "Ship an accessible command menu",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
-                          "fontSize": 20,
+                          "fontSize": 18,
                           "fontWeight": "600"
                         },
                         {
@@ -92915,7 +92918,7 @@
                               "width": "fill_container",
                               "height": 34,
                               "fill": "$X:--background",
-                              "cornerRadius": 4,
+                              "cornerRadius": 6,
                               "stroke": "$X:--destructive",
                               "strokeWidth": 1,
                               "gap": 8,
@@ -92983,7 +92986,7 @@
                       "content": "Supplied values",
                       "lineHeight": 1.35,
                       "fontFamily": "Inter",
-                      "fontSize": 15,
+                      "fontSize": 16,
                       "fontWeight": "600"
                     },
                     {
@@ -94495,7 +94498,7 @@
                           "type": "text",
                           "id": "W0GKOv",
                           "name": "Inline selection validation",
-                          "fill": "$X:--muted-foreground",
+                          "fill": "$X:--destructive",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
                           "content": "Select at most 2 sections.",
@@ -94639,7 +94642,7 @@
           "x": 2790,
           "y": 1736,
           "name": "04H · Phone composer / short viewport · 390 × 480",
-          "context": "390×480 short-height composer. The dependency is unavailable, so Create and start stays visibly disabled; Save draft remains separate and available. The form scrolls while both actions stay in the viewport. Disclosure summaries reflect current values, and resizing input is expected to preserve value, selection and caret. Real safe-area insets, scrolling and resize behavior need device evidence.",
+          "context": "390×480 short-height composer. The dependency is unavailable, so Create and start stays visibly disabled; Save draft remains separate and available. The form is shown scrolled to its end; both actions stay in the viewport. Disclosure summaries reflect current values, and resizing input is expected to preserve value, selection and caret. Real safe-area insets, scrolling and resize behavior need device evidence.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -94690,7 +94693,7 @@
                   "content": "Create a task",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
-                  "fontSize": 15,
+                  "fontSize": 18,
                   "fontWeight": "600"
                 }
               ]
@@ -94709,8 +94712,11 @@
                 {
                   "type": "frame",
                   "id": "fTREM",
+                  "layoutPosition": "absolute",
+                  "x": 12,
+                  "y": -58,
                   "name": "Composer phone content",
-                  "width": "fill_container",
+                  "width": 366,
                   "layout": "vertical",
                   "gap": 8,
                   "children": [
@@ -94880,14 +94886,15 @@
                       "id": "evnFq",
                       "name": "Phone optional settings disclosure",
                       "width": "fill_container",
-                      "height": 64,
                       "fill": "$X:--card",
                       "cornerRadius": 6,
                       "stroke": "$X:--border",
                       "strokeWidth": 1,
                       "layout": "vertical",
-                      "gap": 4,
-                      "padding": 8,
+                      "padding": [
+                        4,
+                        8
+                      ],
                       "children": [
                         {
                           "type": "text",
@@ -94896,24 +94903,215 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Optional settings · 4 supplied  ⌄",
+                          "content": "Optional settings · 4 supplied",
                           "lineHeight": 1.35,
                           "fontFamily": "Inter",
                           "fontSize": 12,
                           "fontWeight": "600"
                         },
                         {
-                          "type": "text",
-                          "id": "U4SV4l",
-                          "name": "Phone optional settings summary",
-                          "fill": "$X:--muted-foreground",
-                          "textGrowth": "fixed-width",
+                          "type": "frame",
+                          "id": "KOFJp",
+                          "name": "Context disclosure",
                           "width": "fill_container",
-                          "content": "Context · Keyboard matrix  /  2 links  /  Eli  /  1 dependency",
-                          "lineHeight": 1.35,
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
+                          "height": 32,
+                          "stroke": "$X:--border",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "tiaii",
+                              "name": "Context disclosure label",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 84,
+                              "content": "Context",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "A1VxGG",
+                              "name": "Context disclosure summary",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Keyboard navigation matrix",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "qljKo",
+                              "name": "Context disclosure expand",
+                              "width": 14,
+                              "height": 14,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$X:--muted-foreground"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "ED9t7",
+                          "name": "References disclosure",
+                          "width": "fill_container",
+                          "height": 32,
+                          "stroke": "$X:--border",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "JVGgx",
+                              "name": "References disclosure label",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 84,
+                              "content": "References",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "fHCcQ",
+                              "name": "References disclosure summary",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "2 links supplied",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "Nd4UJ",
+                              "name": "References disclosure expand",
+                              "width": 14,
+                              "height": 14,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$X:--muted-foreground"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "R0PkkC",
+                          "name": "Assignee disclosure",
+                          "width": "fill_container",
+                          "height": 32,
+                          "stroke": "$X:--border",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "nBVMC",
+                              "name": "Assignee disclosure label",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 84,
+                              "content": "Assignee",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "kwSsc",
+                              "name": "Assignee disclosure summary",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Eli · permitted profile",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "oSrHb",
+                              "name": "Assignee disclosure expand",
+                              "width": 14,
+                              "height": 14,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$X:--muted-foreground"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "b50Cja",
+                          "name": "Dependencies disclosure",
+                          "width": "fill_container",
+                          "height": 32,
+                          "stroke": "$X:--border",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "UzTAE",
+                              "name": "Dependencies disclosure label",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 84,
+                              "content": "Dependencies",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "600"
+                            },
+                            {
+                              "type": "text",
+                              "id": "M5Ebq",
+                              "name": "Dependencies disclosure summary",
+                              "fill": "$X:--destructive",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "1 unavailable",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "NNf4r",
+                              "name": "Dependencies disclosure expand",
+                              "width": 14,
+                              "height": 14,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$X:--muted-foreground"
+                            }
+                          ]
                         }
                       ]
                     },

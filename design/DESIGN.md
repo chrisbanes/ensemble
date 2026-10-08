@@ -1492,3 +1492,22 @@ Implementation differences recorded on 8 October 2026:
   are emulated in Chromium only. The safe-area inset is checked through an
   emulated custom property. Physical Safari/iPhone, virtual keyboards, the
   recovery route and the retained HTML operator remain outside this matrix.
+
+Consistency pass on 8 October 2026 across `h23qD`–`g5wmIu`:
+
+- Screen and task titles use 18/600 and section headings 16/600, matching the
+  desktop and phone baselines.
+- Phone composer `g5wmIu` shows the same four Context / References /
+  Assignee / Dependencies rows as `LBzlj` and the production composer. It is
+  shown scrolled to its end, so the unavailable dependency sits beside the
+  disabled Create and start action.
+- `Sejey` shows the Q2 limit error in the destructive colour, as `FsTwL` does.
+- Search and Overview now describe AT-155 and Q-204/r2 with the same state and
+  next actor as Board.
+- The tablet Overview header drops the extra product label, and the dependency
+  field uses the shared 6px radius.
+- Identifiers inside sentences remain Inter across the canvas. Board column
+  tabs keep the library's 2px radius.
+
+The file was saved in Pen, reopened and read back. Only the intended scroll
+regions `wHhpl` and `fTREM` clip.
