@@ -1,9 +1,12 @@
 ---
 status: accepted
-partially_superseded_by: ADR-1005
+partially_superseded_by: [ADR-1005, ADR-1008]
 ---
 
 # Build Ensemble as a standalone service without BB
+
+The 8 October [ADR-1008](1008-claude-code-execution-harness.md) lifts the
+deferral of Claude for agent execution; API-key billing stays deferred.
 
 The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
 separate task-owner accountability and lead-only initial allocation where described
