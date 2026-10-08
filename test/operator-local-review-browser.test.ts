@@ -253,7 +253,7 @@ test("production local review composes exact multi-origin anchors and sends one 
     .getByText(/Review sent to .*One local message was queued/)
     .waitFor();
   assert.equal(events(), 1, "reconciliation never sends a second event");
-  const sent = review.getByRole("region", { name: "Sent review" });
+  const sent = review.getByRole("region", { name: "Sent review", exact: true });
   await sent.getByText("Edited file comment").waitFor();
   await sent.getByText(/diff\.txt · lines 2–3/).waitFor();
   await sent.getByText(/review\.txt · lines 2–3/).waitFor();
