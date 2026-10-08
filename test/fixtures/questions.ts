@@ -4,8 +4,8 @@ import type { createOperatorFixture } from "./operator-web.js";
 import { seedReviewTask } from "./task-review.js";
 import { mixedForm } from "./question-data.js";
 import type { QuestionForm } from "../../src/core/question-forms.js";
-export async function until(condition: () => boolean) {
-  const deadline = Date.now() + 5000;
+export async function until(condition: () => boolean, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() > deadline) throw Error("Question fixture timed out");
     await new Promise((resolve) => setTimeout(resolve, 5));

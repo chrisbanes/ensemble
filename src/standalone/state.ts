@@ -84,6 +84,12 @@ export interface TaskExecutionBinding extends TaskExecutionContext {
   conversationRevision: number;
 }
 
+export interface TaskTurnCaptureIdentity extends TaskExecutionBinding {
+  profileId: string;
+  workRevision: number;
+  requestSequence: number;
+}
+
 export interface CoordinationExecutionBinding extends TaskExecutionBinding {
   state: "running" | "completed";
 }
@@ -1079,6 +1085,50 @@ export class ExecutionState {
     return this.db
       .prepare("SELECT * FROM task_execution_bindings WHERE workId = ?")
       .get(workId) as TaskExecutionBinding | undefined;
+  }
+
+  taskTurnCaptureIdentity(workId: string): TaskTurnCaptureIdentity | undefined {
+    if (!this.hasTurnRequests) return undefined;
+    const rows = this.db
+      .prepare(`SELECT binding.workId, binding.taskId, binding.assignmentId,
+        binding.assignmentVersion, binding.instructionsRevision,
+        binding.profileRevision, binding.conversationRevision,
+        assignment.profileId, revision.workRevision,
+        request.sequence AS requestSequence
+        FROM task_execution_bindings binding
+        JOIN task_work_revisions revision ON revision.workId = binding.workId
+        JOIN turn_requests request ON request.workId = binding.workId
+          AND request.kind = 'assignment'
+          AND request.taskId = binding.taskId
+          AND request.assignmentId = binding.assignmentId
+          AND request.assignmentVersion = binding.assignmentVersion
+          AND request.instructionsRevision = binding.instructionsRevision
+          AND request.profileRevision = binding.profileRevision
+          AND request.state = 'active'
+        JOIN execution_intents intent ON intent.workId = binding.workId
+          AND intent.state = 'submitting'
+        JOIN domain_assignments assignment ON assignment.id = binding.assignmentId
+          AND assignment.taskId = binding.taskId
+          AND assignment.version = binding.assignmentVersion
+          AND assignment.instructionsRevision = binding.instructionsRevision
+          AND assignment.profileRevision = binding.profileRevision
+        WHERE binding.workId = ? LIMIT 2`)
+      .all(workId) as Array<Record<string, unknown>>;
+    if (rows.length !== 1) return undefined;
+    return z
+      .object({
+        workId: z.string().min(1),
+        taskId: z.string().min(1),
+        assignmentId: z.string().min(1),
+        assignmentVersion: z.number().int().positive(),
+        instructionsRevision: z.number().int().positive(),
+        profileRevision: z.number().int().positive(),
+        conversationRevision: z.number().int().positive(),
+        profileId: z.string().min(1),
+        workRevision: z.number().int().positive(),
+        requestSequence: z.number().int().positive(),
+      })
+      .parse(rows[0]);
   }
 
   /** Historical diagnostic binding only; it does not authorize commands or recovery. */

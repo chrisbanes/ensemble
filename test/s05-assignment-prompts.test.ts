@@ -668,7 +668,10 @@ test("instruction apply rebinds only a never-admitted stale inbox batch", async 
           .questions.some((question) => question.status === "open") &&
         currentService()
           .list()
-          .every((intent) => intent.state !== "running"),
+          .every(
+            (intent) =>
+              intent.state !== "submitting" && intent.state !== "running",
+          ),
       "initial-question-turn-terminal",
     );
     return currentService()
@@ -1187,14 +1190,19 @@ test("stale inbox withdrawal preserves independent stop and admission holds", as
       const taskId = randomUUID();
       runtime.observe(service, taskId);
       await createReadyTask(taskId, `hold case ${index}`);
-      await waitUntil(
-        () =>
-          currentService()
-            .coordinationView()
-            .readTask(taskId)
-            .questions.some((question) => question.status === "open"),
-        `question-created-for-${witness}-case`,
-      );
+      await waitUntil(() => {
+        const questionOpen = currentService()
+          .coordinationView()
+          .readTask(taskId)
+          .questions.some((question) => question.status === "open");
+        const turnCompleted = currentService()
+          .turnRequests()
+          .some(
+            (request) =>
+              request.taskId === taskId && request.state === "completed",
+          );
+        return questionOpen && turnCompleted;
+      }, `question-and-terminal-callbacks-for-${witness}-case`);
       const assignment = currentService()
         .domain()
         .assignments(taskId)

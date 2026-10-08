@@ -235,6 +235,34 @@ The approved local code review amendment adds these scenarios:
 | WI12 | Inspect a draft and send, retry a confirmed failure, or reconcile an uncertain submission | One logical review containing the exact comments and summary reaches the named accountable lead with a receipt. Confirmed failures preserve editable drafts; unknown outcomes retain the original operation for reconciliation without duplicate delivery. No GitHub call, approval, readiness/completion change, merge authority or hold release occurs. |
 | WI13 | Navigate among files, diffs and exact result evidence while drafting on desktop, phone and keyboard | Draft content and anchors survive navigation/refresh under session privacy rules. Sent feedback remains inspectable with its original context. Existing contextual feedback is preserved; no unrelated thread-resolution or retraction workflow is introduced. |
 
+### #780 server-side evidence map
+
+The #780 implementation adds authenticated comparison reads and turn capture;
+it does not implement the #782 review UI or #781 result-retention lifetime.
+These suites cover the server-side portions of WI03–WI06 and WI10–WI11:
+
+| Criteria | Offline evidence |
+| --- | --- |
+| WI03 path, binding, exclusion, race and current-session privacy | `workspace-inspection.test.ts`, `workspace-comparison.test.ts`, `operator-comparisons.test.ts`, `turn-capture-service.test.ts`; comparison reads recheck current policy after awaited filesystem and stored-projection work. |
+| WI04–WI05 Branch/Uncommitted selection, exact baseline and honest unavailable states | `workspace-comparison.test.ts` and authenticated cases in `operator-comparisons.test.ts`; fixtures use real Git repositories and verify no ref/index mutation. |
+| WI06 actual-turn identity, bounded before/after capture, latest replacement, restart and held failure | `turn-capture-service.test.ts` and `turn-capture-harness.test.ts`; SQLite, production service admission, fake runtime, authenticated read and restart are exercised. |
+| WI10–WI11 immutable side/range anchors and retained export boundary | `workspace-comparison.test.ts`, `turn-capture-service.test.ts` and `operator-comparisons.test.ts`; the copied export is independent of latest-turn replacement, while #781 owns durable result retention. |
+
+`turn-capture-harness.test.ts` also proves the offline harness's one-dispatch
+guard, finite deadlines/read count, delayed start and terminal handling,
+uncertain Stop/reopen hold preservation, and checkpoint privacy. Fake-runtime
+tests qualify this control boundary only; they do not prove native Codex
+behavior. The guarded `test/wi03/live-turn-capture.mjs` entry is built but has
+not been run. T5's one actual-runtime attempt remains pending the controller's
+fresh independent review and explicit continuation.
+
+The implemented route is
+`GET /api/operator/tasks/{taskId}/comparisons`; see the #780 section in
+`docs/SPEC.md` for exact-ID refresh, authenticated projection checks and the
+implemented engineering bounds. The current observation budget is 5 seconds,
+but awaited binding validation and bounded child cleanup can extend response
+time; it is not a strict wall-clock response guarantee.
+
 Use production service APIs, real filesystem/Git and SQLite fixtures for the
 deterministic cases, including bounded sizes, process restart and cleanup.
 Qualify the changed turn-capture boundary with a bounded real-runtime journey

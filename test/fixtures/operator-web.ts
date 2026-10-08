@@ -1,35 +1,37 @@
 import { randomUUID } from "node:crypto";
-import type { Browser } from "playwright";
-import { DatabaseSync } from "node:sqlite";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { OperatorAuth } from "../../src/standalone/operator-auth.js";
+import type { Browser } from "playwright";
+import { DeliveryStore } from "../../src/core/delivery.js";
+import type {
+  Runtime,
+  RuntimeToolCall,
+  RuntimeToolDefinition,
+  RuntimeToolResult,
+} from "../../src/standalone/codex.js";
 import {
   LocalOperatorHttp,
   LocalOperatorUi,
 } from "../../src/standalone/operator.js";
-import {
-  OperatorWebBundle,
-  OperatorWebBoundary,
-} from "../../src/standalone/operator-web.js";
 import { OperatorApi } from "../../src/standalone/operator-api.js";
+import { OperatorAuth } from "../../src/standalone/operator-auth.js";
+import { coordinationOperatorRoutes } from "../../src/standalone/operator-coordination.js";
 import { OperatorRouteRegistry } from "../../src/standalone/operator-routes.js";
 import { runtimeOperatorRoutes } from "../../src/standalone/operator-runtime.js";
-import { coordinationOperatorRoutes } from "../../src/standalone/operator-coordination.js";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "../temp.js";
-import type {
-  Runtime,
-  RuntimeToolCall,
-  RuntimeToolResult,
-} from "../../src/standalone/codex.js";
+import {
+  OperatorWebBoundary,
+  OperatorWebBundle,
+} from "../../src/standalone/operator-web.js";
+import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
 import {
   StandaloneService,
   type StandaloneServiceOptions,
+  type RuntimeSpawnContext,
 } from "../../src/standalone/service.js";
-import { DeliveryStore } from "../../src/core/delivery.js";
-import type { RoutingChoiceClient } from "../../src/standalone/routing.js";
+import { tmpdir } from "../temp.js";
 import {
   FixtureLifecycle,
   type FixtureLifecycleOptions,
@@ -38,6 +40,11 @@ import {
   fixtureStepPending,
   throwFixtureCleanup,
 } from "./fixture-lifecycle.js";
+
+const operatorFixtureThreadSequence = new WeakMap<
+  OperatorFixtureRuntime,
+  number
+>();
 export class OperatorFixtureRuntime implements Runtime {
   turns = 0;
   prompts: string[] = [];
@@ -49,15 +56,20 @@ export class OperatorFixtureRuntime implements Runtime {
   async stop() {
     for (const done of this.outcomes.values()) done("completed");
   }
-  async startThread() {
-    return "fixture-thread";
+  async startThread(
+    _workspace: string,
+    _tools?: readonly RuntimeToolDefinition[],
+  ) {
+    const sequence = (operatorFixtureThreadSequence.get(this) ?? 0) + 1;
+    operatorFixtureThreadSequence.set(this, sequence);
+    return sequence === 1 ? "fixture-thread" : `fixture-thread-${sequence}`;
   }
   async resumeThread() {}
-  async startTurn(_thread?: string, _workspace?: string, prompt?: string) {
+  async startTurn(_thread: string, _workspace: string, prompt: string) {
     if (prompt) this.prompts.push(prompt);
     return `fixture-turn-${++this.turns}`;
   }
-  async interruptTurn() {}
+  async interruptTurn(_thread: string, _turn: string) {}
   waitForTurn(_thread: string, turn: string): Promise<"completed" | "failed"> {
     return new Promise((done) => this.outcomes.set(turn, done));
   }
@@ -72,7 +84,14 @@ export class OperatorFixtureRuntime implements Runtime {
   complete(turn: number) {
     this.outcomes.get(`fixture-turn-${turn}`)?.("completed");
   }
+  fail(turn: number) {
+    this.outcomes.get(`fixture-turn-${turn}`)?.("failed");
+  }
+  hasPending(turn: number) {
+    return this.outcomes.has(`fixture-turn-${turn}`);
+  }
 }
+
 import type { GitHubReaderFactory } from "../../src/standalone/github-sync.js";
 
 interface OwnedWeb {
@@ -86,15 +105,55 @@ interface OwnedWeb {
   closeSteps: Map<string, FixtureStep>;
 }
 
+export interface OperatorFixture<R extends Runtime> {
+  directory: string;
+  readonly runtime: R;
+  readonly service: StandaloneService;
+  reopen(): Promise<void>;
+  lifecycle: FixtureLifecycle;
+  seedPersistedState(seed: (db: DatabaseSync) => void): void;
+  advanceClock(ms: number): void;
+  startWeb(controlPaths?: readonly string[]): Promise<{
+    origin: string;
+    password: string;
+    auth: OperatorAuth;
+    http: LocalOperatorHttp;
+    close(): Promise<void>;
+  }>;
+  removeDirectoryAfterServiceStop(): Promise<void>;
+  close(
+    browser?: Browser,
+    primaryFailure?: unknown,
+    preserveDirectory?: boolean,
+  ): Promise<void>;
+}
+
+export function createOperatorFixture<R extends Runtime>(
+  routingClient: RoutingChoiceClient | null,
+  readerFactory: GitHubReaderFactory | undefined,
+  delivery: StandaloneServiceOptions["delivery"] | undefined,
+  lifecycleOptions: FixtureLifecycleOptions,
+  runtimeFactory: (context: RuntimeSpawnContext) => R,
+  serviceOptions?: StandaloneServiceOptions,
+): Promise<OperatorFixture<R>>;
+export function createOperatorFixture(
+  routingClient?: RoutingChoiceClient | null,
+  readerFactory?: GitHubReaderFactory,
+  delivery?: StandaloneServiceOptions["delivery"],
+  lifecycleOptions?: FixtureLifecycleOptions,
+  runtimeFactory?: undefined,
+  serviceOptions?: StandaloneServiceOptions,
+): Promise<OperatorFixture<OperatorFixtureRuntime>>;
 export async function createOperatorFixture<
-  R extends OperatorFixtureRuntime = OperatorFixtureRuntime,
+  R extends Runtime = OperatorFixtureRuntime,
 >(
   routingClient: RoutingChoiceClient | null = null,
   readerFactory?: GitHubReaderFactory,
   delivery?: StandaloneServiceOptions["delivery"],
   lifecycleOptions: FixtureLifecycleOptions = {},
-  runtimeFactory?: () => R,
-) {
+  runtimeFactory?: (context: RuntimeSpawnContext) => R,
+  serviceOptions: StandaloneServiceOptions = {},
+): Promise<OperatorFixture<R>> {
   const lifecycle = new FixtureLifecycle(lifecycleOptions);
   const fixtureDeadline = performance.now() + lifecycle.startupTimeoutMs;
   const startupSteps: FixtureStep[] = [];
@@ -141,16 +200,30 @@ export async function createOperatorFixture<
       fixture: directoryOwner,
     });
   }
-  let runtime = runtimeFactory
-    ? runtimeFactory()
-    : (new OperatorFixtureRuntime() as R);
+  let runtime: R | undefined;
+  let defaultRuntime: OperatorFixtureRuntime | undefined;
   const makeService = () =>
-    new StandaloneService(join(directory, "data"), () => runtime, undefined, {
-      power: { enabled: false },
-      routingClient,
-      ...(delivery ? { delivery } : {}),
-      ...(readerFactory ? { github: { readerFactory } } : {}),
-    });
+    new StandaloneService(
+      join(directory, "data"),
+      (context) => {
+        let currentRuntime: R;
+        if (runtimeFactory) currentRuntime = runtimeFactory(context);
+        else {
+          if (!defaultRuntime) defaultRuntime = new OperatorFixtureRuntime();
+          currentRuntime = defaultRuntime as unknown as R;
+        }
+        runtime = currentRuntime;
+        return currentRuntime;
+      },
+      undefined,
+      {
+        ...serviceOptions,
+        power: { enabled: false },
+        routingClient,
+        ...(delivery ? { delivery } : {}),
+        ...(readerFactory ? { github: { readerFactory } } : {}),
+      },
+    );
   let service = makeService();
   const listeners = new Map<number, OwnedWeb>();
   let listenerSequence = 0;
@@ -215,9 +288,10 @@ export async function createOperatorFixture<
     if (!pending && steps.every(fixtureStepCompleted)) listeners.delete(web.id);
     return steps;
   };
-  const fixture = {
+  const fixture: OperatorFixture<R> = {
     directory,
     get runtime() {
+      if (!runtime) throw Error("Fixture runtime unavailable");
       return runtime;
     },
     get service() {
@@ -229,9 +303,8 @@ export async function createOperatorFixture<
       if (service.list().some((i) => i.state === "running"))
         throw Error("Settle active work before reopening");
       await service.stop();
-      runtime = runtimeFactory
-        ? runtimeFactory()
-        : (new OperatorFixtureRuntime() as R);
+      runtime = undefined;
+      defaultRuntime = undefined;
       service = makeService();
       await service.start();
     },
@@ -355,7 +428,11 @@ export async function createOperatorFixture<
         owned.starting = false;
       }
     },
-    async close(browser?: Browser, primaryFailure?: unknown) {
+    async close(
+      browser?: Browser,
+      primaryFailure?: unknown,
+      preserveDirectory = false,
+    ) {
       // Clients must close before server.close waits for their connections.
       const steps: FixtureStep[] = [];
       let clientsClosed = true;
@@ -400,16 +477,34 @@ export async function createOperatorFixture<
           : lifecycle.skip("service.stop");
       if (stopped.status !== "dependency-skipped") serviceStep = stopped;
       steps.push(stopped);
-      const removed = fixtureStepCompleted(stopped)
-        ? await cleanupOperation(
-            "directory.remove",
-            () => rm(directory, { recursive: true, force: true }),
-            directoryStep,
-          )
-        : lifecycle.skip("directory.remove");
+      const removed = preserveDirectory
+        ? lifecycle.skip("directory.remove")
+        : fixtureStepCompleted(stopped)
+          ? await cleanupOperation(
+              "directory.remove",
+              () => rm(directory, { recursive: true, force: true }),
+              directoryStep,
+            )
+          : lifecycle.skip("directory.remove");
       if (removed.status !== "dependency-skipped") directoryStep = removed;
       steps.push(removed);
-      throwFixtureCleanup(steps, primaryFailure);
+      throwFixtureCleanup(
+        preserveDirectory ? steps.filter((step) => step !== removed) : steps,
+        primaryFailure,
+      );
+    },
+    async removeDirectoryAfterServiceStop() {
+      if (!fixtureStepCompleted(serviceStep))
+        throw new Error(
+          "Fixture service must be stopped before directory removal",
+        );
+      const removed = await cleanupOperation(
+        "directory.remove",
+        () => rm(directory, { recursive: true, force: true }),
+        directoryStep,
+      );
+      if (removed.status !== "dependency-skipped") directoryStep = removed;
+      throwFixtureCleanup([removed]);
     },
   };
   try {
@@ -421,7 +516,11 @@ export async function createOperatorFixture<
     );
   } catch (error) {
     try {
-      await fixture.close(undefined, error);
+      await fixture.close(
+        undefined,
+        error,
+        lifecycleOptions.preserveDirectoryOnStartupFailure ?? false,
+      );
     } catch (failure) {
       throw Object.assign(
         failure instanceof Error ? failure : Error(String(failure)),

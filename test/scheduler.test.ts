@@ -70,7 +70,18 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function waitUntil(predicate: () => boolean): Promise<boolean> {
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs?: number,
+): Promise<boolean> {
+  if (timeoutMs !== undefined) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    return predicate();
+  }
   for (let attempt = 0; attempt < 100; attempt++) {
     if (predicate()) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -345,14 +356,12 @@ test("eligible pending assignments dispatch once and retain request identity aft
     assert.equal(runtime.turns, 1);
 
     release.resolve();
-    for (let attempt = 0; attempt < 20; attempt++) {
-      if (
+    await waitUntil(
+      () =>
         service.list().find((item) => item.id === first.id)?.state ===
-        "completed"
-      )
-        break;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
+        "completed",
+      15_000,
+    );
     assert.equal(
       service.list().find((item) => item.id === first.id)?.state,
       "completed",

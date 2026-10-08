@@ -1,72 +1,81 @@
-import {
-  questionReadSchema,
-  inboxReadSchema,
-  type InboxItem,
-} from "../operator/contracts.js";
-import {
-  nativeQuestionForm,
-  questionFormSchema,
-  type QuestionAnswers,
-} from "../core/question-forms.js";
-import { setImmediate as yieldTraversal } from "node:timers/promises";
-import type { OperatorCommentReview } from "../core/delivery.js";
-import { previewRecordedArtifact, ArtifactUnavailable } from "./task-review.js";
-import { taskReviewReadSchema } from "../core/task-review.js";
-import type { CoordinationView } from "./coordination-view.js";
-import { z } from "zod";
 import { createHash } from "node:crypto";
+import { setImmediate as yieldTraversal } from "node:timers/promises";
+import { z } from "zod";
+import type {
+  CoordinationInteraction,
+  TaskCompletionRequest,
+} from "../core/coordination.js";
+import type { OperatorCommentReview } from "../core/delivery.js";
 import {
   DomainCommands,
   DomainConflictError,
   DomainPolicyError,
 } from "../core/domain.js";
-import type {
-  CoordinationInteraction,
-  TaskCompletionRequest,
-} from "../core/coordination.js";
 import {
-  runtimeSettingsSchema,
-  assignmentRecoverySchema,
-  recoveryObservationSchema,
-  sourceObservationSchema,
-  projectConfigurationSchema,
-  profileConfigurationSchema,
-  taskListPageSchema,
-  taskListQuerySchema,
-  composerOptionsSchema,
+  nativeQuestionForm,
+  type QuestionAnswers,
+  questionFormSchema,
+} from "../core/question-forms.js";
+import { taskReviewReadSchema } from "../core/task-review.js";
+import {
   admissionSchema,
   assignmentHistorySchema,
+  assignmentRecoverySchema,
   commandReceiptSchema,
+  composerOptionsSchema,
+  deliveryReadSchema,
+  type Execution,
+  type InboxItem,
+  inboxReadSchema,
   materialSchema,
   operatorCommandSchema,
+  profileConfigurationSchema,
+  projectConfigurationSchema,
   projectSchema,
-  taskSchema,
+  questionReadSchema,
+  recoveryObservationSchema,
   reviewReadSchema,
+  runtimeSettingsSchema,
   searchQuerySchema,
   searchReadSchema,
-  deliveryReadSchema,
+  sourceObservationSchema,
+  taskListPageSchema,
+  taskListQuerySchema,
+  taskSchema,
   uuid,
-  workspaceSchema,
-  type Execution,
+  workspaceComparisonReadRequestSchema,
+  workspaceComparisonReadSchema,
   workspaceDirectoryReadSchema,
   workspacePreviewReadSchema,
+  workspaceSchema,
 } from "../operator/contracts.js";
+import {
+  type ConversationHistoryBinding,
+  sanitizeConversationText,
+} from "./conversation-history.js";
+import type { CoordinationView } from "./coordination-view.js";
 import {
   GitHubHttpSourceReader,
   type GitHubSourceReader,
 } from "./github-source.js";
 import type { StandaloneService } from "./service.js";
+import { ArtifactUnavailable, previewRecordedArtifact } from "./task-review.js";
 import {
-  sanitizeConversationText,
-  type ConversationHistoryBinding,
-} from "./conversation-history.js";
+  compareRepository,
+  type WorkspaceComparisonSideContent,
+  type WorkspaceComparisonSnapshot,
+  type WorkspaceTurnCaptureRecord,
+} from "./workspace-comparison.js";
 import {
   listWorkspaceDirectory,
   previewWorkspaceFile,
-  WorkspaceInspectionInputError,
   type WorkspaceInspectionCurrent,
+  WorkspaceInspectionInputError,
+  type WorkspaceInspectionPathReference,
   type WorkspaceInspectionRequest,
+  workspaceInspectionPathsExcluded,
 } from "./workspace-inspection.js";
+
 type Row =
   ReturnType<StandaloneService["domain"]> extends { task(id: string): infer R }
     ? R
@@ -303,7 +312,7 @@ export class OperatorApi {
         workspace: this.service.taskWorkspaceVisibility(taskId),
       }),
       ...(binding ? { binding } : {}),
-      controlPaths: this.controlPaths,
+      controlPaths: [...this.controlPaths],
     };
   }
   private workspaceInspectionFailure(error: unknown): never {
@@ -341,6 +350,459 @@ export class OperatorApi {
     } catch (error) {
       return this.workspaceInspectionFailure(error);
     }
+  }
+  private comparisonRead(
+    data: z.input<typeof workspaceComparisonReadSchema>["data"],
+  ) {
+    try {
+      return workspaceComparisonReadSchema.parse({
+        data,
+        observedAt: Date.now(),
+      });
+    } catch {
+      throw new OperatorApiError(503, "unavailable");
+    }
+  }
+  private comparisonResponse(
+    taskId: string,
+    target: "branch" | "uncommitted" | "last-turn",
+    comparison:
+      | WorkspaceComparisonSnapshot
+      | NonNullable<WorkspaceTurnCaptureRecord["comparison"]>,
+  ) {
+    if (comparison.state === "available")
+      return this.comparisonRead({
+        taskId,
+        target,
+        state: "available",
+        comparisonId: comparison.comparisonId,
+        comparison,
+      });
+    if (comparison.state === "gap")
+      return this.comparisonRead({
+        taskId,
+        target,
+        state: "gap",
+        comparisonId: comparison.comparisonId,
+        comparison,
+        ...(comparison.reason ? { reason: comparison.reason } : {}),
+      });
+    return this.comparisonRead({
+      taskId,
+      target,
+      state: "unavailable",
+      comparisonId: comparison.comparisonId,
+      comparison,
+      reason: comparison.reason ?? "comparison-unavailable",
+      ...(comparison.target === "branch"
+        ? { availableBaseBranches: comparison.availableBaseBranches }
+        : {}),
+    });
+  }
+  private pendingTurnProjection(
+    capture: WorkspaceTurnCaptureRecord,
+    includeComparison = true,
+  ) {
+    const {
+      before,
+      after,
+      sides: _sides,
+      comparison,
+      ...identityAndState
+    } = capture;
+    return {
+      ...identityAndState,
+      ...(includeComparison && comparison ? { comparison } : {}),
+      captureState:
+        capture.captureState === "finished"
+          ? "unsettled"
+          : capture.captureState,
+      ...(before
+        ? { beforeState: before.state, beforeObservedAt: before.observedAt }
+        : {}),
+      ...(after
+        ? { afterState: after.state, afterObservedAt: after.observedAt }
+        : {}),
+    };
+  }
+  private async storedComparisonVisible(
+    initial: WorkspaceInspectionCurrent,
+    comparison:
+      | WorkspaceComparisonSnapshot
+      | NonNullable<WorkspaceTurnCaptureRecord["comparison"]>,
+  ) {
+    if (comparison.taskId !== initial.taskId) return false;
+    const repositoryTarget =
+      comparison.target === "turn" ? undefined : comparison.repositoryId;
+    const references: WorkspaceInspectionPathReference[] = [];
+    for (const entry of comparison.entries) {
+      let repositoryId = entry.repositoryId;
+      if (repositoryId === undefined && repositoryTarget !== undefined)
+        repositoryId = repositoryTarget;
+      if (repositoryId === undefined) {
+        const anchorRepositoryIds = new Set(
+          entry.hunks.flatMap((hunk) =>
+            [hunk.leftAnchor, hunk.rightAnchor]
+              .filter((anchor) => anchor !== undefined)
+              .map((anchor) => anchor.repositoryId),
+          ),
+        );
+        if (anchorRepositoryIds.size !== 1) return false;
+        const inferredRepositoryId = anchorRepositoryIds.values().next()
+          .value as string | null | undefined;
+        if (inferredRepositoryId === undefined) return false;
+        repositoryId = inferredRepositoryId;
+      }
+      if (repositoryTarget !== undefined && repositoryId !== repositoryTarget)
+        return false;
+      const scope =
+        repositoryId === null
+          ? ({ kind: "workspace" } as const)
+          : ({ kind: "repository", repositoryId } as const);
+      const paths = new Set<string>([
+        entry.path,
+        ...(entry.previousPath ? [entry.previousPath] : []),
+        ...entry.hunks.flatMap((hunk) =>
+          [hunk.leftAnchor, hunk.rightAnchor]
+            .filter((anchor) => anchor !== undefined)
+            .map((anchor) => {
+              if (anchor.repositoryId !== repositoryId) return "";
+              return anchor.path;
+            }),
+        ),
+      ]);
+      if (paths.has("")) return false;
+      for (const path of paths)
+        references.push({ scope, path: path.split("/") });
+    }
+    return !(await workspaceInspectionPathsExcluded(
+      initial.taskId,
+      references,
+      initial,
+      () => this.workspaceInspectionCurrent(initial.taskId),
+    ));
+  }
+  async readWorkspaceComparison(taskId: string, untrustedRequest: unknown) {
+    const request =
+      workspaceComparisonReadRequestSchema.parse(untrustedRequest);
+    this.requireTask(taskId);
+    const initial = await this.workspaceInspectionCurrent(taskId);
+    const taskVersion = initial.taskVersion;
+    const visibility = initial.visibility;
+    const stillVisible = async () => {
+      const current = await this.workspaceInspectionCurrent(taskId);
+      return (
+        current.taskVersion === taskVersion && current.visibility === visibility
+      );
+    };
+    const unavailable = (
+      target: "branch" | "uncommitted" | "last-turn",
+      reason: string,
+      comparisonId?: string,
+      availableBaseBranches?: readonly string[],
+    ) =>
+      this.comparisonRead({
+        taskId,
+        target,
+        state: "unavailable",
+        reason,
+        ...(comparisonId ? { comparisonId } : {}),
+        ...(availableBaseBranches
+          ? { availableBaseBranches: [...availableBaseBranches] }
+          : {}),
+      });
+
+    if ("comparisonId" in request) {
+      const target = request.target;
+      if (target === "last-turn") {
+        const slots = this.service.workspaceTurnCaptureSlots(taskId);
+        if (slots.pending?.comparisonId === request.comparisonId) {
+          if (!(await stillVisible()))
+            throw new OperatorApiError(503, "unavailable");
+          const includePendingComparison =
+            !slots.pending.comparison ||
+            (await this.storedComparisonVisible(
+              initial,
+              slots.pending.comparison,
+            ));
+          const includeLatestFinished =
+            !slots.latestFinished?.comparison ||
+            (await this.storedComparisonVisible(
+              initial,
+              slots.latestFinished.comparison,
+            ));
+          const latestSlots = this.service.workspaceTurnCaptureSlots(taskId);
+          if (latestSlots.pending?.comparisonId !== request.comparisonId)
+            return unavailable(
+              target,
+              "comparison-stale",
+              request.comparisonId,
+            );
+          const includeLatestStillCurrent =
+            slots.latestFinished?.comparisonId ===
+            latestSlots.latestFinished?.comparisonId;
+          const includeStoredComparisons =
+            includePendingComparison && includeLatestFinished;
+          return this.comparisonRead({
+            taskId,
+            target,
+            state: "unsettled",
+            pending: this.pendingTurnProjection(
+              slots.pending,
+              includeStoredComparisons,
+            ),
+            ...(slots.latestFinished?.comparison &&
+            includeStoredComparisons &&
+            includeLatestStillCurrent
+              ? { latestFinished: slots.latestFinished.comparison }
+              : {}),
+          });
+        }
+        const finished = slots.latestFinished;
+        if (
+          finished?.comparisonId === request.comparisonId &&
+          finished.comparison
+        ) {
+          if (!(await stillVisible()))
+            throw new OperatorApiError(503, "unavailable");
+          if (
+            !(await this.storedComparisonVisible(initial, finished.comparison))
+          )
+            return unavailable(
+              target,
+              "comparison-unavailable",
+              request.comparisonId,
+            );
+          if (
+            this.service.workspaceTurnCaptureSlots(taskId).latestFinished
+              ?.comparisonId !== request.comparisonId
+          )
+            return unavailable(
+              target,
+              "comparison-stale",
+              request.comparisonId,
+            );
+          return this.comparisonResponse(taskId, target, finished.comparison);
+        }
+        if (!(await stillVisible()))
+          throw new OperatorApiError(503, "unavailable");
+        return unavailable(
+          target,
+          "comparison-unavailable",
+          request.comparisonId,
+        );
+      }
+      const exported = this.service.workspaceComparisonById(
+        taskId,
+        request.comparisonId,
+      );
+      const comparison = exported?.comparison;
+      if (
+        !comparison ||
+        comparison.target !== target ||
+        !initial.binding?.repositories.some(
+          (repository) => repository.repositoryId === comparison.repositoryId,
+        )
+      ) {
+        if (!(await stillVisible()))
+          throw new OperatorApiError(503, "unavailable");
+        return unavailable(
+          target,
+          "comparison-unavailable",
+          request.comparisonId,
+        );
+      }
+      if (!(await stillVisible()))
+        throw new OperatorApiError(503, "unavailable");
+      if (!(await this.storedComparisonVisible(initial, comparison)))
+        return unavailable(
+          target,
+          "comparison-unavailable",
+          request.comparisonId,
+        );
+      const stillCurrent = this.service.workspaceComparisonById(
+        taskId,
+        request.comparisonId,
+      );
+      if (
+        !stillCurrent ||
+        stillCurrent.comparison.comparisonId !== comparison.comparisonId ||
+        stillCurrent.comparison.target !== target
+      )
+        return unavailable(target, "comparison-stale", request.comparisonId);
+      return this.comparisonResponse(taskId, target, comparison);
+    }
+
+    if (request.target === "last-turn") {
+      const slots = this.service.workspaceTurnCaptureSlots(taskId);
+      if (slots.pending) {
+        if (!(await stillVisible()))
+          throw new OperatorApiError(503, "unavailable");
+        const includePendingComparison =
+          !slots.pending.comparison ||
+          (await this.storedComparisonVisible(
+            initial,
+            slots.pending.comparison,
+          ));
+        const includeLatestFinished =
+          !slots.latestFinished?.comparison ||
+          (await this.storedComparisonVisible(
+            initial,
+            slots.latestFinished.comparison,
+          ));
+        const latestSlots = this.service.workspaceTurnCaptureSlots(taskId);
+        if (latestSlots.pending?.comparisonId !== slots.pending.comparisonId)
+          return unavailable("last-turn", "capture-unavailable");
+        const includeLatestStillCurrent =
+          slots.latestFinished?.comparisonId ===
+          latestSlots.latestFinished?.comparisonId;
+        const includeStoredComparisons =
+          includePendingComparison && includeLatestFinished;
+        return this.comparisonRead({
+          taskId,
+          target: "last-turn",
+          state: "unsettled",
+          pending: this.pendingTurnProjection(
+            slots.pending,
+            includeStoredComparisons,
+          ),
+          ...(slots.latestFinished?.comparison &&
+          includeStoredComparisons &&
+          includeLatestStillCurrent
+            ? { latestFinished: slots.latestFinished.comparison }
+            : {}),
+        });
+      }
+      if (slots.latestFinished?.comparison) {
+        if (!(await stillVisible()))
+          throw new OperatorApiError(503, "unavailable");
+        if (
+          !(await this.storedComparisonVisible(
+            initial,
+            slots.latestFinished.comparison,
+          ))
+        )
+          return unavailable(
+            "last-turn",
+            "capture-unavailable",
+            slots.latestFinished.comparisonId,
+          );
+        if (
+          this.service.workspaceTurnCaptureSlots(taskId).latestFinished
+            ?.comparisonId !== slots.latestFinished.comparisonId
+        )
+          return unavailable("last-turn", "capture-unavailable");
+        return this.comparisonResponse(
+          taskId,
+          "last-turn",
+          slots.latestFinished.comparison,
+        );
+      }
+      if (!(await stillVisible()))
+        throw new OperatorApiError(503, "unavailable");
+      return unavailable("last-turn", "capture-unavailable");
+    }
+
+    const current = initial.binding;
+    if (
+      !current ||
+      current.state !== "ready" ||
+      !current.repositories.some(
+        (repository) => repository.repositoryId === request.repositoryId,
+      )
+    ) {
+      return unavailable(request.target, "repository-unavailable");
+    }
+    const existing = this.service.currentWorkspaceComparison(
+      taskId,
+      request.repositoryId,
+      request.target,
+    );
+    const snapshot = existing?.comparison;
+    const selectionMatches = snapshot
+      ? request.target === "branch"
+        ? snapshot.target === "branch" &&
+          (request.baseBranch === undefined
+            ? snapshot.reason === "base-branch-required"
+            : snapshot.baseline?.branch === request.baseBranch)
+        : snapshot.target === "uncommitted" &&
+          snapshot.changeSet === (request.changeSet ?? "all")
+      : false;
+    if (snapshot && !request.refresh && selectionMatches) {
+      if (!(await this.storedComparisonVisible(initial, snapshot)))
+        return unavailable(
+          request.target,
+          "comparison-unavailable",
+          snapshot.comparisonId,
+        );
+      const stillCurrent = this.service.currentWorkspaceComparison(
+        taskId,
+        request.repositoryId,
+        request.target,
+      );
+      if (stillCurrent?.comparison.comparisonId !== snapshot.comparisonId)
+        return unavailable(
+          request.target,
+          "comparison-stale",
+          snapshot.comparisonId,
+        );
+      return this.comparisonResponse(taskId, request.target, snapshot);
+    }
+    if (
+      request.target === "branch" &&
+      request.baseBranch === undefined &&
+      snapshot &&
+      (snapshot.target !== "branch" ||
+        snapshot.reason !== "base-branch-required") &&
+      !request.refresh
+    ) {
+      return unavailable(
+        "branch",
+        "base-branch-required",
+        undefined,
+        snapshot && "availableBaseBranches" in snapshot
+          ? snapshot.availableBaseBranches
+          : [],
+      );
+    }
+
+    const sideContent = new Map<number, WorkspaceComparisonSideContent>();
+    const comparison = await compareRepository(
+      {
+        taskId,
+        repositoryId: request.repositoryId,
+        target: request.target,
+        ...(request.target === "branch" && request.baseBranch
+          ? { baseBranch: request.baseBranch }
+          : {}),
+        ...(request.target === "uncommitted" && request.changeSet
+          ? { changeSet: request.changeSet }
+          : {}),
+      },
+      () => this.workspaceInspectionCurrent(taskId),
+      {
+        captureSideContent: (entryIndex, side, text) => {
+          const value = sideContent.get(entryIndex) ?? { entryIndex };
+          if (side === "left") value.leftText = text;
+          else value.rightText = text;
+          sideContent.set(entryIndex, value);
+        },
+      },
+    );
+    if (!(await stillVisible())) throw new OperatorApiError(503, "unavailable");
+    if (!(await this.storedComparisonVisible(initial, comparison)))
+      return unavailable(
+        request.target,
+        "comparison-unavailable",
+        comparison.comparisonId,
+      );
+    this.service.replaceWorkspaceComparison(
+      comparison,
+      [...sideContent.values()].sort(
+        (left, right) => left.entryIndex - right.entryIndex,
+      ),
+    );
+    return this.comparisonResponse(taskId, request.target, comparison);
   }
   private project(row: Row, excluded: readonly string[] | undefined) {
     return {

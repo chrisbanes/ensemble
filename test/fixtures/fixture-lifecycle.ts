@@ -21,6 +21,7 @@ export interface FixtureStep {
 export interface FixtureLifecycleOptions {
   cleanupTimeoutMs?: number;
   startupTimeoutMs?: number;
+  preserveDirectoryOnStartupFailure?: boolean;
   operation?: (name: string, operation: () => Promise<void>) => Promise<void>;
 }
 

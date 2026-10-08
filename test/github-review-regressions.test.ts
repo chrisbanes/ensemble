@@ -342,19 +342,17 @@ for (const revoke of [false, true])
           requesterAssignmentId: null,
         });
         await service.refreshGitHub();
-        for (
-          let attempt = 0;
-          attempt < 100 &&
-          !(revoke
+        const expectedReadiness = () =>
+          revoke
             ? service
                 .list()
                 .some((intent) =>
                   intent.reason?.includes("repository-access-revoked"),
                 )
-            : turns > 0);
-          attempt++
-        )
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            : turns > 0;
+        const readinessDeadline = Date.now() + (revoke ? 5_000 : 15_000);
+        while (!expectedReadiness() && Date.now() < readinessDeadline)
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
         assert.equal(turns, revoke ? 0 : 1);
         if (revoke)
           assert.ok(

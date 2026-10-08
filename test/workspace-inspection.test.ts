@@ -27,6 +27,7 @@ import {
   inspectionLimits,
   listWorkspaceDirectory,
   previewWorkspaceFile,
+  workspaceInspectionPathExcluded,
   type WorkspaceInspectionCurrent,
   type WorkspaceInspectionRequest,
 } from "../src/standalone/workspace-inspection.js";
@@ -221,6 +222,34 @@ test("repository-free listing excludes private paths, bounds results, and keeps 
   );
 });
 
+test("text preview preserves a UTF-8 BOM so returned text matches its byte hash", async (t) => {
+  const f = fixture();
+  t.after(() => f.close());
+  const binding = await f.manager.provision("utf8-bom-preview");
+  const bytes = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from("BOM content\n", "utf8"),
+  ]);
+  await writeFile(join(binding.path, "bom.txt"), bytes);
+
+  const preview = await previewWorkspaceFile(
+    request(binding, { path: ["bom.txt"] }),
+    currentFor(binding),
+  );
+  assert.equal(preview.state, "ready");
+  assert.equal(preview.preview?.kind, "text");
+  if (preview.preview?.kind !== "text") return;
+  assert.equal(preview.preview.text, "\ufeffBOM content\n");
+  assert.equal(
+    preview.preview.sha256,
+    createHash("sha256").update(bytes).digest("hex"),
+  );
+  assert.equal(
+    createHash("sha256").update(preview.preview.text, "utf8").digest("hex"),
+    preview.preview.sha256,
+  );
+});
+
 test("configured control paths follow filesystem case and Unicode aliases", async (t) => {
   const f = fixture();
   t.after(() => f.close());
@@ -386,6 +415,15 @@ test("multi-repository listing exposes only synthetic identities and exact repos
     );
     assert.equal(denied.state, "conflict");
     assert.deepEqual(denied.entries, []);
+    assert.equal(
+      await workspaceInspectionPathExcluded(
+        taskId,
+        { kind: "workspace" },
+        [repositoryPath, "README.md"],
+        current,
+      ),
+      true,
+    );
   }
   await writeFile(
     join(binding.repositories[0]!.workspacePath, "ignored.log"),
@@ -394,6 +432,15 @@ test("multi-repository listing exposes only synthetic identities and exact repos
   const repositoryScope = request(binding, {
     scope: { kind: "repository", repositoryId: "owner/one" },
   });
+  assert.equal(
+    await workspaceInspectionPathExcluded(
+      taskId,
+      repositoryScope.scope,
+      ["README.md"],
+      current,
+    ),
+    false,
+  );
   const hidden = await listWorkspaceDirectory(repositoryScope, current);
   assert.equal(hidden.state, "ready");
   assert.equal(hidden.ignoreStatus, "known");

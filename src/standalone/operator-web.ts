@@ -3,12 +3,42 @@ import { join } from "node:path";
 import { z } from "zod";
 import { OperatorApiError, type OperatorApi } from "./operator-api.js";
 import type { WorkspaceInspectionRequest } from "./workspace-inspection.js";
+import { workspaceComparisonReadRequestSchema } from "../operator/contracts.js";
 const mime: Record<string, string> = {
   js: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8",
   woff2: "font/woff2",
 };
 type WorkspaceInspectionQuery = Omit<WorkspaceInspectionRequest, "taskId">;
+type WorkspaceComparisonQuery = z.infer<
+  typeof workspaceComparisonReadRequestSchema
+>;
+
+function parseWorkspaceComparisonQuery(
+  query: URLSearchParams,
+): WorkspaceComparisonQuery {
+  const allowed = new Set([
+    "target",
+    "comparisonId",
+    "repositoryId",
+    "baseBranch",
+    "changeSet",
+    "refresh",
+  ]);
+  for (const key of query.keys())
+    if (!allowed.has(key) || query.getAll(key).length !== 1)
+      throw new OperatorApiError(400, "invalid-input");
+  const raw: Record<string, string | boolean> = Object.fromEntries(query);
+  const refresh = query.get("refresh");
+  if (refresh !== null) {
+    if (refresh !== "true" && refresh !== "false")
+      throw new OperatorApiError(400, "invalid-input");
+    raw.refresh = refresh === "true";
+  }
+  const parsed = workspaceComparisonReadRequestSchema.safeParse(raw);
+  if (!parsed.success) throw new OperatorApiError(400, "invalid-input");
+  return parsed.data;
+}
 
 function parseWorkspaceInspectionQuery(
   query: URLSearchParams,
@@ -157,6 +187,9 @@ export class OperatorWebBoundary {
     const workspacePreview = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/preview$/,
     );
+    const workspaceComparisons = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/comparisons$/,
+    );
     if (workspaceFiles) {
       const request = parseWorkspaceInspectionQuery(query, rawSearch);
       return this.api.readWorkspaceDirectory(workspaceFiles[1] ?? "", request);
@@ -164,6 +197,13 @@ export class OperatorWebBoundary {
     if (workspacePreview) {
       const request = parseWorkspaceInspectionQuery(query, rawSearch);
       return this.api.readWorkspacePreview(workspacePreview[1] ?? "", request);
+    }
+    if (workspaceComparisons) {
+      const request = parseWorkspaceComparisonQuery(query);
+      return this.api.readWorkspaceComparison(
+        workspaceComparisons[1] ?? "",
+        request,
+      );
     }
     const question = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/questions\/([^/]+)$/,
@@ -273,6 +313,7 @@ export class OperatorWebBoundary {
         path,
       ) ||
       /^\/api\/operator\/tasks\/[^/]+\/(?:files|preview)$/.test(path) ||
+      /^\/api\/operator\/tasks\/[^/]+\/comparisons$/.test(path) ||
       /^\/api\/operator\/tasks\/[^/]+\/questions\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
       /^\/api\/operator\/assignments\/[^/]+\/(?:history|recovery)$/.test(path)

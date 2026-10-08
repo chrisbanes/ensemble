@@ -488,8 +488,9 @@ As of 8 October 2026, the standalone service implements authenticated JSON GETs
 for a task workspace directory and one file preview. Each request names a
 current task and either the repository-free workspace root or an exact bound
 repository ID; clients cannot supply filesystem roots. The session is checked
-again after the awaited read. These routes do not provide a file download,
-terminal, edit action, comparison, capture, or preview UI.
+again after the awaited read. The #779 directory and preview routes do not
+provide a file download, terminal, edit action, comparison, capture, or preview
+UI.
 
 The server scans one directory level, with a maximum of 32 path segments and
 2,048 UTF-8 path bytes, 4,096 entries scanned and 256 returned, a 2-second Git
@@ -514,8 +515,51 @@ identity around the read. Text, Markdown and HTML are inert UTF-8 in JSON;
 raster and PDF bytes are typed base64 data, never navigable file responses.
 These checks enforce path-based exclusions and bounded current-file reads;
 they are not semantic secret scanning or host-wide read isolation. Result
-snapshots, stable UI refresh behavior, comparisons, turn capture and the
-operator renderer remain later work.
+snapshots, stable UI refresh behavior and the operator renderer remain later
+work.
+
+#### #780 server comparison and turn capture
+
+The server adds authenticated JSON comparison reads at
+`/api/operator/tasks/{taskId}/comparisons`. Branch reads use an explicit
+operator-selected local base branch and its exact merge-base commit; they do
+not guess a base or fetch or check out refs. Uncommitted reads support all,
+staged and unstaged changes. Repository-free tasks can be observed around an
+actual workspace-capable turn, while Git comparisons remain unavailable.
+Comparison IDs stay stable until an explicit refresh; an old ID is never
+silently redirected to newer workspace contents. Current exclusion, binding,
+task-access and session checks apply again before stored comparison projections
+are returned. The authenticated API does not add a file download or UI.
+
+The durable SQLite turn slots keep the latest finished capture and a separate
+pending or unsettled capture. A capture records the admitted task/work revision,
+request sequence, assignment and profile revisions/IDs, exact runtime thread
+and turn IDs when bound, outcome, timestamps, before/after observations, and
+immutable comparison sides. Capture or store failure remains an explicit gap;
+it does not determine runtime completion, clear a hold, or replace the previous
+finished capture. Exported side text is checked against its original byte hash,
+size, line count, path, side and range before it is retained or returned. This
+export is available to the result-retention work in #781; it does not implement
+that retention or a UI.
+
+Comparison and each before/after observation scan at most 4,096 entries and
+return at most 256. A text file or side is limited to 1 MiB, source bytes to
+8 MiB per comparison/observation, combined Git-child output to 2 MiB, and
+rendered diff output to 1 MiB. Diffs are limited to 2,048 lines per side and
+4,000,000 diff operations. Each local Git child has a 1.5-second timeout. The
+comparison/observation clock is 5 seconds, below the published plan's 10-second
+per-observation value; source-byte and rendered-diff limits are also lower than
+the plan's 16 MiB and 2 MiB values. Durable serialized comparison, side and
+capture payloads have a 20 MiB per-record limit.
+
+The 5-second clock is an observation budget: when useful scan/read work exceeds
+it, the comparison records a `time-limit` gap. Awaited workspace validation,
+current-policy checks and bounded Git-child cleanup may extend beyond that
+threshold, so it is not a strict wall-clock response guarantee. These limits
+can produce incomplete comparisons and are engineering bounds, not a claim of a
+whole-workspace snapshot. The actual Codex runtime hook still requires its
+separate bounded qualification; fake-runtime evidence does not establish native
+runtime behavior.
 
 #### Local code review amendment — 6 October 2026
 
