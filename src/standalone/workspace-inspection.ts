@@ -1,14 +1,14 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import { constants } from "node:fs";
 import {
-  lstat,
-  opendir,
-  open,
-  realpath,
   type FileHandle,
+  lstat,
+  open,
+  opendir,
+  realpath,
 } from "node:fs/promises";
-import { spawn, type ChildProcess } from "node:child_process";
-import type { Stats } from "node:fs";
 import {
   basename,
   dirname,
@@ -59,6 +59,11 @@ export interface WorkspaceInspectionCurrent {
   controlPaths: readonly string[];
 }
 
+export interface WorkspaceInspectionPathReference {
+  scope: WorkspaceInspectionScope;
+  path: readonly string[];
+}
+
 export interface WorkspaceInspectionRequest {
   taskId: string;
   scope: WorkspaceInspectionScope;
@@ -75,6 +80,8 @@ export interface WorkspaceInspectionOptions {
   afterDirectoryOpen?: (path: string) => Promise<void>;
   /** Test-only observation after an exact no-follow file handle was opened. */
   afterFileOpen?: (path: string) => Promise<void>;
+  /** Internal comparison identity; hashes only bytes already read by this boundary. */
+  captureContentHash?: boolean;
 }
 
 export class WorkspaceInspectionInputError extends Error {
@@ -157,6 +164,7 @@ export interface WorkspaceFilePreview {
     kind: "file" | "directory" | "symlink" | "other";
     size: number | null;
     modifiedAt: number | null;
+    sha256?: string;
     ignored: boolean | null;
     reason?:
       | "unsupported-format"
@@ -384,6 +392,200 @@ async function createPathExclusion(
 const privateSegmentsExcluded = (segments: readonly string[]) =>
   segments.some(privateComponent);
 
+/**
+ * Fail-closed path gate for comparison code that reads immutable Git objects.
+ * Working-tree bytes must still go through previewWorkspaceFile, which also
+ * applies the no-follow and stable-file checks.
+ */
+export async function workspaceInspectionPathExcluded(
+  taskId: string,
+  scope: WorkspaceInspectionScope,
+  path: readonly string[],
+  current: () => Promise<WorkspaceInspectionCurrent>,
+): Promise<boolean> {
+  const segments = safeSegments(path);
+  if (
+    !taskId ||
+    !scope ||
+    (scope.kind !== "workspace" &&
+      (scope.kind !== "repository" || !scope.repositoryId))
+  )
+    throw new WorkspaceInspectionInputError();
+  if (privateSegmentsExcluded(segments)) return true;
+  try {
+    const initial = await current();
+    if (initial.taskId !== taskId) return true;
+    const root = currentRoot(initial, scope);
+    if (!root || root.binding.state !== "ready") return true;
+    if (scope.kind === "workspace") {
+      const repositories = repositoryWorkspaceNames(root.binding);
+      if (!repositories) return true;
+      const firstSegment = segments[0];
+      if (firstSegment !== undefined && repositories.has(firstSegment))
+        return true;
+    }
+    const excluded = await createPathExclusion(root.path, initial.controlPaths);
+    if (await excluded(root.path)) return true;
+    const target = resolve(root.path, ...segments);
+    if (!within(root.path, target) || (await excluded(target))) return true;
+    const parent = await validateDirectory(root, segments.slice(0, -1));
+    const repositories =
+      scope.kind === "workspace"
+        ? await validateBoundRepositories(root.binding)
+        : undefined;
+    return !(await sameObservation(
+      current,
+      initial,
+      taskId,
+      root,
+      segments.slice(0, -1),
+      parent,
+      repositories,
+    ));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Revalidate a bounded set of paths under one current binding and privacy
+ * snapshot. Stored comparison responses can contain many hunks for the same
+ * file; checking them as one observation avoids repeating binding validation
+ * for every range while still checking the current binding and roots before
+ * returning any stored path or patch.
+ */
+export async function workspaceInspectionPathsExcluded(
+  taskId: string,
+  references: readonly WorkspaceInspectionPathReference[],
+  initial: WorkspaceInspectionCurrent,
+  current: () => Promise<WorkspaceInspectionCurrent>,
+): Promise<boolean> {
+  if (!taskId || initial.taskId !== taskId) return true;
+  if (!references.length) {
+    try {
+      const latest = await current();
+      return (
+        latest.taskId !== taskId ||
+        bindingIdentity(latest) !== bindingIdentity(initial)
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  type ScopeSnapshot = {
+    scope: WorkspaceInspectionScope;
+    root: Root;
+    excluded: Awaited<ReturnType<typeof createPathExclusion>>;
+    directory: Awaited<ReturnType<typeof validateDirectory>>;
+  };
+  const scopes = new Map<string, ScopeSnapshot>();
+  const paths = new Map<
+    string,
+    { scope: ScopeSnapshot; segments: string[]; target: string }
+  >();
+  const directories = new Map<
+    string,
+    {
+      root: Root;
+      segments: string[];
+      snapshot: Awaited<ReturnType<typeof validateDirectory>>;
+    }
+  >();
+
+  try {
+    if (!initial.binding || initial.binding.state !== "ready") return true;
+    for (const reference of references) {
+      const segments = safeSegments(reference.path);
+      if (privateSegmentsExcluded(segments)) return true;
+      const scopeKey =
+        reference.scope.kind === "workspace"
+          ? "workspace"
+          : JSON.stringify(["repository", reference.scope.repositoryId]);
+      let scope = scopes.get(scopeKey);
+      if (!scope) {
+        const root = currentRoot(initial, reference.scope);
+        if (!root || root.binding.state !== "ready") return true;
+        if (reference.scope.kind === "workspace") {
+          const repositories = repositoryWorkspaceNames(root.binding);
+          if (!repositories) return true;
+          if (segments[0] !== undefined && repositories.has(segments[0]))
+            return true;
+        }
+        const excluded = await createPathExclusion(
+          root.path,
+          initial.controlPaths,
+        );
+        if (await excluded(root.path)) return true;
+        scope = {
+          scope: reference.scope,
+          root,
+          excluded,
+          directory: await validateDirectory(root, []),
+        };
+        scopes.set(scopeKey, scope);
+      }
+      if (
+        reference.scope.kind === "workspace" &&
+        segments[0] !== undefined &&
+        repositoryWorkspaceNames(scope.root.binding)?.has(segments[0])
+      )
+        return true;
+      const target = resolve(scope.root.path, ...segments);
+      if (!within(scope.root.path, target) || (await scope.excluded(target)))
+        return true;
+      const pathKey = JSON.stringify([scopeKey, segments]);
+      if (!paths.has(pathKey)) paths.set(pathKey, { scope, segments, target });
+    }
+
+    for (const { scope, segments } of paths.values()) {
+      const parentSegments = segments.slice(0, -1);
+      const directoryKey = JSON.stringify([scope.root.path, parentSegments]);
+      if (!directories.has(directoryKey))
+        directories.set(directoryKey, {
+          root: scope.root,
+          segments: parentSegments,
+          snapshot: await validateDirectory(scope.root, parentSegments),
+        });
+    }
+
+    for (const scope of scopes.values()) {
+      if (
+        !sameDirectorySnapshot(
+          scope.directory,
+          await validateDirectory(scope.root, []),
+        )
+      )
+        return true;
+    }
+    for (const directory of directories.values()) {
+      if (
+        !sameDirectorySnapshot(
+          directory.snapshot,
+          await validateDirectory(directory.root, directory.segments),
+        )
+      )
+        return true;
+    }
+    // This is deliberately the final await: it rechecks the stored binding,
+    // task visibility and copied privacy policy after all path filesystem
+    // observations, so an awaited stat cannot outlive the current gate.
+    const latest = await current();
+    if (
+      latest.taskId !== taskId ||
+      bindingIdentity(latest) !== bindingIdentity(initial)
+    )
+      return true;
+    for (const scope of scopes.values()) {
+      const latestRoot = currentRoot(latest, scope.scope);
+      if (!latestRoot || latestRoot.path !== scope.root.path) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 const bindingIdentity = (current: WorkspaceInspectionCurrent) =>
   JSON.stringify({
     taskId: current.taskId,
@@ -497,12 +699,28 @@ function checkGitIgnore(
   return new Promise((resolveResult) => {
     let child: ChildProcess;
     try {
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of Object.keys(environment))
+        if (key.startsWith("GIT_")) delete environment[key];
+      environment.GIT_ALLOW_PROTOCOL = "";
+      environment.GIT_NO_LAZY_FETCH = "1";
+      environment.GIT_OPTIONAL_LOCKS = "0";
+      environment.GIT_TERMINAL_PROMPT = "0";
       child = spawn(
         executable,
-        ["-C", repositoryPath, "check-ignore", "-z", "--stdin"],
+        [
+          "-C",
+          repositoryPath,
+          "-c",
+          "core.fsmonitor=false",
+          "check-ignore",
+          "-z",
+          "--stdin",
+        ],
         {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
+          env: environment,
         },
       );
     } catch {
@@ -730,6 +948,81 @@ async function sameObservation(
   }
 }
 
+/**
+ * Capture the exact #779 managed-root identity for a sequence of read-only
+ * Git operations. Each check rereads current task/binding/privacy state and
+ * requires the same canonical root inode captured here.
+ */
+export async function workspaceInspectionRootGuard(
+  taskId: string,
+  scope: WorkspaceInspectionScope,
+  initial: WorkspaceInspectionCurrent,
+  current: () => Promise<WorkspaceInspectionCurrent>,
+  additionalIdentityCheck?: (latest: WorkspaceInspectionCurrent) => boolean,
+): Promise<(() => Promise<boolean>) | undefined> {
+  if (initial.taskId !== taskId) return undefined;
+  const root = currentRoot(initial, scope);
+  if (!root || root.binding.state !== "ready") return undefined;
+  if (scope.kind === "workspace" && !repositoryWorkspaceNames(root.binding))
+    return undefined;
+  try {
+    const exclusion = await createPathExclusion(
+      root.path,
+      initial.controlPaths,
+    );
+    if (await exclusion(root.path)) return undefined;
+    const directory = await validateDirectory(root, []);
+    const repositories =
+      scope.kind === "workspace"
+        ? await validateBoundRepositories(root.binding)
+        : undefined;
+    if (
+      !(await sameObservation(
+        current,
+        initial,
+        taskId,
+        root,
+        [],
+        directory,
+        repositories,
+      ))
+    )
+      return undefined;
+    const identity = bindingIdentity(initial);
+    return async () => {
+      try {
+        const latest = await current();
+        if (
+          latest.taskId !== taskId ||
+          bindingIdentity(latest) !== identity ||
+          (additionalIdentityCheck && !additionalIdentityCheck(latest))
+        )
+          return false;
+        const latestExclusion = await createPathExclusion(
+          root.path,
+          latest.controlPaths,
+        );
+        if (await latestExclusion(root.path)) return false;
+        const latestDirectory = await validateDirectory(root, []);
+        const latestRepositories =
+          repositories === undefined
+            ? undefined
+            : await validateBoundRepositories(root.binding);
+        return (
+          sameDirectorySnapshot(directory, latestDirectory) &&
+          (repositories === undefined ||
+            (latestRepositories !== undefined &&
+              sameRepositorySnapshots(repositories, latestRepositories)))
+        );
+      } catch {
+        return false;
+      }
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 const repositoryFreeIgnored = (segments: readonly string[]) =>
   segments.some((segment) => repositoryFreeClutter.has(segment.toLowerCase()));
 
@@ -884,7 +1177,10 @@ function rasterInfo(bytes: Buffer): ImageInfo | undefined {
 
 const validText = (bytes: Buffer): string | undefined => {
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const text = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
     for (const character of text) {
       const codePoint = character.codePointAt(0) ?? 0;
       if (
@@ -1208,6 +1504,7 @@ export async function previewWorkspaceFile(
       NonNullable<WorkspaceFilePreview["metadata"]>["reason"],
       undefined
     >,
+    sha256?: string,
   ): WorkspaceFilePreview => ({
     ...blank("metadata-only", identity),
     metadata: {
@@ -1216,6 +1513,7 @@ export async function previewWorkspaceFile(
       modifiedAt: Number.isFinite(stat.mtimeMs)
         ? Math.trunc(stat.mtimeMs)
         : null,
+      ...(options.captureContentHash && sha256 ? { sha256 } : {}),
       ignored,
       reason,
     },
@@ -1422,6 +1720,7 @@ export async function previewWorkspaceFile(
           before,
           metadataIgnored,
           "invalid-content",
+          sha256,
         );
       return {
         ...blank("ready", initial),
@@ -1452,6 +1751,7 @@ export async function previewWorkspaceFile(
           before,
           metadataIgnored,
           "invalid-content",
+          sha256,
         );
       if (
         raster.width < 1 ||
@@ -1463,6 +1763,7 @@ export async function previewWorkspaceFile(
           before,
           metadataIgnored,
           "image-dimensions-exceed-limit",
+          sha256,
         );
       return {
         ...blank("ready", initial),
@@ -1486,16 +1787,40 @@ export async function previewWorkspaceFile(
       };
     }
     if (expectedMime === "application/pdf")
-      return metadataOnly(initial, before, metadataIgnored, "invalid-content");
+      return metadataOnly(
+        initial,
+        before,
+        metadataIgnored,
+        "invalid-content",
+        sha256,
+      );
     if (expectedMime?.startsWith("image/"))
-      return metadataOnly(initial, before, metadataIgnored, "invalid-content");
+      return metadataOnly(
+        initial,
+        before,
+        metadataIgnored,
+        "invalid-content",
+        sha256,
+      );
     const text = validText(bytes);
     if (text === undefined)
-      return metadataOnly(initial, before, metadataIgnored, "binary-content");
+      return metadataOnly(
+        initial,
+        before,
+        metadataIgnored,
+        "binary-content",
+        sha256,
+      );
     if (bytes.length > inspectionLimits.maxTextBytes)
       return metadataOnly(initial, before, metadataIgnored, "too-large");
     if (raster || bytes.subarray(0, 5).toString("ascii") === "%PDF-")
-      return metadataOnly(initial, before, metadataIgnored, "invalid-content");
+      return metadataOnly(
+        initial,
+        before,
+        metadataIgnored,
+        "invalid-content",
+        sha256,
+      );
     return {
       ...blank("ready", initial),
       metadata: {

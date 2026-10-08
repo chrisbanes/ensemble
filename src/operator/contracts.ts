@@ -1,17 +1,17 @@
-import {
-  questionFormSchema,
-  questionAnswersSchema,
-  questionPayloadLimit,
-} from "../core/question-forms.js";
-import {
-  taskReviewReadSchema,
-  feedbackReferenceSchema,
-} from "../core/task-review.js";
 import { z } from "zod";
 import {
   githubConfigurationSchema,
   readinessSchema,
 } from "../core/github-source-contracts.js";
+import {
+  questionAnswersSchema,
+  questionFormSchema,
+  questionPayloadLimit,
+} from "../core/question-forms.js";
+import {
+  feedbackReferenceSchema,
+  taskReviewReadSchema,
+} from "../core/task-review.js";
 export const uuid = z.string().uuid();
 const revision = z.number().int().positive().safe();
 const time = z.number().int().nonnegative().safe();
@@ -225,6 +225,338 @@ export const workspacePreviewReadSchema = envelope(
           message: "unavailable preview cannot contain file data",
         });
     }),
+);
+const workspaceComparisonContentSchema = z
+  .object({
+    sha256: hash.optional(),
+    objectId: z
+      .string()
+      .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)
+      .optional(),
+    size: z.number().int().nonnegative().safe().nullable(),
+    lineCount: z.number().int().nonnegative().safe().nullable(),
+    modifiedAt: time.nullable().optional(),
+  })
+  .strict();
+const workspaceComparisonAnchorSchema = z
+  .object({
+    taskId: uuid,
+    repositoryId: z.string().min(1).max(512).nullable(),
+    path: z.string().min(1).max(2048),
+    comparisonId: uuid,
+    context: z.enum(["branch", "uncommitted", "turn", "result"]),
+    workId: z.string().min(1).max(512).optional(),
+    resultId: z.string().min(1).max(512).optional(),
+    threadId: z.string().min(1).max(512).optional(),
+    turnId: z.string().min(1).max(512).optional(),
+    side: z.enum(["left", "right"]),
+    startLine: revision,
+    endLine: revision,
+    contentSha256: hash,
+  })
+  .strict()
+  .refine((anchor) => anchor.endLine >= anchor.startLine);
+const workspaceComparisonHunkSchema = z
+  .object({
+    oldStart: z.number().int().nonnegative().safe(),
+    oldLines: z.number().int().nonnegative().safe(),
+    newStart: z.number().int().nonnegative().safe(),
+    newLines: z.number().int().nonnegative().safe(),
+    patch: z.string().max(1024 * 1024),
+    leftAnchor: workspaceComparisonAnchorSchema.optional(),
+    rightAnchor: workspaceComparisonAnchorSchema.optional(),
+  })
+  .strict();
+const workspaceComparisonEntrySchema = z
+  .object({
+    path: z.string().min(1).max(2048),
+    repositoryId: z.string().min(1).max(512).nullable().optional(),
+    previousPath: z.string().min(1).max(2048).optional(),
+    change: z.enum(["added", "modified", "deleted", "renamed", "type-changed"]),
+    changeSet: z.enum(["branch", "staged", "unstaged"]).optional(),
+    state: z.enum(["text", "binary", "unsupported", "gap"]),
+    diff: z
+      .string()
+      .max(1024 * 1024)
+      .optional(),
+    left: workspaceComparisonContentSchema.optional(),
+    right: workspaceComparisonContentSchema.optional(),
+    hunks: z.array(workspaceComparisonHunkSchema).max(2048),
+    reason: z
+      .enum([
+        "too-large",
+        "invalid-text",
+        "unsupported-format",
+        "changing",
+        "unavailable",
+        "output-limit",
+        "time-limit",
+      ])
+      .optional(),
+  })
+  .strict();
+const workspaceComparisonEntriesSchema = z
+  .array(workspaceComparisonEntrySchema)
+  .max(256);
+type WorkspaceComparisonAnchorContainer = {
+  comparisonId: string;
+  taskId: string;
+  target: "branch" | "uncommitted" | "turn";
+  repositoryId?: string | undefined;
+  workId?: string | undefined;
+  threadId?: string | undefined;
+  turnId?: string | undefined;
+  entries: z.infer<typeof workspaceComparisonEntriesSchema>;
+};
+function validateWorkspaceComparisonAnchors(
+  comparison: WorkspaceComparisonAnchorContainer,
+  context: z.RefinementCtx,
+) {
+  for (const [entryIndex, entry] of comparison.entries.entries()) {
+    for (const [hunkIndex, hunk] of entry.hunks.entries()) {
+      for (const [anchorSide, anchor] of [
+        ["left", hunk.leftAnchor],
+        ["right", hunk.rightAnchor],
+      ] as const) {
+        if (!anchor) continue;
+        const content = entry[anchorSide];
+        const expectedRepositoryId =
+          comparison.repositoryId ?? entry.repositoryId ?? null;
+        const expectedPath =
+          anchorSide === "left"
+            ? (entry.previousPath ?? entry.path)
+            : entry.path;
+        if (
+          anchor.taskId !== comparison.taskId ||
+          anchor.comparisonId !== comparison.comparisonId ||
+          anchor.side !== anchorSide ||
+          anchor.path !== expectedPath ||
+          anchor.context !== comparison.target ||
+          anchor.contentSha256 !== content?.sha256 ||
+          content?.lineCount === null ||
+          content?.lineCount === undefined ||
+          anchor.endLine > content.lineCount ||
+          anchor.repositoryId !== expectedRepositoryId ||
+          (comparison.workId !== undefined &&
+            (anchor.workId !== comparison.workId ||
+              anchor.threadId !== comparison.threadId ||
+              anchor.turnId !== comparison.turnId))
+        )
+          context.addIssue({
+            code: "custom",
+            path: ["entries", entryIndex, "hunks", hunkIndex],
+            message: "comparison-anchor-context-mismatch",
+          });
+      }
+    }
+  }
+}
+const workspaceRepositoryComparisonSchema = z
+  .object({
+    comparisonId: uuid,
+    taskId: uuid,
+    repositoryId: z.string().min(1).max(512),
+    target: z.enum(["branch", "uncommitted"]),
+    changeSet: z.enum(["all", "staged", "unstaged"]).optional(),
+    state: z.enum(["available", "unavailable", "gap"]),
+    observedAt: time,
+    baseline: z
+      .object({
+        kind: z.enum(["merge-base", "head"]),
+        branch: z.string().min(1).max(255).optional(),
+        commit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+      })
+      .strict()
+      .optional(),
+    availableBaseBranches: z.array(z.string().min(1).max(255)).max(4096),
+    entries: workspaceComparisonEntriesSchema,
+    truncated: z.boolean(),
+    reason: z
+      .enum([
+        "workspace-unavailable",
+        "repository-unavailable",
+        "base-branch-required",
+        "base-branch-unavailable",
+        "no-merge-base",
+        "head-unavailable",
+        "git-failed",
+        "time-limit",
+        "output-limit",
+        "unsafe-path",
+        "workspace-changed",
+      ])
+      .optional(),
+  })
+  .strict()
+  .superRefine(validateWorkspaceComparisonAnchors);
+const workspaceTurnComparisonSchema = z
+  .object({
+    comparisonId: uuid,
+    taskId: uuid,
+    target: z.literal("turn"),
+    state: z.enum(["available", "gap", "unavailable"]),
+    outcome: z.enum(["completed", "failed", "unknown"]),
+    startedAt: time,
+    observedAt: time,
+    workId: z.string().min(1).max(512),
+    workRevision: revision,
+    requestSequence: revision,
+    assignmentId: z.string().min(1).max(512),
+    assignmentVersion: revision,
+    instructionsRevision: revision,
+    profileRevision: revision,
+    profileId: uuid,
+    threadId: z.string().min(1).max(512).optional(),
+    turnId: z.string().min(1).max(512).optional(),
+    entries: workspaceComparisonEntriesSchema,
+    truncated: z.boolean(),
+    reason: z
+      .enum([
+        "workspace-unavailable",
+        "repository-unavailable",
+        "base-branch-required",
+        "base-branch-unavailable",
+        "no-merge-base",
+        "head-unavailable",
+        "git-failed",
+        "time-limit",
+        "output-limit",
+        "unsafe-path",
+        "workspace-changed",
+        "unsupported-content",
+      ])
+      .optional(),
+  })
+  .strict()
+  .superRefine(validateWorkspaceComparisonAnchors);
+const workspaceComparisonSnapshotSchema = z.union([
+  workspaceRepositoryComparisonSchema,
+  workspaceTurnComparisonSchema,
+]);
+const workspaceTurnCaptureIdentitySchema = z
+  .object({
+    taskId: uuid,
+    workId: z.string().min(1).max(512),
+    workRevision: revision,
+    requestSequence: revision,
+    assignmentId: z.string().min(1).max(512),
+    assignmentVersion: revision,
+    instructionsRevision: revision,
+    profileRevision: revision,
+    profileId: uuid,
+  })
+  .strict();
+const workspacePendingTurnSchema = z
+  .object({
+    comparisonId: uuid,
+    identity: workspaceTurnCaptureIdentitySchema,
+    captureState: z.enum(["pending", "unsettled"]),
+    outcome: z.enum(["running", "completed", "failed", "unknown"]),
+    startedAt: time,
+    observedAt: time,
+    threadId: z.string().min(1).max(512).optional(),
+    turnId: z.string().min(1).max(512).optional(),
+    beforeState: z.enum(["available", "gap"]).optional(),
+    beforeObservedAt: time.optional(),
+    afterState: z.enum(["available", "gap"]).optional(),
+    afterObservedAt: time.optional(),
+    comparison: workspaceTurnComparisonSchema.optional(),
+    reason: z
+      .enum([
+        "workspace-unavailable",
+        "repository-unavailable",
+        "base-branch-required",
+        "base-branch-unavailable",
+        "no-merge-base",
+        "head-unavailable",
+        "git-failed",
+        "time-limit",
+        "output-limit",
+        "unsafe-path",
+        "workspace-changed",
+        "unsupported-content",
+        "runtime-uncertain",
+        "turn-unbound",
+        "callback-unfinished",
+        "capture-store-failed",
+      ])
+      .optional(),
+  })
+  .strict();
+export const workspaceComparisonReadRequestSchema = z.union([
+  z
+    .object({
+      target: z.enum(["branch", "uncommitted", "last-turn"]),
+      comparisonId: uuid,
+    })
+    .strict(),
+  z
+    .object({
+      target: z.literal("branch"),
+      repositoryId: z.string().min(1).max(512),
+      baseBranch: z.string().min(1).max(255).optional(),
+      refresh: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      target: z.literal("uncommitted"),
+      repositoryId: z.string().min(1).max(512),
+      changeSet: z.enum(["all", "staged", "unstaged"]).optional(),
+      refresh: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ target: z.literal("last-turn") }).strict(),
+]);
+export const workspaceComparisonReadSchema = envelope(
+  z.discriminatedUnion("state", [
+    z
+      .object({
+        taskId: uuid,
+        target: z.enum(["branch", "uncommitted", "last-turn"]),
+        state: z.literal("available"),
+        comparisonId: uuid,
+        comparison: workspaceComparisonSnapshotSchema,
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        target: z.enum(["branch", "uncommitted", "last-turn"]),
+        state: z.literal("gap"),
+        comparisonId: uuid.optional(),
+        comparison: workspaceComparisonSnapshotSchema.optional(),
+        reason: z.string().min(1).max(80).optional(),
+        availableBaseBranches: z
+          .array(z.string().min(1).max(255))
+          .max(4096)
+          .optional(),
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        target: z.enum(["branch", "uncommitted", "last-turn"]),
+        state: z.literal("unavailable"),
+        comparisonId: uuid.optional(),
+        comparison: workspaceComparisonSnapshotSchema.optional(),
+        reason: z.string().min(1).max(80),
+        availableBaseBranches: z
+          .array(z.string().min(1).max(255))
+          .max(4096)
+          .optional(),
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        target: z.literal("last-turn"),
+        state: z.literal("unsettled"),
+        pending: workspacePendingTurnSchema,
+        latestFinished: workspaceTurnComparisonSchema.optional(),
+      })
+      .strict(),
+  ]),
 );
 export const executionSchema = z
   .object({
@@ -1641,6 +1973,9 @@ export const apiErrorSchema = z
 export type OperatorCommand = z.infer<typeof operatorCommandSchema>;
 export type CommandReceipt = z.infer<typeof commandReceiptSchema>;
 export type Workspace = z.infer<typeof workspaceSchema>;
+export type WorkspaceComparisonRead = z.infer<
+  typeof workspaceComparisonReadSchema
+>;
 export type TaskRead = z.infer<typeof taskSchema>;
 export type Execution = z.infer<typeof executionSchema>;
 export type Session = z.infer<typeof sessionSchema>;

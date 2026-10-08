@@ -1,67 +1,37 @@
-import { InboxStartupReconciliation } from "./inbox-startup.js";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  materialDigest,
-  isOperatorDeliveryCaller,
-  type RuntimeDeliveryCaller,
-  type OperatorDeliveryCaller,
-  type OperatorCommentReview,
-  type DeliveryActionRecord,
-} from "../core/delivery.js";
+import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import {
-  ArchivedResumeRejectedError,
-  preTurnRecoveryCommandSchema,
-  noTurnRecoveryCommandSchema,
-  type HistoricalNoTurnAdoption,
-  type NoTurnRecoveryCommand,
-  type HistoricalPreTurnAdoption,
-  type PreTurnRecoveryCommand,
-  type ReplaceConversationCommand,
-} from "./pre-turn-recovery.js";
-import {
-  DeliveryStore,
-  canonicalMaterial,
-  type DeliveryCaller,
-  type DeliveryPolicy,
-} from "../core/delivery.js";
-import { DeliveryCoordinator, deliveryRuntimeEnvironment } from "./delivery.js";
-import type { GitHubDeliveryProvider } from "./github-delivery.js";
-import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import { isAbsolute, join, resolve, sep } from "node:path";
-import {
-  STANDALONE_MARKER_CONTENTS,
-  StandaloneDataDirectory,
-} from "./data-directory.js";
-import { Store } from "../core/store.js";
-import { verifiedRepository } from "../core/github-source.js";
-import { GitHubSourceStore } from "../core/github-source.js";
-import { GitHubSynchronizer, type GitHubReaderFactory } from "./github-sync.js";
-import {
-  CoordinationStore,
   type CoordinationCall,
   type CoordinationReceipt,
+  CoordinationStore,
   type InboxDelivery,
   type RuntimeQuestionRecord,
 } from "../core/coordination.js";
 import {
-  dispatchCoordinationTool,
-  isCoordinationTool,
-  coordinationTools,
-} from "./coordination-tools.js";
+  canonicalMaterial,
+  type DeliveryActionRecord,
+  type DeliveryCaller,
+  type DeliveryPolicy,
+  DeliveryStore,
+  isOperatorDeliveryCaller,
+  materialDigest,
+  type OperatorCommentReview,
+  type OperatorDeliveryCaller,
+  type RuntimeDeliveryCaller,
+} from "../core/delivery.js";
 import {
-  nativeEndpointKey,
-  encodeNativeInputReply,
-  type RuntimeUserInputRequest,
-  type RuntimeUserInputOutcome,
-} from "./native-input.js";
-import { CoordinationView } from "./coordination-view.js";
-import {
-  DomainStore,
   type CapacityConfigureCommand,
   type CapacityLimits,
+  DomainStore,
 } from "../core/domain.js";
+import {
+  GitHubSourceStore,
+  verifiedRepository,
+} from "../core/github-source.js";
+import { Store } from "../core/store.js";
 import {
   CodexRuntime,
   parseFailureEvidence,
@@ -70,46 +40,32 @@ import {
   type RuntimeToolCall,
   type RuntimeToolResult,
 } from "./codex.js";
+import { SqliteWorkspaceComparisonStore } from "./comparison-store.js";
+import type { ConversationHistoryAssignmentRead } from "./conversation-history.js";
 import {
   ConversationHistoryCapture,
   ConversationHistoryStore,
 } from "./conversation-history.js";
-import type { ConversationHistoryAssignmentRead } from "./conversation-history.js";
-import type {
-  RecoveryRecord,
-  RecoveryReceipt,
-  TerminationVerifier,
-} from "./recovery-types.js";
 import {
-  SchedulerStore,
-  TurnScheduler,
-  type TurnRequest,
-} from "./scheduler.js";
+  coordinationTools,
+  dispatchCoordinationTool,
+  isCoordinationTool,
+} from "./coordination-tools.js";
+import { CoordinationView } from "./coordination-view.js";
 import {
-  RoutingAttemptStore,
-  RoutingCoordinator,
-  RoutingOperationStaleError,
-  routingClientFromEnvironment,
-  routingModel,
-  type RoutingChoiceClient,
-  type RoutingOutcome,
-  type RoutingSnapshot,
-  type RoutingStaleReason,
-} from "./routing.js";
+  STANDALONE_MARKER_CONTENTS,
+  StandaloneDataDirectory,
+} from "./data-directory.js";
+import { DeliveryCoordinator, deliveryRuntimeEnvironment } from "./delivery.js";
+import type { GitHubDeliveryProvider } from "./github-delivery.js";
+import { type GitHubReaderFactory, GitHubSynchronizer } from "./github-sync.js";
+import { InboxStartupReconciliation } from "./inbox-startup.js";
 import {
-  ExecutionSupervisor,
-  type ExecutionSupervisorOptions,
-  type StopObservation,
-} from "./supervisor.js";
-import { MacProcessTerminationVerifier } from "./termination.js";
-import {
-  ExecutionState,
-  type CoordinationExecutionBinding,
-  type ExecutionIntent,
-  type TaskExecutionBinding,
-  type TaskExecutionContext,
-} from "./state.js";
-import type { RuntimeSafetyPort } from "./runtime-retention.js";
+  encodeNativeInputReply,
+  nativeEndpointKey,
+  type RuntimeUserInputOutcome,
+  type RuntimeUserInputRequest,
+} from "./native-input.js";
 import {
   CaffeinateAssertion,
   ExecutionPower,
@@ -117,10 +73,66 @@ import {
   type PowerEventSource,
 } from "./power.js";
 import {
+  ArchivedResumeRejectedError,
+  type HistoricalNoTurnAdoption,
+  type HistoricalPreTurnAdoption,
+  type NoTurnRecoveryCommand,
+  noTurnRecoveryCommandSchema,
+  type PreTurnRecoveryCommand,
+  preTurnRecoveryCommandSchema,
+  type ReplaceConversationCommand,
+} from "./pre-turn-recovery.js";
+import type {
+  RecoveryReceipt,
+  RecoveryRecord,
+  TerminationVerifier,
+} from "./recovery-types.js";
+import {
+  RoutingAttemptStore,
+  type RoutingChoiceClient,
+  RoutingCoordinator,
+  RoutingOperationStaleError,
+  type RoutingOutcome,
+  type RoutingSnapshot,
+  type RoutingStaleReason,
+  routingClientFromEnvironment,
+  routingModel,
+} from "./routing.js";
+import type { RuntimeSafetyPort } from "./runtime-retention.js";
+import {
+  SchedulerStore,
+  type TurnRequest,
+  TurnScheduler,
+} from "./scheduler.js";
+import {
+  type CoordinationExecutionBinding,
+  type ExecutionIntent,
+  ExecutionState,
+  type TaskExecutionBinding,
+  type TaskExecutionContext,
+} from "./state.js";
+import {
+  ExecutionSupervisor,
+  type ExecutionSupervisorOptions,
+  type StopObservation,
+} from "./supervisor.js";
+import { MacProcessTerminationVerifier } from "./termination.js";
+import {
+  compareWorkspaceTurnObservations,
+  observeWorkspaceTurn,
+  type WorkspaceComparisonExport,
+  type WorkspaceComparisonSideContent,
+  type WorkspaceComparisonSnapshot,
+  type WorkspaceTurnCaptureReason,
+  type WorkspaceTurnCaptureRecord,
+  type WorkspaceTurnObservation,
+} from "./workspace-comparison.js";
+import type { WorkspaceInspectionCurrent } from "./workspace-inspection.js";
+import {
   SqliteWorkspaceBindingStore,
-  WorkspaceManager,
   type TaskWorkspaceRepositoryInput,
   type WorkspaceCleanupEvidence,
+  WorkspaceManager,
   type WorkspaceManagerOptions,
 } from "./workspaces.js";
 
@@ -235,6 +247,7 @@ export class StandaloneService {
   private routingAttempts: RoutingAttemptStore | undefined;
   private workspaces: WorkspaceManager | undefined;
   private workspaceBindings: SqliteWorkspaceBindingStore | undefined;
+  private workspaceComparisons: SqliteWorkspaceComparisonStore | undefined;
   private schedulerStore: SchedulerStore | undefined;
   private inboxStartup: InboxStartupReconciliation | undefined;
   private scheduler: TurnScheduler | undefined;
@@ -314,6 +327,7 @@ export class StandaloneService {
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL",
       );
       new Store(db).ensureHost("standalone-codex");
+      this.workspaceComparisons = new SqliteWorkspaceComparisonStore(db);
       this.conversationHistory = new ConversationHistoryStore(db);
       const domain = new DomainStore(db, () =>
         this.observeBackgroundFailure(generation, "domain-wake", () =>
@@ -706,6 +720,7 @@ export class StandaloneService {
           this.scheduler = undefined;
           this.workspaces = undefined;
           this.workspaceBindings = undefined;
+          this.workspaceComparisons = undefined;
           this.clearConversationCaptures();
           this.conversationHistory = undefined;
           this.state = undefined;
@@ -888,6 +903,7 @@ export class StandaloneService {
       this.power = undefined;
       this.workspaces = undefined;
       this.workspaceBindings = undefined;
+      this.workspaceComparisons = undefined;
       this.conversationHistory = undefined;
       this.activeByWorkId.clear();
       this.nativeWaiters.clear();
@@ -1525,6 +1541,194 @@ export class StandaloneService {
   taskWorkspace(taskId: string) {
     this.domain().task(taskId);
     return this.requireWorkspaces().get(taskId);
+  }
+
+  replaceWorkspaceComparison(
+    comparison: WorkspaceComparisonSnapshot,
+    sides: readonly WorkspaceComparisonSideContent[],
+  ): void {
+    this.domain().task(comparison.taskId);
+    const store = this.workspaceComparisons;
+    if (!store) throw new Error("Workspace comparison store unavailable");
+    store.replaceCurrentComparison(comparison, sides);
+  }
+
+  currentWorkspaceComparison(
+    taskId: string,
+    repositoryId: string,
+    target: WorkspaceComparisonSnapshot["target"],
+  ): WorkspaceComparisonExport | undefined {
+    this.domain().task(taskId);
+    return this.workspaceComparisons?.currentComparison(
+      taskId,
+      repositoryId,
+      target,
+    );
+  }
+
+  workspaceComparisonById(
+    taskId: string,
+    comparisonId: string,
+  ): WorkspaceComparisonExport | undefined {
+    this.domain().task(taskId);
+    return this.workspaceComparisons?.comparisonById(taskId, comparisonId);
+  }
+
+  workspaceComparisonExport(
+    taskId: string,
+    comparisonId: string,
+  ): WorkspaceComparisonExport | undefined {
+    this.domain().task(taskId);
+    return this.workspaceComparisons?.exportComparison(taskId, comparisonId);
+  }
+
+  workspaceTurnCaptureSlots(taskId: string) {
+    this.domain().task(taskId);
+    return this.workspaceComparisons?.latestTurnCaptures(taskId) ?? {};
+  }
+
+  private async turnWorkspaceInspectionCurrent(
+    taskId: string,
+  ): Promise<WorkspaceInspectionCurrent> {
+    const task = this.domain().task(taskId);
+    const binding = await this.taskWorkspace(taskId);
+    return {
+      taskId,
+      taskVersion: Number(task.version),
+      visibility: this.taskWorkspaceVisibility(taskId),
+      ...(binding ? { binding } : {}),
+      controlPaths: [
+        this.dataDir,
+        process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+      ],
+    };
+  }
+
+  private async observeTurnWorkspace(
+    taskId: string,
+  ): Promise<WorkspaceTurnObservation> {
+    try {
+      return await observeWorkspaceTurn(taskId, () =>
+        this.turnWorkspaceInspectionCurrent(taskId),
+      );
+    } catch {
+      return {
+        observedAt: Date.now(),
+        state: "gap",
+        reason: "workspace-unavailable",
+        files: [],
+        truncated: false,
+      };
+    }
+  }
+
+  private async recordTurnCaptureAfter(
+    capture: WorkspaceTurnCaptureRecord,
+    outcome: "completed" | "failed" | "unknown",
+    captureState: "pending" | "unsettled",
+    reason?: WorkspaceTurnCaptureReason,
+  ): Promise<WorkspaceTurnCaptureRecord | undefined> {
+    const before = capture.before;
+    const store = this.workspaceComparisons;
+    if (!before || !store) return undefined;
+    const after = await this.observeTurnWorkspace(capture.identity.taskId);
+    const sideContent = new Map<number, WorkspaceComparisonSideContent>();
+    const identity = {
+      ...capture.identity,
+      ...(capture.threadId ? { threadId: capture.threadId } : {}),
+      ...(capture.turnId ? { turnId: capture.turnId } : {}),
+    };
+    let comparison: ReturnType<typeof compareWorkspaceTurnObservations>;
+    try {
+      comparison = compareWorkspaceTurnObservations(
+        identity,
+        capture.comparisonId,
+        capture.startedAt,
+        before,
+        after,
+        outcome,
+        (entryIndex, side, text) => {
+          const item = sideContent.get(entryIndex) ?? { entryIndex };
+          if (side === "left") item.leftText = text;
+          else item.rightText = text;
+          sideContent.set(entryIndex, item);
+        },
+      );
+    } catch {
+      return undefined;
+    }
+    const { before: _before, after: _after, ...withoutObservations } = capture;
+    const next = {
+      ...withoutObservations,
+      captureState,
+      outcome,
+      observedAt: after.observedAt,
+      comparison,
+      sides: [...sideContent.values()].sort(
+        (a, b) => a.entryIndex - b.entryIndex,
+      ),
+      ...((reason ?? after.reason ?? capture.reason)
+        ? { reason: reason ?? after.reason ?? capture.reason }
+        : {}),
+    } satisfies WorkspaceTurnCaptureRecord;
+    try {
+      return store.updatePendingTurnCapture(next) ? next : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private persistUnsettledTurnCapture(
+    capture: WorkspaceTurnCaptureRecord,
+    reason: WorkspaceTurnCaptureReason,
+  ): WorkspaceTurnCaptureRecord | undefined {
+    const store = this.workspaceComparisons;
+    if (!store) return undefined;
+    const next = {
+      ...capture,
+      captureState: "unsettled" as const,
+      reason,
+    } satisfies WorkspaceTurnCaptureRecord;
+    try {
+      return store.updatePendingTurnCapture(next) ? next : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private finishTurnCapture(capture: WorkspaceTurnCaptureRecord): void {
+    const store = this.workspaceComparisons;
+    if (!store) return;
+    const {
+      before: _before,
+      after: _after,
+      comparison: _comparison,
+      sides: _sides,
+      ...identityOnly
+    } = capture;
+    let finished = false;
+    try {
+      finished = store.finishTurnCapture({
+        ...identityOnly,
+        ...(capture.comparison ? { comparison: capture.comparison } : {}),
+        ...(capture.sides ? { sides: capture.sides } : {}),
+        captureState: "finished",
+        outcome: "completed",
+      });
+    } catch {
+      // A capture write must not change the observed runtime terminal or hold.
+    }
+    if (!finished) {
+      this.persistUnsettledTurnCapture(
+        {
+          ...identityOnly,
+          captureState: "unsettled",
+          outcome: "completed",
+          observedAt: Date.now(),
+        },
+        "capture-store-failed",
+      );
+    }
   }
 
   async archiveTask(taskId: string, evidence: WorkspaceCleanupEvidence) {
@@ -2974,7 +3178,13 @@ export class StandaloneService {
     const action = (async () => {
       try {
         await power?.executionStarted(request.workId);
-        return await this.executeAdmitted(request, intent, workspace, previous);
+        return await this.executeAdmitted(
+          request,
+          intent,
+          workspace,
+          previous,
+          generation,
+        );
       } finally {
         await power?.executionEnded(request.workId).catch(() => {});
       }
@@ -2998,13 +3208,71 @@ export class StandaloneService {
     intent: ExecutionIntent,
     workspace: string,
     previous?: ExecutionIntent,
+    generation?: ServiceGeneration,
   ): Promise<ExecutionIntent> {
     const state = this.requireState();
     const runtime = this.requireRuntime();
     let submissionStage: "resume" | "thread" | "bound" | "turn" = "thread";
     let captureThreadId: string | undefined;
+    let turnCapture: WorkspaceTurnCaptureRecord | undefined;
     let conversationCapture: ConversationHistoryCapture | undefined;
+    const comparisonStore = this.workspaceComparisons;
+    if (
+      comparisonStore &&
+      request.kind === "assignment" &&
+      request.taskId &&
+      request.assignmentId
+    ) {
+      try {
+        const identity = state.taskTurnCaptureIdentity(request.workId);
+        if (
+          identity &&
+          identity.taskId === request.taskId &&
+          identity.assignmentId === request.assignmentId &&
+          identity.assignmentVersion === request.assignmentVersion &&
+          identity.instructionsRevision === request.instructionsRevision &&
+          identity.profileRevision === request.profileRevision
+        ) {
+          const startedAt = Date.now();
+          const before = await this.observeTurnWorkspace(request.taskId);
+          const capture: WorkspaceTurnCaptureRecord = {
+            comparisonId: randomUUID(),
+            identity: {
+              taskId: identity.taskId,
+              workId: identity.workId,
+              workRevision: identity.workRevision,
+              requestSequence: identity.requestSequence,
+              assignmentId: identity.assignmentId,
+              assignmentVersion: identity.assignmentVersion,
+              instructionsRevision: identity.instructionsRevision,
+              profileRevision: identity.profileRevision,
+              profileId: identity.profileId,
+            },
+            captureState: "pending",
+            outcome: "running",
+            startedAt,
+            observedAt: before.observedAt,
+            before,
+          };
+          comparisonStore.beginTurnCapture(capture);
+          turnCapture = capture;
+        }
+      } catch {
+        // Capture is observational; its storage failure cannot change admission.
+      }
+    }
     try {
+      if (
+        !generation ||
+        this.generation !== generation ||
+        !generation.accepting ||
+        this.runtime !== runtime
+      )
+        throw new Error(
+          "Runtime generation changed before task turn submission",
+        );
+      if (state.get(intent.id).state !== "submitting")
+        throw new Error("Execution admission was held");
       let threadId: string;
       const tools =
         request.kind === "assignment" && request.assignmentId
@@ -3134,6 +3402,25 @@ export class StandaloneService {
           this.removeConversationCapture(threadId, conversationCapture);
         throw new Error("Turn binding was held or changed");
       }
+      if (turnCapture && comparisonStore) {
+        try {
+          if (
+            comparisonStore.bindTurnCapture(
+              turnCapture.comparisonId,
+              threadId,
+              turnId,
+            )
+          )
+            turnCapture = { ...turnCapture, threadId, turnId };
+          else
+            turnCapture = this.persistUnsettledTurnCapture(
+              turnCapture,
+              "capture-store-failed",
+            );
+        } catch {
+          turnCapture = undefined;
+        }
+      }
       const exactBinding = this.safeConversationHistoryBinding(
         state,
         request.workId,
@@ -3152,16 +3439,50 @@ export class StandaloneService {
         turnId,
         outcome,
       );
+      if (turnCapture) {
+        const admittedCapture = turnCapture;
+        try {
+          turnCapture =
+            (await this.recordTurnCaptureAfter(
+              admittedCapture,
+              outcome,
+              outcome === "completed" ? "pending" : "unsettled",
+            )) ??
+            this.persistUnsettledTurnCapture(
+              {
+                ...admittedCapture,
+                outcome,
+                observedAt: Date.now(),
+              },
+              "workspace-unavailable",
+            );
+        } catch {
+          turnCapture = this.persistUnsettledTurnCapture(
+            {
+              ...admittedCapture,
+              outcome,
+              observedAt: Date.now(),
+            },
+            "workspace-unavailable",
+          );
+        }
+      }
       if (
         outcome === "completed" &&
         (this.callbacks.get(request.workId)?.size ?? 0) > 0
-      )
+      ) {
         state.hold(
           intent.id,
           "Ensemble callback is unfinished at terminal status",
         );
-      else if (outcome === "completed") {
+        if (turnCapture)
+          turnCapture = this.persistUnsettledTurnCapture(
+            turnCapture,
+            "callback-unfinished",
+          );
+      } else if (outcome === "completed") {
         state.complete(intent.id, threadId, turnId);
+        if (turnCapture?.comparison) this.finishTurnCapture(turnCapture);
         this.lastCompletedWorkId = request.workId;
         const coordination = this.coordination;
         const binding = state.taskBinding(request.workId);
@@ -3245,6 +3566,42 @@ export class StandaloneService {
           intent.id,
           `Runtime submission or observation uncertain: ${String(error)}`,
         );
+      if (turnCapture) {
+        const admittedCapture = turnCapture;
+        try {
+          if (admittedCapture.comparison) {
+            this.persistUnsettledTurnCapture(
+              admittedCapture,
+              admittedCapture.turnId ? "runtime-uncertain" : "turn-unbound",
+            );
+          } else {
+            turnCapture =
+              (await this.recordTurnCaptureAfter(
+                admittedCapture,
+                "unknown",
+                "unsettled",
+                admittedCapture.turnId ? "runtime-uncertain" : "turn-unbound",
+              )) ??
+              this.persistUnsettledTurnCapture(
+                {
+                  ...admittedCapture,
+                  outcome: "unknown",
+                  observedAt: Date.now(),
+                },
+                admittedCapture.turnId ? "runtime-uncertain" : "turn-unbound",
+              );
+          }
+        } catch {
+          this.persistUnsettledTurnCapture(
+            {
+              ...admittedCapture,
+              outcome: "unknown",
+              observedAt: Date.now(),
+            },
+            admittedCapture.turnId ? "runtime-uncertain" : "turn-unbound",
+          );
+        }
+      }
     } finally {
       if (conversationCapture) {
         conversationCapture.discard();

@@ -280,8 +280,12 @@ async function main() {
       ]
     : globSync("dist/test/*.test.js").sort();
   if (!files.length) throw Error("No compiled test files found");
+  // Serialize Git/browser/capture fixtures to preserve production observation
+  // deadlines while retaining the complete test suite and per-test assertions.
+  const concurrency = 1;
   const args = [
     "--test",
+    `--test-concurrency=${concurrency}`,
     ...(preflight
       ? [
           "--test-name-pattern=fixture preflight|failed browser assertion surfaces",

@@ -235,11 +235,46 @@ The approved local code review amendment adds these scenarios:
 | WI12 | Inspect a draft and send, retry a confirmed failure, or reconcile an uncertain submission | One logical review containing the exact comments and summary reaches the named accountable lead with a receipt. Confirmed failures preserve editable drafts; unknown outcomes retain the original operation for reconciliation without duplicate delivery. No GitHub call, approval, readiness/completion change, merge authority or hold release occurs. |
 | WI13 | Navigate among files, diffs and exact result evidence while drafting on desktop, phone and keyboard | Draft content and anchors survive navigation/refresh under session privacy rules. Sent feedback remains inspectable with its original context. Existing contextual feedback is preserved; no unrelated thread-resolution or retraction workflow is introduced. |
 
+### #780 server-side evidence map
+
+The #780 implementation adds authenticated comparison reads and turn capture;
+it does not implement the #782 review UI or #781 result-retention lifetime.
+These suites cover the server-side portions of WI03–WI06 and WI10–WI11:
+
+| Criteria | Offline evidence |
+| --- | --- |
+| WI03 path, binding, exclusion, race and current-session privacy | `workspace-inspection.test.ts`, `workspace-comparison.test.ts`, `operator-comparisons.test.ts`, `turn-capture-service.test.ts`; comparison reads recheck current policy after awaited filesystem and stored-projection work. |
+| WI04–WI05 Branch/Uncommitted selection, exact baseline and honest unavailable states | `workspace-comparison.test.ts` and authenticated cases in `operator-comparisons.test.ts`; fixtures use real Git repositories and verify no ref/index mutation. |
+| WI06 actual-turn identity, bounded before/after capture, latest replacement, restart and held failure | `turn-capture-service.test.ts` and `turn-capture-harness.test.ts`; SQLite, production service admission, fake runtime, authenticated read and restart are exercised. |
+| WI10–WI11 immutable side/range anchors and retained export boundary | `workspace-comparison.test.ts`, `turn-capture-service.test.ts` and `operator-comparisons.test.ts`; the copied export is independent of latest-turn replacement, while #781 owns durable result retention. |
+
+`turn-capture-harness.test.ts` also proves the offline harness's one-dispatch
+guard, finite deadlines/read count, delayed start and terminal handling,
+uncertain Stop/reopen hold preservation, and checkpoint privacy. Fake-runtime
+tests qualify this control boundary only; they do not prove native Codex
+behavior. The guarded `test/wi03/live-turn-capture.mjs` entry completed the
+single controller-authorized, repository-free actual journey for #780 T5's
+actual-turn portion of WI06. See the
+[#780 T5 turn-capture evidence](evidence/wi03-turn-capture.md) for runtime
+identity, exact capture assertions, SQLite readback, shutdown proof and limits.
+It does not cover the native successive-turn, restart, failed, interrupted or
+uncertain-capture cases; those remain in offline coverage. An earlier static
+ESM-link failure started no runtime or turn and did not reset the actual-journey
+allowance; the single actual journey is now spent.
+
+The implemented route is
+`GET /api/operator/tasks/{taskId}/comparisons`; see the #780 section in
+`docs/SPEC.md` for exact-ID refresh, authenticated projection checks and the
+implemented engineering bounds. The current observation budget is 5 seconds,
+but awaited binding validation and bounded child cleanup can extend response
+time; it is not a strict wall-clock response guarantee.
+
 Use production service APIs, real filesystem/Git and SQLite fixtures for the
 deterministic cases, including bounded sizes, process restart and cleanup.
-Qualify the changed turn-capture boundary with a bounded real-runtime journey
-after deterministic coverage, then verify the integrated production UI on
-desktop and phone. Record source/runtime identity, observed captures, limits and
+The bounded real-runtime journey for #780 T5's actual-turn portion of WI06 is
+recorded in the [turn-capture evidence](evidence/wi03-turn-capture.md). Verify
+the integrated production UI on desktop and phone under its separate
+acceptance scope. Record source/runtime identity, observed captures, limits and
 exact resource cleanup; reuse unaffected runtime and #742 evidence. The
 implementation owner runs validation. Review the Pen interaction/state handoff
 before UI implementation and retain final integrated usability review.

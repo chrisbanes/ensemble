@@ -28,6 +28,18 @@ import type {
 import { WorkspaceManager } from "../src/standalone/workspaces.js";
 
 class RuntimeFixture implements Runtime {
+  resultReports: Array<{
+    workId: string;
+    assignmentId: string;
+    profileId: string;
+    threadId: string;
+    turnId: string;
+    success: boolean;
+  }> = [];
+  reportResultForTurn?: (
+    threadId: string,
+    turnId: string,
+  ) => { workId: string; assignmentId: string; profileId: string } | undefined;
   starts = 0;
   resumes = 0;
   turns = 0;
@@ -60,15 +72,34 @@ class RuntimeFixture implements Runtime {
     return `turn-${++this.turnIds}`;
   }
   async waitForTurn(threadId: string, turnId: string) {
-    await this.toolCall?.({
-      threadId,
-      turnId,
-      callId: `fixture-question-${threadId}-${turnId}`,
-      tool: "ensemble_ask_question",
-      arguments: {
-        question: "Task-writer fixture is waiting for the next step",
-      },
-    });
+    const resultBinding = this.reportResultForTurn?.(threadId, turnId);
+    if (resultBinding) {
+      const result = await this.toolCall?.({
+        threadId,
+        turnId,
+        callId: `fixture-result-${threadId}-${turnId}`,
+        tool: "ensemble_report_result",
+        arguments: {
+          summary: "Task-writer fixture completed the exact lead assignment",
+        },
+      });
+      this.resultReports.push({
+        ...resultBinding,
+        threadId,
+        turnId,
+        success: result?.success === true,
+      });
+    } else {
+      await this.toolCall?.({
+        threadId,
+        turnId,
+        callId: `fixture-question-${threadId}-${turnId}`,
+        tool: "ensemble_ask_question",
+        arguments: {
+          question: "Task-writer fixture is waiting for the next step",
+        },
+      });
+    }
     this.entered?.();
     await this.gate;
     return this.outcome;
@@ -98,6 +129,9 @@ interface SupervisorTestClock {
 }
 
 interface SupervisorTestOptions {
+  createInitialAssignment?: boolean;
+  reportTaskLeadResult?: boolean;
+  initialAssignmentSettleMs?: number;
   supervisor?: { clock: SupervisorTestClock; observationMs: number };
   workspaceManager?: WorkspaceManagerOptions;
 }
@@ -157,7 +191,16 @@ async function waitForControlledGitEvent(
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(
-    "Task-writer test Git child did not reach the expected state",
+    `Task-writer test Git child did not reach the expected state: ${JSON.stringify(
+      controlled
+        .events()
+        .slice(-20)
+        .map(({ event, operation, command }) => ({
+          event,
+          operation,
+          command,
+        })),
+    )}`,
   );
 }
 
@@ -166,6 +209,16 @@ async function fixture(
   repositories: TaskWorkspaceRepositoryInput[] = [],
 ) {
   const root = mkdtempSync(join(tmpdir(), "ensemble-task-writer-"));
+  const {
+    createInitialAssignment = true,
+    reportTaskLeadResult = false,
+    initialAssignmentSettleMs = 15_000,
+    ...serviceOptions
+  } = options ?? {};
+  const projectId = randomUUID();
+  const taskId = randomUUID();
+  const profileId = randomUUID();
+  const assignmentId = randomUUID();
   const runtime = new RuntimeFixture();
   const ServiceWithOptions = StandaloneService as unknown as new (
     dataDir: string,
@@ -177,13 +230,36 @@ async function fixture(
     join(root, "data"),
     () => runtime,
     undefined,
-    options,
+    serviceOptions,
   );
+  if (reportTaskLeadResult) {
+    runtime.reportResultForTurn = (threadId, turnId) => {
+      const state = (service as unknown as { state: ExecutionState }).state;
+      const binding = state.coordinationBinding(threadId, turnId);
+      if (
+        !binding ||
+        binding.taskId !== taskId ||
+        binding.assignmentId === assignmentId
+      )
+        return undefined;
+      const assignment = service
+        .domain()
+        .assignments(taskId)
+        .find(
+          (candidate) =>
+            candidate.id === binding.assignmentId &&
+            String(candidate.brief) === "Task: Task\nOutcome: Deliver",
+        );
+      return assignment
+        ? {
+            workId: binding.workId,
+            assignmentId: String(assignment.id),
+            profileId: String(assignment.profileId),
+          }
+        : undefined;
+    };
+  }
   await service.start();
-  const projectId = randomUUID();
-  const taskId = randomUUID();
-  const profileId = randomUUID();
-  const assignmentId = randomUUID();
   const execute = (command: Record<string, unknown>) =>
     service.domain().execute({ key: randomUUID(), ...command } as never);
   execute({
@@ -215,34 +291,43 @@ async function fixture(
     taskId,
     title: "Task",
     outcome: "Deliver",
-    ready: true,
+    ready: createInitialAssignment,
   });
-  execute({
-    type: "assignment.create",
-    actor: "agent",
-    projectId,
-    taskId,
-    assignmentId,
-    profileId,
-    brief: "Work",
-    resultDestination: "lead",
-    requesterAssignmentId: null,
-  });
+  if (createInitialAssignment)
+    execute({
+      type: "assignment.create",
+      actor: "agent",
+      projectId,
+      taskId,
+      assignmentId,
+      profileId,
+      brief: "Work",
+      resultDestination: "lead",
+      requesterAssignmentId: null,
+    });
   const workspace = await service.provisionTask(taskId, repositories);
   assert.equal(workspace.state, "ready");
-  const firstIntent = `assignment:${assignmentId}:initial`;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (
-      service.list().find((item) => item.workId === firstIntent)?.state ===
-      "completed"
+  if (createInitialAssignment) {
+    const firstIntent = `assignment:${assignmentId}:initial`;
+    const firstTurnDeadline = Date.now() + initialAssignmentSettleMs;
+    while (
+      Date.now() < firstTurnDeadline &&
+      service.list().find((item) => item.workId === firstIntent)?.state !==
+        "completed"
     )
-      break;
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      service.list().find((item) => item.workId === firstIntent)?.state,
+      "completed",
+      `Initial assignment did not settle in ${initialAssignmentSettleMs}ms: ${JSON.stringify(
+        {
+          intents: service.list(),
+          requests: service.turnRequests(),
+          taskHold: service.taskHold(taskId),
+        },
+      )}`,
+    );
   }
-  assert.equal(
-    service.list().find((item) => item.workId === firstIntent)?.state,
-    "completed",
-  );
   runtime.starts = 0;
   runtime.turns = 0;
   return {
@@ -1362,6 +1447,7 @@ test("uncertain archive status keeps its archival hold across restart", async (t
     NonNullable<WorkspaceManagerOptions["gitFailureObserver"]>
   >[0][] = [];
   const serviceOptions = {
+    createInitialAssignment: false,
     workspaceManager: {
       gitExecutable: controlled.executable,
       gitTimeoutMs: { "archive-status": 400 },
@@ -1379,6 +1465,9 @@ test("uncertain archive status keeps its archival hold across restart", async (t
     const binding = await f.service.taskWorkspace(f.taskId);
     const repositoryBinding = binding?.repositories[0];
     assert.ok(repositoryBinding);
+    assert.deepEqual(f.service.list(), []);
+    assert.deepEqual(f.service.turnRequests(), []);
+    assert.equal(f.service.taskHold(f.taskId), undefined);
     const serviceWithWake = f.service as unknown as {
       wakeScheduler: () => Promise<void>;
     };
@@ -1400,11 +1489,56 @@ test("uncertain archive status keeps its archival hold across restart", async (t
       reconciliationEvidencePreserved: true,
       workspaceContentsPreserved: true,
     });
-    const ready = await waitForControlledGitEvent(
-      controlled,
-      ({ event, operation }) =>
-        event === "ready" && operation === "archive-status",
-    );
+    let ready: ControlledGitEvent;
+    try {
+      ready = await waitForControlledGitEvent(
+        controlled,
+        ({ event, operation }) =>
+          event === "ready" && operation === "archive-status",
+      );
+    } catch (error) {
+      const archiveResult = await Promise.race([
+        archival.then((result) => ({ status: "settled" as const, result })),
+        new Promise<{ status: "pending" }>((resolve) =>
+          setTimeout(() => resolve({ status: "pending" }), 50),
+        ),
+      ]);
+      t.diagnostic(
+        `archive-child-not-reached ${JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+          archiveResult,
+          assignments: f.service
+            .domain()
+            .assignments(f.taskId)
+            .map((assignment) => ({
+              id: assignment.id,
+              brief: assignment.brief,
+              resultDestination: assignment.resultDestination,
+              requesterAssignmentId: assignment.requesterAssignmentId,
+              state: assignment.state,
+            })),
+          archiveWakeCount,
+          taskHold: f.service.taskHold(f.taskId),
+          intents: f.service.list().map((intent) => ({
+            id: intent.id,
+            workId: intent.workId,
+            state: intent.state,
+            reason: intent.reason,
+            threadId: intent.threadId,
+            turnId: intent.turnId,
+          })),
+          requests: f.service.turnRequests().map((request) => ({
+            workId: request.workId,
+            assignmentId: request.assignmentId,
+            state: request.state,
+            reason: request.reason,
+            sequence: request.sequence,
+          })),
+          events: controlled.events().slice(-20),
+        })}`,
+      );
+      throw error;
+    }
     assert.ok(ready.atMs !== undefined);
 
     const liveDb = (f.service as unknown as { db: DatabaseSync }).db;
@@ -1492,6 +1626,28 @@ test("uncertain archive status keeps its archival hold across restart", async (t
     );
     afterRestart.close();
 
+    const recoveredDomain = recovered.domain();
+    recoveredDomain.execute({
+      type: "assignment.create",
+      actor: "agent",
+      key: randomUUID(),
+      projectId: f.projectId,
+      taskId: f.taskId,
+      assignmentId: f.assignmentId,
+      profileId: f.profileId,
+      brief: "Verify the retained workspace cannot admit new work",
+      resultDestination: "lead",
+      requesterAssignmentId: null,
+    });
+    recoveredDomain.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId: f.projectId,
+      taskId: f.taskId,
+      expectedVersion: Number(recoveredDomain.task(f.taskId).version),
+      ready: true,
+    });
     await assert.rejects(
       recovered.submitTask(
         "blocked-by-uncertain-archive",
@@ -1683,6 +1839,7 @@ test("service stop settles archive status and worktree removal before database c
       const databaseOpenAtFailure: boolean[] = [];
       let observingService: StandaloneService | undefined;
       const serviceOptions = {
+        createInitialAssignment: false,
         workspaceManager: {
           gitExecutable: controlled.executable,
           gitTimeoutMs: {
@@ -1834,6 +1991,7 @@ test("service stop cancels startup workspace recovery and settles before databas
   const databaseOpenAtFailure: boolean[] = [];
   let observingService: StandaloneService | undefined;
   const serviceOptions = {
+    createInitialAssignment: false,
     workspaceManager: {
       gitExecutable: controlled.executable,
       gitTimeoutMs: { "repository-identity": 30_000 },
@@ -2253,6 +2411,8 @@ test("real Git service provisioning, execution lookup, and clean archive stay wi
   const controlled = controlledGit();
   const f = await fixture(
     {
+      reportTaskLeadResult: true,
+      initialAssignmentSettleMs: 30_000,
       workspaceManager: {
         gitExecutable: controlled.executable,
       },
@@ -2266,6 +2426,99 @@ test("real Git service provisioning, execution lookup, and clean archive stay wi
     const binding = await f.service.taskWorkspace(f.taskId);
     assert.equal(binding?.state, "ready");
     assert.equal(binding?.repositories.length, 2);
+    const taskAssignmentIds = new Set(
+      f.service
+        .domain()
+        .assignments(f.taskId)
+        .map((assignment) => String(assignment.id)),
+    );
+    const unsettled = () =>
+      f.service.list().filter((intent) => {
+        const assignmentId = intent.workId.split(":")[1];
+        return (
+          assignmentId !== undefined &&
+          taskAssignmentIds.has(assignmentId) &&
+          [
+            "ready",
+            "capacity-waiting",
+            "held",
+            "submitting",
+            "running",
+          ].includes(intent.state)
+        );
+      });
+    const settlementDeadline = Date.now() + 15_000;
+    while (
+      Date.now() < settlementDeadline &&
+      unsettled().some((intent) => intent.state !== "held")
+    )
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(
+      unsettled(),
+      [],
+      `Task writer ownership did not settle: ${JSON.stringify({
+        intents: f.service.list(),
+        requests: f.service.turnRequests(),
+        taskHold: f.service.taskHold(f.taskId),
+      })}`,
+    );
+    const reportBindings = f.runtime.resultReports;
+    assert.equal(
+      reportBindings.length,
+      1,
+      `Expected one exact task-lead result callback: ${JSON.stringify(reportBindings)}`,
+    );
+    for (const report of reportBindings) {
+      const assignment = f.service.domain().assignment(report.assignmentId);
+      const intent = f.service
+        .list()
+        .find((candidate) => candidate.workId === report.workId);
+      assert.equal(report.success, true);
+      assert.equal(report.workId, `assignment:${report.assignmentId}:initial`);
+      assert.equal(assignment.brief, "Task: Task\nOutcome: Deliver");
+      assert.equal(assignment.resultDestination, "lead");
+      assert.equal(String(assignment.profileId), report.profileId);
+      assert.equal(intent?.threadId, report.threadId);
+      assert.equal(intent?.turnId, report.turnId);
+      assert.equal(
+        f.service
+          .domain()
+          .assignments(f.taskId)
+          .some((candidate) => candidate.id === report.assignmentId),
+        true,
+      );
+    }
+    t.diagnostic(`task-lead-result-binding ${JSON.stringify(reportBindings)}`);
+    t.diagnostic(
+      `before-clean-archive ${JSON.stringify({
+        assignments: f.service
+          .domain()
+          .assignments(f.taskId)
+          .map((assignment) => ({
+            id: assignment.id,
+            profileId: assignment.profileId,
+            brief: assignment.brief,
+            resultDestination: assignment.resultDestination,
+            state: assignment.state,
+          })),
+        intents: f.service.list().map((intent) => ({
+          id: intent.id,
+          workId: intent.workId,
+          state: intent.state,
+          reason: intent.reason,
+          threadId: intent.threadId,
+          turnId: intent.turnId,
+        })),
+        requests: f.service.turnRequests().map((request) => ({
+          workId: request.workId,
+          assignmentId: request.assignmentId,
+          state: request.state,
+          reason: request.reason,
+          sequence: request.sequence,
+        })),
+        taskHold: f.service.taskHold(f.taskId),
+      })}`,
+    );
     const archived = await f.service.archiveTask(f.taskId, {
       deliveryConfirmed: true,
       writerOwnershipResolved: true,
@@ -2273,6 +2526,7 @@ test("real Git service provisioning, execution lookup, and clean archive stay wi
       reconciliationEvidencePreserved: true,
       workspaceContentsPreserved: true,
     });
+    t.diagnostic(`clean-archive-result ${JSON.stringify(archived)}`);
     assert.equal(archived.outcome, "cleaned");
     assert.equal(existsSync(binding?.path ?? ""), false);
     const measurements = new Map<string, number[]>();

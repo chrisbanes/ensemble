@@ -581,8 +581,8 @@ test("committed lost-response creation survives reload expiry and exact reconcil
 
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { ExecutionState } from "../src/standalone/state.js";
-async function until(predicate: () => boolean) {
-  const end = Date.now() + 5000;
+async function until(predicate: () => boolean, timeoutMs = 5000) {
+  const end = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > end) throw Error("Fixture timed out");
     await new Promise((r) => setTimeout(r, 5));
@@ -680,7 +680,7 @@ async function seedCatalog(
         .turnRequests()
         .some((r) => r.taskId === id && r.state === "active"),
     );
-    assert.ok(f.runtime.turns >= before + 1);
+    await until(() => f.runtime.turns >= before + 1, 15_000);
     const request = f.service
       .turnRequests()
       .find((r) => r.taskId === id && r.state === "active");

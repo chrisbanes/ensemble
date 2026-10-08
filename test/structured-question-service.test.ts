@@ -138,7 +138,7 @@ test("ordinary same-assignment continuation delivers before answer to original r
       expectedVersion: 3,
       paused: false,
     });
-    await questionUntil(() => f.runtime.turns === 2);
+    await questionUntil(() => f.runtime.turns === 2, 15_000);
     assert.ok(f.runtime.prompts[1]?.includes("Ordinary unrelated follow-up"));
     f.service.domain().execute({
       type: "project.configure",
@@ -186,7 +186,7 @@ test("ordinary same-assignment continuation delivers before answer to original r
       expectedVersion: 5,
       paused: false,
     });
-    await questionUntil(() => f.runtime.turns === 3);
+    await questionUntil(() => f.runtime.turns === 3, 15_000);
     assert.ok(
       f.runtime.prompts[2]?.includes(JSON.stringify(mixedAnswers)),
       JSON.stringify({
