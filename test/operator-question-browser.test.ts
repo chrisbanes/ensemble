@@ -664,6 +664,43 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
   await captureBrowserEvidence(page, "390x480-inbox-question-detail", {
     fullPage: false,
   });
+
+  // Each request keeps its own reading position in the shared detail scroller.
+  await page.setViewportSize({ width: 1024, height: 600 });
+  // Earlier wheel input can leave a smooth-scroll animation running; wait it out.
+  const settledScrollTop = () =>
+    detail.evaluate(
+      (element) =>
+        new Promise<number>((resolve) => {
+          let last = -1,
+            stable = 0;
+          const step = () => {
+            stable = element.scrollTop === last ? stable + 1 : 0;
+            last = element.scrollTop;
+            if (stable >= 10) resolve(last);
+            else requestAnimationFrame(step);
+          };
+          step();
+        }),
+    );
+  await settledScrollTop();
+  const open = async (title: string) => {
+    await rows.locator(".inbox-row").filter({ hasText: title }).click();
+    await page
+      .getByRole("region", { name: "Exact question response" })
+      .getByRole("textbox", { name: "Explain", exact: true })
+      .waitFor();
+    return settledScrollTop();
+  };
+  await open("Scrollable request 1");
+  await detail.evaluate((element) => {
+    element.scrollTop = 150;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const first = await detail.evaluate((element) => element.scrollTop);
+  assert.ok(first > 0, String(first));
+  assert.equal(await open("Scrollable request 2"), 0);
+  assert.equal(await open("Scrollable request 1"), first);
   assert.equal(commandWrites, 0);
 });
 
