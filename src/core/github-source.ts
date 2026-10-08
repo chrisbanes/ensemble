@@ -5,7 +5,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import type { Database } from "./store.js";
+import { transaction, type Database } from "./store.js";
 
 export interface IssueSnapshot {
   providerInstance: "github.com";
@@ -313,8 +313,7 @@ export class GitHubSourceStore {
     observation: IssueStatus,
     binding?: GitHubObservationBinding & { reference: IssueReference },
   ): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const issue = this.issue(nodeId);
       if (
         binding &&
@@ -330,7 +329,6 @@ export class GitHubSourceStore {
             )
             .get(String(issue.taskId), binding.projectId))
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
       if (!issue) throw new Error("Unknown imported issue");
@@ -353,17 +351,12 @@ export class GitHubSourceStore {
             "UPDATE domain_tasks SET version = version + 1 WHERE id IN (SELECT taskId FROM local_dependencies WHERE blockerTaskId = ?)",
           )
           .run(String(issue.taskId));
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   invalidateProviderObservations(): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db
         .prepare(`UPDATE domain_tasks SET importedBlockers = 'unknown', version = version + 1
         WHERE id IN (SELECT taskId FROM github_external_issues) AND importedBlockers != 'unknown'`)
@@ -389,11 +382,7 @@ export class GitHubSourceStore {
           "UPDATE github_sync_state SET complete = 0, reason = 'startup-refresh-required'",
         )
         .run();
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   reconcileBlockers(
@@ -404,8 +393,7 @@ export class GitHubSourceStore {
       reference: IssueReference;
     },
   ): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const issue = this.issue(nodeId);
       if (!issue) throw new Error("Unknown imported issue");
       if (
@@ -421,7 +409,6 @@ export class GitHubSourceStore {
             )
             .get(binding.projectId, binding.selectionId, nodeId))
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
       if (snapshot.complete) {
@@ -471,12 +458,8 @@ export class GitHubSourceStore {
             "UPDATE domain_tasks SET importedBlockers = ?, version = version + 1 WHERE id = ?",
           )
           .run(state, String(issue.taskId));
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   reconcileSelection(
@@ -485,14 +468,12 @@ export class GitHubSourceStore {
     snapshot: SelectionSnapshot,
     binding?: GitHubObservationBinding,
   ): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       if (
         binding &&
         (binding.projectId !== projectId ||
           !this.currentBinding(binding, selectionId))
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
       const config = this.db
@@ -681,12 +662,8 @@ export class GitHubSourceStore {
           SELECT e.taskId FROM github_external_issues e JOIN github_memberships m ON m.nodeId = e.nodeId
           WHERE m.projectId = ? AND m.selectionId = ?)`)
           .run(projectId, selectionId);
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   recordDeliveryClosure(
@@ -711,8 +688,7 @@ export class GitHubSourceStore {
       })
       .strict()
       .parse(input);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const issue = this.issue(snapshot.nodeId),
         config = this.db
           .prepare(
@@ -730,7 +706,6 @@ export class GitHubSourceStore {
           .prepare("SELECT 1 FROM domain_tasks WHERE id=? AND projectId=?")
           .get(String(issue.taskId), projectId)
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
       const digest = sourceTextDigest(snapshot.title, snapshot.body),
@@ -798,12 +773,8 @@ export class GitHubSourceStore {
           closerPrNodeId,
           JSON.stringify(snapshot),
         );
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
   recordDeliveryClosureUnavailable(nodeId: string): void {
     const hold = this.db

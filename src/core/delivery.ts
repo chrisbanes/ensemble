@@ -1,7 +1,7 @@
 import { TaskReviewStore } from "./task-review.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { Database } from "./store.js";
+import { transaction, type Database } from "./store.js";
 
 const identity = z.string().trim().min(1).max(512);
 export const actionKinds = [
@@ -411,15 +411,7 @@ export class DeliveryStore {
     `);
   }
   transaction<T>(run: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = run();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    return transaction(this.db, run);
   }
   private save(record: DeliveryActionRecord): void {
     this.db

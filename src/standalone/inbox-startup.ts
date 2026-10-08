@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import type { Database } from "../core/store.js";
+import { transaction, type Database } from "../core/store.js";
 import type { DomainStore } from "../core/domain.js";
 import { TaskReviewStore } from "../core/task-review.js";
 import { SchedulerStore, type TurnRequest } from "./scheduler.js";
@@ -88,8 +88,7 @@ export class InboxStartupReconciliation {
 
   reconcile(): void {
     const scheduler = new SchedulerStore(this.db);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       for (const request of scheduler.queued()) {
         if (
           !request.taskId ||
@@ -235,10 +234,6 @@ export class InboxStartupReconciliation {
           )
           .run(exact.id);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 }

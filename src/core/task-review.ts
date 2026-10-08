@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import { z } from "zod";
-import type { Database } from "./store.js";
+import { transaction, type Database } from "./store.js";
 const uuid = z.string().uuid(),
   revision = z.number().int().positive(),
   text = z.string().max(16000),
@@ -1116,8 +1116,7 @@ export class TaskReviewStore {
       if (r?.taskId !== taskId) throw Error("Viewed result unavailable");
     }
     const material = JSON.stringify({ taskId, sourceId, resultIds });
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       const prior = this.db
         .prepare("SELECT material FROM task_review_view_receipts WHERE key=?")
         .get(key) as Row | undefined;
@@ -1136,10 +1135,6 @@ export class TaskReviewStore {
           .prepare("INSERT INTO task_review_view_receipts VALUES(?,?)")
           .run(key, material);
       }
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
 }
