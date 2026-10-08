@@ -1,7 +1,7 @@
 {
   "version": 1,
   "issues": [745, 697, 698],
-  "status": "UI07, S07a, S07b and S08b native gates completed (S08b via PR #773 with independent review and final-head remote check passed); operational release remains unqualified pending #732 and #761",
+  "status": "UI07, S07a, S07b and S08b native gates completed (S08b via PR #773 with independent review and final-head remote check passed); no S07b independent integrated review record found; operational release remains unqualified pending that review, #732 and #761",
   "baseline": {
     "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
     "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
@@ -320,6 +320,10 @@
   ],
   "remainingGates": [
     {
+      "issue": 697,
+      "status": "S07b controller independent integrated review: no record found after PR #772 merged; pending until evidence exists"
+    },
+    {
       "issue": 698,
       "status": "Completed 5 October 2026 by PR #773: independent review passed for head b8f6a87d1d64231c8f16da33c5619ea067964ccb and its remote check passed"
     },
@@ -370,7 +374,7 @@
     "issue": 697,
     "plan": "https://github.com/chrisbanes/ensemble/issues/697#issuecomment-5994598567",
     "baseHead": "8d8ad5c2c67cf492d82443574f1a426f1540d4c0",
-    "status": "Local assembled integration and full acceptance inventory qualified; published and merged by PR #772 with its remote check passing",
+    "status": "Local assembled integration and full acceptance inventory qualified; published and merged by PR #772 with its remote check passing; controller independent integrated review remains pending (no record found)",
     "nativePrerequisites": {
       "736": {
         "state": "CLOSED",
