@@ -3201,6 +3201,21 @@ export class StandaloneService {
   ): Promise<void> {
     if (!generation || this.generation !== generation || !generation.accepting)
       return;
+    // A sleep/wake during a just-ended turn must be observed before admission.
+    // Never await the poll here: admissionResumed wakes the scheduler, which
+    // awaits this drain.
+    const power = this.power;
+    if (power && !power.observedForAdmission()) {
+      this.requireSchedulerStore().wait(
+        request.workId,
+        "Waiting for power-event observation",
+      );
+      this.observeBackgroundFailure(generation, "power-poll", async () => {
+        await power.poll();
+        await this.wakeScheduler(0, generation);
+      });
+      return;
+    }
     const state = this.requireState();
     const store = this.requireSchedulerStore();
     let workspaceKey: string;

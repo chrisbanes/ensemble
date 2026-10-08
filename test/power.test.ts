@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { DomainStore } from "../src/core/domain.js";
 import { Store } from "../src/core/store.js";
 import { ExecutionState } from "../src/standalone/state.js";
@@ -42,6 +42,7 @@ interface ExecutionPowerPort {
   executionStarted(workId: string): Promise<void>;
   executionEnded(workId: string): Promise<void>;
   admissionHeld(): boolean;
+  observedForAdmission(now?: number): boolean;
   status(): { assertionFailure: string | null };
 }
 
@@ -214,6 +215,84 @@ test("caffeinate holds exactly one idle-sleep assertion only while execution is 
       "supervisor shutdown releases its assertion",
     );
   } finally {
+    await power.stop();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("admission observation needs a completed poll started after the last execution ended", async () => {
+  let clock = 1_000_000;
+  const clockMock = mock.method(Date, "now", () => clock);
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-observed-"));
+  const { db, state } = powerStore(join(root, "power.sqlite"));
+  const events = new FakePowerEvents();
+  events.cursor = powerCursor("baseline");
+  const assertion: CaffeinateAssertionPort = {
+    on() {
+      return this;
+    },
+    async start() {},
+    async stop() {},
+  };
+  const power = new ExecutionPower(state, events, assertion, async () => {});
+  try {
+    await power.start();
+    assert.equal(power.observedForAdmission(), false, "no completed poll");
+    await power.poll();
+    assert.equal(power.observedForAdmission(), true);
+
+    await power.executionStarted("work-a");
+    clock += 1;
+    await power.executionEnded("work-a");
+    assert.equal(power.observedForAdmission(), false, "stale after end");
+    await power.poll();
+    assert.equal(
+      power.observedForAdmission(),
+      false,
+      "a poll starting in the same millisecond is not after the end",
+    );
+
+    // A poll already in flight when the execution ends does not count.
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => (releaseRead = resolve));
+    const readSince = events.readSince.bind(events);
+    events.readSince = async (cursor) => {
+      await readGate;
+      return readSince(cursor);
+    };
+    clock += 1;
+    const inFlight = power.poll();
+    clock += 1;
+    await power.executionStarted("work-b");
+    await power.executionEnded("work-b");
+    releaseRead();
+    await inFlight;
+    assert.equal(power.observedForAdmission(), false, "poll began before end");
+
+    clock += 1;
+    await power.poll();
+    const startedAt = clock;
+    assert.equal(power.observedForAdmission(), true, "later poll is fresh");
+    assert.equal(power.observedForAdmission(startedAt + 14_999), true);
+    assert.equal(power.observedForAdmission(startedAt + 15_000), false);
+    assert.equal(
+      power.observedForAdmission(startedAt - 1),
+      false,
+      "a wall clock that moved backwards is stale",
+    );
+
+    // A poll that throws does not refresh the observation.
+    clock += 20_000;
+    const admissionState = state.powerAdmissionState.bind(state);
+    state.powerAdmissionState = () => {
+      throw new Error("injected power-state failure");
+    };
+    await assert.rejects(power.poll(), /injected power-state failure/);
+    state.powerAdmissionState = admissionState;
+    assert.equal(power.observedForAdmission(), false, "failed poll is stale");
+  } finally {
+    clockMock.mock.restore();
     await power.stop();
     db.close();
     rmSync(root, { recursive: true, force: true });

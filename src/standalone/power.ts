@@ -447,6 +447,9 @@ export class ExecutionPower {
   private assertionFailure: string | null = null;
   private started = false;
   private polling: Promise<void> | undefined;
+  // Wall clock: a monotonic clock may not advance while the Mac sleeps.
+  private lastEndedAt: number | undefined;
+  private observedPollStartedAt: number | undefined;
 
   constructor(
     private readonly state: ExecutionState,
@@ -483,6 +486,7 @@ export class ExecutionPower {
   }
 
   async executionEnded(workId: string): Promise<void> {
+    this.lastEndedAt = Date.now();
     this.activeWork.delete(workId);
     if (this.activeWork.size === 0) await this.assertion.stop();
   }
@@ -491,7 +495,10 @@ export class ExecutionPower {
     if (!this.started)
       throw new Error("Execution power supervision is not started");
     if (this.polling) return this.polling;
-    const current = this.pollUnlocked();
+    const startedAt = Date.now();
+    const current = this.pollUnlocked().then(() => {
+      this.observedPollStartedAt = startedAt;
+    });
     this.polling = current;
     try {
       await current;
@@ -602,6 +609,19 @@ export class ExecutionPower {
     } catch {
       // Keep the durable gate and pending-generation ledger for a later pass.
     }
+  }
+
+  /**
+   * True when a poll that started after the last execution ended has completed
+   * within 15 s (longer than the 10 s read timeout, so a slow poll still counts).
+   */
+  observedForAdmission(now = Date.now()): boolean {
+    const startedAt = this.observedPollStartedAt;
+    if (startedAt === undefined) return false;
+    if (this.lastEndedAt !== undefined && startedAt <= this.lastEndedAt)
+      return false;
+    const age = now - startedAt;
+    return age >= 0 && age < 15_000;
   }
 
   admissionHeld(): boolean {
