@@ -379,3 +379,130 @@ test("search deduplicates complete pages and rejects truncation, incomplete resu
   assert.equal(missing.complete, false);
   assert.equal(missing.reason, "missing-credential");
 });
+
+const repoSelection = {
+  id: "repo",
+  kind: "repository" as const,
+  repositoryId: "R_1",
+  owner: "org",
+  name: "repo",
+};
+const limitedReader = (response: () => Response) =>
+  new GitHubHttpSourceReader("fixture-token", async () => response());
+
+test("403 with an exhausted limit or 429 with retry-after reports a rate-limited incomplete read that names when to resume", async () => {
+  const exhausted = await limitedReader(
+    () =>
+      new Response("limit", {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "4000" },
+      }),
+  ).readSelection(repoSelection);
+  assert.equal(exhausted.complete, false);
+  assert.equal(exhausted.reason, "rate-limited");
+  assert.equal(
+    exhausted.complete === false ? exhausted.resumeAt : undefined,
+    4_000_000,
+  );
+
+  const before = Date.now();
+  const retry = await limitedReader(
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(retry.reason, "rate-limited");
+  const resumeAt = retry.complete === false ? (retry.resumeAt ?? 0) : 0;
+  assert.ok(resumeAt >= before + 30_000 && resumeAt <= after + 30_000);
+
+  const both = await limitedReader(
+    () =>
+      new Response("limit", {
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "4000",
+          "retry-after": "30",
+        },
+      }),
+  ).readSelection(repoSelection);
+  assert.ok(
+    (both.complete === false ? (both.resumeAt ?? 0) : 0) >= Date.now() + 29_000,
+  );
+});
+
+test("a 403 without rate-limit headers stays an http failure", async () => {
+  const denied = await limitedReader(
+    () => new Response("denied", { status: 403 }),
+  ).readSelection(repoSelection);
+  assert.equal(denied.complete, false);
+  assert.equal(denied.reason, "http-403");
+  assert.equal("resumeAt" in denied, false);
+  const remaining = await limitedReader(
+    () =>
+      new Response("denied", {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "42" },
+      }),
+  ).readSelection(repoSelection);
+  assert.equal(remaining.reason, "http-403");
+});
+
+test("a rate limit while checking a blocker is reported as rate-limited, not as an invalid blocker", async () => {
+  const reader = new GitHubHttpSourceReader("fixture-token", async (input) => {
+    const url = String(input);
+    if (url === "https://api.github.com/repos/org/repo")
+      return new Response(
+        JSON.stringify({ node_id: "R_1", full_name: "org/repo" }),
+      );
+    if (url.includes("/dependencies/blocked_by"))
+      return new Response(JSON.stringify([issue(7, "B_7")]));
+    return new Response("slow down", {
+      status: 429,
+      headers: { "retry-after": "30" },
+    });
+  });
+  const result = await reader.readBlockers({
+    nodeId: "I_1",
+    repositoryId: "R_1",
+    repositoryName: "org/repo",
+    number: 1,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "rate-limited");
+  assert.ok((result.resumeAt ?? 0) > Date.now());
+});
+
+test("search items sharing a repository look the repository up once", async () => {
+  const requests: string[] = [];
+  const reader = new GitHubHttpSourceReader("fixture-token", async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url === "https://api.github.com/repos/org/repo")
+      return new Response(
+        JSON.stringify({ node_id: "R_1", full_name: "org/repo" }),
+      );
+    return new Response(
+      JSON.stringify({
+        total_count: 3,
+        incomplete_results: false,
+        items: [issue(1), issue(2), issue(3)],
+      }),
+    );
+  });
+  const snapshot = await reader.readSelection({
+    id: "search",
+    kind: "search",
+    query: "repo:org/repo",
+  });
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.issues.length, 3);
+  assert.equal(
+    requests.filter((url) => url === "https://api.github.com/repos/org/repo")
+      .length,
+    1,
+  );
+});

@@ -7,6 +7,8 @@ import {
   GitHubHttpSourceReader,
   type GitHubSourceReader,
   type IssueReference,
+  type IssueSnapshot,
+  type SelectionSnapshot,
 } from "./github-source.js";
 
 export type GitHubReaderFactory = (credentialRef: string) => GitHubSourceReader;
@@ -15,6 +17,8 @@ export type GitHubReaderFactory = (credentialRef: string) => GitHubSourceReader;
 export class GitHubSynchronizer {
   private pending: Promise<void> | undefined;
   private stopped = false;
+  // Rate-limit pauses per credential, in memory: after a restart GitHub just answers "rate-limited" again.
+  private readonly pausedUntil = new Map<string, number>();
 
   constructor(
     private readonly domain: DomainStore,
@@ -38,23 +42,54 @@ export class GitHubSynchronizer {
     await this.pending;
   }
 
+  private paused(credentialRef: string): boolean {
+    const until = this.pausedUntil.get(credentialRef);
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    this.pausedUntil.delete(credentialRef);
+    return false;
+  }
+
+  private notePause(
+    credentialRef: string,
+    result: { reason?: string | null; resumeAt?: number },
+  ): void {
+    if (result.reason === "rate-limited" && result.resumeAt !== undefined)
+      this.pausedUntil.set(credentialRef, result.resumeAt);
+  }
+
+  /** Admission consults imported blockers of a closed issue only while its open task continues from its own delivery closure. */
+  private readsBlockers(issue: IssueSnapshot): boolean {
+    if (issue.state !== "closed") return true;
+    const taskId = this.sources.issue(issue.nodeId)?.taskId;
+    return (
+      taskId !== undefined &&
+      this.domain.task(String(taskId)).state === "open" &&
+      this.domain.hasOwnDeliveryClosure(String(taskId))
+    );
+  }
+
   private async perform(): Promise<void> {
     for (const project of this.domain.projects()) {
       const projectId = String(project.id);
       const config = this.domain.githubConfiguration(projectId);
       const active = new Set(this.domain.githubActiveSelectionIds(projectId));
-      if (!config.credentialRef) continue;
-      const reader = this.readerFactory(config.credentialRef);
+      const credentialRef = config.credentialRef;
+      if (!credentialRef) continue;
+      const reader = this.readerFactory(credentialRef);
       for (const raw of config.selections) {
         if (this.stopped) return;
         const selection = selectionSchema.parse(raw);
         if (!active.has(selection.id)) continue;
-        const snapshot = await reader.readSelection(selection).catch(() => ({
-          complete: false as const,
-          issues: [],
-          reason: "reader-error",
-        }));
+        const snapshot: SelectionSnapshot = this.paused(credentialRef)
+          ? { complete: false, issues: [], reason: "rate-limited" }
+          : await reader.readSelection(selection).catch(() => ({
+              complete: false as const,
+              issues: [],
+              reason: "reader-error",
+            }));
         if (this.stopped) return;
+        this.notePause(credentialRef, snapshot);
         const committed = this.sources.reconcileSelection(
           projectId,
           selection.id,
@@ -68,6 +103,8 @@ export class GitHubSynchronizer {
         if (!committed) continue;
         if (!snapshot.complete) continue;
         for (const issue of snapshot.issues) {
+          if (this.paused(credentialRef)) break;
+          if (!this.readsBlockers(issue)) continue;
           const reference: IssueReference = {
             nodeId: issue.nodeId,
             repositoryId: issue.repositoryId,
@@ -80,6 +117,7 @@ export class GitHubSynchronizer {
             reason: "reader-error",
           }));
           if (this.stopped) return;
+          this.notePause(credentialRef, blockers);
           this.sources.reconcileBlockers(issue.nodeId, blockers, {
             projectId,
             configVersion: config.version,
@@ -93,8 +131,10 @@ export class GitHubSynchronizer {
     for (const retained of this.sources.localBlockerReferences()) {
       if (this.stopped) return;
       const config = this.domain.githubConfiguration(retained.projectId);
-      const reader = config.credentialRef
-        ? this.readerFactory(config.credentialRef)
+      const credentialRef = config.credentialRef;
+      if (credentialRef && this.paused(credentialRef)) continue;
+      const reader = credentialRef
+        ? this.readerFactory(credentialRef)
         : undefined;
       const status = reader
         ? await reader.readIssueStatus(retained.reference).catch(() => ({
@@ -103,6 +143,7 @@ export class GitHubSynchronizer {
           }))
         : { status: "unknown" as const, reason: "missing-credential" };
       if (this.stopped) return;
+      if (credentialRef) this.notePause(credentialRef, status);
       this.sources.recordIssueStatus(retained.reference.nodeId, status, {
         projectId: retained.projectId,
         configVersion: config.version,

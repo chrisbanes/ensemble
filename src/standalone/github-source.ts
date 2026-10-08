@@ -154,15 +154,47 @@ function issueFromRest(
   };
 }
 
+class RateLimitedError extends Error {
+  constructor(readonly resumeAt: number) {
+    super("rate-limited");
+  }
+}
+
+/** The epoch-ms time GitHub says to resume, when a 403/429 is a rate limit. */
+function rateLimitResumeAt(response: Response): number | undefined {
+  if (response.status !== 403 && response.status !== 429) return undefined;
+  const header = (name: string) => response.headers.get(name);
+  const retryAfter = header("retry-after");
+  if (header("x-ratelimit-remaining") !== "0" && retryAfter === null)
+    return undefined;
+  const now = Date.now();
+  const times = [
+    Number(header("x-ratelimit-reset") ?? Number.NaN) * 1000,
+    now + Number(retryAfter ?? Number.NaN) * 1000,
+  ].filter(Number.isFinite);
+  // ponytail: a limit with no usable reset time waits one minute; tune if GitHub documents a better bound.
+  return times.length ? Math.max(...times) : now + 60_000;
+}
+
 function safeReason(error: unknown): string {
   if (
     error instanceof Error &&
-    /^(missing-credential|page-limit|search-window|invalid-|http-|repository-mismatch)/.test(
+    /^(missing-credential|page-limit|search-window|invalid-|http-|repository-mismatch|rate-limited)/.test(
       error.message,
     )
   )
     return error.message;
   return "unreadable-provider-data";
+}
+
+function incomplete(error: unknown): {
+  reason: string;
+  resumeAt?: number;
+} {
+  return {
+    reason: safeReason(error),
+    ...(error instanceof RateLimitedError ? { resumeAt: error.resumeAt } : {}),
+  };
 }
 
 export class GitHubHttpSourceReader implements GitHubSourceReader {
@@ -188,7 +220,11 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!response.ok) throw new Error(`http-${response.status}`);
+    if (!response.ok) {
+      const resumeAt = rateLimitResumeAt(response);
+      if (resumeAt !== undefined) throw new RateLimitedError(resumeAt);
+      throw new Error(`http-${response.status}`);
+    }
     try {
       return { response, value: (await response.json()) as unknown };
     } catch {
@@ -196,17 +232,28 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
     }
   }
 
+  // The synchronizer builds a reader per project per refresh pass, so this caches within one pass only.
+  private readonly repositories = new Map<
+    string,
+    z.output<typeof repositorySchema>
+  >();
+
   private async repository(
     owner: string,
     name: string,
   ): Promise<z.output<typeof repositorySchema>> {
-    return repositorySchema.parse(
+    const key = `${owner}/${name}`.toLowerCase();
+    const cached = this.repositories.get(key);
+    if (cached) return cached;
+    const repository = repositorySchema.parse(
       (
         await this.request(
           `${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
         )
       ).value,
     );
+    this.repositories.set(key, repository);
+    return repository;
   }
 
   private async graphql(
@@ -302,7 +349,7 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
       const unique = new Map(issues.map((issue) => [issue.nodeId, issue]));
       return { complete: true, issues: [...unique.values()], reason: null };
     } catch (error) {
-      return { complete: false, issues, reason: safeReason(error) };
+      return { complete: false, issues, ...incomplete(error) };
     }
   }
 
@@ -335,7 +382,7 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
         throw new Error("invalid-issue-identity");
       return { status: issue.state };
     } catch (error) {
-      return { status: "unknown", reason: safeReason(error) };
+      return { status: "unknown", ...incomplete(error) };
     }
   }
 
@@ -361,8 +408,11 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
         const repository = await this.repository(match[1], match[2]);
         const candidate = issueFromRest(issue, repository);
         const status = await this.readIssueStatus(candidate);
-        if (status.status === "unknown")
+        if (status.status === "unknown") {
+          if (status.resumeAt !== undefined)
+            throw new RateLimitedError(status.resumeAt);
           throw new Error("invalid-blocker-status");
+        }
         blockers.push({ ...candidate, state: status.status });
       }
       return {
@@ -375,7 +425,7 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
         reason: null,
       };
     } catch (error) {
-      return { complete: false, blockers, reason: safeReason(error) };
+      return { complete: false, blockers, ...incomplete(error) };
     }
   }
 
@@ -520,7 +570,7 @@ export class GitHubHttpSourceReader implements GitHubSourceReader {
         reason: null,
       };
     } catch (error) {
-      return { complete: false, issues, reason: safeReason(error) };
+      return { complete: false, issues, ...incomplete(error) };
     }
   }
 }
