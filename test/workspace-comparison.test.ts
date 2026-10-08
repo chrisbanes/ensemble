@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { Store } from "../src/core/store.js";
@@ -129,6 +130,362 @@ function executable(root: string, name: string, source: string): string {
   chmodSync(path, 0o755);
   return path;
 }
+
+test("comparison Git reads disable configured filesystem monitors", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  writeFileSync(join(repo, "staged.md"), "staged after\n");
+  git(repo, "add", "staged.md");
+  writeFileSync(join(repo, "unstaged.md"), "unstaged after\n");
+  writeFileSync(join(repo, "untracked.md"), "untracked after\n");
+
+  const marker = join(f.root, "fsmonitor-invoked");
+  const monitor = executable(
+    f.root,
+    "fsmonitor-hook",
+    `#!/bin/sh\nprintf x >> "$FS_MONITOR_MARKER"\nprintf 'token\\000'\n`,
+  );
+  git(repo, "config", "core.fsmonitor", monitor);
+  const previousMarker = process.env.FS_MONITOR_MARKER;
+  process.env.FS_MONITOR_MARKER = marker;
+  let comparison: WorkspaceComparisonSnapshot;
+  try {
+    comparison = await compareRepository(
+      {
+        taskId: f.binding.taskId,
+        repositoryId: f.repository.repositoryId,
+        target: "uncommitted",
+        changeSet: "all",
+      },
+      f.current,
+    );
+  } finally {
+    if (previousMarker === undefined) delete process.env.FS_MONITOR_MARKER;
+    else process.env.FS_MONITOR_MARKER = previousMarker;
+  }
+
+  assert.equal(comparison.state, "available");
+  assert.ok(entry(comparison, "staged.md", "staged"));
+  assert.ok(entry(comparison, "unstaged.md", "unstaged"));
+  assert.ok(entry(comparison, "untracked.md", "unstaged"));
+  assert.equal(existsSync(marker), false, "configured fsmonitor hook ran");
+});
+
+test("working-tree comparisons disable configured clean and process filters", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  writeFileSync(
+    join(repo, ".gitattributes"),
+    "clean.txt filter=cleanprobe\nprocess.txt filter=processprobe\n",
+  );
+  writeFileSync(join(repo, "clean.txt"), "clean before\n");
+  writeFileSync(join(repo, "process.txt"), "process before\n");
+  git(repo, "add", ".gitattributes", "clean.txt", "process.txt");
+  git(repo, "commit", "--quiet", "-m", "add filter fixture files");
+
+  const marker = join(f.root, "filter-invoked");
+  const clean = executable(
+    f.root,
+    "filter-clean-hook",
+    `#!/bin/sh\nprintf C >> "$ENSEMBLE_FILTER_MARKER"\ncat\n`,
+  );
+  const processHook = executable(
+    f.root,
+    "filter-process-hook",
+    `#!/bin/sh\nprintf P >> "$ENSEMBLE_FILTER_MARKER"\nexit 0\n`,
+  );
+  git(repo, "config", "filter.cleanprobe.clean", clean);
+  git(repo, "config", "filter.cleanprobe.required", "true");
+  git(repo, "config", "filter.processprobe.process", processHook);
+  git(repo, "config", "filter.processprobe.required", "true");
+  writeFileSync(join(repo, "clean.txt"), "clean after\n");
+  writeFileSync(join(repo, "process.txt"), "process after\n");
+
+  const previousMarker = process.env.ENSEMBLE_FILTER_MARKER;
+  process.env.ENSEMBLE_FILTER_MARKER = marker;
+  let comparison: WorkspaceComparisonSnapshot;
+  try {
+    const diff = [
+      "-C",
+      repo,
+      "diff",
+      "--raw",
+      "-z",
+      "--no-abbrev",
+      "--find-renames=50%",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--",
+    ];
+    const cleanControl = spawnSync("git", [...diff, "clean.txt"], {
+      encoding: "utf8",
+      env: process.env,
+    });
+    assert.equal(cleanControl.status, 0, cleanControl.stderr);
+    assert.equal(
+      existsSync(marker),
+      true,
+      "clean positive control did not run",
+    );
+    assert.equal(
+      readFileSync(marker, "utf8").includes("C"),
+      true,
+      "clean hook was not exercised",
+    );
+    unlinkSync(marker);
+
+    const processControl = spawnSync("git", [...diff, "process.txt"], {
+      encoding: "utf8",
+      env: process.env,
+    });
+    assert.equal(processControl.error, undefined);
+    assert.equal(
+      existsSync(marker),
+      true,
+      "process positive control did not run",
+    );
+    assert.equal(
+      readFileSync(marker, "utf8").includes("P"),
+      true,
+      "process hook was not exercised",
+    );
+    unlinkSync(marker);
+
+    comparison = await compareRepository(
+      {
+        taskId: f.binding.taskId,
+        repositoryId: f.repository.repositoryId,
+        target: "uncommitted",
+        changeSet: "unstaged",
+      },
+      f.current,
+    );
+  } finally {
+    if (previousMarker === undefined) delete process.env.ENSEMBLE_FILTER_MARKER;
+    else process.env.ENSEMBLE_FILTER_MARKER = previousMarker;
+  }
+
+  assert.equal(comparison.state, "available");
+  assert.ok(entry(comparison, "clean.txt", "unstaged"));
+  assert.ok(entry(comparison, "process.txt", "unstaged"));
+  assert.equal(
+    existsSync(marker),
+    false,
+    "comparison invoked a configured filter",
+  );
+});
+
+test("comparison ignores an inherited alternate index and reads the bound index", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  writeFileSync(join(repo, "staged.md"), "staged after\n");
+  git(repo, "add", "staged.md");
+
+  const actualIndexPath = git(repo, "rev-parse", "--git-path", "index");
+  const actualIndexBefore = readFileSync(actualIndexPath);
+  const alternateIndexPath = join(f.root, "alternate.index");
+  execFileSync("git", ["-C", repo, "read-tree", "HEAD"], {
+    env: { ...process.env, GIT_INDEX_FILE: alternateIndexPath },
+  });
+  const alternateIndexBefore = readFileSync(alternateIndexPath);
+  const previousIndex = process.env.GIT_INDEX_FILE;
+  process.env.GIT_INDEX_FILE = alternateIndexPath;
+  let comparison: WorkspaceComparisonSnapshot;
+  try {
+    comparison = await compareRepository(
+      {
+        taskId: f.binding.taskId,
+        repositoryId: f.repository.repositoryId,
+        target: "uncommitted",
+        changeSet: "all",
+      },
+      f.current,
+    );
+  } finally {
+    if (previousIndex === undefined) delete process.env.GIT_INDEX_FILE;
+    else process.env.GIT_INDEX_FILE = previousIndex;
+  }
+
+  assert.equal(comparison.state, "available");
+  const staged = entry(comparison, "staged.md", "staged");
+  assert.ok(staged, "comparison must use the repository's bound index");
+  assert.equal(staged.right?.sha256, digest("staged after\n"));
+  assert.equal(readFileSync(actualIndexPath).equals(actualIndexBefore), true);
+  assert.equal(
+    readFileSync(alternateIndexPath).equals(alternateIndexBefore),
+    true,
+  );
+});
+
+test("comparison refuses a missing promisor object without invoking a remote helper", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  const helperDirectory = join(f.root, "promisor-helpers");
+  mkdirSync(helperDirectory);
+  executable(
+    helperDirectory,
+    "git-remote-marker",
+    `#!/bin/sh\nprintf x >> "$PROMISOR_HELPER_MARKER"\nexit 1\n`,
+  );
+
+  git(repo, "config", "extensions.partialClone", "origin");
+  git(repo, "config", "remote.origin.promisor", "true");
+  git(repo, "config", "remote.origin.url", `marker::${f.root}`);
+  git(repo, "config", "protocol.marker.allow", "always");
+  const missingObject = execFileSync(
+    "git",
+    ["-C", repo, "hash-object", "--stdin"],
+    {
+      input: "promisor fixture object is deliberately absent\n",
+      encoding: "utf8",
+    },
+  ).trim();
+  execFileSync(
+    "git",
+    [
+      "-C",
+      repo,
+      "update-index",
+      "--cacheinfo",
+      `100644,${missingObject},README.md`,
+    ],
+    {
+      env: {
+        ...process.env,
+        GIT_ALLOW_PROTOCOL: "",
+        GIT_NO_LAZY_FETCH: "1",
+      },
+    },
+  );
+
+  const marker = join(f.root, "promisor-helper-invoked");
+  const helperPath = [helperDirectory, process.env.PATH ?? ""].join(delimiter);
+  const probe = spawnSync(
+    "git",
+    ["-C", repo, "cat-file", "-s", missingObject],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: helperPath,
+        PROMISOR_HELPER_MARKER: marker,
+      },
+    },
+  );
+  assert.notEqual(probe.status, 0);
+  assert.equal(existsSync(marker), true, "positive control did not run helper");
+  unlinkSync(marker);
+
+  const previousPath = process.env.PATH;
+  const previousMarker = process.env.PROMISOR_HELPER_MARKER;
+  process.env.PATH = helperPath;
+  process.env.PROMISOR_HELPER_MARKER = marker;
+  let comparison: WorkspaceComparisonSnapshot;
+  try {
+    comparison = await compareRepository(
+      {
+        taskId: f.binding.taskId,
+        repositoryId: f.repository.repositoryId,
+        target: "uncommitted",
+        changeSet: "staged",
+      },
+      f.current,
+    );
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousMarker === undefined) delete process.env.PROMISOR_HELPER_MARKER;
+    else process.env.PROMISOR_HELPER_MARKER = previousMarker;
+  }
+
+  assert.equal(comparison.state, "gap");
+  assert.equal(existsSync(marker), false, "comparison invoked remote helper");
+});
+
+test("comparison reads original object bytes when replacement refs exist", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  const originalBytes = Buffer.from("first line\nkeep line\nlast line\n");
+  const originalObject = git(repo, "rev-parse", "HEAD:README.md");
+  const replacementObject = execFileSync(
+    "git",
+    ["-C", repo, "hash-object", "-w", "--stdin"],
+    { input: "replacement ref content\n", encoding: "utf8" },
+  ).trim();
+  git(repo, "replace", originalObject, replacementObject);
+  writeFileSync(
+    join(repo, "README.md"),
+    "first line\nchanged line\nlast line\n",
+  );
+
+  const comparison = await compareRepository(
+    {
+      taskId: f.binding.taskId,
+      repositoryId: f.repository.repositoryId,
+      target: "uncommitted",
+      changeSet: "unstaged",
+    },
+    f.current,
+  );
+
+  assert.equal(comparison.state, "available");
+  const readme = entry(comparison, "README.md", "unstaged");
+  assert.ok(readme);
+  assert.equal(readme.left?.sha256, digest(originalBytes));
+  assert.notEqual(readme.left?.sha256, digest("replacement ref content\n"));
+});
+
+test("CRLF-to-LF edits preserve line endings, content hashes, anchors, and EOF markers", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const repo = f.repository.workspacePath;
+  git(repo, "config", "core.autocrlf", "false");
+  const leftBytes = Buffer.from("stable\nchanged\r\nEOF-no-newline");
+  const rightBytes = Buffer.from("stable\nchanged\nEOF-no-newline");
+  writeFileSync(join(repo, "line-ending.md"), leftBytes);
+  git(repo, "add", "line-ending.md");
+  git(repo, "commit", "--quiet", "-m", "add CRLF comparison fixture");
+  writeFileSync(join(repo, "line-ending.md"), rightBytes);
+
+  const comparison = await compareRepository(
+    {
+      taskId: f.binding.taskId,
+      repositoryId: f.repository.repositoryId,
+      target: "uncommitted",
+      changeSet: "unstaged",
+    },
+    f.current,
+  );
+
+  assert.equal(comparison.state, "available");
+  const changed = entry(comparison, "line-ending.md", "unstaged");
+  assert.ok(changed);
+  assert.equal(changed.left?.sha256, digest(leftBytes));
+  assert.equal(changed.right?.sha256, digest(rightBytes));
+  const hunk = changed.hunks[0];
+  assert.ok(hunk);
+  assert.equal(hunk.patch.includes("-changed\r\n+changed\n"), true);
+  assert.equal(
+    hunk.patch.includes(" EOF-no-newline\n\\ No newline at end of file\n"),
+    true,
+  );
+  assert.deepEqual(
+    [hunk.leftAnchor?.startLine, hunk.leftAnchor?.endLine],
+    [2, 2],
+  );
+  assert.deepEqual(
+    [hunk.rightAnchor?.startLine, hunk.rightAnchor?.endLine],
+    [2, 2],
+  );
+  assert.equal(hunk.leftAnchor?.contentSha256, digest(leftBytes));
+  assert.equal(hunk.rightAnchor?.contentSha256, digest(rightBytes));
+  assert.equal(changed.diff?.includes("-changed\r\n+changed\n"), true);
+});
 
 test("Branch compares each repository to an explicit merge base and exposes exact text and rename anchors", async (t) => {
   const f = await fixture();

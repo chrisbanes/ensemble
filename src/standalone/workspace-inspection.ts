@@ -699,12 +699,28 @@ function checkGitIgnore(
   return new Promise((resolveResult) => {
     let child: ChildProcess;
     try {
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of Object.keys(environment))
+        if (key.startsWith("GIT_")) delete environment[key];
+      environment.GIT_ALLOW_PROTOCOL = "";
+      environment.GIT_NO_LAZY_FETCH = "1";
+      environment.GIT_OPTIONAL_LOCKS = "0";
+      environment.GIT_TERMINAL_PROMPT = "0";
       child = spawn(
         executable,
-        ["-C", repositoryPath, "check-ignore", "-z", "--stdin"],
+        [
+          "-C",
+          repositoryPath,
+          "-c",
+          "core.fsmonitor=false",
+          "check-ignore",
+          "-z",
+          "--stdin",
+        ],
         {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
+          env: environment,
         },
       );
     } catch {

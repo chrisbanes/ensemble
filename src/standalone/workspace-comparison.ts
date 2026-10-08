@@ -24,6 +24,10 @@ export const workspaceComparisonLimits = Object.freeze({
   gitTimeoutMs: 1_500,
 });
 
+const maxFilterDriverNames = 64;
+const maxFilterDriverNameBytes = 64;
+const maxFilterConfigBytes = 16 * 1024;
+
 export type WorkspaceComparisonTarget = "branch" | "uncommitted";
 export type WorkspaceComparisonContext =
   | "branch"
@@ -255,6 +259,7 @@ type GitRead =
       ok: false;
       reason: "failed" | "timed-out" | "output-limit" | "unsettled";
       exitCode?: number | null;
+      output?: Buffer;
     };
 
 type ContentObservation = {
@@ -312,6 +317,7 @@ async function readGit(
   args: readonly string[],
   startedAt: number,
   options: CompareRepositoryOptions,
+  configOverrides: readonly string[] = [],
 ): Promise<GitRead> {
   const remaining =
     (options.timeoutMs ?? workspaceComparisonLimits.maxDurationMs) -
@@ -327,15 +333,30 @@ async function readGit(
   return await new Promise((resolveRead) => {
     let child: ChildProcess;
     try {
-      child = spawn(options.gitExecutable ?? "git", ["-C", root, ...args], {
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-        env: {
-          ...process.env,
-          GIT_OPTIONAL_LOCKS: "0",
-          GIT_TERMINAL_PROMPT: "0",
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of Object.keys(environment))
+        if (key.startsWith("GIT_")) delete environment[key];
+      environment.GIT_ALLOW_PROTOCOL = "";
+      environment.GIT_NO_LAZY_FETCH = "1";
+      environment.GIT_OPTIONAL_LOCKS = "0";
+      environment.GIT_TERMINAL_PROMPT = "0";
+      child = spawn(
+        options.gitExecutable ?? "git",
+        [
+          "-C",
+          root,
+          "--no-replace-objects",
+          "-c",
+          "core.fsmonitor=false",
+          ...configOverrides,
+          ...args,
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          env: environment,
         },
-      });
+      );
     } catch {
       resolveRead({ ok: false, reason: "failed" });
       return;
@@ -371,7 +392,9 @@ async function readGit(
         finish({
           ok: false,
           reason: failure ?? "failed",
-          ...(failure === undefined ? { exitCode: code } : {}),
+          ...(failure === undefined
+            ? { exitCode: code, output: Buffer.concat(chunks, stdoutBytes) }
+            : {}),
         });
         return;
       }
@@ -493,6 +516,41 @@ function parseNulPaths(output: Buffer): string[] | undefined {
     : undefined;
 }
 
+type FilterDriverRead =
+  | { ok: true; drivers: string[] }
+  | { ok: false; reason: "git-failed" | "output-limit" };
+
+function parseFilterDriverNames(output: Buffer): FilterDriverRead {
+  if (output.length > maxFilterConfigBytes)
+    return { ok: false, reason: "output-limit" };
+  if (output.length === 0) return { ok: true, drivers: [] };
+  if (output.at(-1) !== 0) return { ok: false, reason: "git-failed" };
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(output);
+  } catch {
+    return { ok: false, reason: "git-failed" };
+  }
+  const keys = decoded.split("\0");
+  if (keys.pop() !== "" || keys.length > maxFilterDriverNames * 2)
+    return { ok: false, reason: "output-limit" };
+  const drivers = new Set<string>();
+  for (const key of keys) {
+    const match = /^filter\.([A-Za-z0-9_-]{1,64})\.(?:clean|process)$/i.exec(
+      key,
+    );
+    if (
+      !match?.[1] ||
+      Buffer.byteLength(match[1], "utf8") > maxFilterDriverNameBytes
+    )
+      return { ok: false, reason: "git-failed" };
+    drivers.add(match[1]);
+    if (drivers.size > maxFilterDriverNames)
+      return { ok: false, reason: "output-limit" };
+  }
+  return { ok: true, drivers: [...drivers].sort() };
+}
+
 function changeKind(status: string): WorkspaceComparisonEntry["change"] {
   if (status.startsWith("R") || status.startsWith("C")) return "renamed";
   if (status === "A") return "added";
@@ -567,8 +625,8 @@ function baseEntry(
 
 function splitPatchLine(line: string): { text: string; terminated: boolean } {
   return line.endsWith("\n")
-    ? { text: line.slice(0, -1).replace(/\r$/, ""), terminated: true }
-    : { text: line.replace(/\r$/, ""), terminated: false };
+    ? { text: line.slice(0, -1), terminated: true }
+    : { text: line, terminated: false };
 }
 
 function unifiedHunks(
@@ -1111,18 +1169,28 @@ export async function compareRepository(
       reason: NonNullable<WorkspaceComparisonSnapshot["reason"]>;
       exitCode: number;
     },
+    configOverrides: readonly string[] = [],
+    emptyOutputExitCode?: number,
   ): Promise<Buffer | undefined> => {
     if (!(await stillCurrent())) {
       result.state = "gap";
       result.reason = "workspace-changed";
       return undefined;
     }
-    const read = await readGit(
+    let read = await readGit(
       repository.workspacePath,
       args,
       startedAt,
       options,
+      configOverrides,
     );
+    if (
+      !read.ok &&
+      read.reason === "failed" &&
+      read.exitCode === emptyOutputExitCode &&
+      read.output?.length === 0
+    )
+      read = { ok: true, output: read.output ?? Buffer.alloc(0) };
     if (!read.ok) {
       if (
         read.reason === "failed" &&
@@ -1150,6 +1218,54 @@ export async function compareRepository(
       return undefined;
     }
     return read.output;
+  };
+
+  const readFilterDrivers = async (): Promise<string[] | undefined> => {
+    const output = await run(
+      [
+        "config",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        "^filter\\..*\\.(clean|process)$",
+      ],
+      undefined,
+      [],
+      1,
+    );
+    if (!output) return undefined;
+    const parsed = parseFilterDriverNames(output);
+    if (!parsed.ok) {
+      result.state = "gap";
+      result.reason = parsed.reason;
+      return undefined;
+    }
+    return parsed.drivers;
+  };
+
+  const runWorkingTreeDiff = async (
+    args: readonly string[],
+  ): Promise<Buffer | undefined> => {
+    const before = await readFilterDrivers();
+    if (!before) return undefined;
+    const configOverrides = before.flatMap((driver) => [
+      "-c",
+      `filter.${driver}.clean=`,
+      "-c",
+      `filter.${driver}.process=`,
+      "-c",
+      `filter.${driver}.required=false`,
+    ]);
+    const output = await run(args, undefined, configOverrides);
+    if (!output) return undefined;
+    const after = await readFilterDrivers();
+    if (!after) return undefined;
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      result.state = "gap";
+      result.reason = "workspace-changed";
+      return undefined;
+    }
+    return output;
   };
 
   const refs = await run([
@@ -1261,7 +1377,7 @@ export async function compareRepository(
     [];
   const untrackedPaths: string[] = [];
   if (request.target === "branch") {
-    const output = await run([
+    const output = await runWorkingTreeDiff([
       "diff",
       "--raw",
       "-z",
@@ -1322,7 +1438,7 @@ export async function compareRepository(
       );
     }
     if (changeSet !== "staged") {
-      const unstagedOutput = await run([
+      const unstagedOutput = await runWorkingTreeDiff([
         "diff",
         "--raw",
         "-z",

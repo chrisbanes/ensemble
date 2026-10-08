@@ -529,7 +529,17 @@ actual workspace-capable turn, while Git comparisons remain unavailable.
 Comparison IDs stay stable until an explicit refresh; an old ID is never
 silently redirected to newer workspace contents. Current exclusion, binding,
 task-access and session checks apply again before stored comparison projections
-are returned. The authenticated API does not add a file download or UI.
+are returned. Local Git reads clear inherited `GIT_*` environment overrides,
+disable fsmonitor and replacement refs, and disallow transport so these reads do
+not fetch. Before a working-tree diff, the service discovers only configured
+clean/process filter names, applies empty command-line overrides with
+`required=false`, and checks the names again afterward. Discovery accepts at
+most 64 ASCII driver names of at most 64 bytes and 16 KiB of key-name output;
+malformed, oversized or changed names produce a gap. This recheck reports
+observed name changes but does not claim containment of concurrent Git-config
+edits outside that observation. The reader does not execute those filters or
+write Git configuration. The authenticated API does not add a file download or
+UI.
 
 The durable SQLite turn slots keep the latest finished capture and a separate
 pending or unsettled capture. A capture records the admitted task/work revision,

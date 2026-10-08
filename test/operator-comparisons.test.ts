@@ -561,16 +561,38 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
     createHash("sha256").update("newer workspace contents\n").digest("hex"),
   );
 
-  const refreshed = await get(
-    new URLSearchParams({ ...Object.fromEntries(allQuery), refresh: "true" }),
-  );
+  const refreshValidationMs: number[] = [];
+  const refreshTaskWorkspace = f.service.taskWorkspace.bind(f.service);
+  f.service.taskWorkspace = async (currentTaskId) => {
+    const startedAt = performance.now();
+    try {
+      return await refreshTaskWorkspace(currentTaskId);
+    } finally {
+      refreshValidationMs.push(performance.now() - startedAt);
+    }
+  };
+  const refreshStartedAt = performance.now();
+  let refreshed: Response;
+  try {
+    refreshed = await get(
+      new URLSearchParams({ ...Object.fromEntries(allQuery), refresh: "true" }),
+    );
+  } finally {
+    f.service.taskWorkspace = refreshTaskWorkspace;
+  }
+  const refreshElapsedMs = Math.round(performance.now() - refreshStartedAt);
   const refreshedBody = (await refreshed.json()) as {
     data: {
+      state: string;
+      reason?: string;
       comparisonId: string;
       comparison: {
         entries: {
           path: string;
+          state: string;
+          reason?: string;
           previousPath?: string;
+          left?: { sha256?: string };
           right?: { sha256?: string };
           hunks: {
             leftAnchor?: Record<string, unknown>;
@@ -580,13 +602,34 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
       };
     };
   };
-  assert.notEqual(refreshedBody.data.comparisonId, oldId);
-  assert.equal(
-    refreshedBody.data.comparison.entries.find(
-      (entry) => entry.path === "README.md",
-    )?.right?.sha256,
-    createHash("sha256").update("newer workspace contents\n").digest("hex"),
+  const refreshedReadme = refreshedBody.data.comparison.entries.find(
+    (entry) => entry.path === "README.md",
   );
+  const expectedRefreshedHash = createHash("sha256")
+    .update("newer workspace contents\n")
+    .digest("hex");
+  t.diagnostic(
+    `comparison-refresh ${JSON.stringify({
+      refreshElapsedMs,
+      currentValidationCount: refreshValidationMs.length,
+      currentValidationTotalMs: Math.round(
+        refreshValidationMs.reduce((total, duration) => total + duration, 0),
+      ),
+      currentValidationMaxMs: Math.round(Math.max(0, ...refreshValidationMs)),
+      comparisonState: refreshedBody.data.state,
+      comparisonReason: refreshedBody.data.reason,
+      readme: refreshedReadme
+        ? {
+            state: refreshedReadme.state,
+            reason: refreshedReadme.reason,
+            leftSha256: refreshedReadme.left?.sha256,
+            rightSha256: refreshedReadme.right?.sha256,
+          }
+        : null,
+    })}`,
+  );
+  assert.notEqual(refreshedBody.data.comparisonId, oldId);
+  assert.equal(refreshedReadme?.right?.sha256, expectedRefreshedHash);
   const stale = await get(
     new URLSearchParams({ target: "uncommitted", comparisonId: oldId }),
   );
@@ -1201,21 +1244,21 @@ test("workspace comparison awaits recheck logout, expiry, binding and changing e
   const wrapper = join(wrapperRoot, "git");
   writeFileSync(
     wrapper,
-    `#!/bin/sh\nif [ "$GIT_TEST_GATE_ARMED" = "1" ] && [ ! -e "$GIT_TEST_GATE_USED" ]; then : > "$GIT_TEST_GATE_USED"; : > "$GIT_TEST_GATE_ENTERED"; while [ ! -e "$GIT_TEST_GATE_RELEASE" ]; do /bin/sleep 0.01; done; rm -f "$GIT_TEST_GATE_ENTERED" "$GIT_TEST_GATE_RELEASE"; fi\nexec "$GIT_TEST_REAL" "$@"\n`,
+    `#!/bin/sh\nif [ "$ENSEMBLE_TEST_GATE_ARMED" = "1" ] && [ ! -e "$ENSEMBLE_TEST_GATE_USED" ]; then : > "$ENSEMBLE_TEST_GATE_USED"; : > "$ENSEMBLE_TEST_GATE_ENTERED"; while [ ! -e "$ENSEMBLE_TEST_GATE_RELEASE" ]; do /bin/sleep 0.01; done; rm -f "$ENSEMBLE_TEST_GATE_ENTERED" "$ENSEMBLE_TEST_GATE_RELEASE"; fi\nexec "$ENSEMBLE_TEST_GIT_REAL" "$@"\n`,
   );
   chmodSync(wrapper, 0o700);
   const previousPath = process.env.PATH ?? "";
   process.env.PATH = `${wrapperRoot}:${previousPath}`;
-  process.env.GIT_TEST_GATE_ENTERED = marker;
-  process.env.GIT_TEST_GATE_RELEASE = gate;
-  process.env.GIT_TEST_GATE_USED = used;
-  process.env.GIT_TEST_GATE_ARMED = "0";
-  process.env.GIT_TEST_REAL = realGit;
+  process.env.ENSEMBLE_TEST_GATE_ENTERED = marker;
+  process.env.ENSEMBLE_TEST_GATE_RELEASE = gate;
+  process.env.ENSEMBLE_TEST_GATE_USED = used;
+  process.env.ENSEMBLE_TEST_GATE_ARMED = "0";
+  process.env.ENSEMBLE_TEST_GIT_REAL = realGit;
   let gateLookups = 0;
   let changeNextBinding = false;
   f.service.taskWorkspace = async (id) => {
     const value = await originalTaskWorkspace(id);
-    if (++gateLookups === 4) process.env.GIT_TEST_GATE_ARMED = "1";
+    if (++gateLookups === 4) process.env.ENSEMBLE_TEST_GATE_ARMED = "1";
     if (!changeNextBinding || !value) return value;
     changeNextBinding = false;
     return { ...value, workspaceId: randomUUID() };
@@ -1264,7 +1307,7 @@ test("workspace comparison awaits recheck logout, expiry, binding and changing e
 
     rmSync(used, { force: true });
     gateLookups = 0;
-    process.env.GIT_TEST_GATE_ARMED = "0";
+    process.env.ENSEMBLE_TEST_GATE_ARMED = "0";
     let bindingReadState = "pending";
     const bindingRead = fetch(endpoint, {
       headers: { cookie: credentials.cookie },
@@ -1312,10 +1355,10 @@ test("workspace comparison awaits recheck logout, expiry, binding and changing e
     writeFileSync(gate, "release");
     f.service.taskWorkspace = originalTaskWorkspace;
     process.env.PATH = previousPath;
-    delete process.env.GIT_TEST_GATE_ENTERED;
-    delete process.env.GIT_TEST_GATE_RELEASE;
-    delete process.env.GIT_TEST_GATE_USED;
-    delete process.env.GIT_TEST_GATE_ARMED;
-    delete process.env.GIT_TEST_REAL;
+    delete process.env.ENSEMBLE_TEST_GATE_ENTERED;
+    delete process.env.ENSEMBLE_TEST_GATE_RELEASE;
+    delete process.env.ENSEMBLE_TEST_GATE_USED;
+    delete process.env.ENSEMBLE_TEST_GATE_ARMED;
+    delete process.env.ENSEMBLE_TEST_GIT_REAL;
   }
 });

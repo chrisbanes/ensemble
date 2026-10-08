@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { globSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { availableParallelism, constants } from "node:os";
+import { constants } from "node:os";
 import {
   createTestEvidenceDirectory,
   writeTestEvidence,
@@ -280,9 +280,9 @@ async function main() {
       ]
     : globSync("dist/test/*.test.js").sort();
   if (!files.length) throw Error("No compiled test files found");
-  // Bound concurrent Git/browser/capture fixtures while preserving production
-  // observation deadlines under aggregate test-runner resource contention.
-  const concurrency = Math.max(1, Math.min(4, availableParallelism() - 1));
+  // Serialize Git/browser/capture fixtures to preserve production observation
+  // deadlines while retaining the complete test suite and per-test assertions.
+  const concurrency = 1;
   const args = [
     "--test",
     `--test-concurrency=${concurrency}`,
