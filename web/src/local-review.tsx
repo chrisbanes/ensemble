@@ -560,7 +560,15 @@ function SentReview({ operationKey }: { operationKey: string }) {
     loader,
   );
   const data = resource.state.data?.data;
-  if (!data) return <p role="status">Reading sent review…</p>;
+  if (!data)
+    return resource.state.error ? (
+      <p role="status">
+        This sent review is unavailable or not authorised. Current drafts are
+        not substituted.
+      </p>
+    ) : (
+      <p role="status">Reading sent review…</p>
+    );
   const groups = new Map((data.groups ?? []).map((g) => [g.groupId, g]));
   return (
     <section className="sent-review" aria-label="Sent review">

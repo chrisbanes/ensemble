@@ -170,6 +170,29 @@ export function TaskWorkspace({
       state.selectedSource = params.get("source");
       if (params.has("assignment"))
         state.expanded.add(params.get("assignment") ?? "");
+      // Exact inspection links; the service still enforces scope and exclusions.
+      const filePath = params.get("path")?.split("/").filter(Boolean) ?? [];
+      const repository = params.get("repository");
+      if (filePath.length)
+        state.files.openCurrentFile(
+          repository
+            ? { kind: "repository", repositoryId: repository }
+            : { kind: "workspace" },
+          filePath,
+        );
+      const target = params.get("target");
+      if (
+        target === "branch" ||
+        target === "uncommitted" ||
+        target === "last-turn"
+      )
+        state.changes.target = target;
+      if (repository && !filePath.length)
+        state.changes.repositoryId = repository;
+      const base = params.get("base");
+      if (repository && base)
+        state.changes.baseBranchByRepository[repository] = base;
+      if (params.has("review")) state.review.inspectKey = params.get("review");
     }
   }
   const selectionQuery = new URLSearchParams();
@@ -968,7 +991,24 @@ export function TaskWorkspace({
             "history",
             "reply",
           ].map((s) => (
-            <ActionLink variant="secondary" key={s} href={`#${s}`}>
+            <ActionLink
+              variant="secondary"
+              key={s}
+              href={`#${s}`}
+              onClick={(event) => {
+                // Keep this history entry, and so its origin, instead of pushing a hash entry.
+                const target = document.getElementById(s);
+                if (!target || event.metaKey || event.ctrlKey || event.shiftKey)
+                  return;
+                event.preventDefault();
+                target.scrollIntoView();
+                const heading = target.querySelector<HTMLElement>("h3,h4");
+                if (heading) {
+                  heading.tabIndex = -1;
+                  heading.focus({ preventScroll: true });
+                }
+              }}
+            >
               {s[0]?.toUpperCase()}
               {s.slice(1).replace("-", " ")}
             </ActionLink>
