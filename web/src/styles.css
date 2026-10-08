@@ -885,8 +885,6 @@ textarea[data-auto-grow="true"] {
   padding: 0.5rem 0.25rem;
 }
 .question-submit {
-  position: sticky;
-  bottom: 0;
   padding: 0.75rem 0
     calc(
       0.75rem +
@@ -897,7 +895,6 @@ textarea[data-auto-grow="true"] {
   gap: 0.75rem;
   border-top: 1px solid var(--border);
   background: var(--background);
-  z-index: 1;
 }
 .question-submit p {
   flex-basis: 100%;

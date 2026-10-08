@@ -16,6 +16,7 @@ function Textarea({
   ...props
 }: TextareaProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a controlled value change must re-measure the content height.
   useLayoutEffect(() => {
     const element = ref.current;
     if (!autoGrow || !element) return;

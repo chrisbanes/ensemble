@@ -243,7 +243,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
         submitTop &&
         lastField.y >= 0 &&
         lastField.y + lastField.height <= submitTop.y,
-      "Last field remains fully reachable above reserved submission actions",
+      `Last field remains fully reachable above reserved submission actions: ${JSON.stringify({ lastField, submitTop, height, content: await form.locator(".question-content").boundingBox() })}`,
     );
     await page.evaluate(
       () =>
@@ -422,9 +422,12 @@ test("opt-in answer textarea grows to its measured bound and preserves selection
     assert.ok(contentMetrics.scrollTop > 0);
     assert.equal(contentMetrics.overscroll, "contain");
     assert.equal(
-      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
       true,
     );
+    await form.locator(".question-submit").scrollIntoViewIfNeeded();
     const actions = await form
       .locator(".question-submit button")
       .evaluateAll((buttons) =>
@@ -526,7 +529,7 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
     await rows.evaluate((element) => {
       element.scrollTop = 0;
     });
-    await page.evaluate(() => window.scrollTo(0, 0));
+    await rows.scrollIntoViewIfNeeded();
     const rowBox = await rows.boundingBox();
     assert.ok(rowBox);
     await page.mouse.move(
@@ -544,7 +547,10 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
       scrollTop: element.scrollTop,
       max: element.scrollHeight - element.clientHeight,
     }));
-    assert.ok(atEnd.scrollTop > 0 && atEnd.scrollTop >= atEnd.max - 1);
+    assert.ok(
+      atEnd.scrollTop > 0 && atEnd.scrollTop >= atEnd.max - 1,
+      JSON.stringify({ atEnd, rowBox, height }),
+    );
     await captureBrowserEvidence(page, `390x${height}-inbox-queue-end`, {
       fullPage: false,
     });
@@ -554,10 +560,12 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
   await rows.evaluate((element) => {
     element.scrollTop = 0;
   });
-  await page.evaluate(() => window.scrollTo(0, 40));
+  await rows.scrollIntoViewIfNeeded();
   const queuePageScroll = await page.evaluate(() => window.scrollY);
+  // A page that cannot scroll up would make the no-chaining check vacuous.
+  assert.ok(queuePageScroll > 0, String(queuePageScroll));
   const rowBox = await rows.boundingBox();
-  assert.ok(rowBox);
+  assert.ok(rowBox && rowBox.y >= 0 && rowBox.y + rowBox.height <= 480);
   await page.mouse.move(
     rowBox.x + rowBox.width / 2,
     rowBox.y + rowBox.height / 2,
@@ -596,16 +604,16 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
     }));
   assert.ok(questionMetrics.scrollHeight > questionMetrics.clientHeight);
   assert.equal(questionMetrics.overscroll, "contain");
+  // The bounded phone detail starts at the page top; wheel past its bottom edge.
+  await page.evaluate(() => window.scrollTo(0, 0));
   await detail.evaluate((element) => {
-    element.scrollTop = 0;
+    element.scrollTop = element.scrollHeight;
   });
-  await detail.scrollIntoViewIfNeeded();
-  const detailBox = await detail.boundingBox();
-  assert.ok(detailBox);
-  await page.evaluate(() => window.scrollTo(0, 40));
   const detailPageScroll = await page.evaluate(() => window.scrollY);
+  const detailBox = await detail.boundingBox();
+  assert.ok(detailBox && detailBox.y >= 0 && detailBox.y + 12 <= 480);
   await page.mouse.move(detailBox.x + detailBox.width / 2, detailBox.y + 12);
-  await page.mouse.wheel(0, -800);
+  await page.mouse.wheel(0, 800);
   await page.evaluate(
     () =>
       new Promise<void>((resolve) =>
