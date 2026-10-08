@@ -157,6 +157,17 @@ for that destination, then start it normally. Service startup performs normal
 migrations and workspace/execution reconciliation before scheduler admission;
 restore itself neither clears holds nor upgrades domain state.
 
+The SQLite snapshot includes retained result-evidence and review-anchor BLOBs,
+their manifests and their draft/submitted references. Workspace archive or
+cleanup removes managed files but does not remove evidence still referenced by
+a result or submitted context. Logical retained-payload limits are 32 MiB per
+result, 128 MiB of result payload per task, 16 MiB of review context per task,
+and 512 MiB for retained result and review payloads per installation; individual
+text, image/PDF, diff and anchor limits are recorded in `docs/SPEC.md`. These
+limits count BLOB content, not SQLite pages, indexes, WAL files or filesystem
+overhead. A snapshot preserves database evidence only; it does not restore the
+managed workspace needed for live-file inspection.
+
 The database snapshot excludes managed worktree contents, repository state,
 operator auth files, Codex/provider records, logs and external effects. Stored
 workspace paths remain evidence. A managed workspace restored under a different

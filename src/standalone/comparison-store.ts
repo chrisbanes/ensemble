@@ -571,6 +571,16 @@ export class SqliteWorkspaceComparisonStore {
     };
   }
 
+  comparisonOwner(comparisonId: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT taskId FROM workspace_comparison_current WHERE comparisonId = ?
+      UNION ALL
+      SELECT taskId FROM workspace_turn_captures WHERE comparisonId = ?
+      LIMIT 1`)
+      .get(comparisonId, comparisonId) as { taskId: string } | undefined;
+    return row?.taskId;
+  }
+
   beginTurnCapture(capture: WorkspaceTurnCaptureRecord): void {
     const parsed = turnCaptureSchema.parse(
       capture,

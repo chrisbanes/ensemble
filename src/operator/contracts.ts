@@ -226,6 +226,191 @@ export const workspacePreviewReadSchema = envelope(
         });
     }),
 );
+const retainedEvidenceIdentitySchema = z
+  .object({
+    taskVersion: revision,
+    assignmentId: uuid,
+    assignmentVersion: revision,
+    workId: z.string().min(1).max(512),
+    workRevision: revision,
+    requestSequence: revision,
+    conversationRevision: revision,
+    instructionsRevision: revision,
+    profileRevision: revision,
+    profileId: uuid,
+    threadId: z.string().min(1).max(512),
+    turnId: z.string().min(1).max(512),
+  })
+  .strict();
+const retainedEvidenceSourceObservationSchema = z
+  .object({
+    comparisonId: uuid.nullable(),
+    captureState: z.enum(["missing", "pending", "unsettled", "finished"]),
+    outcome: z.enum(["running", "completed", "failed", "unknown"]).nullable(),
+    observedAt: time.nullable(),
+  })
+  .strict();
+const retainedEvidenceAvailableItemSchema = z
+  .object({
+    itemId: uuid,
+    kind: z.enum(["file", "diff"]),
+    state: z.literal("available"),
+    source: z.enum(["artifact-file", "change-file", "observed-diff"]),
+    repositoryId: z.string().min(1).max(512).nullable(),
+    path: z.string().min(1).max(2048),
+    artifactId: uuid.optional(),
+    mime: z.string().min(1).max(128),
+    sha256: hash,
+    size: z.number().int().nonnegative().safe(),
+    capturedAt: time,
+    observedAt: time.nullable(),
+    provenance: z.record(z.string().max(80), scalar),
+  })
+  .strict();
+const retainedEvidenceItemReadSchema = z.discriminatedUnion("state", [
+  retainedEvidenceAvailableItemSchema,
+  z
+    .object({
+      itemId: uuid,
+      kind: z.enum(["file", "diff"]),
+      state: z.literal("gap"),
+      reason: z.string().min(1).max(80),
+    })
+    .strict(),
+  z
+    .object({
+      itemId: uuid,
+      kind: z.enum(["file", "diff"]),
+      state: z.literal("unavailable"),
+      reason: z.enum(["excluded", "unavailable"]),
+    })
+    .strict(),
+]);
+export const retainedResultEvidenceReadSchema = envelope(
+  z.discriminatedUnion("state", [
+    z
+      .object({
+        taskId: uuid,
+        resultId: uuid,
+        state: z.enum(["empty", "available", "partial", "gap"]),
+        evidenceId: uuid,
+        identity: retainedEvidenceIdentitySchema,
+        capturedAt: time,
+        sourceObservation: retainedEvidenceSourceObservationSchema,
+        items: z.array(retainedEvidenceItemReadSchema).max(320),
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        resultId: uuid,
+        state: z.literal("unavailable"),
+        reason: z.enum(["not-retained", "excluded", "unavailable"]),
+      })
+      .strict(),
+  ]),
+);
+export const retainedEvidenceItemContentReadSchema = envelope(
+  z.discriminatedUnion("state", [
+    z
+      .object({
+        taskId: uuid,
+        resultId: uuid,
+        itemId: uuid,
+        state: z.literal("available"),
+        item: retainedEvidenceAvailableItemSchema,
+        preview: workspacePreviewDataSchema,
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        resultId: uuid,
+        itemId: uuid,
+        state: z.literal("gap"),
+        reason: z.string().min(1).max(80),
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        resultId: uuid,
+        itemId: uuid,
+        state: z.literal("unavailable"),
+        reason: z.enum(["excluded", "unavailable"]),
+      })
+      .strict(),
+  ]),
+);
+const retainedReviewAnchorRecordSchema = z
+  .object({
+    anchorId: uuid,
+    taskId: uuid,
+    repositoryId: z.string().min(1).max(512).nullable(),
+    path: z.string().min(1).max(2048),
+    sourceKind: z.enum([
+      "workspace-file",
+      "comparison-side",
+      "result-evidence",
+    ]),
+    context: z.enum(["workspace", "branch", "uncommitted", "turn", "result"]),
+    comparisonId: uuid.optional(),
+    resultId: uuid.optional(),
+    resultItemId: uuid.optional(),
+    workId: z.string().min(1).max(512).optional(),
+    threadId: z.string().min(1).max(512).optional(),
+    turnId: z.string().min(1).max(512).optional(),
+    side: z.enum(["file", "left", "right"]),
+    startLine: revision,
+    endLine: revision,
+    sourceSha256: hash.optional(),
+    claimedSha256: hash.optional(),
+    excerptSha256: hash.optional(),
+    byteStart: z.number().int().nonnegative().safe().optional(),
+    byteEnd: z.number().int().nonnegative().safe().optional(),
+    mime: z.string().min(1).max(128).optional(),
+    state: z.enum(["available", "gap"]),
+    reason: z.string().min(1).max(80).optional(),
+    size: z.number().int().nonnegative().safe(),
+    capturedAt: time,
+    observedAt: time.nullable(),
+  })
+  .strict();
+export const retainedReviewAnchorReadSchema = envelope(
+  z.discriminatedUnion("state", [
+    z
+      .object({
+        taskId: uuid,
+        anchorId: uuid,
+        state: z.literal("available"),
+        status: z.enum(["current", "outdated", "unknown"]),
+        anchor: retainedReviewAnchorRecordSchema.extend({
+          state: z.literal("available"),
+        }),
+        preview: workspacePreviewDataSchema,
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        anchorId: uuid,
+        state: z.literal("gap"),
+        status: z.literal("unavailable"),
+        anchor: retainedReviewAnchorRecordSchema.extend({
+          state: z.literal("gap"),
+        }),
+      })
+      .strict(),
+    z
+      .object({
+        taskId: uuid,
+        anchorId: uuid,
+        state: z.literal("unavailable"),
+        reason: z.enum(["excluded", "unavailable"]),
+      })
+      .strict(),
+  ]),
+);
 const workspaceComparisonContentSchema = z
   .object({
     sha256: hash.optional(),

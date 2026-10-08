@@ -703,6 +703,33 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   private async gitRepositoryInfo(
     path: string,
   ): Promise<{ root: string; gitCommonDir: string }> {
+    const combinedIdentity = await this.git(
+      path,
+      "repository-identity",
+      "rev-parse",
+      "--show-toplevel",
+      "--git-common-dir",
+    );
+    const identityLines = combinedIdentity.split("\n");
+    const reportedCombinedRoot = identityLines[0];
+    const reportedCombinedCommonDir = identityLines[1];
+    if (
+      identityLines.length === 2 &&
+      reportedCombinedRoot &&
+      isAbsolute(reportedCombinedRoot) &&
+      reportedCombinedCommonDir
+    ) {
+      const root = await realpath(reportedCombinedRoot);
+      const reportedCommonPath = isAbsolute(reportedCombinedCommonDir)
+        ? reportedCombinedCommonDir
+        : resolve(await realpath(path), reportedCombinedCommonDir);
+      const gitCommonDir = await realpath(reportedCommonPath);
+      return { root: resolve(root), gitCommonDir };
+    }
+
+    // Paths can contain newlines, so a combined rev-parse result is ambiguous
+    // unless it has exactly two nonempty identity lines. Preserve those paths
+    // by falling back to the original separately bounded reads.
     const reportedRoot = await this.git(
       path,
       "repository-identity",
