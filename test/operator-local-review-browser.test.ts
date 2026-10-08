@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   browserSuite,
+  type BrowserJourney,
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
@@ -41,7 +42,13 @@ async function signIn(
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
-test("production local review composes exact multi-origin anchors and sends one receipt", async (_t, j) => {
+type Journey = BrowserJourney;
+
+/** A seeded task with a bound repository, a signed-out browser page and web fixture. */
+async function startReview(
+  j: Journey,
+  viewport = { width: 1366, height: 900 },
+) {
   const fixture = await j.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
   );
@@ -103,7 +110,7 @@ test("production local review composes exact multi-origin anchors and sends one 
   const web = await j.start("fixture.web", () => fixture.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({
-    viewport: { width: 1366, height: 900 },
+    viewport,
   });
   j.observe(page);
   page.setDefaultTimeout(15_000);
@@ -113,6 +120,12 @@ test("production local review composes exact multi-origin anchors and sends one 
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  return { fixture, task, web, page, consoleErrors, pageErrors, events };
+}
+
+test("production local review composes exact multi-origin anchors and sends one receipt", async (_t, j) => {
+  const { fixture, task, web, page, consoleErrors, pageErrors, events } =
+    await startReview(j);
   const taskPath = `/app/tasks/${task.taskId}?section=files`;
   await signIn(page, web.origin, taskPath, web.password);
 
@@ -196,7 +209,11 @@ test("production local review composes exact multi-origin anchors and sends one 
     /repo-alpha\/diff\.txt · lines 2–3 · uncommitted · Before/,
   );
   assert.match(draftText, /drop one\ndrop two/);
-  assert.equal((draftText.match(/ · current\b/g) ?? []).length, 2);
+  assert.equal(
+    (draftText.match(/Current at last comparison/g) ?? []).length,
+    2,
+  );
+  assert.match(draftText, /(observed|captured) .*\d/);
 
   // Edit, add summary, reload: draft persists within the live session.
   await comments.getByRole("button", { name: "Edit" }).first().click();
@@ -295,5 +312,289 @@ test("production local review composes exact multi-origin anchors and sends one 
     ),
     [],
   );
+  assert.deepEqual(pageErrors, []);
+});
+
+/** Selects one current-file line of review.txt and saves a comment on it. */
+async function commentOnLine(page: Page, line: string, text: string) {
+  const files = page.locator("#files");
+  const repository = files.getByRole("button", {
+    name: /repo-alpha, repository, full path/,
+  });
+  const target = files.getByRole("button", { name: line });
+  // The first call opens the file; later calls find it already open.
+  await repository.or(target).first().waitFor();
+  if (await repository.isVisible()) {
+    await repository.click();
+    await files.getByRole("button", { name: /review\.txt/ }).click();
+  }
+  await target.click();
+  await files
+    .getByRole("button", { name: "Add review comment", exact: true })
+    .click();
+  await page.keyboard.type(text);
+  await files
+    .getByRole("button", { name: "Save comment", exact: true })
+    .click();
+  await page.locator("#local-review").getByText(text).waitFor();
+}
+
+const activeAttribute = (page: Page, name: string) =>
+  page.waitForFunction(
+    (attribute) => document.activeElement?.hasAttribute(attribute),
+    name,
+  );
+
+test("local review keeps focus on the selection, the next comment and the heading", async (_t, j) => {
+  const { web, task, page, pageErrors } = await startReview(j);
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 1: first", "First note");
+  await commentOnLine(page, "Line 2: second", "Second note");
+  await commentOnLine(page, "Line 3: third", "Third note");
+
+  // Saving and Escape both return to the origin's line, else its Add button.
+  const files = page.locator("#files");
+  await page.waitForFunction(
+    () =>
+      document.activeElement?.hasAttribute("data-review-return") ||
+      document.activeElement?.hasAttribute("data-review-origin"),
+  );
+  await files
+    .getByRole("button", { name: "Add review comment", exact: true })
+    .click();
+  await page.keyboard.press("Escape");
+  await files.getByRole("form", { name: "Review comment" }).waitFor({
+    state: "detached",
+  });
+  await page.waitForFunction(
+    () =>
+      document.activeElement?.hasAttribute("data-review-return") ||
+      document.activeElement?.hasAttribute("data-review-origin"),
+  );
+
+  const review = page.locator("#local-review");
+  const items = review
+    .getByRole("list", { name: "Review comments" })
+    .locator(":scope > li");
+  await items.nth(2).waitFor();
+
+  // Escape cancels an edit, keeps the saved text and returns to its Edit button.
+  await items.first().getByRole("button", { name: "Edit" }).click();
+  await review.getByLabel("Edit comment").fill("Unsaved edit");
+  await page.keyboard.press("Escape");
+  await review.getByLabel("Edit comment").waitFor({ state: "detached" });
+  await activeAttribute(page, "data-review-edit");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.textContent),
+    "Edit",
+  );
+  await review.getByText("First note", { exact: true }).waitFor();
+  assert.equal(await review.getByText("Unsaved edit").count(), 0);
+
+  // Removing moves focus to the next comment, the previous one when last, and
+  // finally to the Local review heading.
+  const commentFocused = (text: string) =>
+    page.waitForFunction(
+      (expected) =>
+        document.activeElement?.hasAttribute("data-comment-id") &&
+        document.activeElement.textContent?.includes(expected),
+      text,
+    );
+  await items.first().getByRole("button", { name: "Remove" }).click();
+  await commentFocused("Second note");
+  await items.last().getByRole("button", { name: "Remove" }).click();
+  await commentFocused("Second note");
+  assert.equal(await items.count(), 1);
+  await items.first().getByRole("button", { name: "Remove" }).click();
+  await page.waitForFunction(
+    () => document.activeElement?.id === "local-review-heading",
+  );
+  await review.getByText("No review comments yet.").waitFor();
+  assert.deepEqual(pageErrors, []);
+});
+
+test("phone local review comments and sends to a receipt using the keyboard", async (_t, j) => {
+  const { web, task, page, events, pageErrors } = await startReview(j, {
+    width: 390,
+    height: 844,
+  });
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  const files = page.locator("#files");
+  await files
+    .getByRole("button", { name: /repo-alpha, repository, full path/ })
+    .click();
+  await files.getByRole("button", { name: /review\.txt/ }).click();
+  await files.getByRole("button", { name: "Line 2: second" }).click();
+  const add = files.getByRole("button", {
+    name: "Add review comment",
+    exact: true,
+  });
+  await add.focus();
+  await page.keyboard.press("Enter");
+  const composer = files.getByRole("form", { name: "Review comment" });
+  await composer.waitFor();
+  await page.keyboard.type("Phone keyboard comment");
+  await page.keyboard.press("Tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.textContent),
+    "Save comment",
+  );
+  await page.keyboard.press("Enter");
+  await composer.waitFor({ state: "detached" });
+  await page.waitForFunction(
+    () =>
+      document.activeElement?.closest("#files") !== null &&
+      document.activeElement !== document.body,
+  );
+
+  // Move to the complete review with the section navigation, then send.
+  const nav = page.getByRole("navigation", { name: "Task sections" });
+  await nav.getByRole("link", { name: "Local review" }).focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () => document.activeElement?.id === "local-review-heading",
+  );
+  const review = page.locator("#local-review");
+  await review.getByText("Phone keyboard comment").waitFor();
+  assert.ok(
+    (await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    )) <= 1,
+    "phone review has no horizontal page scroll",
+  );
+  await captureBrowserEvidence(page, "390-local-review-keyboard-draft", {
+    fullPage: false,
+  });
+  const send = review.getByRole("button", {
+    name: /^Send review \(1 comment\)/,
+  });
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await review
+    .getByText(/Review sent to .*One local message was queued/)
+    .waitFor();
+  assert.equal(events(), 1);
+  const sent = review.getByRole("region", { name: "Sent review", exact: true });
+  await sent.getByText("Phone keyboard comment").waitFor();
+  await captureBrowserEvidence(page, "390-local-review-keyboard-receipt", {
+    fullPage: false,
+  });
+  assert.ok(
+    (await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    )) <= 1,
+    "phone receipt has no horizontal page scroll",
+  );
+  assert.deepEqual(pageErrors, []);
+});
+
+test("send is disabled with an explanation once the project lead has completed", async (_t, j) => {
+  const { web, task, page, events, pageErrors } = await startReview(j);
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Comment for a finished lead");
+  const review = page.locator("#local-review");
+  const send = review.getByRole("button", {
+    name: /^Send review \(1 comment\)/,
+  });
+  assert.equal(await send.isEnabled(), true);
+
+  // A terminal result completes the accountable lead's assignment.
+  task.result("Terminal lead result");
+  await page.reload();
+  await review.getByText("Comment for a finished lead").waitFor();
+  assert.equal(await send.isDisabled(), true);
+  await review
+    .getByText(
+      /The project lead's assignment is completed and cannot receive a review/,
+    )
+    .waitFor();
+  assert.equal(events(), 0);
+  assert.deepEqual(pageErrors, []);
+});
+
+// Depends on the server's local-review-recipient-unavailable (409) rejection.
+test("a lead that completes after the page loaded gives a definitive rejection", async (_t, j) => {
+  const { web, task, page, events, consoleErrors, pageErrors } =
+    await startReview(j);
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Comment for a stale lead");
+  const review = page.locator("#local-review");
+  task.result("Terminal lead result");
+  await review
+    .getByRole("button", { name: /^Send review \(1 comment\)/ })
+    .click();
+  await review
+    .getByText(
+      /not delivered \(the project lead can no longer receive a review\)/,
+    )
+    .waitFor();
+  assert.equal(events(), 0);
+  await review.getByRole("button", { name: "Return to draft" }).click();
+  await review.getByText("Comment for a stale lead").waitFor();
+  assert.equal(
+    await review.getByRole("button", { name: /^Send review/ }).count(),
+    1,
+  );
+  assert.deepEqual(
+    consoleErrors.filter((text) => !/status of 409/.test(text)),
+    [],
+  );
+  assert.deepEqual(pageErrors, []);
+});
+
+// Depends on the server's GET /api/operator/tasks/{id}/local-reviews route.
+test("sent reviews stay inspectable after reload and Start a new review", async (_t, j) => {
+  const { web, task, page, events, pageErrors } = await startReview(j);
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Durable sent comment");
+  const review = page.locator("#local-review");
+  await review
+    .getByRole("button", { name: /^Send review \(1 comment\)/ })
+    .click();
+  await review
+    .getByText(/Review sent to .*One local message was queued/)
+    .waitFor();
+  assert.equal(events(), 1);
+
+  await page.reload();
+  await review.getByRole("button", { name: "Start a new review" }).click();
+  await review.getByText("No review comments yet.").waitFor();
+  const list = review.getByRole("region", {
+    name: "Sent reviews",
+    exact: true,
+  });
+  await list.waitFor();
+  assert.equal(await list.getByRole("listitem").count(), 1);
+  assert.match(await list.innerText(), /to .* · review [0-9a-f-]{36}/);
+  await list.getByRole("button", { name: /^Inspect review/ }).click();
+  const sent = review.getByRole("region", { name: "Sent review", exact: true });
+  await sent.getByText("Durable sent comment").waitFor();
+  assert.match(await sent.innerText(), /recorded /);
+  assert.equal(events(), 1);
   assert.deepEqual(pageErrors, []);
 });
