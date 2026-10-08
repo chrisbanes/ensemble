@@ -853,7 +853,6 @@ export function TaskWorkspaceChanges({
                       aria-label="Diff layout"
                     >
                       <Button
-                        className="changes-split-control"
                         variant={
                           state.layout === "split" ? "primary" : "secondary"
                         }

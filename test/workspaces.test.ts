@@ -975,3 +975,50 @@ test("restored managed bindings reject source-root identity before path access",
 function exists(path: string): boolean {
   return existsSync(path);
 }
+
+test("repeated readiness checks reuse an unchanged worktree identity only briefly", async () => {
+  const controlled = controlledGit();
+  const f = fixture({ gitExecutable: controlled.executable });
+  try {
+    const source = repository(f.root, "recheck-source");
+    const binding = await f.manager.provision("recheck-task", [
+      { repositoryId: "repo", path: source },
+    ]);
+    assert.equal(binding.state, "ready");
+    const workspacePath = binding.repositories[0]?.workspacePath;
+    assert.ok(workspacePath);
+    const identityReads = () =>
+      controlled
+        .events()
+        .filter(
+          ({ event, operation, cwd }) =>
+            event === "start" &&
+            operation === "repository-identity" &&
+            cwd === workspacePath,
+        ).length;
+
+    assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+    const afterFirst = identityReads();
+    for (let index = 0; index < 5; index += 1)
+      assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+    assert.equal(identityReads(), afterFirst, "unchanged rechecks reuse Git");
+
+    const gitEntry = join(workspacePath, ".git");
+    writeFileSync(gitEntry, readFileSync(gitEntry));
+    assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+    assert.equal(
+      identityReads(),
+      afterFirst + 1,
+      "a changed .git entry rereads",
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+    assert.equal(identityReads(), afterFirst + 2, "reuse expires");
+
+    writeFileSync(gitEntry, "gitdir: /nonexistent-ensemble-worktree\n");
+    assert.equal((await f.manager.get("recheck-task"))?.state, "held");
+  } finally {
+    f.close();
+  }
+});

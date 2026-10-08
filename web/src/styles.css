@@ -1401,7 +1401,8 @@ nav h2 {
   .changes-diff-unified.is-active {
     display: block;
   }
-  .changes-split-control {
+  /* Phone shows only the unified diff, so there is no layout to choose. */
+  .changes-layout-controls {
     display: none;
   }
   .artifact-comparisons {

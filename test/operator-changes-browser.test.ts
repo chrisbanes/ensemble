@@ -879,7 +879,11 @@ test("production Changes separates staged and unstaged snapshots and retains exp
       url.searchParams.get("target") === "uncommitted" &&
       url.searchParams.get("repositoryId") === "repo-alpha" &&
       url.searchParams.get("changeSet") === "all";
-    if (!isAllComparison) {
+    // The UI's follow-up exact read carries only target and comparisonId.
+    const isExactPartialRead =
+      partialComparisonId !== null &&
+      url.searchParams.get("comparisonId") === partialComparisonId;
+    if (!isAllComparison && !isExactPartialRead) {
       await route.continue();
       return;
     }
@@ -1214,7 +1218,7 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   );
   assert.notEqual(
     await changes
-      .locator(".changes-diff-unified.is-active")
+      .locator(".changes-diff-unified")
       .evaluate((element) => getComputedStyle(element).display),
     "none",
   );
