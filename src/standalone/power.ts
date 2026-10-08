@@ -317,7 +317,12 @@ export class CaffeinateAssertion extends EventEmitter {
     this.stopping = false;
     let child: ChildProcess;
     try {
-      child = this.spawnProcess("/usr/bin/caffeinate", ["-i"]);
+      // -w ties the assertion to this process so a crash cannot leak it.
+      child = this.spawnProcess("/usr/bin/caffeinate", [
+        "-i",
+        "-w",
+        String(process.pid),
+      ]);
     } catch {
       this.emit("failure", "caffeinate process failed to start");
       return;
