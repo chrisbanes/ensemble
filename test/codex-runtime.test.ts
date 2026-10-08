@@ -1380,6 +1380,55 @@ for await (const line of createInterface({input: process.stdin})) {
   }
 });
 
+test("child exit notifies failure listeners exactly once", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-exit-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.id === undefined) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = newTestRuntime(executable);
+  const processRef = runtime as unknown as {
+    child?: ChildProcessWithoutNullStreams;
+  };
+  const failures: Error[] = [];
+  runtime.onFailure((error) => failures.push(error));
+  try {
+    await bounded(runtime.start(), 3000);
+    assert.deepEqual(failures, []);
+    processRef.child?.kill("SIGKILL");
+    await bounded(
+      new Promise<void>((resolve) => {
+        const poll = setInterval(() => {
+          if (failures.length > 0) {
+            clearInterval(poll);
+            resolve();
+          }
+        }, 5);
+      }),
+      3000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(failures.length, 1);
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dynamic tool registration is passed to thread/start", async () => {
   const runtime = newTestRuntime();
   const request = runtime as unknown as {

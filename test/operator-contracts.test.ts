@@ -41,16 +41,42 @@ test("operator commands accept supported inputs and reject authority or unrestri
   );
 });
 test("read envelopes reject row fields and invalid states", () => {
+  const runtime = { state: "available" };
   assert.deepEqual(
     workspaceSchema.parse({
-      data: { projects: [], profiles: [] },
+      data: { projects: [], profiles: [], runtime },
       observedAt: 1,
     }).data.projects,
     [],
   );
+  assert.deepEqual(
+    workspaceSchema.parse({
+      data: {
+        projects: [],
+        profiles: [],
+        runtime: { state: "unavailable", since: 5 },
+      },
+      observedAt: 1,
+    }).data.runtime,
+    { state: "unavailable", since: 5 },
+  );
+  for (const invalid of [
+    undefined,
+    { state: "unavailable" },
+    { state: "available", since: 5 },
+    { state: "unavailable", since: -1 },
+    { state: "unavailable", since: 5, error: "secret" },
+  ])
+    assert.equal(
+      workspaceSchema.safeParse({
+        data: { projects: [], profiles: [], runtime: invalid },
+        observedAt: 1,
+      }).success,
+      false,
+    );
   assert.equal(
     workspaceSchema.safeParse({
-      data: { projects: [], profiles: [], credentialRef: "secret" },
+      data: { projects: [], profiles: [], runtime, credentialRef: "secret" },
       observedAt: 1,
     }).success,
     false,
