@@ -4,10 +4,12 @@ import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
+  appendFile,
   link as hardLink,
   mkdir,
   rename,
   rm,
+  stat,
   symlink,
   truncate,
   writeFile,
@@ -96,6 +98,18 @@ function request(
     showIgnored: false,
     ...options,
   };
+}
+
+async function aliasesResolveToSameEntry(first: string, second: string) {
+  try {
+    const [firstStat, secondStat] = await Promise.all([
+      stat(first),
+      stat(second),
+    ]);
+    return firstStat.dev === secondStat.dev && firstStat.ino === secondStat.ino;
+  } catch {
+    return false;
+  }
 }
 
 test("repository-free listing excludes private paths, bounds results, and keeps symlinks inert", async (t) => {
@@ -205,6 +219,141 @@ test("repository-free listing excludes private paths, bounds results, and keeps 
       current,
     ),
   );
+});
+
+test("configured control paths follow filesystem case and Unicode aliases", async (t) => {
+  const f = fixture();
+  t.after(() => f.close());
+  const source = sourceRepository(f.directory, "control-alias-source");
+  const binding = await f.manager.provision("control-path-aliases", [
+    { repositoryId: "repo", path: source },
+  ]);
+  const repository = binding.repositories[0]!;
+  const workspaceFile = join(binding.path, "operatorauth.txt");
+  const workspaceFileAlias = join(binding.path, "OperatorAuth.txt");
+  const workspaceDirectory = join(binding.path, "cafe\u0301-auth");
+  const workspaceDirectoryAlias = join(binding.path, "caf\u00e9-auth");
+  const repositoryFile = join(repository.workspacePath, "operatorauth.txt");
+  const repositoryFileAlias = join(
+    repository.workspacePath,
+    "OperatorAuth.txt",
+  );
+  const repositoryDirectory = join(repository.workspacePath, "cafe\u0301-auth");
+  const repositoryDirectoryAlias = join(
+    repository.workspacePath,
+    "caf\u00e9-auth",
+  );
+  await writeFile(workspaceFile, "DUMMY_PRIVATE_VALUE workspace file");
+  await mkdir(workspaceDirectory);
+  await writeFile(
+    join(workspaceDirectory, "private.txt"),
+    "DUMMY_PRIVATE_VALUE workspace directory",
+  );
+  await writeFile(repositoryFile, "DUMMY_PRIVATE_VALUE repository file");
+  await mkdir(repositoryDirectory);
+  await writeFile(
+    join(repositoryDirectory, "private.txt"),
+    "DUMMY_PRIVATE_VALUE repository directory",
+  );
+
+  const workspaceFileIsAlias = await aliasesResolveToSameEntry(
+    workspaceFile,
+    workspaceFileAlias,
+  );
+  const workspaceDirectoryIsAlias = await aliasesResolveToSameEntry(
+    workspaceDirectory,
+    workspaceDirectoryAlias,
+  );
+  const repositoryFileIsAlias = await aliasesResolveToSameEntry(
+    repositoryFile,
+    repositoryFileAlias,
+  );
+  const repositoryDirectoryIsAlias = await aliasesResolveToSameEntry(
+    repositoryDirectory,
+    repositoryDirectoryAlias,
+  );
+  t.diagnostic(
+    `filesystem control-path aliases ${JSON.stringify({
+      caseFile: workspaceFileIsAlias,
+      unicodeDirectory: workspaceDirectoryIsAlias,
+      repositoryCaseFile: repositoryFileIsAlias,
+      repositoryUnicodeDirectory: repositoryDirectoryIsAlias,
+    })}`,
+  );
+  const current = currentFor(binding, [
+    workspaceFileAlias,
+    workspaceDirectoryAlias,
+    repositoryFileAlias,
+    repositoryDirectoryAlias,
+  ]);
+
+  const workspaceListing = await listWorkspaceDirectory(
+    request(binding, { showIgnored: true }),
+    current,
+  );
+  assert.equal(
+    workspaceListing.entries.some(
+      (entry) =>
+        entry.kind !== "repository" && entry.name === "operatorauth.txt",
+    ),
+    !workspaceFileIsAlias,
+  );
+  assert.equal(
+    workspaceListing.entries.some(
+      (entry) =>
+        entry.kind !== "repository" && entry.name === "cafe\u0301-auth",
+    ),
+    !workspaceDirectoryIsAlias,
+  );
+  for (const [path, isAlias] of [
+    [["operatorauth.txt"], workspaceFileIsAlias],
+    [["cafe\u0301-auth", "private.txt"], workspaceDirectoryIsAlias],
+  ] as const) {
+    const preview = await previewWorkspaceFile(
+      request(binding, { path, showIgnored: true }),
+      current,
+    );
+    assert.equal(preview.state, isAlias ? "excluded" : "ready");
+    assert.equal(preview.preview?.kind === "text", !isAlias);
+    if (isAlias) assert.deepEqual(preview.path, []);
+    else assert.ok(preview.preview?.kind === "text");
+  }
+
+  const repositoryScope = {
+    kind: "repository" as const,
+    repositoryId: repository.repositoryId,
+  };
+  const repositoryListing = await listWorkspaceDirectory(
+    request(binding, { scope: repositoryScope, showIgnored: true }),
+    current,
+  );
+  assert.equal(
+    repositoryListing.entries.some(
+      (entry) =>
+        entry.kind !== "repository" && entry.name === "operatorauth.txt",
+    ),
+    !repositoryFileIsAlias,
+  );
+  assert.equal(
+    repositoryListing.entries.some(
+      (entry) =>
+        entry.kind !== "repository" && entry.name === "cafe\u0301-auth",
+    ),
+    !repositoryDirectoryIsAlias,
+  );
+  for (const [path, isAlias] of [
+    [["operatorauth.txt"], repositoryFileIsAlias],
+    [["cafe\u0301-auth", "private.txt"], repositoryDirectoryIsAlias],
+  ] as const) {
+    const preview = await previewWorkspaceFile(
+      request(binding, { scope: repositoryScope, path, showIgnored: true }),
+      current,
+    );
+    assert.equal(preview.state, isAlias ? "excluded" : "ready");
+    assert.equal(preview.preview?.kind === "text", !isAlias);
+    if (isAlias) assert.deepEqual(preview.path, []);
+    else assert.ok(preview.preview?.kind === "text");
+  }
 });
 
 test("multi-repository listing exposes only synthetic identities and exact repository scope", async (t) => {
@@ -399,6 +548,19 @@ test("missing and held workspace bindings return safe availability states", asyn
     (await listWorkspaceDirectory(request(absent), withoutBinding)).state,
     "missing",
   );
+  const missingPrivate = await listWorkspaceDirectory(
+    request(absent, { path: [".ENV"] }),
+    withoutBinding,
+  );
+  assert.equal(missingPrivate.state, "excluded");
+  assert.deepEqual(missingPrivate.path, []);
+  const missingPrivatePreview = await previewWorkspaceFile(
+    request(absent, { path: [".ENV"] }),
+    withoutBinding,
+  );
+  assert.equal(missingPrivatePreview.state, "excluded");
+  assert.deepEqual(missingPrivatePreview.path, []);
+  assert.equal(missingPrivatePreview.metadata, undefined);
 
   const held = await f.manager.provision("held-binding");
   await rm(held.path, { recursive: true, force: true });
@@ -413,6 +575,43 @@ test("missing and held workspace bindings return safe availability states", asyn
     (await listWorkspaceDirectory(request(held), heldCurrent)).state,
     "held",
   );
+  const heldPrivate = await listWorkspaceDirectory(
+    request(held, { path: [".env"] }),
+    heldCurrent,
+  );
+  assert.equal(heldPrivate.state, "excluded");
+  assert.deepEqual(heldPrivate.path, []);
+  const heldPrivatePreview = await previewWorkspaceFile(
+    request(held, { path: [".env"] }),
+    heldCurrent,
+  );
+  assert.equal(heldPrivatePreview.state, "excluded");
+  assert.deepEqual(heldPrivatePreview.path, []);
+  assert.equal(heldPrivatePreview.metadata, undefined);
+
+  const heldControl = await f.manager.provision("held-control-path");
+  const controlPath = join(heldControl.path, "operator.auth");
+  await writeFile(controlPath, "DUMMY_PRIVATE_VALUE");
+  const heldControlCurrent = async (): Promise<WorkspaceInspectionCurrent> => ({
+    taskId: heldControl.taskId,
+    taskVersion: 1,
+    visibility: "held-control-path",
+    binding: { ...heldControl, state: "held" },
+    controlPaths: [controlPath],
+  });
+  const heldControlListing = await listWorkspaceDirectory(
+    request(heldControl, { path: ["operator.auth"] }),
+    heldControlCurrent,
+  );
+  assert.equal(heldControlListing.state, "excluded");
+  assert.deepEqual(heldControlListing.path, []);
+  const heldControlPreview = await previewWorkspaceFile(
+    request(heldControl, { path: ["operator.auth"] }),
+    heldControlCurrent,
+  );
+  assert.equal(heldControlPreview.state, "excluded");
+  assert.deepEqual(heldControlPreview.path, []);
+  assert.equal(heldControlPreview.metadata, undefined);
 
   const missingRoot = await f.manager.provision("missing-root");
   await rm(missingRoot.path, { recursive: true, force: true });
@@ -705,4 +904,113 @@ test("file replacement and binding changes after no-follow open discard preview 
   );
   assert.equal(changed.state, "conflict");
   assert.equal(changed.preview, undefined);
+});
+
+test("parent and root replacement, truncation, and late hard links discard preview bytes", async (t) => {
+  const f = fixture();
+  t.after(() => f.close());
+
+  const parentBinding = await f.manager.provision("preview-parent-replacement");
+  const parent = join(parentBinding.path, "nested");
+  await mkdir(parent);
+  const parentFile = join(parent, "parent.md");
+  await writeFile(parentFile, "DUMMY_PRIVATE_VALUE parent replacement");
+  let parentReplaced = false;
+  const parentResult = await previewWorkspaceFile(
+    request(parentBinding, { path: ["nested", "parent.md"] }),
+    currentFor(parentBinding),
+    {
+      afterFileOpen: async () => {
+        if (parentReplaced) return;
+        parentReplaced = true;
+        await rename(parent, `${parent}-old`);
+        await mkdir(parent);
+        await writeFile(join(parent, "replacement.md"), "replacement");
+      },
+    },
+  );
+  assert.equal(parentResult.state, "conflict");
+  assert.equal(parentResult.preview, undefined);
+  assert.ok(!JSON.stringify(parentResult).includes("DUMMY_PRIVATE_VALUE"));
+
+  const rootBinding = await f.manager.provision("preview-root-replacement");
+  const rootFile = join(rootBinding.path, "root.md");
+  await writeFile(rootFile, "DUMMY_PRIVATE_VALUE root replacement");
+  let rootReplaced = false;
+  const rootResult = await previewWorkspaceFile(
+    request(rootBinding, { path: ["root.md"] }),
+    currentFor(rootBinding),
+    {
+      afterFileOpen: async () => {
+        if (rootReplaced) return;
+        rootReplaced = true;
+        await rename(rootBinding.path, `${rootBinding.path}-old`);
+        await mkdir(rootBinding.path);
+        await writeFile(
+          join(rootBinding.path, "replacement.md"),
+          "replacement",
+        );
+      },
+    },
+  );
+  assert.equal(rootResult.state, "conflict");
+  assert.equal(rootResult.preview, undefined);
+  assert.ok(!JSON.stringify(rootResult).includes("DUMMY_PRIVATE_VALUE"));
+
+  const truncatedBinding = await f.manager.provision("preview-truncation");
+  const truncatedPath = join(truncatedBinding.path, "truncated.md");
+  await writeFile(truncatedPath, "DUMMY_PRIVATE_VALUE before truncation");
+  let truncated = false;
+  const truncatedResult = await previewWorkspaceFile(
+    request(truncatedBinding, { path: ["truncated.md"] }),
+    currentFor(truncatedBinding),
+    {
+      afterFileOpen: async () => {
+        if (truncated) return;
+        truncated = true;
+        await truncate(truncatedPath, 0);
+      },
+    },
+  );
+  assert.equal(truncatedResult.state, "conflict");
+  assert.equal(truncatedResult.preview, undefined);
+  assert.ok(!JSON.stringify(truncatedResult).includes("DUMMY_PRIVATE_VALUE"));
+
+  const grownBinding = await f.manager.provision("preview-growth");
+  const grownPath = join(grownBinding.path, "grown.md");
+  await writeFile(grownPath, "DUMMY_PRIVATE_VALUE before growth");
+  let grown = false;
+  const grownResult = await previewWorkspaceFile(
+    request(grownBinding, { path: ["grown.md"] }),
+    currentFor(grownBinding),
+    {
+      afterFileOpen: async () => {
+        if (grown) return;
+        grown = true;
+        await appendFile(grownPath, " after growth");
+      },
+    },
+  );
+  assert.equal(grownResult.state, "conflict");
+  assert.equal(grownResult.preview, undefined);
+  assert.ok(!JSON.stringify(grownResult).includes("DUMMY_PRIVATE_VALUE"));
+
+  const linkedBinding = await f.manager.provision("preview-late-hardlink");
+  const linkedPath = join(linkedBinding.path, "linked.md");
+  await writeFile(linkedPath, "DUMMY_PRIVATE_VALUE before hard link");
+  let linked = false;
+  const linkedResult = await previewWorkspaceFile(
+    request(linkedBinding, { path: ["linked.md"] }),
+    currentFor(linkedBinding),
+    {
+      afterFileOpen: async () => {
+        if (linked) return;
+        linked = true;
+        await hardLink(linkedPath, join(linkedBinding.path, "late-link.md"));
+      },
+    },
+  );
+  assert.equal(linkedResult.state, "conflict");
+  assert.equal(linkedResult.preview, undefined);
+  assert.ok(!JSON.stringify(linkedResult).includes("DUMMY_PRIVATE_VALUE"));
 });

@@ -2,8 +2,18 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  OperatorApi,
+  OperatorApiError,
+} from "../src/standalone/operator-api.js";
+import {
+  OperatorWebBoundary,
+  OperatorWebBundle,
+} from "../src/standalone/operator-web.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 
@@ -101,6 +111,40 @@ async function login(
   };
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function awaitWithin<T>(promise: Promise<T>, name: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${name} timed out`)), 5000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function sameFilesystemPath(first: string, second: string) {
+  try {
+    const [firstStat, secondStat] = await Promise.all([
+      stat(first),
+      stat(second),
+    ]);
+    return firstStat.dev === secondStat.dev && firstStat.ino === secondStat.ino;
+  } catch {
+    return false;
+  }
+}
+
 test("authenticated HTTP workspace listing and preview stay JSON, scoped, private and session-bound", async (t) => {
   const f = await createOperatorFixture();
   t.after(() => f.close());
@@ -108,9 +152,22 @@ test("authenticated HTTP workspace listing and preview stay JSON, scoped, privat
   const binding = await f.service.taskWorkspace(task.taskId);
   assert.ok(binding);
   mkdirSync(join(binding.path, "directory"));
+  mkdirSync(join(binding.path, "directory", "nested"));
   writeFileSync(join(binding.path, "index.html"), "<script>inert()</script>");
+  writeFileSync(
+    join(binding.path, "directory", "nested", "answer.md"),
+    "nested preview",
+  );
   writeFileSync(join(binding.path, ".env"), "PRIVATE WORKSPACE SECRET");
-  const web = await f.startWeb();
+  const controlFile = join(binding.path, "operatorauth.txt");
+  const controlAlias = join(binding.path, "OperatorAuth.txt");
+  writeFileSync(controlFile, "DUMMY_PRIVATE_VALUE HTTP control alias");
+  const controlAliasMatches = await sameFilesystemPath(
+    controlFile,
+    controlAlias,
+  );
+  t.diagnostic(`HTTP control-path case alias ${controlAliasMatches}`);
+  const web = await f.startWeb([f.directory, controlAlias]);
   const files = `${web.origin}/api/operator/tasks/${task.taskId}/files`;
   const preview = `${web.origin}/api/operator/tasks/${task.taskId}/preview`;
 
@@ -146,6 +203,10 @@ test("authenticated HTTP workspace listing and preview stay JSON, scoped, privat
   assert.ok(!listingText.includes(".env"));
   assert.ok(!listingText.includes("PRIVATE WORKSPACE SECRET"));
   assert.ok(!listingText.includes(binding.path));
+  assert.equal(
+    listingBody.data.entries.some((entry) => entry.name === "operatorauth.txt"),
+    !controlAliasMatches,
+  );
 
   const page = await fetch(
     `${preview}?scope=workspace&path=index.html&showIgnored=true`,
@@ -164,6 +225,48 @@ test("authenticated HTTP workspace listing and preview stay JSON, scoped, privat
   assert.equal(pageBody.data.preview?.kind, "text");
   assert.equal(pageBody.data.preview?.text, "<script>inert()</script>");
   assert.ok(pageText.startsWith("{"));
+
+  const controlPreview = await fetch(
+    `${preview}?scope=workspace&path=operatorauth.txt&showIgnored=true`,
+    { headers: { cookie: credentials.cookie } },
+  );
+  assert.equal(controlPreview.status, 200);
+  const controlPreviewText = await controlPreview.text();
+  const controlPreviewBody = JSON.parse(controlPreviewText) as {
+    data: { state: string; preview?: { text?: string } };
+  };
+  assert.equal(
+    controlPreviewBody.data.state,
+    controlAliasMatches ? "excluded" : "ready",
+  );
+  assert.equal(
+    controlPreviewBody.data.preview?.text ===
+      "DUMMY_PRIVATE_VALUE HTTP control alias",
+    !controlAliasMatches,
+  );
+
+  const nestedListing = await fetch(
+    `${files}?scope=workspace&path=directory/nested`,
+    { headers: { cookie: credentials.cookie } },
+  );
+  assert.equal(nestedListing.status, 200);
+  const nestedListingBody = (await nestedListing.json()) as {
+    data: { state: string; entries: { name?: string }[] };
+  };
+  assert.equal(nestedListingBody.data.state, "ready");
+  assert.ok(
+    nestedListingBody.data.entries.some((entry) => entry.name === "answer.md"),
+  );
+  const nestedPreview = await fetch(
+    `${preview}?scope=workspace&path=directory/nested/answer.md`,
+    { headers: { cookie: credentials.cookie } },
+  );
+  assert.equal(nestedPreview.status, 200);
+  const nestedPreviewBody = (await nestedPreview.json()) as {
+    data: { state: string; preview?: { text?: string } };
+  };
+  assert.equal(nestedPreviewBody.data.state, "ready");
+  assert.equal(nestedPreviewBody.data.preview?.text, "nested preview");
 
   const privateRead = await fetch(
     `${preview}?scope=workspace&path=.env&showIgnored=true`,
@@ -237,6 +340,112 @@ test("authenticated HTTP workspace listing and preview stay JSON, scoped, privat
     headers: { cookie: expiringCredentials.cookie },
   });
   assert.equal(expired.status, 401);
+});
+
+test("internal parsed workspace queries allow nested paths", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Internal nested path");
+  const binding = await f.service.taskWorkspace(task.taskId);
+  assert.ok(binding);
+  mkdirSync(join(binding.path, "nested"));
+  writeFileSync(join(binding.path, "nested", "answer.md"), "internal nested");
+  const bundle = await OperatorWebBundle.open(
+    fileURLToPath(new URL("../operator", import.meta.url)),
+  );
+  const boundary = new OperatorWebBoundary(
+    bundle,
+    new OperatorApi(f.service, [f.directory]),
+  );
+  const result = (await boundary.read(
+    `/api/operator/tasks/${task.taskId}/preview`,
+    new URLSearchParams("scope=workspace&path=nested%2Fanswer.md"),
+  )) as { data: { state: string; preview?: { text?: string } } };
+  assert.equal(result.data.state, "ready");
+  assert.equal(result.data.preview?.text, "internal nested");
+});
+
+test("workspace read errors recheck sessions after logout and expiry", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Session loss during workspace read");
+  const web = await f.startWeb();
+  const files = `${web.origin}/api/operator/tasks/${task.taskId}/files?scope=workspace`;
+  const original = f.service.taskWorkspace.bind(f.service);
+  let pendingGate:
+    | {
+        started: ReturnType<typeof deferred>;
+        release: ReturnType<typeof deferred>;
+        failure: unknown;
+      }
+    | undefined;
+  f.service.taskWorkspace = async (taskId) => {
+    const gate = pendingGate;
+    if (gate) {
+      gate.started.resolve();
+      await gate.release.promise;
+      throw gate.failure;
+    }
+    return original(taskId);
+  };
+  t.after(() => {
+    pendingGate?.release.resolve();
+    f.service.taskWorkspace = original;
+  });
+
+  const logoutCredentials = await login(web);
+  const logoutGate = {
+    started: deferred(),
+    release: deferred(),
+    failure: new OperatorApiError(404, "not-found"),
+  };
+  pendingGate = logoutGate;
+  const pendingLogoutRead = fetch(files, {
+    headers: { cookie: logoutCredentials.cookie },
+  });
+  await awaitWithin(
+    logoutGate.started.promise,
+    "workspace lookup before logout",
+  );
+  const logout = await fetch(`${web.origin}/api/operator/logout`, {
+    method: "POST",
+    headers: {
+      cookie: logoutCredentials.cookie,
+      origin: web.origin,
+      "content-type": "application/json",
+      "x-csrf-token": logoutCredentials.csrfToken,
+    },
+    body: "{}",
+  });
+  assert.equal(logout.status, 200);
+  logoutGate.release.resolve();
+  pendingGate = undefined;
+  const afterLogout = await awaitWithin(pendingLogoutRead, "logout result");
+  const afterLogoutText = await afterLogout.text();
+  assert.equal(afterLogout.status, 401);
+  assert.ok(!afterLogoutText.includes("not-found"));
+
+  const expiringCredentials = await login(web);
+  const expiryGate = {
+    started: deferred(),
+    release: deferred(),
+    failure: new Error("private workspace lookup detail"),
+  };
+  pendingGate = expiryGate;
+  const pendingExpiredRead = fetch(files, {
+    headers: { cookie: expiringCredentials.cookie },
+  });
+  await awaitWithin(
+    expiryGate.started.promise,
+    "workspace lookup before expiry",
+  );
+  f.advanceClock(60_000);
+  expiryGate.release.resolve();
+  pendingGate = undefined;
+  const afterExpiry = await awaitWithin(pendingExpiredRead, "expiry result");
+  const afterExpiryText = await afterExpiry.text();
+  assert.equal(afterExpiry.status, 401);
+  assert.ok(!afterExpiryText.includes("private workspace lookup detail"));
 });
 
 test("authenticated multi-repository HTTP reads require an exact repository scope and reveal only requested ignore clutter", async (t) => {

@@ -12,7 +12,7 @@ type WorkspaceInspectionQuery = Omit<WorkspaceInspectionRequest, "taskId">;
 
 function parseWorkspaceInspectionQuery(
   query: URLSearchParams,
-  rawSearch: string,
+  rawSearch?: string,
 ): WorkspaceInspectionQuery {
   const allowed = new Set(["scope", "repositoryId", "path", "showIgnored"]);
   for (const key of query.keys())
@@ -26,19 +26,21 @@ function parseWorkspaceInspectionQuery(
       throw new OperatorApiError(400, "invalid-input");
     }
   };
-  const rawPathValues: string[] = [];
-  for (const field of rawSearch.replace(/^\?/, "").split("&")) {
-    if (!field) continue;
-    const separator = field.indexOf("=");
-    const key = decode(separator < 0 ? field : field.slice(0, separator));
-    if (key !== "path") continue;
-    const value = separator < 0 ? "" : field.slice(separator + 1);
-    if (/%(?:0[0-9a-f]|1[0-9a-f]|2f|5c|7f)/i.test(value))
+  if (rawSearch !== undefined) {
+    const rawPathValues: string[] = [];
+    for (const field of rawSearch.replace(/^\?/, "").split("&")) {
+      if (!field) continue;
+      const separator = field.indexOf("=");
+      const key = decode(separator < 0 ? field : field.slice(0, separator));
+      if (key !== "path") continue;
+      const value = separator < 0 ? "" : field.slice(separator + 1);
+      if (/%(?:0[0-9a-f]|1[0-9a-f]|2f|5c|7f)/i.test(value))
+        throw new OperatorApiError(400, "invalid-input");
+      rawPathValues.push(decode(value));
+    }
+    if (rawPathValues.length !== query.getAll("path").length)
       throw new OperatorApiError(400, "invalid-input");
-    rawPathValues.push(decode(value));
   }
-  if (rawPathValues.length !== query.getAll("path").length)
-    throw new OperatorApiError(400, "invalid-input");
 
   const scope = query.get("scope");
   const repositoryId = query.get("repositoryId");
@@ -146,11 +148,7 @@ export class OperatorWebBoundary {
       path.startsWith("/api/")
     );
   }
-  async read(
-    path: string,
-    query = new URLSearchParams(),
-    rawSearch = query.toString(),
-  ) {
+  async read(path: string, query = new URLSearchParams(), rawSearch?: string) {
     if (path === "/api/operator/search") return this.api.readSearch(query);
     if (path === "/api/operator/inbox") return this.api.readInbox(query);
     const workspaceFiles = path.match(

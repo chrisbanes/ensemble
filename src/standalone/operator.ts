@@ -1421,6 +1421,10 @@ export class LocalOperatorHttp {
       if (data === undefined) deny(404, "not-found");
       else json(200, data);
     } catch (error) {
+      if (session?.authenticated && !this.currentSession(session)) {
+        deny(401, "unauthenticated");
+        return true;
+      }
       const status =
         error instanceof OperatorApiError
           ? error.status
