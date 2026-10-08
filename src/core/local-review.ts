@@ -484,7 +484,8 @@ export class LocalReviewStore {
       const current = row ? Number(row.version) : 0;
       if (current !== input.expectedDraftVersion)
         throw new Error("Local review draft version conflict");
-      if (row && row.state !== "editable")
+      // A sent draft may be cleared to start the next review; sending stays frozen.
+      if (row && row.state !== "editable" && row.state !== "sent")
         throw new Error("Local review draft is frozen");
       const groups = this.db
         .prepare(`SELECT groupId,anchorDraftId,anchorIdsJson,state
@@ -497,7 +498,7 @@ export class LocalReviewStore {
         empty = JSON.stringify({ summary: "", comments: [] });
       if (row)
         this.db
-          .prepare(`UPDATE coordination_local_review_drafts SET version=?,draftJson=?,accessFingerprint=?,updatedAt=?
+          .prepare(`UPDATE coordination_local_review_drafts SET version=?,state='editable',draftJson=?,accessFingerprint=?,updatedAt=?
           WHERE taskId=? AND ownerKey=? AND version=?`)
           .run(
             next,

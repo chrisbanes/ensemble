@@ -190,6 +190,34 @@ export function RetainedResultEvidence({
                   content.item.path.split("/"),
                 )}
                 changed={changed}
+                {...(content.item.kind === "file"
+                  ? {
+                      comment: {
+                        originKey: `retained:${content.itemId}`,
+                        label: `retained result ${data.resultId}`,
+                        anchorFor: (
+                          startLine: number,
+                          endLine: number,
+                          contentSha256: string,
+                        ) => ({
+                          taskId,
+                          repositoryId: content.item.repositoryId,
+                          path: content.item.path,
+                          sourceKind: "result-evidence" as const,
+                          context: "result" as const,
+                          resultId: data.resultId,
+                          resultItemId: content.itemId,
+                          workId: data.identity.workId,
+                          threadId: data.identity.threadId,
+                          turnId: data.identity.turnId,
+                          side: "file" as const,
+                          startLine,
+                          endLine,
+                          contentSha256,
+                        }),
+                      },
+                    }
+                  : {})}
               />
               {content.item.kind === "file" && (
                 <Button

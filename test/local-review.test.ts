@@ -206,6 +206,48 @@ test("local review sends all anchor groups atomically and exact replay returns t
     continuations: 0,
     submissions: 2,
   });
+
+  // A sent draft stays frozen for edits but can be cleared for the next review.
+  const sent = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(sent.data.state, "sent");
+  await assert.rejects(
+    api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: sent.data.version,
+        draft: { summary: "edit after send", comments: [] },
+      },
+      owner,
+    ),
+  );
+  await api.execute(
+    {
+      type: "review.draft.discard",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: sent.data.version,
+    },
+    owner,
+  );
+  const next = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(next.data.state, "editable");
+  assert.deepEqual(next.data.draft, { summary: "", comments: [] });
+  assert.ok(next.data.groups.every((group) => group.state === "sealed"));
+  const inspected = await api.readLocalReviewOperation(
+    task.taskId,
+    committedKey,
+    owner,
+  );
+  assert.equal(inspected.data.state, "recorded");
+  assert.equal(inspected.data.groups?.length, 2);
+  assert.deepEqual(counts(f, task.taskId, committedKey), {
+    events: 1,
+    receipts: 1,
+    continuations: 0,
+    submissions: 2,
+  });
 });
 
 test("prepared anchor bytes survive restart purge but the old editable draft does not cross sessions", async (t) => {

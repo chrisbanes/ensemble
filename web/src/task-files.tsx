@@ -17,8 +17,10 @@ import { Button, StatusBadge } from "./components.js";
 import type { PDFDocumentProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
 import {
   TaskFileTabState,
+  type ReviewAnchorCandidate,
   type TaskFilesState,
 } from "./task-workspace-state.js";
+import { CommentAction, ReviewComposer } from "./local-review.js";
 import { useOperatorResource } from "./resource.js";
 
 function requestUrl(
@@ -384,12 +386,19 @@ function SourceLines({
   const lineButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const lines = text.split("\n");
   const shown = lines.slice(0, maxSourceLines);
-  const focusLine = (index: number) => {
-    const bounded = Math.max(0, Math.min(shown.length - 1, index));
-    tab.selectedLine = bounded + 1;
+  const select = (number: number, extend: boolean) => {
+    tab.rangeAnchorLine = extend
+      ? (tab.rangeAnchorLine ?? tab.selectedLine)
+      : null;
+    tab.selectedLine = number;
     changed();
+  };
+  const focusLine = (index: number, extend: boolean) => {
+    const bounded = Math.max(0, Math.min(shown.length - 1, index));
+    select(bounded + 1, extend);
     lineButtons.current[bounded]?.focus();
   };
+  const range = tab.selectedRange;
   return (
     <div className={`file-source-scroll${wrapLines ? " is-wrapped" : ""}`}>
       <ol className="file-source-lines" aria-label="Source lines">
@@ -404,21 +413,25 @@ function SourceLines({
                 type="button"
                 className="file-source-line"
                 aria-label={`Line ${number}${line.length ? `: ${line}` : " (blank)"}`}
-                aria-pressed={tab.selectedLine === number}
+                aria-pressed={
+                  range !== null &&
+                  number >= range.startLine &&
+                  number <= range.endLine
+                }
                 tabIndex={
                   tab.selectedLine === number ||
                   (tab.selectedLine === null && number === 1)
                     ? 0
                     : -1
                 }
-                onClick={() => {
-                  tab.selectedLine = number;
-                  changed();
-                }}
+                onClick={(event) => select(number, event.shiftKey)}
                 onKeyDown={(event) => {
                   if (event.key === "ArrowUp" || event.key === "ArrowDown") {
                     event.preventDefault();
-                    focusLine(index + (event.key === "ArrowUp" ? -1 : 1));
+                    focusLine(
+                      index + (event.key === "ArrowUp" ? -1 : 1),
+                      event.shiftKey,
+                    );
                   }
                 }}
               >
@@ -573,10 +586,21 @@ export function FilePreviewBody({
   name,
   tab,
   changed,
+  comment,
 }: {
   data: NonNullable<NonNullable<TaskFileTabState["preview"]>["preview"]>;
   name: string;
   tab: TaskFileTabState;
+  /** Exact anchor for a selected source range in this origin, when reviewable. */
+  comment?: {
+    originKey: string;
+    label: string;
+    anchorFor: (
+      startLine: number,
+      endLine: number,
+      contentSha256: string,
+    ) => ReviewAnchorCandidate;
+  };
   changed: () => void;
 }) {
   const isMarkdown =
@@ -650,6 +674,29 @@ export function FilePreviewBody({
                 wrapLines={tab.wrapSource}
                 changed={changed}
               />
+              {comment && (
+                <>
+                  <p className="muted" aria-live="polite">
+                    {tab.selectedRange
+                      ? `Selected lines ${tab.selectedRange.startLine}–${tab.selectedRange.endLine}`
+                      : "Select a line, or Shift-select a range, to comment."}
+                  </p>
+                  <CommentAction
+                    originKey={comment.originKey}
+                    label={comment.label}
+                    anchor={
+                      tab.selectedRange
+                        ? comment.anchorFor(
+                            tab.selectedRange.startLine,
+                            tab.selectedRange.endLine,
+                            data.sha256,
+                          )
+                        : null
+                    }
+                  />
+                  <ReviewComposer originKey={comment.originKey} />
+                </>
+              )}
             </>
           )}
         </>
@@ -1252,6 +1299,24 @@ export function TaskFiles({
                     name={activeTab.path.at(-1) ?? ""}
                     tab={activeTab}
                     changed={changed}
+                    comment={{
+                      originKey: `files:${activeTab.key}`,
+                      label: "current file",
+                      anchorFor: (startLine, endLine, contentSha256) => ({
+                        taskId,
+                        repositoryId:
+                          activeTab.scope.kind === "repository"
+                            ? activeTab.scope.repositoryId
+                            : null,
+                        path: activeTab.path.join("/"),
+                        sourceKind: "workspace-file",
+                        context: "workspace",
+                        side: "file",
+                        startLine,
+                        endLine,
+                        contentSha256,
+                      }),
+                    }}
                   />
                 )}
                 <Button

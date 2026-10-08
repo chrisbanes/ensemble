@@ -1446,6 +1446,89 @@ const localReviewDraftContentSchema = z
     if (bytes > 16000)
       ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
   });
+export const localReviewDraftReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      version: z.number().int().nonnegative().safe(),
+      state: z.enum(["editable", "sending", "sent"]),
+      draft: localReviewDraftContentSchema,
+      accessFingerprint: z.string().max(128).nullable(),
+      updatedAt: time.nullable(),
+      groups: z
+        .array(
+          z
+            .object({
+              groupId: uuid,
+              anchorIds: z.array(uuid).max(32),
+              state: z.string().min(1).max(32),
+              submittedContextId: uuid.nullable(),
+              createdAt: time,
+            })
+            .strict(),
+        )
+        .max(256),
+      unsentDraftLost: z.boolean(),
+    })
+    .strict(),
+);
+const localReviewOperationAnchorSchema = z.union([
+  z
+    .object({
+      anchorId: uuid,
+      state: z.literal("unavailable"),
+      reason: z.enum(["excluded", "unavailable"]),
+    })
+    .strict(),
+  z
+    .object({
+      anchorId: uuid,
+      state: z.enum(["available", "gap"]),
+      status: z.enum(["current", "outdated", "unknown"]).optional(),
+      path: z.string().min(1).max(2048),
+      context: z.enum(["workspace", "branch", "uncommitted", "turn", "result"]),
+      startLine: revision,
+      endLine: revision,
+    })
+    .strict(),
+]);
+export const localReviewOperationReadSchema = envelope(
+  z
+    .object({
+      operationId: uuid,
+      taskId: uuid,
+      reviewId: uuid,
+      state: z.enum(["prepared", "recorded", "rejected", "not-recorded"]),
+      eventId: uuid.optional(),
+      recipientAssignmentId: uuid.optional(),
+      reason: z.string().max(128).optional(),
+      summary: z.string().max(4000).optional(),
+      comments: z
+        .array(
+          z
+            .object({
+              commentId: uuid,
+              body: z.string().max(4000).nullable(),
+              anchorGroupIds: z.array(uuid).max(32),
+            })
+            .strict(),
+        )
+        .max(32)
+        .optional(),
+      groups: z
+        .array(
+          z
+            .object({
+              groupId: uuid,
+              anchors: z.array(localReviewOperationAnchorSchema).max(32),
+            })
+            .strict(),
+        )
+        .max(32)
+        .optional(),
+    })
+    .strict(),
+);
 export const operatorCommandSchema = z.discriminatedUnion("type", [
   z
     .object({

@@ -18,6 +18,7 @@ import {
   type ExpectedWorkspaceComparisonRead,
 } from "./comparison-read-match.js";
 import { Button, StatusBadge } from "./components.js";
+import { CommentAction, ReviewComposer } from "./local-review.js";
 import { useOperatorResource } from "./resource.js";
 import type {
   TaskChangeSelection,
@@ -907,6 +908,42 @@ export function TaskWorkspaceChanges({
                     comparison {state.selection.comparisonId}
                   </p>
                 )}
+                <CommentAction
+                  originKey={`changes:${snapshot.comparisonId}`}
+                  label={
+                    snapshot.target === "turn"
+                      ? "Last turn comparison"
+                      : `${snapshot.target} comparison`
+                  }
+                  anchor={
+                    state.selection
+                      ? {
+                          taskId,
+                          repositoryId: state.selection.repositoryId,
+                          path: state.selection.path,
+                          sourceKind: "comparison-side",
+                          context: state.selection.context,
+                          comparisonId: state.selection.comparisonId,
+                          side: state.selection.side,
+                          startLine: state.selection.startLine,
+                          endLine: state.selection.endLine,
+                          contentSha256: state.selection.contentSha256,
+                          ...(state.selection.workId
+                            ? { workId: state.selection.workId }
+                            : {}),
+                          ...(state.selection.threadId
+                            ? { threadId: state.selection.threadId }
+                            : {}),
+                          ...(state.selection.turnId
+                            ? { turnId: state.selection.turnId }
+                            : {}),
+                        }
+                      : null
+                  }
+                />
+                <ReviewComposer
+                  originKey={`changes:${snapshot.comparisonId}`}
+                />
               </>
             ) : (
               <p className="changes-empty-selection">

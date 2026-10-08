@@ -46,6 +46,16 @@ export class TaskFileTabState {
   sourceMode: "rendered" | "source" = "rendered";
   wrapSource = false;
   selectedLine: number | null = null;
+  /** Shift-selection origin; the range spans it and selectedLine. */
+  rangeAnchorLine: number | null = null;
+  get selectedRange() {
+    if (this.selectedLine === null) return null;
+    const anchor = this.rangeAnchorLine ?? this.selectedLine;
+    return {
+      startLine: Math.min(anchor, this.selectedLine),
+      endLine: Math.max(anchor, this.selectedLine),
+    };
+  }
   readingScrollTop = 0;
   imageScrollLeft = 0;
   imageScrollTop = 0;
@@ -137,6 +147,54 @@ class TaskReplyState {
   }
   uncertain = false;
 }
+/** Exact source passed to `review.anchor.stage`; never a specimen or a later match. */
+export type ReviewAnchorCandidate = {
+  taskId: string;
+  repositoryId: string | null;
+  path: string;
+  sourceKind: "workspace-file" | "comparison-side" | "result-evidence";
+  context: "workspace" | "branch" | "uncommitted" | "turn" | "result";
+  comparisonId?: string;
+  resultId?: string;
+  resultItemId?: string;
+  workId?: string;
+  threadId?: string;
+  turnId?: string;
+  side: "file" | "left" | "right";
+  startLine: number;
+  endLine: number;
+  contentSha256: string;
+};
+
+export type LocalReviewSend = {
+  key: string;
+  expectedDraftVersion: number;
+  recipientAssignmentId: string;
+  expectedAssignmentVersion: number;
+  recipientName: string;
+  status: "sending" | "unknown" | "recorded" | "rejected" | "not-recorded";
+  reason?: string;
+};
+
+/** Client view of the session-owned server draft; private text is never persisted here. */
+export class LocalReviewState {
+  composer: {
+    originKey: string;
+    label: string;
+    anchor: ReviewAnchorCandidate;
+    body: string;
+    error: string;
+    saving: boolean;
+    returnFocus: HTMLElement | null;
+  } | null = null;
+  editing: Record<string, string> = {};
+  summary: string | null = null;
+  pending = false;
+  notice = "";
+  send: LocalReviewSend | null = null;
+  inspectKey: string | null = null;
+}
+
 /** Reading state for one result's retained evidence; bytes are immutable. */
 export class RetainedEvidenceState {
   selectedItemId: string | null = null;
@@ -152,7 +210,10 @@ export class RetainedEvidenceState {
 }
 
 export class TaskWorkspaceState {
-  constructor(private readonly reply = new TaskReplyState()) {}
+  constructor(
+    private readonly reply = new TaskReplyState(),
+    readonly review = new LocalReviewState(),
+  ) {}
   readonly files = new TaskFilesState();
   readonly changes = new TaskChangesState();
   private readonly retainedEvidence = new Map<string, RetainedEvidenceState>();
@@ -239,6 +300,7 @@ export class TaskWorkspaceState {
 export class TaskWorkspaceStates {
   private states = new Map<string, TaskWorkspaceState>();
   private replies = new Map<string, TaskReplyState>();
+  private reviews = new Map<string, LocalReviewState>();
   forTask(id: string, entryKey = id) {
     const key = `${id}:${entryKey}`;
     let s = this.states.get(key);
@@ -248,7 +310,12 @@ export class TaskWorkspaceStates {
         reply = new TaskReplyState();
         this.replies.set(id, reply);
       }
-      s = new TaskWorkspaceState(reply);
+      let review = this.reviews.get(id);
+      if (!review) {
+        review = new LocalReviewState();
+        this.reviews.set(id, review);
+      }
+      s = new TaskWorkspaceState(reply, review);
       this.states.set(key, s);
     }
     return s;
@@ -256,5 +323,6 @@ export class TaskWorkspaceStates {
   purge() {
     this.states.clear();
     this.replies.clear();
+    this.reviews.clear();
   }
 }
