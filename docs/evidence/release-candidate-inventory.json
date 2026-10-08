@@ -1,7 +1,7 @@
 {
   "version": 1,
   "issues": [745, 697, 698],
-  "status": "UI07, S07a and S07b native gates completed; S08b final recovery and cutover proposal qualified locally; independent review and final-head remote gates pending; operational release remains unqualified",
+  "status": "UI07, S07a, S07b and S08b native gates completed (S08b via PR #773 with independent review and final-head remote check passed); operational release remains unqualified pending #732 and #761",
   "baseline": {
     "head": "4932405fc97b0f00d4facc310c398e2908f2f719",
     "tree": "7b80280ec013f33cccbe1a9b614230cde88d5503"
@@ -321,7 +321,7 @@
   "remainingGates": [
     {
       "issue": 698,
-      "status": "S08b independent integrated candidate/proposal review and final-head remote gates; local final check passed"
+      "status": "Completed 5 October 2026 by PR #773: independent review passed for head b8f6a87d1d64231c8f16da33c5619ea067964ccb and its remote check passed"
     },
     {
       "issues": [732, 761],
@@ -370,7 +370,7 @@
     "issue": 697,
     "plan": "https://github.com/chrisbanes/ensemble/issues/697#issuecomment-5994598567",
     "baseHead": "8d8ad5c2c67cf492d82443574f1a426f1540d4c0",
-    "status": "Local assembled integration and full acceptance inventory qualified; controller independent review/publication/final-head gates pending",
+    "status": "Local assembled integration and full acceptance inventory qualified; published and merged by PR #772 with its remote check passing",
     "nativePrerequisites": {
       "736": {
         "state": "CLOSED",
@@ -814,7 +814,7 @@
       },
       {
         "id": "R06",
-        "disposition": "Fresh-database separation and retained S08a preparation passed. S08b current-schema CLI restore and exact owned-child/effect recovery qualified locally; executable Haze proposal prepared. Independent proposal review pending. Actual old-work disposition/deployment/cutover remains #761; R06 operational completion is unproved.",
+        "disposition": "Fresh-database separation and retained S08a preparation passed. S08b current-schema CLI restore and exact owned-child/effect recovery qualified locally; executable Haze proposal prepared. Independent review passed in PR #773. Actual old-work disposition/deployment/cutover remains #761; R06 operational completion is unproved.",
         "references": [
           "docs/acceptance.md",
           "docs/evidence/s05-local-qualification.md",
@@ -946,6 +946,6 @@
       "proposalValidation": "One-off shell syntax and CLI arities passed; no proposal commands executed"
     },
     "releaseReady": false,
-    "pendingGates": "Independent proposal/candidate review and final-head remote gates; #732 before operational use; #761 execution approval, verified old-work disposition and actual cutover"
+    "pendingGates": "#732 before operational use; #761 execution approval, verified old-work disposition and actual cutover"
   }
 }

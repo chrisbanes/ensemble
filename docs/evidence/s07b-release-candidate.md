@@ -2,6 +2,8 @@
 
 Issue [#697](https://github.com/chrisbanes/ensemble/issues/697), approved [v2rev1 plan](https://github.com/chrisbanes/ensemble/issues/697#issuecomment-5994598567). This qualifies deterministic assembled delivery integration and records the full acceptance inventory. It does not qualify release, deployed operations, physical sleep/wake or Haze cutover.
 
+> **Post-merge status, 8 October 2026:** [PR #772](https://github.com/chrisbanes/ensemble/pull/772) merged on 5 October at `b972978895957400cf808d3a8e6ab18224d79af2` with its remote check passing. No separate independent-review record was found. The rest of this report is the pre-merge record.
+
 ## Identity and reuse
 
 The implementation starts from `8d8ad5c2c67cf492d82443574f1a426f1540d4c0`. The exact staged source/test tree tested by the final check is `06233a4718d4373c18d34083cd0860bea6e55e6c`; it includes the seven owned source/test paths and the unchanged baseline documentation. Subsequent evidence/status edits are documentation only. This tree is an input identity, not a fabricated self-referential final commit.

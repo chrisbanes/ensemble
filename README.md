@@ -97,10 +97,10 @@ The service now includes local GitHub discovery for selected repository issues,
 searches and Projects, with provider-owned readiness and dependency holds.
 Operators can inspect source state and refresh it in the authenticated UI.
 Scoped GitHub delivery now has durable intents, confirmed readback, retained PR
-feedback and operator settlement controls. Its deterministic tests pass; the
-required live handback and through-merge journeys remain unrun.
+feedback and operator settlement controls. Its deterministic tests and the
+bounded live handback and through-merge journeys pass.
 [S07a evidence](docs/evidence/s07a-github-delivery.md) records that qualification
-gate. Release and cutover remain ahead.
+and its limits. Release and cutover remain ahead.
 In particular, physical sleep/wake behaviour and
 access from an independent device still need qualification. Follow the
 [delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.

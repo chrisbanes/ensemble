@@ -2,6 +2,8 @@
 
 Local technical qualification for [#698](https://github.com/chrisbanes/ensemble/issues/698), following the [reviewed v2 rev1 plan](https://github.com/chrisbanes/ensemble/issues/698#issuecomment-5996272405). The only production change uses absolute `/usr/sbin/sysctl` for macOS boot identity; the rendered LaunchAgent environment remains unchanged. No prototype database was opened and no deployment, reboot, power experiment, model turn or external provider effect was performed.
 
+> **Post-merge status, 8 October 2026:** [PR #773](https://github.com/chrisbanes/ensemble/pull/773) merged on 5 October at `6064bd0c889d3a0caaa2aee8bffd93bbe8a87d81`. Its fresh independent review passed for frozen head `b8f6a87d1d64231c8f16da33c5619ea067964ccb`, and that head's remote check passed, closing the review and final-head gates recorded as pending below. Physical sleep/wake #732 and the separately approved cutover #761 remain open.
+
 ## Tested candidate and environment
 
 Starting revision: `b972978895957400cf808d3a8e6ab18224d79af2`. Tested source/test tree: `9758b0dacc3f58c2b33d43e3dca3c83c38c466cc`. This tree contains the five owned source/test paths below and baseline documentation. The final evidence, operations prose, proposal and R06 inventory are a documentation-only follow-up; the report does not invent its own final commit identity.
