@@ -165,14 +165,19 @@ function rateLimitResumeAt(response: Response): number | undefined {
   if (response.status !== 403 && response.status !== 429) return undefined;
   const header = (name: string) => response.headers.get(name);
   const retryAfter = header("retry-after");
-  if (header("x-ratelimit-remaining") !== "0" && retryAfter === null)
+  // A 429 is always a rate limit; a 403 is one only when its headers say so.
+  if (
+    response.status === 403 &&
+    header("x-ratelimit-remaining") !== "0" &&
+    retryAfter === null
+  )
     return undefined;
   const now = Date.now();
   const times = [
     Number(header("x-ratelimit-reset") ?? Number.NaN) * 1000,
     now + Number(retryAfter ?? Number.NaN) * 1000,
   ].filter(Number.isFinite);
-  // ponytail: a limit with no usable reset time waits one minute; tune if GitHub documents a better bound.
+  // GitHub documents waiting at least one minute when no header gives a reset time.
   // Headers are external input: cap at GitHub's one-hour primary window so they cannot pause discovery indefinitely.
   return times.length
     ? Math.min(Math.max(...times), now + 3_600_000)

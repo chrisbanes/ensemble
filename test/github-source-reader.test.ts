@@ -466,6 +466,19 @@ test("a 403 without rate-limit headers stays an http failure", async () => {
   assert.equal(remaining.reason, "http-403");
 });
 
+test("a 429 without rate-limit headers pauses for GitHub's one-minute minimum", async () => {
+  const before = Date.now();
+  const result = await limitedReader(
+    () => new Response("too many requests", { status: 429 }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "rate-limited");
+  assert.ok(result.resumeAt !== undefined);
+  assert.ok(result.resumeAt >= before + 60_000);
+  assert.ok(result.resumeAt <= after + 60_000);
+});
+
 test("a rate limit while checking a blocker is reported as rate-limited, not as an invalid blocker", async () => {
   const reader = new GitHubHttpSourceReader("fixture-token", async (input) => {
     const url = String(input);
