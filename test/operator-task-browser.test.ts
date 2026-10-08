@@ -10,6 +10,11 @@ import { createOperatorFixture } from "./fixtures/operator-web.js";
 async function screenshot(page: Page, name: string) {
   return captureBrowserEvidence(page, name);
 }
+// Optional composer sections start collapsed; their fields stay mounted.
+async function expandComposer(page: Page) {
+  const closed = page.locator(".composer-disclosure:not([open]) > summary");
+  while ((await closed.count()) > 0) await closed.first().click();
+}
 async function signIn(
   page: Page,
   origin: string,
@@ -240,6 +245,7 @@ test("Save draft and Create and start record real task outcomes without claiming
   );
   await page.getByLabel("Task title").fill("Saved outcome");
   await page.getByLabel("Desired outcome").fill("Ship a useful result");
+  await expandComposer(page);
   await page.getByLabel("Optional context").fill("Review supplied evidence");
   await page
     .getByLabel("Reference links")
@@ -264,6 +270,7 @@ test("Save draft and Create and start record real task outcomes without claiming
   await page.goto(`${web.origin}/app/tasks/new?project=${projectId}`);
   await page.getByLabel("Task title").fill("Ready dependent");
   await page.getByLabel("Desired outcome").fill("Ship after blocker");
+  await expandComposer(page);
   await page.getByLabel("Assignee").selectOption(workerId);
   await page.getByLabel("Open blocker", { exact: true }).check();
   await page
@@ -327,6 +334,168 @@ test("Save draft and Create and start record real task outcomes without claiming
     .click();
   await page.getByText("running", { exact: true }).waitFor();
   await screenshot(page, "1366-confirmed-ready-running");
+});
+
+test("composer disclosures keep supplied values and open the section of each validation error", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const d = f.service.domain(),
+    projectId = randomUUID(),
+    leadId = randomUUID(),
+    blocker = randomUUID();
+  d.execute({
+    type: "profile.create",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: leadId,
+    name: "Disclosure lead",
+    instructions: "build",
+    capabilities: "code",
+  });
+  d.execute({
+    type: "project.create",
+    key: randomUUID(),
+    actor: "operator",
+    projectId,
+    name: "Disclosure project",
+    leadProfileId: leadId,
+  });
+  d.execute({
+    type: "task.create",
+    key: randomUUID(),
+    actor: "operator",
+    projectId,
+    taskId: blocker,
+    title: "Disclosure blocker",
+    outcome: "Finish",
+    ready: false,
+  });
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  let commandWrites = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/operator/commands"
+    )
+      commandWrites++;
+  });
+  await signIn(
+    page,
+    web.origin,
+    web.password,
+    `/app/tasks/new?project=${projectId}`,
+  );
+  const sections = page.locator(".composer-disclosure");
+  const summaries = () =>
+    sections.evaluateAll((all) =>
+      all.map((section) => ({
+        open: (section as HTMLDetailsElement).open,
+        summary: section.querySelector("summary")?.textContent,
+      })),
+    );
+  await page.getByLabel("Disclosure blocker").waitFor({ state: "attached" });
+  assert.deepEqual(await summaries(), [
+    { open: false, summary: "Optional contextNone" },
+    { open: false, summary: "Reference linksNone" },
+    { open: false, summary: "AssigneeDefault project lead allocation" },
+    { open: false, summary: "DependenciesNone" },
+  ]);
+  await page.getByLabel("Task title").fill("Disclosed outcome");
+  await page.getByLabel("Desired outcome").fill("Ship a useful result");
+  await expandComposer(page);
+  await page.getByLabel("Optional context").fill("Review supplied evidence");
+  await page
+    .getByLabel("Reference links")
+    .fill("https://example.com/one\nhttps://example.com/two");
+  await page.getByLabel("Assignee").selectOption(leadId);
+  await page.getByLabel("Disclosure blocker", { exact: true }).check();
+  const collapse = async () => {
+    const open = page.locator(".composer-disclosure[open] > summary");
+    while ((await open.count()) > 0) await open.first().click();
+  };
+  await collapse();
+  const supplied = [
+    { open: false, summary: "Optional context24 characters" },
+    { open: false, summary: "Reference links2 links" },
+    { open: false, summary: "AssigneeDisclosure lead" },
+    { open: false, summary: "Dependencies1 selected" },
+  ];
+  assert.deepEqual(await summaries(), supplied);
+  assert.equal(
+    await page.getByLabel("Optional context").inputValue(),
+    "Review supplied evidence",
+  );
+  assert.equal(await page.getByLabel("Assignee").inputValue(), leadId);
+  assert.equal(
+    await page.getByLabel("Disclosure blocker", { exact: true }).isChecked(),
+    true,
+  );
+  await screenshot(page, "390-composer-collapsed-summaries");
+
+  // An invalid link opens its section and focuses the field without a command.
+  await expandComposer(page);
+  await page.getByLabel("Reference links").fill("not a link");
+  await collapse();
+  await page
+    .getByRole("button", { name: "Create and start", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => document.activeElement?.id === "composer-links",
+  );
+  assert.equal((await summaries())[1]?.open, true);
+  assert.equal(commandWrites, 0);
+  await screenshot(page, "390-composer-link-error-expanded");
+  await page
+    .getByLabel("Reference links")
+    .fill("https://example.com/one\nhttps://example.com/two");
+  await collapse();
+
+  // A stored assignee that is no longer permitted fails before submission.
+  d.execute({
+    type: "profile.configure",
+    key: randomUUID(),
+    actor: "operator",
+    profileId: leadId,
+    expectedVersion: 1,
+    revoked: true,
+  });
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume unfinished input", exact: true })
+    .click();
+  await page.getByLabel("Disclosure blocker").waitFor({ state: "attached" });
+  assert.equal(
+    (await summaries())[2]?.summary,
+    "AssigneeSelected assignee unavailable",
+  );
+  await page
+    .getByRole("button", { name: "Create and start", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => document.activeElement?.id === "composer-profileId",
+  );
+  assert.equal((await summaries())[2]?.open, true);
+  await page
+    .getByText("Choose a currently permitted assignee.", { exact: true })
+    .waitFor();
+  assert.equal(commandWrites, 0);
+  assert.equal(
+    d.tasks(projectId).some((t) => t.title === "Disclosed outcome"),
+    false,
+  );
 });
 
 test("browser frozen storage failure sends zero commands and restores only last saved input", async (_t, journey) => {
@@ -471,6 +640,7 @@ test("committed lost-response creation survives reload expiry and exact reconcil
   await page
     .getByLabel("Desired outcome", { exact: true })
     .fill("Finish exactly once");
+  await expandComposer(page);
   await page.getByLabel("Assignee", { exact: true }).selectOption(profileId);
   await page.getByLabel("Recovery blocker", { exact: true }).check();
   const sent: string[] = [];
@@ -1510,6 +1680,7 @@ for (const viewport of [
     await page
       .getByLabel("Desired outcome", { exact: true })
       .fill("Detailed desired outcome.\n".repeat(180));
+    await expandComposer(page);
     await page
       .getByLabel("Optional context", { exact: true })
       .fill("Supplied context remains readable.\n".repeat(90));
@@ -1656,8 +1827,11 @@ test("composer switches scoped options despite delayed prior response and preser
     .fill("Preserved outcome");
   await page.getByLabel("Desired outcome", { exact: true }).fill("Do the work");
   await page.getByLabel("Project", { exact: true }).selectOption(b);
-  await page.getByLabel("Second dependency", { exact: true }).waitFor();
+  await page
+    .getByLabel("Second dependency", { exact: true })
+    .waitFor({ state: "attached" });
   release();
+  await expandComposer(page);
   await page.getByLabel("Assignee", { exact: true }).selectOption(leadB);
   assert.equal(
     await page.getByLabel("First dependency", { exact: true }).count(),
@@ -1665,7 +1839,9 @@ test("composer switches scoped options despite delayed prior response and preser
   );
   await page.getByLabel("Second dependency", { exact: true }).check();
   await page.getByLabel("Project", { exact: true }).selectOption(a);
-  await page.getByLabel("First dependency", { exact: true }).waitFor();
+  await page
+    .getByLabel("First dependency", { exact: true })
+    .waitFor({ state: "attached" });
   assert.equal(
     await page.getByLabel("Assignee", { exact: true }).inputValue(),
     "",
@@ -1680,6 +1856,7 @@ test("composer switches scoped options despite delayed prior response and preser
       { exact: true },
     )
     .waitFor();
+  await expandComposer(page);
   await page.getByLabel("Assignee", { exact: true }).selectOption(leadA);
   d.execute({
     type: "profile.configure",
@@ -1765,6 +1942,7 @@ test("replacement composer owns recovery before a detached committed receipt or 
     await page
       .getByLabel("Desired outcome", { exact: true })
       .fill("Finish exactly once");
+    await expandComposer(page);
     await page.getByLabel("Assignee", { exact: true }).selectOption(profileId);
     let release!: () => void, committed!: () => void;
     const held = new Promise<void>((done) => {

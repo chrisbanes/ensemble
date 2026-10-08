@@ -393,8 +393,26 @@ nav h2 {
 
 .composer .outcome-input {
   min-height: 260px;
-  resize: vertical;
   line-height: 1.5;
+}
+
+.composer-disclosure {
+  border-top: 1px solid var(--border);
+  padding: var(--space-12) 0;
+}
+
+.composer-disclosure summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-4) var(--space-12);
+  min-height: 44px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.composer-disclosure[open] summary {
+  margin-bottom: var(--space-12);
 }
 
 .composer-policy {
@@ -436,7 +454,8 @@ nav h2 {
   display: flex;
   gap: var(--space-12);
   flex-wrap: wrap;
-  padding: var(--space-16) 0;
+  padding: var(--space-16) 0
+    calc(var(--space-16) + var(--operator-safe-area-inset-bottom));
   margin-top: var(--space-24);
 }
 
