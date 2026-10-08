@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "./temp.js";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
 import type {
   Runtime,
@@ -39,6 +39,9 @@ function cursor(value: string): PowerEventCursor {
 class FakePowerEvents implements PowerEventSource {
   private current = cursor("baseline");
   private events: PowerEventBatch["events"] = [];
+  readGate: Promise<void> | undefined;
+  failAdvancement = false;
+  reads = 0;
 
   wake() {
     const next = cursor("wake-1");
@@ -51,6 +54,15 @@ class FakePowerEvents implements PowerEventSource {
   async readSince(
     requested: PowerEventCursor | null,
   ): Promise<PowerEventBatch> {
+    this.reads++;
+    await this.readGate;
+    if (this.failAdvancement && requested?.value === "wake-1")
+      return {
+        complete: false,
+        fromCursor: requested,
+        cursor: requested,
+        events: [],
+      };
     if (requested === null)
       return {
         complete: true,
@@ -85,6 +97,8 @@ class FakeRuntime implements Runtime {
   inspectionGate: Promise<void> | undefined;
   firstTurnEntered: (() => void) | undefined;
   firstTurnGate: Promise<void> | undefined;
+  identityEntered: (() => void) | undefined;
+  identityGate: Promise<void> | undefined;
   private toolCall:
     | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
     | undefined;
@@ -100,12 +114,16 @@ class FakeRuntime implements Runtime {
   }
   async interruptTurn() {}
   onUnexpectedRequest() {}
-  processIdentity(): RuntimeProcessIdentity {
-    return {
+  processIdentity(): RuntimeProcessIdentity | Promise<RuntimeProcessIdentity> {
+    const identity = {
       processId: "fake-pid",
       processStartedAt: "fake-start",
       bootId: "fake-boot",
     };
+    const gate = this.identityGate;
+    if (!gate) return identity;
+    this.identityEntered?.();
+    return gate.then(() => identity);
   }
   async waitForTurn(threadId: string, turnId: string) {
     await this.toolCall?.({
@@ -250,4 +268,192 @@ test("power-source shutdown failure does not retain the service database owner",
     await service.stop().catch(() => {});
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("power polling defaults to a 60 second interval", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-default-interval-"));
+  const delays: unknown[] = [];
+  const realSetInterval = globalThis.setInterval;
+  const spy = mock.method(globalThis, "setInterval", ((
+    ...args: Parameters<typeof setInterval>
+  ) => {
+    delays.push(args[1]);
+    return realSetInterval(...args);
+  }) as typeof setInterval);
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => new FakeRuntime(),
+    undefined,
+    { power: { enabled: true, eventSource: new FakePowerEvents() } },
+  );
+  try {
+    await service.start();
+    assert.ok(delays.includes(60_000), `intervals: ${delays.join(",")}`);
+    assert.ok(!delays.includes(5000));
+  } finally {
+    spy.mock.restore();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function postTurnPowerFixture(
+  run: (fixture: {
+    service: StandaloneService;
+    runtime: FakeRuntime;
+    events: FakePowerEvents;
+    secondWorkspace: string;
+    queued: () => { state: string; reason: string | null };
+  }) => Promise<void>,
+) {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-post-turn-"));
+  const firstWorkspace = join(root, "first");
+  const secondWorkspace = join(root, "second");
+  mkdirSync(firstWorkspace);
+  mkdirSync(secondWorkspace);
+  const runtime = new FakeRuntime();
+  const events = new FakePowerEvents();
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => runtime,
+    undefined,
+    {
+      power: {
+        eventSource: events,
+        // No timer poll during the test: only the admission gate may poll.
+        pollIntervalMs: 60_000,
+        assertion: new CaffeinateAssertion((() => new FakeChild()) as never),
+      },
+    },
+  );
+  const store = () =>
+    (
+      service as unknown as {
+        schedulerStore: {
+          byWorkId(workId: string): { state: string; reason: string | null };
+        };
+      }
+    ).schedulerStore;
+  try {
+    await service.start();
+    await service.submit("first", "first prompt", firstWorkspace);
+    assert.equal(runtime.starts, 1);
+    await run({
+      service,
+      runtime,
+      events,
+      secondWorkspace,
+      queued: () => store().byWorkId("second"),
+    });
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("queued work after a turn waits for a power poll that started after the turn ended", async () => {
+  await postTurnPowerFixture(
+    async ({ service, runtime, events, secondWorkspace, queued }) => {
+      const read = deferred();
+      events.readGate = read.promise;
+      const readsBefore = events.reads;
+      const second = await service.submit(
+        "second",
+        "second prompt",
+        secondWorkspace,
+      );
+      assert.equal(second.state, "ready");
+      assert.equal(runtime.starts, 1, "not admitted before the power poll");
+      assert.deepEqual(queued(), {
+        ...queued(),
+        state: "queued",
+        reason: "Waiting for power-event observation",
+      });
+      await waitUntil(() => events.reads > readsBefore);
+      assert.equal(runtime.starts, 1, "not admitted while the poll is running");
+
+      read.resolve();
+      await waitUntil(() => runtime.starts === 2);
+      assert.equal(service.powerStatus()?.admissionHeld, false);
+    },
+  );
+});
+
+test("a sleep/wake seen by the post-turn power poll holds queued work", async () => {
+  await postTurnPowerFixture(
+    async ({ service, runtime, events, secondWorkspace }) => {
+      events.wake();
+      events.failAdvancement = true;
+      await service.submit("second", "second prompt", secondWorkspace);
+      await waitUntil(() => service.powerStatus()?.admissionHeld === true);
+      await waitUntil(
+        () =>
+          service.powerStatus()?.admissionReason ===
+          "Power-event advancement is incomplete or ambiguous",
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      assert.equal(runtime.starts, 1, "transition holds new admission");
+    },
+  );
+});
+
+test("a post-turn power poll that resumes admission does not deadlock the scheduler", async () => {
+  await postTurnPowerFixture(
+    async ({ service, runtime, events, secondWorkspace }) => {
+      events.wake();
+      const read = deferred();
+      events.readGate = read.promise;
+      await service.submit("second", "second prompt", secondWorkspace);
+      assert.equal(runtime.starts, 1);
+      read.resolve();
+      // Reconciliation clears the hold and admissionResumed wakes the scheduler.
+      await waitUntil(() => runtime.starts === 2);
+      assert.equal(service.powerStatus()?.admissionHeld, false);
+    },
+  );
+});
+
+test("a turn ending while admission awaits still requires a later power poll", async () => {
+  await postTurnPowerFixture(
+    async ({ service, runtime, events, secondWorkspace, queued }) => {
+      const power = (
+        service as unknown as {
+          power: {
+            poll(): Promise<void>;
+            executionEnded(workId: string): Promise<void>;
+          };
+        }
+      ).power;
+      // Make the observation fresh so only the mid-admission end can stale it.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      await power.poll();
+      const identity = deferred();
+      const identityEntered = deferred();
+      runtime.identityGate = identity.promise;
+      runtime.identityEntered = identityEntered.resolve;
+      const submitted = service.submit(
+        "second",
+        "second prompt",
+        secondWorkspace,
+      );
+      await identityEntered.promise;
+      runtime.identityGate = undefined;
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      await power.executionEnded("other-turn");
+      const read = deferred();
+      events.readGate = read.promise;
+      const readsBefore = events.reads;
+      identity.resolve();
+      const second = await submitted;
+      assert.equal(second.state, "ready");
+      assert.equal(runtime.starts, 1, "not admitted after a mid-admission end");
+      assert.equal(queued().state, "queued");
+      assert.equal(queued().reason, "Waiting for power-event observation");
+      await waitUntil(() => events.reads > readsBefore);
+      assert.equal(runtime.starts, 1, "not admitted while the poll is running");
+
+      read.resolve();
+      await waitUntil(() => runtime.starts === 2);
+    },
+  );
 });

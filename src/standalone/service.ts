@@ -639,7 +639,7 @@ export class StandaloneService {
         (powerOptions?.eventSource !== undefined ||
           runtime instanceof CodexRuntime);
       if (powerEnabled) {
-        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 5000;
+        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 60_000;
         if (
           !Number.isSafeInteger(pollIntervalMs) ||
           pollIntervalMs <= 0 ||
@@ -3404,6 +3404,16 @@ export class StandaloneService {
         store.wait(request.workId, reason);
         return;
       }
+      // A sleep/wake during a turn that ended before now must be observed
+      // first. No await may separate this check from state.begin.
+      const power = this.power;
+      if (power && !power.observedForAdmission()) {
+        const reason = "Waiting for power-event observation";
+        state.wait(intent.id, reason);
+        store.wait(request.workId, reason);
+        this.pollPowerThenWake(power, generation);
+        return;
+      }
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),
@@ -3434,6 +3444,17 @@ export class StandaloneService {
       return;
     }
     this.startExecution(request, intent, workspaceKey, previous);
+  }
+
+  /** Never awaited by admission: admissionResumed wakes the scheduler drain. */
+  private pollPowerThenWake(
+    power: ExecutionPower,
+    generation: ServiceGeneration,
+  ): void {
+    this.observeBackgroundFailure(generation, "power-poll", async () => {
+      await power.poll();
+      await this.wakeScheduler(0, generation);
+    });
   }
 
   private startExecution(
