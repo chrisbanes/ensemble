@@ -122,7 +122,7 @@ export type RetainedReviewAnchorStageRequest = z.infer<
 
 export interface CaptureRetainedReviewAnchorInput {
   selection: RetainedReviewAnchorSelection;
-  identity: Pick<RetainedEvidenceIdentity, "taskId" | "taskVersion">;
+  identity: Pick<RetainedEvidenceIdentity, "taskId" | "captureTaskVersion">;
   currentWorkspace: () => Promise<WorkspaceInspectionCurrent>;
   currentPolicy: () => Promise<RetainedEvidenceCapturePolicy | undefined>;
   exportComparison: (
@@ -133,6 +133,7 @@ export interface CaptureRetainedReviewAnchorInput {
 }
 
 export interface RetainedEvidenceCapturePolicy {
+  taskVersion: number;
   fingerprint: string;
   excluded: readonly string[];
   authorizedRepositoryIds: readonly string[];
@@ -677,6 +678,7 @@ function validateOptionalResultBinding(
       manifest.sourceObservation.comparisonId !== comparisonId ||
       comparison.comparisonId !== comparisonId ||
       comparison.taskId !== manifest.taskId ||
+      comparison.taskVersion !== manifest.taskVersion ||
       comparison.workId !== manifest.workId ||
       comparison.workRevision !== manifest.workRevision ||
       comparison.requestSequence !== manifest.requestSequence ||
@@ -715,6 +717,8 @@ export async function captureRetainedReviewAnchor(
   const capturedAt = Date.now();
   const policy = await input.currentPolicy();
   if (!policy) throw new Error("Review anchor policy is unavailable");
+  if (policy.taskVersion !== input.identity.captureTaskVersion)
+    throw new Error("Review anchor task version changed");
   if (
     (selection.repositoryId &&
       !policy.authorizedRepositoryIds.includes(selection.repositoryId)) ||
@@ -764,8 +768,16 @@ export async function captureRetainedReviewAnchor(
         null,
         capturedAt,
       );
-    const currentPolicy = await input.currentPolicy();
-    if (!currentPolicy || currentPolicy.fingerprint !== policy.fingerprint)
+    const [currentPolicy, currentWorkspace] = await Promise.all([
+      input.currentPolicy(),
+      input.currentWorkspace(),
+    ]);
+    if (
+      !currentPolicy ||
+      currentPolicy.taskVersion !== input.identity.captureTaskVersion ||
+      currentPolicy.fingerprint !== policy.fingerprint ||
+      currentWorkspace.taskVersion !== input.identity.captureTaskVersion
+    )
       throw new Error("Review anchor policy changed during capture");
     const sourceText = textFromBytes(content.bytes);
     if (
@@ -787,7 +799,8 @@ export async function captureRetainedReviewAnchor(
   if (selection.sourceKind === "workspace-file") {
     const workspace = await input.currentWorkspace();
     if (
-      workspace.taskVersion !== input.identity.taskVersion ||
+      workspace.taskVersion !== input.identity.captureTaskVersion ||
+      policy.taskVersion !== input.identity.captureTaskVersion ||
       workspace.binding?.state !== "ready"
     )
       return gapReviewAnchorCandidate(
@@ -856,6 +869,7 @@ export async function captureRetainedReviewAnchor(
     const latestWorkspace = await input.currentWorkspace();
     if (
       !latestPolicy ||
+      latestPolicy.taskVersion !== input.identity.captureTaskVersion ||
       latestPolicy.fingerprint !== policy.fingerprint ||
       latestWorkspace.taskVersion !== workspace.taskVersion ||
       latestWorkspace.visibility !== workspace.visibility
@@ -941,7 +955,8 @@ export async function captureRetainedReviewAnchor(
   };
   const currentWorkspace = await input.currentWorkspace();
   if (
-    currentWorkspace.taskVersion !== input.identity.taskVersion ||
+    currentWorkspace.taskVersion !== input.identity.captureTaskVersion ||
+    policy.taskVersion !== input.identity.captureTaskVersion ||
     currentWorkspace.binding?.state !== "ready"
   )
     return gapReviewAnchorCandidate(
@@ -995,6 +1010,7 @@ export async function captureRetainedReviewAnchor(
   const latestWorkspace = await input.currentWorkspace();
   if (
     !latestPolicy ||
+    latestPolicy.taskVersion !== input.identity.captureTaskVersion ||
     latestPolicy.fingerprint !== policy.fingerprint ||
     latestWorkspace.taskVersion !== currentWorkspace.taskVersion ||
     latestWorkspace.visibility !== currentWorkspace.visibility
@@ -1146,6 +1162,7 @@ function comparisonMatches(
     comparison.state !== "unavailable" &&
     comparison.outcome === "completed" &&
     comparison.taskId === identity.taskId &&
+    comparison.taskVersion === identity.taskVersion &&
     comparison.comparisonId === capture.comparisonId &&
     comparison.workId === identity.workId &&
     comparison.workRevision === identity.workRevision &&
@@ -1241,6 +1258,14 @@ export async function captureRetainedResultEvidence(
     }
     if (!policy || !workspace) {
       items.push(gapItem(baseItem, "unavailable"));
+      return;
+    }
+    if (
+      workspace.taskId !== identity.taskId ||
+      workspace.taskVersion !== identity.captureTaskVersion ||
+      policy.taskVersion !== identity.captureTaskVersion
+    ) {
+      items.push(gapItem(baseItem, "binding-changed"));
       return;
     }
     if (artifact && artifact.availability !== "available") {
@@ -1373,6 +1398,16 @@ export async function captureRetainedResultEvidence(
       capturedAt,
       observedAt: observation.observedAt,
     };
+    if (
+      !workspace ||
+      !policy ||
+      workspace.taskId !== identity.taskId ||
+      workspace.taskVersion !== identity.captureTaskVersion ||
+      policy.taskVersion !== identity.captureTaskVersion
+    ) {
+      diffItems.push(gapItem(baseItem, "binding-changed"));
+      continue;
+    }
     if (!exactComparison || exactComparison.comparison.target !== "turn") {
       const reason =
         observation.captureState === "pending" ||
@@ -1425,7 +1460,12 @@ export async function captureRetainedResultEvidence(
       observation.comparisonId ?? "",
       identity.taskId,
       input.currentWorkspace,
-      policy ?? { fingerprint: "", excluded: [], authorizedRepositoryIds: [] },
+      policy ?? {
+        taskVersion: identity.captureTaskVersion,
+        fingerprint: "",
+        excluded: [],
+        authorizedRepositoryIds: [],
+      },
     );
     if (!("bytes" in value)) {
       diffItems.push(gapItem(baseItem, value.reason));
@@ -1478,6 +1518,7 @@ export async function captureRetainedResultEvidence(
     if (
       !policy ||
       !finalPolicy ||
+      finalPolicy.taskVersion !== identity.captureTaskVersion ||
       finalPolicy.fingerprint !== policy.fingerprint
     ) {
       for (let index = 0; index < items.length; index++) {

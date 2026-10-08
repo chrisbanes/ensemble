@@ -75,6 +75,7 @@ import {
   previewRetainedBytes,
   previewWorkspaceFile,
   retainedPathExcluded,
+  workspaceInspectionBindingIdentity,
   type WorkspaceInspectionCurrent,
   WorkspaceInspectionInputError,
   type WorkspaceInspectionPathReference,
@@ -719,6 +720,7 @@ export class OperatorApi {
           evidenceId: manifest.evidenceId,
           identity: {
             taskVersion: manifest.taskVersion,
+            captureTaskVersion: manifest.captureTaskVersion,
             assignmentId: manifest.assignmentId,
             assignmentVersion: manifest.assignmentVersion,
             workId: manifest.workId,
@@ -851,7 +853,11 @@ export class OperatorApi {
   ): Promise<"current" | "outdated" | "unknown" | "excluded" | "unavailable"> {
     if (anchor.sourceKind === "workspace-file") {
       const current = await this.workspaceInspectionCurrent(anchor.taskId);
-      if (current.binding?.state !== "ready") return "unknown";
+      if (
+        current.binding?.state !== "ready" ||
+        current.taskVersion !== policy.taskVersion
+      )
+        return "unknown";
       const path = relativePolicySegments(anchor.path);
       if (!path) return "unknown";
       const scope = anchor.repositoryId
@@ -861,6 +867,25 @@ export class OperatorApi {
         { taskId: anchor.taskId, scope, path, showIgnored: true },
         () => this.workspaceInspectionCurrent(anchor.taskId),
       );
+      let latestWorkspace: WorkspaceInspectionCurrent | undefined;
+      let latestPolicy: RetainedReadPolicy | undefined;
+      try {
+        [latestWorkspace, latestPolicy] = await Promise.all([
+          this.workspaceInspectionCurrent(anchor.taskId),
+          this.retainedEvidencePolicy(anchor.taskId),
+        ]);
+      } catch {
+        return "unknown";
+      }
+      if (
+        latestWorkspace.binding?.state !== "ready" ||
+        latestWorkspace.taskVersion !== current.taskVersion ||
+        workspaceInspectionBindingIdentity(latestWorkspace) !==
+          workspaceInspectionBindingIdentity(current) ||
+        !this.sameRetainedPolicy(latestPolicy, policy)
+      )
+        return "unknown";
+      if (preview.state === "missing") return "outdated";
       if (preview.state !== "ready" || preview.preview?.kind !== "text")
         return "unknown";
       const currentBytes = Buffer.from(preview.preview.text, "utf8");

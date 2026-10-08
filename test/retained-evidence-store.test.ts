@@ -17,6 +17,7 @@ import {
 } from "../src/core/retained-evidence.js";
 import { Store } from "../src/core/store.js";
 import { SchedulerStore } from "../src/standalone/scheduler.js";
+import { captureRetainedResultEvidence } from "../src/standalone/retained-evidence.js";
 import { ExecutionState } from "../src/standalone/state.js";
 
 const projectId = "10000000-0000-4000-8000-000000000001";
@@ -172,13 +173,18 @@ function fixture() {
     const currentTask = domain.task(taskId);
     const currentAssignment = domain.assignment(assignmentId);
     const currentBinding = state.taskBinding(workId);
+    const admittedRequest = db
+      .prepare("SELECT taskVersion FROM turn_requests WHERE workId=?")
+      .get(workId) as { taskVersion: number } | undefined;
     const revision = db
       .prepare("SELECT workRevision FROM task_work_revisions WHERE workId=?")
       .get(workId) as { workRevision: number };
     assert.ok(currentBinding);
+    assert.ok(admittedRequest);
     return {
       taskId,
-      taskVersion: Number(currentTask.version),
+      taskVersion: Number(admittedRequest.taskVersion),
+      captureTaskVersion: Number(currentTask.version),
       assignmentId,
       assignmentVersion: Number(currentAssignment.version),
       workId,
@@ -207,6 +213,16 @@ function fixture() {
     },
     get scheduler() {
       return scheduler;
+    },
+    configureTaskTitle(title: string) {
+      run({
+        type: "task.configure",
+        actor: "operator",
+        projectId,
+        taskId,
+        expectedVersion: Number(domain.task(taskId).version),
+        title,
+      });
     },
     reopen() {
       db.close();
@@ -358,6 +374,82 @@ test("callback without eligible file links commits a truthful empty manifest whi
     } finally {
       directFixture.close();
     }
+  } finally {
+    f.close();
+  }
+});
+
+test("task revision change during evidence capture rejects the result receipt and manifest atomically", async () => {
+  const f = fixture();
+  try {
+    const identity = f.identity();
+    let policyReads = 0;
+    const candidateAtCapture = await captureRetainedResultEvidence({
+      identity,
+      review: undefined,
+      currentWorkspace: async () => ({
+        taskId,
+        taskVersion: identity.captureTaskVersion,
+        visibility: "retained-result-test",
+        controlPaths: [],
+      }),
+      currentPolicy: async () => {
+        policyReads++;
+        if (policyReads === 2)
+          f.configureTaskTitle(
+            "Changed while result evidence was being captured",
+          );
+        const currentVersion = Number(f.domain.task(taskId).version);
+        return {
+          taskVersion: currentVersion,
+          fingerprint: `retained-policy-${currentVersion}`,
+          excluded: [],
+          authorizedRepositoryIds: [],
+        };
+      },
+      turnCaptures: {},
+      exportComparison: () => undefined,
+    });
+    assert.equal(policyReads, 2);
+    assert.equal(
+      candidateAtCapture.identity.captureTaskVersion,
+      identity.captureTaskVersion,
+    );
+    const call = report("task-revision-changed-during-capture");
+    assert.throws(
+      () => f.coordination.recordResult(call, candidateAtCapture),
+      /Retained result evidence binding changed/,
+    );
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT COUNT(*) AS count FROM coordination_results")
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        f.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM coordination_receipts WHERE callId=?",
+          )
+          .get(call.callId) as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      f.db
+        .prepare("SELECT state FROM domain_assignments WHERE id=?")
+        .get(assignmentId)?.state,
+      "running",
+    );
+    assert.equal(
+      f.db
+        .prepare("SELECT state FROM execution_pending_effects WHERE workId=?")
+        .get(workId)?.state,
+      "pending",
+    );
   } finally {
     f.close();
   }

@@ -35,7 +35,10 @@ const retainedMime = z.union([
 const identitySchema = z
   .object({
     taskId: uuid,
+    // taskVersion is the request's admitted revision. Capture safety uses the
+    // separately revalidated revision observed while reading workspace bytes.
     taskVersion: revision,
+    captureTaskVersion: revision,
     assignmentId: uuid,
     assignmentVersion: revision,
     workId: z.string().min(1).max(512),
@@ -465,6 +468,7 @@ export interface RetainedEvidenceManifest {
   evidenceId: string;
   taskId: string;
   taskVersion: number;
+  captureTaskVersion: number;
   assignmentId: string;
   assignmentVersion: number;
   workId: string;
@@ -508,6 +512,7 @@ export const retainedEvidenceManifestSchema = z
     evidenceId: uuid,
     taskId: uuid,
     taskVersion: revision,
+    captureTaskVersion: revision.optional(),
     assignmentId: uuid,
     assignmentVersion: revision,
     workId: z.string().min(1).max(512),
@@ -528,9 +533,13 @@ export const retainedEvidenceManifestSchema = z
   .strict();
 
 function parseManifest(value: unknown): RetainedEvidenceManifest {
-  return retainedEvidenceManifestSchema.parse(
-    value,
-  ) as RetainedEvidenceManifest;
+  const parsed = retainedEvidenceManifestSchema.parse(value);
+  return {
+    ...parsed,
+    // Older accepted callbacks required admitted and current task versions to
+    // match, so their single stored version is an exact value for both fields.
+    captureTaskVersion: parsed.captureTaskVersion ?? parsed.taskVersion,
+  } as RetainedEvidenceManifest;
 }
 
 function rowItem(row: Row): RetainedEvidenceItemRecord {
@@ -564,6 +573,7 @@ function identityMatches(
   return (
     expected.taskId === actual.taskId &&
     expected.taskVersion === actual.taskVersion &&
+    expected.captureTaskVersion === actual.captureTaskVersion &&
     expected.assignmentId === actual.assignmentId &&
     expected.assignmentVersion === actual.assignmentVersion &&
     expected.workId === actual.workId &&
@@ -641,6 +651,7 @@ export class RetainedEvidenceStore {
       profileRevision INTEGER NOT NULL CHECK(profileRevision > 0),
       profileId TEXT NOT NULL,
       taskVersion INTEGER NOT NULL CHECK(taskVersion > 0),
+      captureTaskVersion INTEGER NOT NULL CHECK(captureTaskVersion > 0),
       threadId TEXT NOT NULL,
       turnId TEXT NOT NULL,
       evidenceId TEXT NOT NULL UNIQUE,
@@ -682,6 +693,19 @@ export class RetainedEvidenceStore {
       ON retained_result_evidence_items(resultId,itemId);
     CREATE INDEX IF NOT EXISTS retained_result_items_task
       ON retained_result_evidence_items(taskId,resultId,itemId);`);
+    const evidenceColumns = this.db
+      .prepare("PRAGMA table_info(retained_result_evidence)")
+      .all() as Array<{ name: string }>;
+    if (
+      !evidenceColumns.some((column) => column.name === "captureTaskVersion")
+    ) {
+      this.db.exec(
+        "ALTER TABLE retained_result_evidence ADD COLUMN captureTaskVersion INTEGER",
+      );
+      this.db.exec(
+        "UPDATE retained_result_evidence SET captureTaskVersion=taskVersion WHERE captureTaskVersion IS NULL",
+      );
+    }
     this.db.exec(`CREATE TABLE IF NOT EXISTS retained_review_anchor_contexts (
       anchorId TEXT PRIMARY KEY,
       taskId TEXT NOT NULL REFERENCES domain_tasks(id),
@@ -771,11 +795,9 @@ export class RetainedEvidenceStore {
       );
     const candidate = candidateSchema.parse(input);
     const identity = identitySchema.parse(currentIdentity);
-    const validIdentity = identityMatches(candidate.identity, identity);
-    const preparedItems = candidate.items.map((item) => {
-      const parsed = itemSchema.parse(item);
-      return validIdentity ? parsed : asGap(parsed, "binding-changed");
-    });
+    if (!identityMatches(candidate.identity, identity))
+      throw new Error("Retained result evidence binding changed");
+    const preparedItems = candidate.items.map((item) => itemSchema.parse(item));
     const prior = this.db
       .prepare(
         "SELECT manifestJson FROM retained_result_evidence WHERE resultId=?",
@@ -876,9 +898,9 @@ export class RetainedEvidenceStore {
       .prepare(`INSERT INTO retained_result_evidence
       (resultId,taskId,assignmentId,assignmentVersion,workId,workRevision,
        requestSequence,conversationRevision,instructionsRevision,profileRevision,
-       profileId,taskVersion,threadId,turnId,evidenceId,capturedAt,comparisonId,
+       profileId,taskVersion,captureTaskVersion,threadId,turnId,evidenceId,capturedAt,comparisonId,
        comparisonCaptureState,comparisonOutcome,comparisonObservedAt,state,payloadBytes,manifestJson)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(
         owner.resultId,
         owner.taskId,
@@ -892,6 +914,7 @@ export class RetainedEvidenceStore {
         identity.profileRevision,
         identity.profileId,
         identity.taskVersion,
+        identity.captureTaskVersion,
         identity.threadId,
         identity.turnId,
         candidate.evidenceId,
@@ -942,6 +965,7 @@ export class RetainedEvidenceStore {
     const row = this.db
       .prepare(`SELECT evidence.manifestJson,evidence.assignmentId,
         evidence.assignmentVersion,evidence.workId,evidence.workRevision,
+        evidence.captureTaskVersion,
         result.taskId AS resultTaskId,result.assignmentId AS resultAssignmentId,
         result.assignmentVersion AS resultAssignmentVersion,result.workId AS resultWorkId,
         result.workRevision AS resultWorkRevision
@@ -962,6 +986,7 @@ export class RetainedEvidenceStore {
       manifest.workId !== row.resultWorkId ||
       manifest.workRevision !== row.workRevision ||
       manifest.workRevision !== row.resultWorkRevision ||
+      manifest.captureTaskVersion !== row.captureTaskVersion ||
       manifest.taskId !== row.resultTaskId
     )
       throw new Error("Retained result evidence lookup identity mismatch");

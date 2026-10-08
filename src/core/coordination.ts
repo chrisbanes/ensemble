@@ -892,6 +892,7 @@ export class CoordinationStore {
   recordResult(
     input: CoordinationCall,
     evidenceCandidate?: RetainedEvidenceCandidate,
+    options: { nativeResultCallback?: boolean } = {},
   ): {
     result: AssignmentResult;
     response: CoordinationToolResponse;
@@ -969,6 +970,14 @@ export class CoordinationStore {
         String(binding.assignmentId),
         Number(binding.workRevision),
       );
+      if (
+        options.nativeResultCallback === true &&
+        !priorResult &&
+        !evidenceCandidate
+      )
+        throw new Error(
+          "Native result callback requires retained evidence capture",
+        );
       let result: AssignmentResult;
       if (priorResult) {
         if (priorResult.payloadHash !== callHash)
@@ -3633,7 +3642,9 @@ export class CoordinationStore {
       .prepare(`SELECT binding.taskId, task.version AS taskVersion,
       binding.assignmentId, binding.conversationRevision,
       binding.assignmentVersion, binding.instructionsRevision, binding.profileRevision,
-      assignment.profileId, ${hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      assignment.profileId,
+      ${hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      ${hasTurnRequests ? "request.taskVersion" : "NULL"} AS admittedTaskVersion,
       revision.workRevision, intent.workId, assignment.resultDestination,
       assignment.resultRecipientAssignmentId, assignment.resultRecipientDisposition,
       assignment.requesterAssignmentId, assignment.projectId
@@ -3650,7 +3661,6 @@ export class CoordinationStore {
           ? `LEFT JOIN turn_requests request ON request.workId = binding.workId
         AND request.kind = 'assignment' AND request.taskId = binding.taskId
         AND request.assignmentId = binding.assignmentId
-        AND request.taskVersion = task.version
         AND request.assignmentVersion = binding.assignmentVersion
         AND request.instructionsRevision = binding.instructionsRevision
         AND request.profileRevision = binding.profileRevision`
@@ -3683,12 +3693,15 @@ export class CoordinationStore {
   private retainedEvidenceIdentity(binding: Row, call: CoordinationCall) {
     if (
       binding.requestSequence === null ||
-      binding.requestSequence === undefined
+      binding.requestSequence === undefined ||
+      binding.admittedTaskVersion === null ||
+      binding.admittedTaskVersion === undefined
     )
       return undefined;
     return {
       taskId: String(binding.taskId),
-      taskVersion: Number(binding.taskVersion),
+      taskVersion: Number(binding.admittedTaskVersion),
+      captureTaskVersion: Number(binding.taskVersion),
       assignmentId: String(binding.assignmentId),
       assignmentVersion: Number(binding.assignmentVersion),
       workId: String(binding.workId),

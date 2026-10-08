@@ -1155,6 +1155,7 @@ export class StandaloneService {
       const policy = await operatorApi.retainedEvidencePolicy(request.taskId);
       return policy
         ? {
+            taskVersion: policy.taskVersion,
             fingerprint: policy.fingerprint,
             excluded: policy.excluded,
             authorizedRepositoryIds: policy.authorizedRepositoryIds,
@@ -1167,7 +1168,8 @@ export class StandaloneService {
     if (initialWorkspace.taskVersion !== Number(task.version))
       throw new Error("Review anchor task version changed");
     const initialPolicy = await currentPolicy();
-    if (!initialPolicy) throw new Error("Review anchor policy is unavailable");
+    if (!initialPolicy || initialPolicy.taskVersion !== Number(task.version))
+      throw new Error("Review anchor policy is unavailable");
     const candidates = [];
     for (const selection of request.anchors)
       candidates.push(
@@ -1175,7 +1177,7 @@ export class StandaloneService {
           selection,
           identity: {
             taskId: request.taskId,
-            taskVersion: Number(task.version),
+            captureTaskVersion: Number(task.version),
           },
           currentWorkspace,
           currentPolicy,
@@ -1192,6 +1194,7 @@ export class StandaloneService {
     ]);
     if (
       !latestPolicy ||
+      latestPolicy.taskVersion !== initialPolicy.taskVersion ||
       latestPolicy.fingerprint !== initialPolicy.fingerprint ||
       latestWorkspace.taskVersion !== initialWorkspace.taskVersion ||
       latestWorkspace.visibility !== initialWorkspace.visibility
@@ -2283,6 +2286,14 @@ export class StandaloneService {
         text: "Coordination call is not bound to current task work",
         success: false,
       });
+    if (
+      call.tool === "ensemble_report_result" &&
+      (binding.requestSequence === null || binding.admittedTaskVersion === null)
+    )
+      return Promise.resolve({
+        text: "Result callback is missing its exact admitted request identity",
+        success: false,
+      });
 
     let capturedDeliveryCaller: RuntimeDeliveryCaller | undefined;
     const pending = Promise.resolve()
@@ -2343,6 +2354,7 @@ export class StandaloneService {
           );
           if (
             binding.requestSequence !== null &&
+            binding.admittedTaskVersion !== null &&
             !coordination.hasResultForWork(
               binding.workId,
               binding.workRevision,
@@ -2357,6 +2369,7 @@ export class StandaloneService {
               api.retainedEvidencePolicy(binding.taskId).then((value) =>
                 value
                   ? {
+                      taskVersion: value.taskVersion,
                       fingerprint: value.fingerprint,
                       excluded: value.excluded,
                       authorizedRepositoryIds: value.authorizedRepositoryIds,
@@ -2365,7 +2378,8 @@ export class StandaloneService {
               );
             const identity = {
               taskId: binding.taskId,
-              taskVersion: binding.taskVersion,
+              taskVersion: binding.admittedTaskVersion,
+              captureTaskVersion: binding.taskVersion,
               assignmentId: binding.assignmentId,
               assignmentVersion: binding.assignmentVersion,
               workId: binding.workId,
@@ -2396,8 +2410,37 @@ export class StandaloneService {
                 retainedReview,
               );
             }
+            const latestBinding = state.coordinationBinding(
+              call.threadId,
+              call.turnId,
+            );
+            const exactBindingFields = [
+              "taskId",
+              "taskVersion",
+              "admittedTaskVersion",
+              "assignmentId",
+              "assignmentVersion",
+              "workId",
+              "workRevision",
+              "requestSequence",
+              "conversationRevision",
+              "instructionsRevision",
+              "profileRevision",
+              "profileId",
+            ] as const;
+            if (
+              !latestBinding ||
+              exactBindingFields.some(
+                (field) => latestBinding[field] !== binding[field],
+              )
+            )
+              throw new Error(
+                "Coordination callback binding changed during result capture",
+              );
           }
-          response = coordination.recordResult(resultCall, candidate).response;
+          response = coordination.recordResult(resultCall, candidate, {
+            nativeResultCallback: true,
+          }).response;
         } else {
           response = dispatchCoordinationTool(
             coordination,
@@ -3443,6 +3486,7 @@ export class StandaloneService {
             comparisonId: randomUUID(),
             identity: {
               taskId: identity.taskId,
+              taskVersion: identity.taskVersion,
               workId: identity.workId,
               workRevision: identity.workRevision,
               requestSequence: identity.requestSequence,

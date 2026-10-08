@@ -586,14 +586,20 @@ the committed result and original manifest without rereading the workspace.
 
 Each manifest binds its result, task, assignment and work revisions, request
 sequence, profile/instructions revisions, runtime thread and turn, capture
-time, and comparison observation identity. Available bytes live in SQLite
-BLOBs. Capture, policy, read, size and quota failures are represented as
-explicit gaps while a valid result is recorded. A stale or foreign result
-binding remains rejected; an unrecoverable SQLite result/receipt commit failure
-rolls back the result and evidence together. Pending or unsettled comparison
-exports produce a diff gap. The service does not substitute an older turn or
-backfill that gap from a later comparison, and capture time does not imply that
-the callback stopped later workspace writes.
+time, and comparison observation identity. `taskVersion` is the exact revision
+admitted by the turn request; `captureTaskVersion` is the current task revision
+used for workspace and access-policy checks. A metadata edit after admission but
+before the callback preserves the admitted request identity while capture uses
+the current revision. If that current revision changes during capture, result,
+receipt and evidence commit together only when the exact binding still matches;
+otherwise the transaction is rejected without partial acceptance. Available
+bytes live in SQLite BLOBs. Capture, policy, read, size and quota failures are
+represented as explicit gaps while a valid result is recorded. A stale or
+foreign result binding remains rejected; an unrecoverable SQLite result/receipt
+commit failure rolls back the result and evidence together. Pending or unsettled
+comparison exports produce a diff gap. The service does not substitute an older
+turn or backfill that gap from a later comparison, and capture time does not
+imply that the callback stopped later workspace writes.
 
 Authenticated task-scoped reads resolve exact result and item IDs and recheck
 the current task, project, session, repository and path exclusions. A retained

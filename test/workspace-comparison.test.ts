@@ -1018,6 +1018,7 @@ test("turn observations retain exact BOM bytes and emit bound immutable side anc
   const sides = new Map<number, WorkspaceComparisonSideContent>();
   const identity = {
     taskId: f.binding.taskId,
+    taskVersion: 1,
     workId: "assignment-turn-bom",
     workRevision: 1,
     requestSequence: 1,

@@ -72,6 +72,7 @@ function replaceLatestCapture(
     outcome: "completed",
     startedAt: now,
     observedAt: now + 1,
+    taskVersion: identity.taskVersion,
     workId: identity.workId,
     workRevision: identity.workRevision,
     requestSequence: identity.requestSequence,
@@ -351,6 +352,25 @@ test("retained evidence and submitted comparison context survive replacement, cl
     /result binding mismatch/,
   );
 
+  const taskBeforeAnchor = f.service.domain().task(seeded.taskId);
+  f.service.domain().execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: seeded.projectId,
+    taskId: seeded.taskId,
+    expectedVersion: Number(taskBeforeAnchor.version),
+    title: "Metadata changed after immutable result capture",
+  });
+  const manifestBeforeAnchor = retained.result(seeded.taskId, result.resultId);
+  assert.deepEqual(manifestBeforeAnchor, originalManifest);
+  const laterBytes = Buffer.from("newer live file content\n");
+  await writeFile(textPath, laterBytes);
+  const resultItem = originalManifest.items.find(
+    (item) => item.kind === "file" && item.path === "retained-proof.txt",
+  );
+  assert.ok(resultItem?.state === "available");
+
   const staged = await f.service.stageReviewAnchorDraft({
     taskId: seeded.taskId,
     operationId: randomUUID(),
@@ -374,21 +394,49 @@ test("retained evidence and submitted comparison context survive replacement, cl
         endLine: 2,
         contentSha256: digest(callbackBytes),
       },
+      {
+        taskId: seeded.taskId,
+        repositoryId: null,
+        path: "retained-proof.txt",
+        sourceKind: "result-evidence",
+        context: "result",
+        resultId: result.resultId,
+        resultItemId: resultItem.itemId,
+        workId: result.workId,
+        side: "file",
+        startLine: 1,
+        endLine: 2,
+        contentSha256: digest(callbackBytes),
+      },
     ],
   });
-  assert.equal(staged.anchorIds.length, 2);
+  assert.equal(staged.anchorIds.length, 3);
   const leftAnchor = retained.reviewAnchor(seeded.taskId, staged.anchorIds[0]!);
   const rightAnchor = retained.reviewAnchor(
     seeded.taskId,
     staged.anchorIds[1]!,
   );
-  assert.ok(leftAnchor?.bytes && rightAnchor?.bytes);
+  const resultAnchor = retained.reviewAnchor(
+    seeded.taskId,
+    staged.anchorIds[2]!,
+  );
+  assert.ok(leftAnchor?.bytes && rightAnchor?.bytes && resultAnchor?.bytes);
   assert.deepEqual(leftAnchor.bytes, beforeBytes);
   assert.deepEqual(rightAnchor.bytes, callbackBytes);
+  assert.deepEqual(resultAnchor.bytes, callbackBytes);
   assert.equal(leftAnchor.anchor.sourceKind, "comparison-side");
   assert.equal(leftAnchor.anchor.resultId, result.resultId);
   assert.equal(leftAnchor.anchor.observedAt, exported!.comparison.observedAt);
   assert.equal(rightAnchor.anchor.observedAt, exported!.comparison.observedAt);
+  assert.equal(resultAnchor.anchor.sourceKind, "result-evidence");
+  assert.equal(resultAnchor.anchor.resultId, result.resultId);
+  assert.equal(resultAnchor.anchor.resultItemId, resultItem.itemId);
+  assert.equal(resultAnchor.anchor.observedAt, textItem.observedAt);
+  assert.deepEqual(
+    retained.result(seeded.taskId, result.resultId),
+    originalManifest,
+    "later metadata and anchors do not rewrite the original result manifest",
+  );
   assert.equal(
     retained
       .result(seeded.taskId, result.resultId)
@@ -632,12 +680,16 @@ test("retained evidence and submitted comparison context survive replacement, cl
       restored.reviewAnchor(seeded.taskId, staged.anchorIds[1]!)?.bytes,
       callbackBytes,
     );
+    assert.deepEqual(
+      restored.reviewAnchor(seeded.taskId, staged.anchorIds[2]!)?.bytes,
+      callbackBytes,
+    );
     assert.equal(
       restored.reviewAnchorSubmittedContext(
         seeded.taskId,
         sealed.submittedContextId,
       )?.anchorIds.length,
-      2,
+      3,
     );
   } finally {
     restoredDb.close();

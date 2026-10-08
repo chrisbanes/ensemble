@@ -484,7 +484,8 @@ export async function workspaceInspectionPathsExcluded(
       const latest = await current();
       return (
         latest.taskId !== taskId ||
-        bindingIdentity(latest) !== bindingIdentity(initial)
+        workspaceInspectionBindingIdentity(latest) !==
+          workspaceInspectionBindingIdentity(initial)
       );
     } catch {
       return true;
@@ -591,7 +592,8 @@ export async function workspaceInspectionPathsExcluded(
     const latest = await current();
     if (
       latest.taskId !== taskId ||
-      bindingIdentity(latest) !== bindingIdentity(initial)
+      workspaceInspectionBindingIdentity(latest) !==
+        workspaceInspectionBindingIdentity(initial)
     )
       return true;
     for (const scope of scopes.values()) {
@@ -604,7 +606,9 @@ export async function workspaceInspectionPathsExcluded(
   }
 }
 
-const bindingIdentity = (current: WorkspaceInspectionCurrent) =>
+export const workspaceInspectionBindingIdentity = (
+  current: WorkspaceInspectionCurrent,
+) =>
   JSON.stringify({
     taskId: current.taskId,
     taskVersion: current.taskVersion,
@@ -955,7 +959,8 @@ async function sameObservation(
         : await validateBoundRepositories(root.binding);
     return (
       latest.taskId === requestTaskId &&
-      bindingIdentity(latest) === bindingIdentity(initial) &&
+      workspaceInspectionBindingIdentity(latest) ===
+        workspaceInspectionBindingIdentity(initial) &&
       sameDirectorySnapshot(directorySnapshot, latestDirectory) &&
       (repositorySnapshots === undefined ||
         (latestRepositories !== undefined &&
@@ -1006,13 +1011,13 @@ export async function workspaceInspectionRootGuard(
       ))
     )
       return undefined;
-    const identity = bindingIdentity(initial);
+    const identity = workspaceInspectionBindingIdentity(initial);
     return async () => {
       try {
         const latest = await current();
         if (
           latest.taskId !== taskId ||
-          bindingIdentity(latest) !== identity ||
+          workspaceInspectionBindingIdentity(latest) !== identity ||
           (additionalIdentityCheck && !additionalIdentityCheck(latest))
         )
           return false;

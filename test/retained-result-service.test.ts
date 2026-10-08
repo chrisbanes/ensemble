@@ -37,6 +37,7 @@ function turnIdentity(turnId = "retained-turn"): RetainedEvidenceIdentity {
   return {
     taskId,
     taskVersion: 3,
+    captureTaskVersion: 3,
     assignmentId,
     assignmentVersion: 2,
     workId: "retained-work",
@@ -56,6 +57,7 @@ function workIdentity(
 ): WorkspaceTurnWorkIdentity {
   return {
     taskId: identity.taskId,
+    taskVersion: identity.taskVersion,
     workId: identity.workId,
     workRevision: identity.workRevision,
     requestSequence: identity.requestSequence,
@@ -121,6 +123,7 @@ function exportFor(
     outcome: "completed",
     startedAt: 10,
     observedAt: 20,
+    taskVersion: identity.taskVersion,
     workId: identity.workId,
     workRevision: identity.workRevision,
     requestSequence: identity.requestSequence,
@@ -172,6 +175,7 @@ async function filesystemFixture() {
     controlPaths: [],
   });
   const policy: RetainedEvidenceCapturePolicy = {
+    taskVersion: 3,
     fingerprint: "retained-policy-test",
     excluded: [],
     authorizedRepositoryIds: [],
@@ -225,6 +229,11 @@ test("native result capture retains exact workspace bytes in SQLite and receipt 
     await new Promise((resolve) => setTimeout(resolve, 10));
   const work = f.service.list().find((entry) => entry.state === "running");
   assert.ok(work?.threadId && work.turnId);
+  const admittedRequest = f.service
+    .turnRequests()
+    .find((request) => request.workId === work.workId);
+  assert.ok(admittedRequest);
+  const admittedTaskVersion = admittedRequest.taskVersion;
   const workspace = await f.service.taskWorkspace(seeded.taskId);
   assert.ok(workspace?.state === "ready");
   const path = join(workspace.path, "retained-proof.txt");
@@ -233,6 +242,16 @@ test("native result capture retains exact workspace bytes in SQLite and receipt 
     Buffer.from("first\r\nsecond\r\nfinal-without-newline", "utf8"),
   ]);
   await writeFile(path, expected);
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: seeded.projectId,
+    taskId: seeded.taskId,
+    expectedVersion: Number(d.task(seeded.taskId).version),
+    title: "Updated after request admission",
+  });
+  const captureTaskVersion = Number(d.task(seeded.taskId).version);
   const call = {
     threadId: work.threadId,
     turnId: work.turnId,
@@ -256,6 +275,8 @@ test("native result capture retains exact workspace bytes in SQLite and receipt 
     const store = new RetainedEvidenceStore(db);
     const manifest = store.result(seeded.taskId, recorded.resultId);
     assert.ok(manifest);
+    assert.equal(manifest.taskVersion, admittedTaskVersion);
+    assert.equal(manifest.captureTaskVersion, captureTaskVersion);
     assert.equal(manifest.state, "partial");
     assert.match(
       manifest.sourceObservation.comparisonId ?? "",
@@ -294,6 +315,102 @@ test("native result capture retains exact workspace bytes in SQLite and receipt 
       store.item(seeded.taskId, recorded.resultId, file.itemId)?.bytes,
       expected,
     );
+  });
+});
+
+test("native callback after a task metadata update records an empty manifest and exact receipt", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const seeded = await seedReviewTask(
+    f,
+    "Empty evidence after update",
+    "Retain an empty native callback",
+  );
+  const d = f.service.domain();
+  d.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: seeded.projectId,
+    expectedVersion: 1,
+    paused: false,
+  });
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: seeded.projectId,
+    taskId: seeded.taskId,
+    expectedVersion: Number(d.task(seeded.taskId).version),
+    ready: true,
+  });
+  for (let attempt = 0; attempt < 100 && f.runtime.turns < 1; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  for (
+    let attempt = 0;
+    attempt < 100 && !f.service.list().some((work) => work.state === "running");
+    attempt++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  const work = f.service.list().find((entry) => entry.state === "running");
+  assert.ok(work?.threadId && work.turnId);
+  const admittedRequest = f.service
+    .turnRequests()
+    .find((request) => request.workId === work.workId);
+  assert.ok(admittedRequest);
+  const admittedTaskVersion = admittedRequest.taskVersion;
+  d.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: seeded.projectId,
+    taskId: seeded.taskId,
+    expectedVersion: Number(d.task(seeded.taskId).version),
+    title: "Metadata updated during admitted turn",
+  });
+  const captureTaskVersion = Number(d.task(seeded.taskId).version);
+  const call = {
+    threadId: work.threadId,
+    turnId: work.turnId,
+    callId: randomUUID(),
+    tool: "ensemble_report_result",
+    arguments: { summary: "No eligible evidence links" },
+  };
+  const response = await f.runtime.callTool(call);
+  assert.equal(response.success, true, response.text);
+  const result = f.service.coordinationView().readTask(seeded.taskId)
+    .results[0];
+  assert.ok(result);
+  let capturedAt = 0;
+  f.seedPersistedState((db) => {
+    const store = new RetainedEvidenceStore(db);
+    const manifest = store.result(seeded.taskId, result.resultId);
+    assert.ok(manifest);
+    assert.equal(manifest.state, "empty");
+    assert.deepEqual(manifest.items, []);
+    assert.equal(manifest.taskVersion, admittedTaskVersion);
+    assert.equal(manifest.captureTaskVersion, captureTaskVersion);
+    capturedAt = manifest.capturedAt;
+    const receipt = db
+      .prepare(
+        "SELECT response, workId FROM coordination_receipts WHERE callId=?",
+      )
+      .get(call.callId) as { response: string; workId: string } | undefined;
+    assert.ok(receipt);
+    assert.equal(receipt.workId, work.workId);
+    assert.deepEqual(JSON.parse(receipt.response), response);
+  });
+  const replay = await f.runtime.callTool(call);
+  assert.deepEqual(replay, response);
+  f.seedPersistedState((db) => {
+    const manifest = new RetainedEvidenceStore(db).result(
+      seeded.taskId,
+      result.resultId,
+    );
+    assert.ok(manifest);
+    assert.equal(manifest.capturedAt, capturedAt);
+    assert.equal(manifest.taskVersion, admittedTaskVersion);
+    assert.equal(manifest.captureTaskVersion, captureTaskVersion);
   });
 });
 

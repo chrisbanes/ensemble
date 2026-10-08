@@ -229,6 +229,7 @@ export const workspacePreviewReadSchema = envelope(
 const retainedEvidenceIdentitySchema = z
   .object({
     taskVersion: revision,
+    captureTaskVersion: revision,
     assignmentId: uuid,
     assignmentVersion: revision,
     workId: z.string().min(1).max(512),
@@ -583,6 +584,7 @@ const workspaceTurnComparisonSchema = z
     outcome: z.enum(["completed", "failed", "unknown"]),
     startedAt: time,
     observedAt: time,
+    taskVersion: revision.optional(),
     workId: z.string().min(1).max(512),
     workRevision: revision,
     requestSequence: revision,
@@ -621,6 +623,7 @@ const workspaceComparisonSnapshotSchema = z.union([
 const workspaceTurnCaptureIdentitySchema = z
   .object({
     taskId: uuid,
+    taskVersion: revision.optional(),
     workId: z.string().min(1).max(512),
     workRevision: revision,
     requestSequence: revision,

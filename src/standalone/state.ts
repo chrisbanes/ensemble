@@ -88,12 +88,16 @@ export interface TaskTurnCaptureIdentity extends TaskExecutionBinding {
   profileId: string;
   workRevision: number;
   requestSequence: number;
+  taskVersion: number;
 }
 
 export interface CoordinationExecutionBinding extends TaskExecutionBinding {
+  /** Current task revision for workspace and access-policy checks. */
   taskVersion: number;
   workRevision: number;
   requestSequence: number | null;
+  /** Immutable revision admitted by the exact turn request. */
+  admittedTaskVersion: number | null;
   profileId: string;
   state: "running" | "completed";
 }
@@ -1098,7 +1102,8 @@ export class ExecutionState {
         binding.assignmentVersion, binding.instructionsRevision,
         binding.profileRevision, binding.conversationRevision,
         assignment.profileId, revision.workRevision,
-        request.sequence AS requestSequence
+        request.sequence AS requestSequence,
+        request.taskVersion AS taskVersion
         FROM task_execution_bindings binding
         JOIN task_work_revisions revision ON revision.workId = binding.workId
         JOIN turn_requests request ON request.workId = binding.workId
@@ -1131,6 +1136,7 @@ export class ExecutionState {
         profileId: z.string().min(1),
         workRevision: z.number().int().positive(),
         requestSequence: z.number().int().positive(),
+        taskVersion: z.number().int().positive(),
       })
       .parse(rows[0]);
   }
@@ -1297,7 +1303,6 @@ export class ExecutionState {
       ? `LEFT JOIN turn_requests request ON request.workId = binding.workId
         AND request.kind = 'assignment' AND request.taskId = binding.taskId
         AND request.assignmentId = binding.assignmentId
-        AND request.taskVersion = task.version
         AND request.assignmentVersion = binding.assignmentVersion
         AND request.instructionsRevision = binding.instructionsRevision
         AND request.profileRevision = binding.profileRevision`
@@ -1307,7 +1312,9 @@ export class ExecutionState {
       binding.assignmentId, binding.assignmentVersion,
       binding.instructionsRevision, binding.profileRevision,
       binding.conversationRevision, revision.workRevision,
-      assignment.profileId, ${this.hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      assignment.profileId,
+      ${this.hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      ${this.hasTurnRequests ? "request.taskVersion" : "NULL"} AS admittedTaskVersion,
       intent.state
       FROM task_execution_bindings binding
       JOIN execution_intents intent ON intent.workId = binding.workId

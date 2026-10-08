@@ -68,6 +68,7 @@ function turnComparison(
     outcome: "completed",
     startedAt: 10,
     observedAt: 20,
+    taskVersion: identity.taskVersion,
     workId: identity.workId,
     workRevision: identity.workRevision,
     requestSequence: identity.requestSequence,
@@ -151,6 +152,7 @@ test("no-result draft captures exact text and comparison sides, seals, discards,
   const profile = f.service.domain().profile(task.profileId);
   const workIdentity: WorkspaceTurnWorkIdentity = {
     taskId: task.taskId,
+    taskVersion: Number(f.service.domain().task(task.taskId).version),
     workId: "anchor-review-work",
     workRevision: 1,
     requestSequence: 1,
@@ -695,6 +697,7 @@ test("a comparison owned by another task is rejected without creating a draft", 
   const profile = f.service.domain().profile(foreignTask.profileId);
   const foreignIdentity: WorkspaceTurnWorkIdentity = {
     taskId: foreignTask.taskId,
+    taskVersion: Number(f.service.domain().task(foreignTask.taskId).version),
     workId: randomUUID(),
     workRevision: 1,
     requestSequence: 1,

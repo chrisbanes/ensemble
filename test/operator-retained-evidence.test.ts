@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
@@ -188,6 +188,14 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
   t.after(() => f.close());
   const captured = await captureNativeResult(f, { withArtifact: true });
   assert.ok(captured.artifactItem?.state === "available");
+  const renamedPath = join(captured.workspace.path, "rename-proof.txt");
+  const conflictedPath = join(captured.workspace.path, "conflict-proof.txt");
+  const renamedBytes = Buffer.from("rename original\r\nsecond line\r\n");
+  const conflictedBytes = Buffer.from(
+    "conflict original\r\nretained lines\r\n",
+  );
+  await writeFile(renamedPath, renamedBytes);
+  await writeFile(conflictedPath, conflictedBytes);
   const anchorStage = await f.service.stageReviewAnchorDraft({
     taskId: captured.seeded.taskId,
     operationId: randomUUID(),
@@ -203,17 +211,39 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
         endLine: 2,
         contentSha256: digest(captured.originalText),
       },
+      {
+        taskId: captured.seeded.taskId,
+        repositoryId: null,
+        path: "rename-proof.txt",
+        sourceKind: "workspace-file",
+        context: "workspace",
+        side: "file",
+        startLine: 1,
+        endLine: 2,
+        contentSha256: digest(renamedBytes),
+      },
+      {
+        taskId: captured.seeded.taskId,
+        repositoryId: null,
+        path: "conflict-proof.txt",
+        sourceKind: "workspace-file",
+        context: "workspace",
+        side: "file",
+        startLine: 1,
+        endLine: 2,
+        contentSha256: digest(conflictedBytes),
+      },
     ],
   });
   const anchorId = anchorStage.anchorIds[0]!;
+  const renamedAnchorId = anchorStage.anchorIds[1]!;
+  const conflictedAnchorId = anchorStage.anchorIds[2]!;
   const expectedExcerpt = captured.originalText.subarray(
     0,
     Buffer.byteLength("\uFEFFfirst\r\nsecond\r\n", "utf8"),
   );
-  await writeFile(
-    captured.textPath,
-    "later text must not replace captured bytes",
-  );
+  await rm(captured.textPath);
+  await rename(renamedPath, join(captured.workspace.path, "renamed-proof.txt"));
   await writeFile(captured.artifactPath!, Buffer.from("later image bytes"));
 
   let web = await f.startWeb();
@@ -238,6 +268,16 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
     captured.seeded.taskId +
     "/review-anchors/" +
     anchorId;
+  const renamedAnchorPathRoute =
+    "/api/operator/tasks/" +
+    captured.seeded.taskId +
+    "/review-anchors/" +
+    renamedAnchorId;
+  const conflictedAnchorPathRoute =
+    "/api/operator/tasks/" +
+    captured.seeded.taskId +
+    "/review-anchors/" +
+    conflictedAnchorId;
   const before = readState(f, captured.seeded.taskId);
   const manifestResponse = await fetch(web.origin + manifestPath, {
     headers: { cookie: session.cookie },
@@ -286,25 +326,58 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
   assert.equal(artifactResponse.headers.get("content-type"), "image/png");
   assert.deepEqual(Buffer.from(await artifactResponse.arrayBuffer()), png);
 
-  const anchorResponse = await fetch(web.origin + anchorPathRoute, {
-    headers: { cookie: session.cookie },
-  });
-  assert.equal(anchorResponse.status, 200);
-  const anchor = (await anchorResponse.json()) as {
-    data: {
-      state: string;
-      status: string;
-      anchor: Record<string, unknown>;
-      preview: { kind: "text"; text: string };
+  for (const [route, expected] of [
+    [anchorPathRoute, expectedExcerpt],
+    [renamedAnchorPathRoute, renamedBytes],
+  ] as const) {
+    const anchorResponse = await fetch(web.origin + route, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(anchorResponse.status, 200);
+    const anchor = (await anchorResponse.json()) as {
+      data: {
+        state: string;
+        status: string;
+        anchor: Record<string, unknown>;
+        preview: { kind: "text"; text: string };
+      };
     };
+    assert.equal(anchor.data.state, "available");
+    assert.equal(anchor.data.status, "outdated");
+    assert.deepEqual(Buffer.from(anchor.data.preview.text, "utf8"), expected);
+    assert.equal("originRoot" in anchor.data.anchor, false);
+  }
+  const originalTaskWorkspace = f.service.taskWorkspace;
+  let workspaceReads = 0;
+  f.service.taskWorkspace = async (taskId) => {
+    const binding = await originalTaskWorkspace.call(f.service, taskId);
+    workspaceReads++;
+    return binding && workspaceReads === 2
+      ? { ...binding, workspaceId: randomUUID() }
+      : binding;
   };
-  assert.equal(anchor.data.state, "available");
-  assert.equal(anchor.data.status, "outdated");
-  assert.deepEqual(
-    Buffer.from(anchor.data.preview.text, "utf8"),
-    expectedExcerpt,
-  );
-  assert.equal("originRoot" in anchor.data.anchor, false);
+  try {
+    const conflictedAnchorResponse = await fetch(
+      web.origin + conflictedAnchorPathRoute,
+      { headers: { cookie: session.cookie } },
+    );
+    assert.equal(conflictedAnchorResponse.status, 200);
+    const conflictedAnchor = (await conflictedAnchorResponse.json()) as {
+      data: {
+        state: string;
+        status: string;
+        preview: { kind: "text"; text: string };
+      };
+    };
+    assert.equal(conflictedAnchor.data.state, "available");
+    assert.equal(conflictedAnchor.data.status, "unknown");
+    assert.deepEqual(
+      Buffer.from(conflictedAnchor.data.preview.text, "utf8"),
+      conflictedBytes,
+    );
+  } finally {
+    f.service.taskWorkspace = originalTaskWorkspace;
+  }
   const after = readState(f, captured.seeded.taskId);
   assert.deepEqual(
     after,
@@ -330,6 +403,7 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
     itemPath,
     artifactPathRoute,
     anchorPathRoute,
+    renamedAnchorPathRoute,
   ]) {
     const response = await fetch(web.origin + route, {
       headers: { cookie: reopenedSession.cookie },
@@ -345,17 +419,22 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
       assert.equal(body.includes(f.directory), false);
     }
   }
-  const reopenedAnchor = await fetch(web.origin + anchorPathRoute, {
-    headers: { cookie: reopenedSession.cookie },
-  });
-  const reopenedAnchorBody = (await reopenedAnchor.json()) as {
-    data: { status: string; preview: { kind: "text"; text: string } };
-  };
-  assert.equal(reopenedAnchorBody.data.status, "unknown");
-  assert.deepEqual(
-    Buffer.from(reopenedAnchorBody.data.preview.text, "utf8"),
-    expectedExcerpt,
-  );
+  for (const [route, expected] of [
+    [anchorPathRoute, expectedExcerpt],
+    [renamedAnchorPathRoute, renamedBytes],
+  ] as const) {
+    const reopenedAnchor = await fetch(web.origin + route, {
+      headers: { cookie: reopenedSession.cookie },
+    });
+    const reopenedAnchorBody = (await reopenedAnchor.json()) as {
+      data: { status: string; preview: { kind: "text"; text: string } };
+    };
+    assert.equal(reopenedAnchorBody.data.status, "unknown");
+    assert.deepEqual(
+      Buffer.from(reopenedAnchorBody.data.preview.text, "utf8"),
+      expected,
+    );
+  }
 });
 
 test("a retained artifact gap stays a gap after a matching live file appears", async (t) => {
@@ -440,6 +519,7 @@ test("current exclusions cover every retained diff and rename path without metad
   const identity: RetainedEvidenceIdentity = {
     taskId: seeded.taskId,
     taskVersion: Number(task.version),
+    captureTaskVersion: Number(task.version),
     assignmentId: result.assignmentId,
     assignmentVersion: result.assignmentVersion,
     workId: result.workId,
