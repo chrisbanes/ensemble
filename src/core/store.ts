@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
-type SqlValue = string | number | null;
+type SqlValue = string | number | Uint8Array | null;
 
 // The storage contract is deliberately limited to the SQLite operations used here.
 export interface Database {

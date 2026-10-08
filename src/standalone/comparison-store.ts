@@ -132,6 +132,7 @@ const turnComparisonSchema = z
     outcome: z.enum(["completed", "failed", "unknown"]),
     startedAt: z.number().int().nonnegative(),
     observedAt: z.number().int().nonnegative(),
+    taskVersion: z.number().int().positive().optional(),
     workId: z.string().min(1),
     workRevision: z.number().int().positive(),
     requestSequence: z.number().int().positive(),
@@ -208,6 +209,7 @@ const turnCaptureSchema = z
     identity: z
       .object({
         taskId: z.string().min(1),
+        taskVersion: z.number().int().positive().optional(),
         workId: z.string().min(1),
         workRevision: z.number().int().positive(),
         requestSequence: z.number().int().positive(),
@@ -316,6 +318,7 @@ const parseTurnCapture = (text: string) =>
 
 const identityFields = [
   "taskId",
+  "taskVersion",
   "workId",
   "workRevision",
   "requestSequence",
@@ -571,6 +574,16 @@ export class SqliteWorkspaceComparisonStore {
     };
   }
 
+  comparisonOwner(comparisonId: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT taskId FROM workspace_comparison_current WHERE comparisonId = ?
+      UNION ALL
+      SELECT taskId FROM workspace_turn_captures WHERE comparisonId = ?
+      LIMIT 1`)
+      .get(comparisonId, comparisonId) as { taskId: string } | undefined;
+    return row?.taskId;
+  }
+
   beginTurnCapture(capture: WorkspaceTurnCaptureRecord): void {
     const parsed = turnCaptureSchema.parse(
       capture,
@@ -669,6 +682,23 @@ export class SqliteWorkspaceComparisonStore {
       throw new Error("invalid-finished-turn-capture");
     const comparison = parsed.comparison;
     if (!comparison) throw new Error("invalid-finished-turn-capture");
+    if (
+      comparison.target !== "turn" ||
+      comparison.taskId !== parsed.identity.taskId ||
+      comparison.taskVersion !== parsed.identity.taskVersion ||
+      comparison.workId !== parsed.identity.workId ||
+      comparison.workRevision !== parsed.identity.workRevision ||
+      comparison.requestSequence !== parsed.identity.requestSequence ||
+      comparison.assignmentId !== parsed.identity.assignmentId ||
+      comparison.assignmentVersion !== parsed.identity.assignmentVersion ||
+      comparison.instructionsRevision !==
+        parsed.identity.instructionsRevision ||
+      comparison.profileRevision !== parsed.identity.profileRevision ||
+      comparison.profileId !== parsed.identity.profileId ||
+      comparison.threadId !== parsed.threadId ||
+      comparison.turnId !== parsed.turnId
+    )
+      throw new Error("finished-turn-comparison-binding-mismatch");
     validateComparisonExport(comparison, parsed.sides ?? []);
     const payloadJson = serialize(parsed);
     return transaction(this.db, () => {

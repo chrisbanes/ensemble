@@ -447,6 +447,24 @@ export async function workspaceInspectionPathExcluded(
   }
 }
 
+/** Recheck a retained relative path against today's private/control-path rules without reading it. */
+export async function retainedPathExcluded(
+  originRoot: string,
+  path: readonly string[],
+  controlPaths: readonly string[],
+): Promise<boolean> {
+  try {
+    const segments = safeSegments(path);
+    if (!isAbsolute(originRoot) || segments.length === 0) return true;
+    const root = resolve(originRoot);
+    if (root.split(sep).some(privateComponent)) return true;
+    const excluded = await createPathExclusion(root, controlPaths);
+    return excluded(resolve(root, ...segments));
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Revalidate a bounded set of paths under one current binding and privacy
  * snapshot. Stored comparison responses can contain many hunks for the same
@@ -466,7 +484,8 @@ export async function workspaceInspectionPathsExcluded(
       const latest = await current();
       return (
         latest.taskId !== taskId ||
-        bindingIdentity(latest) !== bindingIdentity(initial)
+        workspaceInspectionBindingIdentity(latest) !==
+          workspaceInspectionBindingIdentity(initial)
       );
     } catch {
       return true;
@@ -573,7 +592,8 @@ export async function workspaceInspectionPathsExcluded(
     const latest = await current();
     if (
       latest.taskId !== taskId ||
-      bindingIdentity(latest) !== bindingIdentity(initial)
+      workspaceInspectionBindingIdentity(latest) !==
+        workspaceInspectionBindingIdentity(initial)
     )
       return true;
     for (const scope of scopes.values()) {
@@ -586,7 +606,9 @@ export async function workspaceInspectionPathsExcluded(
   }
 }
 
-const bindingIdentity = (current: WorkspaceInspectionCurrent) =>
+export const workspaceInspectionBindingIdentity = (
+  current: WorkspaceInspectionCurrent,
+) =>
   JSON.stringify({
     taskId: current.taskId,
     taskVersion: current.taskVersion,
@@ -937,7 +959,8 @@ async function sameObservation(
         : await validateBoundRepositories(root.binding);
     return (
       latest.taskId === requestTaskId &&
-      bindingIdentity(latest) === bindingIdentity(initial) &&
+      workspaceInspectionBindingIdentity(latest) ===
+        workspaceInspectionBindingIdentity(initial) &&
       sameDirectorySnapshot(directorySnapshot, latestDirectory) &&
       (repositorySnapshots === undefined ||
         (latestRepositories !== undefined &&
@@ -988,13 +1011,13 @@ export async function workspaceInspectionRootGuard(
       ))
     )
       return undefined;
-    const identity = bindingIdentity(initial);
+    const identity = workspaceInspectionBindingIdentity(initial);
     return async () => {
       try {
         const latest = await current();
         if (
           latest.taskId !== taskId ||
-          bindingIdentity(latest) !== identity ||
+          workspaceInspectionBindingIdentity(latest) !== identity ||
           (additionalIdentityCheck && !additionalIdentityCheck(latest))
         )
           return false;
@@ -1197,6 +1220,71 @@ const validText = (bytes: Buffer): string | undefined => {
     return undefined;
   }
 };
+
+/** Reapply the existing bounded preview checks to immutable retained bytes. */
+export function previewRetainedBytes(
+  bytes: Buffer,
+  expectedMime: string,
+): WorkspacePreviewData | undefined {
+  if (bytes.byteLength > inspectionLimits.maxImageOrPdfBytes) return undefined;
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (expectedMime === "application/pdf") {
+    if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") return undefined;
+    return {
+      kind: "base64",
+      mime: "application/pdf",
+      data: bytes.toString("base64"),
+      sha256,
+      size: bytes.byteLength,
+      maxDisplayedPages: inspectionLimits.maxPdfDisplayedPages,
+    };
+  }
+  if (expectedMime.startsWith("image/")) {
+    if (bytes.byteLength > inspectionLimits.maxImageOrPdfBytes)
+      return undefined;
+    const raster = rasterInfo(bytes);
+    if (
+      !raster ||
+      raster.mime !== expectedMime ||
+      raster.width < 1 ||
+      raster.height < 1 ||
+      raster.width * raster.height > inspectionLimits.maxImagePixels
+    )
+      return undefined;
+    return {
+      kind: "base64",
+      mime: raster.mime,
+      data: bytes.toString("base64"),
+      sha256,
+      size: bytes.byteLength,
+      width: raster.width,
+      height: raster.height,
+    };
+  }
+  if (
+    !expectedMime.startsWith("text/") &&
+    expectedMime !== "application/json; charset=utf-8" &&
+    expectedMime !== "application/sql; charset=utf-8" &&
+    expectedMime !== "application/vnd.ensemble.workspace-diff+json"
+  )
+    return undefined;
+  if (bytes.byteLength > inspectionLimits.maxTextBytes) return undefined;
+  const text = validText(bytes);
+  if (
+    text === undefined ||
+    !Buffer.from(text, "utf8").equals(bytes) ||
+    rasterInfo(bytes) !== undefined ||
+    bytes.subarray(0, 5).toString("ascii") === "%PDF-"
+  )
+    return undefined;
+  return {
+    kind: "text",
+    mime: expectedMime,
+    text,
+    sha256,
+    size: bytes.byteLength,
+  };
+}
 
 export async function listWorkspaceDirectory(
   request: WorkspaceInspectionRequest,

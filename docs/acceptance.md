@@ -238,7 +238,8 @@ The approved local code review amendment adds these scenarios:
 ### #780 server-side evidence map
 
 The #780 implementation adds authenticated comparison reads and turn capture;
-it does not implement the #782 review UI or #781 result-retention lifetime.
+it does not implement the #782 review UI. #781 adds the bounded server-side
+result and review-context lifetime described below.
 These suites cover the server-side portions of WI03–WI06 and WI10–WI11:
 
 | Criteria | Offline evidence |
@@ -278,6 +279,29 @@ acceptance scope. Record source/runtime identity, observed captures, limits and
 exact resource cleanup; reuse unaffected runtime and #742 evidence. The
 implementation owner runs validation. Review the Pen interaction/state handoff
 before UI implementation and retain final integrated usability review.
+
+### #781 retained evidence and review-context evidence map
+
+The offline suites establish bounded server-side persistence, authenticated
+reads and backup/restore for WI03, WI07 and the immutable-context portions of
+WI10–WI11. They do not implement or qualify the #782 review composer, sending,
+delivery receipt or desktop/phone/keyboard UI scenarios.
+
+| Criteria | Offline evidence |
+| --- | --- |
+| WI03 exact binding, safe capture/read, current exclusions, rename-path filtering, post-await changes and session privacy | `retained-evidence-store.test.ts`, `retained-result-service.test.ts`, `operator-retained-evidence.test.ts`, `operator-task-review.test.ts`, `operator-workspace-inspection.test.ts`; real SQLite/filesystem fixtures and authenticated HTTP. |
+| WI07 original linked file/image bytes, callback receipt replay, truthful empty/gap states, no older-turn substitution or later-file backfill | `retained-evidence-store.test.ts`, `retained-result-service.test.ts`, `operator-retained-evidence.test.ts`; exact bytes and identity read after edit, restart and workspace cleanup. |
+| WI10 exact comparison-side, range, hash and optional result association; durable draft/sealed/discarded context | `review-anchor-retention.test.ts`, `retained-evidence-integration.test.ts`; no-result drafts, both diff sides, source identity rejection and submitted-context preservation. |
+| WI11 original context after edits, rename/delete, latest-capture replacement, restart and workspace cleanup | `review-anchor-retention.test.ts`, `operator-retained-evidence.test.ts`, `retained-evidence-integration.test.ts`; missing comparison remains unknown and retained bytes are not retargeted. |
+| SQLite persistence and offline backup/verify/restore of evidence BLOBs | `retained-evidence-integration.test.ts`, `workspaces.test.ts`, `operator-web-http.test.ts`; integrity, foreign-key and exact-byte readback checks. |
+
+The integrated callback fixture demonstrates a pending comparison gap at result
+time, then a finished exact comparison used for separately retained review
+anchors. The original result manifest remains pending with its diff gap; the
+anchor keeps the completed comparison's own observation time and bytes. This
+does not imply that the result callback stopped later writes or that a review
+was delivered or received. Direct result-recording paths without a retention
+candidate and historical results preserve their earlier behavior.
 
 ## Implemented service and integration proofs
 

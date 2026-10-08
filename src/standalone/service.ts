@@ -6,10 +6,12 @@ import { z } from "zod";
 import {
   type CoordinationCall,
   type CoordinationReceipt,
+  type CoordinationToolResponse,
   CoordinationStore,
   type InboxDelivery,
   type RuntimeQuestionRecord,
 } from "../core/coordination.js";
+import { reviewMetadataSchema } from "../core/task-review.js";
 import {
   canonicalMaterial,
   type DeliveryActionRecord,
@@ -32,6 +34,7 @@ import {
   verifiedRepository,
 } from "../core/github-source.js";
 import { Store } from "../core/store.js";
+import { OperatorApi } from "./operator-api.js";
 import {
   CodexRuntime,
   parseFailureEvidence,
@@ -51,6 +54,14 @@ import {
   dispatchCoordinationTool,
   isCoordinationTool,
 } from "./coordination-tools.js";
+import {
+  captureRetainedReviewAnchor,
+  captureRetainedResultEvidence,
+  failedRetainedResultEvidenceCandidate,
+  retainedReviewAnchorMaterialHash,
+  retainedReviewAnchorStageRequestSchema,
+  type RetainedReviewAnchorStageRequest,
+} from "./retained-evidence.js";
 import { CoordinationView } from "./coordination-view.js";
 import {
   STANDALONE_MARKER_CONTENTS,
@@ -1114,6 +1125,130 @@ export class StandaloneService {
     return this.coordination.taskReview();
   }
 
+  retainedEvidence() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.retainedEvidence();
+  }
+
+  async stageReviewAnchorDraft(input: RetainedReviewAnchorStageRequest) {
+    const request = retainedReviewAnchorStageRequestSchema.parse(input);
+    const task = this.domain().task(request.taskId);
+    const evidence = this.retainedEvidence();
+    const materialHash = retainedReviewAnchorMaterialHash(request);
+    const prior = evidence.reviewAnchorOperation(
+      request.taskId,
+      request.operationId,
+      "stage",
+      materialHash,
+    );
+    if (prior) {
+      if (prior.state !== "staged")
+        throw new Error("Review anchor operation response kind mismatch");
+      return prior;
+    }
+
+    const operatorApi = new OperatorApi(this, [
+      this.dataDir,
+      process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+    ]);
+    const currentPolicy = async () => {
+      const policy = await operatorApi.retainedEvidencePolicy(request.taskId);
+      return policy
+        ? {
+            taskVersion: policy.taskVersion,
+            fingerprint: policy.fingerprint,
+            excluded: policy.excluded,
+            authorizedRepositoryIds: policy.authorizedRepositoryIds,
+          }
+        : undefined;
+    };
+    const currentWorkspace = () =>
+      this.turnWorkspaceInspectionCurrent(request.taskId);
+    const initialWorkspace = await currentWorkspace();
+    if (initialWorkspace.taskVersion !== Number(task.version))
+      throw new Error("Review anchor task version changed");
+    const initialPolicy = await currentPolicy();
+    if (!initialPolicy || initialPolicy.taskVersion !== Number(task.version))
+      throw new Error("Review anchor policy is unavailable");
+    const candidates = [];
+    for (const selection of request.anchors)
+      candidates.push(
+        await captureRetainedReviewAnchor({
+          selection,
+          identity: {
+            taskId: request.taskId,
+            captureTaskVersion: Number(task.version),
+          },
+          currentWorkspace,
+          currentPolicy,
+          exportComparison: (comparisonId) =>
+            this.workspaceComparisonExport(request.taskId, comparisonId),
+          comparisonOwner: (comparisonId) =>
+            this.workspaceComparisons?.comparisonOwner(comparisonId),
+          retainedEvidence: evidence,
+        }),
+      );
+    const [latestPolicy, latestWorkspace] = await Promise.all([
+      currentPolicy(),
+      currentWorkspace(),
+    ]);
+    if (
+      !latestPolicy ||
+      latestPolicy.taskVersion !== initialPolicy.taskVersion ||
+      latestPolicy.fingerprint !== initialPolicy.fingerprint ||
+      latestWorkspace.taskVersion !== initialWorkspace.taskVersion ||
+      latestWorkspace.visibility !== initialWorkspace.visibility
+    )
+      throw new Error(
+        "Review anchor task or access binding changed during capture",
+      );
+    return evidence.stageReviewAnchorDraft(
+      request.taskId,
+      request.operationId,
+      materialHash,
+      candidates,
+    );
+  }
+
+  sealReviewAnchorDraft(input: {
+    taskId: string;
+    draftId: string;
+    operationId: string;
+    anchorIds: readonly string[];
+  }) {
+    this.domain().task(input.taskId);
+    const materialHash = materialDigest({
+      taskId: input.taskId,
+      draftId: input.draftId,
+      anchorIds: [...input.anchorIds],
+    });
+    return this.retainedEvidence().sealReviewAnchorDraft(
+      input.taskId,
+      input.draftId,
+      input.operationId,
+      materialHash,
+      input.anchorIds,
+    );
+  }
+
+  discardReviewAnchorDraft(input: {
+    taskId: string;
+    draftId: string;
+    operationId: string;
+  }) {
+    this.domain().task(input.taskId);
+    const materialHash = materialDigest({
+      taskId: input.taskId,
+      draftId: input.draftId,
+    });
+    return this.retainedEvidence().discardReviewAnchorDraft(
+      input.taskId,
+      input.draftId,
+      input.operationId,
+      materialHash,
+    );
+  }
+
   domain(): DomainStore {
     if (!this.domainState) throw new Error("Service is not started");
     return this.domainState;
@@ -1580,6 +1715,10 @@ export class StandaloneService {
   ): WorkspaceComparisonExport | undefined {
     this.domain().task(taskId);
     return this.workspaceComparisons?.exportComparison(taskId, comparisonId);
+  }
+
+  workspaceComparisonOwner(comparisonId: string): string | undefined {
+    return this.workspaceComparisons?.comparisonOwner(comparisonId);
   }
 
   workspaceTurnCaptureSlots(taskId: string) {
@@ -2147,6 +2286,14 @@ export class StandaloneService {
         text: "Coordination call is not bound to current task work",
         success: false,
       });
+    if (
+      call.tool === "ensemble_report_result" &&
+      (binding.requestSequence === null || binding.admittedTaskVersion === null)
+    )
+      return Promise.resolve({
+        text: "Result callback is missing its exact admitted request identity",
+        success: false,
+      });
 
     let capturedDeliveryCaller: RuntimeDeliveryCaller | undefined;
     const pending = Promise.resolve()
@@ -2196,11 +2343,111 @@ export class StandaloneService {
             },
           );
         }
-        const response = dispatchCoordinationTool(
-          coordination,
-          call as CoordinationCall,
-          () => !state.taskHold(binding.taskId),
-        );
+        let response: CoordinationToolResponse;
+        if (call.tool === "ensemble_report_result") {
+          const resultCall = call as CoordinationCall;
+          let candidate:
+            | Awaited<ReturnType<typeof captureRetainedResultEvidence>>
+            | undefined;
+          const review = reviewMetadataSchema.safeParse(
+            resultCall.arguments.review,
+          );
+          if (
+            binding.requestSequence !== null &&
+            binding.admittedTaskVersion !== null &&
+            !coordination.hasResultForWork(
+              binding.workId,
+              binding.workRevision,
+            ) &&
+            (resultCall.arguments.review === undefined || review.success)
+          ) {
+            const api = new OperatorApi(this, [
+              this.dataDir,
+              process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
+            ]);
+            const policy = () =>
+              api.retainedEvidencePolicy(binding.taskId).then((value) =>
+                value
+                  ? {
+                      taskVersion: value.taskVersion,
+                      fingerprint: value.fingerprint,
+                      excluded: value.excluded,
+                      authorizedRepositoryIds: value.authorizedRepositoryIds,
+                    }
+                  : undefined,
+              );
+            const identity = {
+              taskId: binding.taskId,
+              taskVersion: binding.admittedTaskVersion,
+              captureTaskVersion: binding.taskVersion,
+              assignmentId: binding.assignmentId,
+              assignmentVersion: binding.assignmentVersion,
+              workId: binding.workId,
+              workRevision: binding.workRevision,
+              requestSequence: binding.requestSequence,
+              conversationRevision: binding.conversationRevision,
+              instructionsRevision: binding.instructionsRevision,
+              profileRevision: binding.profileRevision,
+              profileId: binding.profileId,
+              threadId: call.threadId,
+              turnId: call.turnId,
+            };
+            const retainedReview = review.success ? review.data : undefined;
+            try {
+              candidate = await captureRetainedResultEvidence({
+                identity,
+                review: retainedReview,
+                currentWorkspace: () =>
+                  this.turnWorkspaceInspectionCurrent(binding.taskId),
+                currentPolicy: policy,
+                turnCaptures: this.workspaceTurnCaptureSlots(binding.taskId),
+                exportComparison: (comparisonId) =>
+                  this.workspaceComparisonExport(binding.taskId, comparisonId),
+              });
+            } catch {
+              candidate = failedRetainedResultEvidenceCandidate(
+                identity,
+                retainedReview,
+              );
+            }
+            const latestBinding = state.coordinationBinding(
+              call.threadId,
+              call.turnId,
+            );
+            const exactBindingFields = [
+              "taskId",
+              "taskVersion",
+              "admittedTaskVersion",
+              "assignmentId",
+              "assignmentVersion",
+              "workId",
+              "workRevision",
+              "requestSequence",
+              "conversationRevision",
+              "instructionsRevision",
+              "profileRevision",
+              "profileId",
+            ] as const;
+            if (
+              !latestBinding ||
+              exactBindingFields.some(
+                (field) => latestBinding[field] !== binding[field],
+              )
+            )
+              throw new Error(
+                "Coordination callback binding changed during result capture",
+              );
+          }
+          response = coordination.recordResult(resultCall, candidate, {
+            nativeResultCallback: true,
+          }).response;
+        } else {
+          response = dispatchCoordinationTool(
+            coordination,
+            call as CoordinationCall,
+            () => !state.taskHold(binding.taskId),
+          );
+        }
         if (response.success) await this.wakeScheduler();
         return response;
       })
@@ -3239,6 +3486,7 @@ export class StandaloneService {
             comparisonId: randomUUID(),
             identity: {
               taskId: identity.taskId,
+              taskVersion: identity.taskVersion,
               workId: identity.workId,
               workRevision: identity.workRevision,
               requestSequence: identity.requestSequence,

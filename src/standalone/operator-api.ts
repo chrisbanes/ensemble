@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute, resolve, sep } from "node:path";
 import { setImmediate as yieldTraversal } from "node:timers/promises";
 import { z } from "zod";
 import type {
@@ -36,6 +37,9 @@ import {
   recoveryObservationSchema,
   reviewReadSchema,
   runtimeSettingsSchema,
+  retainedEvidenceItemContentReadSchema,
+  retainedResultEvidenceReadSchema,
+  retainedReviewAnchorReadSchema,
   searchQuerySchema,
   searchReadSchema,
   sourceObservationSchema,
@@ -68,7 +72,10 @@ import {
 } from "./workspace-comparison.js";
 import {
   listWorkspaceDirectory,
+  previewRetainedBytes,
   previewWorkspaceFile,
+  retainedPathExcluded,
+  workspaceInspectionBindingIdentity,
   type WorkspaceInspectionCurrent,
   WorkspaceInspectionInputError,
   type WorkspaceInspectionPathReference,
@@ -80,6 +87,148 @@ type Row =
   ReturnType<StandaloneService["domain"]> extends { task(id: string): infer R }
     ? R
     : never;
+type RetainedReadPolicy = {
+  taskId: string;
+  projectId: string;
+  taskVersion: number;
+  visibility: string;
+  workspaceVisibility: string;
+  excluded: readonly string[];
+  controlPaths: readonly string[];
+  authorizedRepositoryIds: readonly string[];
+  fingerprint: string;
+};
+type RetainedDiffPayload = {
+  version: 1;
+  repositoryId: string | null;
+  path: string;
+  previousPath?: string;
+  left: { state: "absent" } | { state: "text"; text: string };
+  right: { state: "absent" } | { state: "text"; text: string };
+};
+const relativePolicySegments = (path: string): string[] | undefined => {
+  if (
+    !path ||
+    path.startsWith("/") ||
+    path.startsWith("\\") ||
+    /^[a-z]:/i.test(path) ||
+    path.includes("\\")
+  )
+    return undefined;
+  const segments = path.split("/");
+  return segments.length <= 32 &&
+    segments.every(
+      (segment) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !/\p{Cc}/u.test(segment),
+    ) &&
+    Buffer.byteLength(path, "utf8") <= 2048
+    ? segments
+    : undefined;
+};
+function parseRetainedDiff(bytes: Buffer): RetainedDiffPayload | undefined {
+  try {
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return undefined;
+    const source = value as Record<string, unknown>;
+    if (
+      source.version !== 1 ||
+      (source.repositoryId !== null &&
+        typeof source.repositoryId !== "string") ||
+      typeof source.path !== "string" ||
+      (source.previousPath !== undefined &&
+        typeof source.previousPath !== "string")
+    )
+      return undefined;
+    const parseSide = (
+      side: unknown,
+    ): RetainedDiffPayload["left"] | undefined => {
+      if (!side || typeof side !== "object" || Array.isArray(side))
+        return undefined;
+      const record = side as Record<string, unknown>;
+      if (record.state === "absent" && Object.keys(record).length === 1)
+        return { state: "absent" };
+      if (record.state === "text" && typeof record.text === "string")
+        return { state: "text", text: record.text };
+      return undefined;
+    };
+    const left = parseSide(source.left);
+    const right = parseSide(source.right);
+    if (!left || !right) return undefined;
+    return {
+      version: 1,
+      repositoryId: source.repositoryId as string | null,
+      path: source.path,
+      ...(source.previousPath
+        ? { previousPath: source.previousPath as string }
+        : {}),
+      left,
+      right,
+    };
+  } catch {
+    return undefined;
+  }
+}
+function retainedAnchorRange(
+  source: Buffer,
+  startLine: number,
+  endLine: number,
+) {
+  if (
+    !Number.isSafeInteger(startLine) ||
+    !Number.isSafeInteger(endLine) ||
+    startLine < 1 ||
+    endLine < startLine
+  )
+    return undefined;
+  const lines: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] === 0x0a) {
+      lines.push({ start, end: index + 1 });
+      start = index + 1;
+    }
+  }
+  if (start < source.length) lines.push({ start, end: source.length });
+  if (endLine > lines.length) return undefined;
+  const byteStart = lines[startLine - 1]?.start;
+  const byteEnd = lines[endLine - 1]?.end;
+  if (byteStart === undefined || byteEnd === undefined) return undefined;
+  return {
+    byteStart,
+    byteEnd,
+    bytes: source.subarray(byteStart, byteEnd),
+  };
+}
+function exactRetainedAnchorExcerpt(
+  anchor: NonNullable<
+    ReturnType<
+      ReturnType<StandaloneService["retainedEvidence"]>["reviewAnchor"]
+    >
+  >["anchor"],
+  source: Buffer,
+  excerpt: Buffer,
+) {
+  const range = retainedAnchorRange(source, anchor.startLine, anchor.endLine);
+  return Boolean(
+    range &&
+      range.byteStart === anchor.byteStart &&
+      range.byteEnd === anchor.byteEnd &&
+      range.bytes.equals(excerpt) &&
+      range.bytes.byteLength === anchor.size &&
+      createHash("sha256").update(range.bytes).digest("hex") ===
+        anchor.excerptSha256,
+  );
+}
+function retainedTextLineCount(text: string) {
+  if (!text) return 0;
+  let count = 0;
+  for (const character of text) if (character === "\n") count++;
+  return text.endsWith("\n") ? count : count + 1;
+}
 export class OperatorApiError extends Error {
   constructor(
     readonly status: number,
@@ -298,6 +447,141 @@ export class OperatorApi {
     const safe = this.safe(value, excluded);
     return safe === String(value) ? safe : null;
   }
+  async retainedEvidencePolicy(taskId: string) {
+    const visibility = this.visibilityToken();
+    const task = this.requireTask(taskId);
+    const projectId = String(task.projectId);
+    const workspaceVisibility = this.service.taskWorkspaceVisibility(taskId);
+    const excluded = await this.exclusions(projectId, taskId);
+    if (!excluded) return undefined;
+    const repositories = this.domain()
+      .githubConfiguration(projectId)
+      .repositories.map((repository) => repository.repositoryId)
+      .sort();
+    const current = this.requireTask(taskId);
+    if (
+      current.projectId !== task.projectId ||
+      current.version !== task.version ||
+      visibility !== this.visibilityToken() ||
+      workspaceVisibility !== this.service.taskWorkspaceVisibility(taskId)
+    )
+      return undefined;
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          taskId,
+          projectId,
+          taskVersion: task.version,
+          visibility,
+          workspaceVisibility,
+          repositories,
+          excluded,
+          controlPaths: this.controlPaths,
+        }),
+      )
+      .digest("hex");
+    return {
+      taskId,
+      projectId,
+      taskVersion: Number(task.version),
+      visibility,
+      workspaceVisibility,
+      excluded,
+      controlPaths: [...this.controlPaths],
+      authorizedRepositoryIds: repositories,
+      fingerprint,
+    };
+  }
+  private sameRetainedPolicy(
+    current: RetainedReadPolicy | undefined,
+    initial: RetainedReadPolicy,
+  ) {
+    return Boolean(
+      current &&
+        current.taskId === initial.taskId &&
+        current.projectId === initial.projectId &&
+        current.taskVersion === initial.taskVersion &&
+        current.fingerprint === initial.fingerprint,
+    );
+  }
+  private async retainedPathUnavailable(
+    policy: RetainedReadPolicy,
+    originRoot: string,
+    repositoryId: string | null,
+    path: string,
+  ): Promise<"excluded" | "unavailable" | undefined> {
+    const segments = relativePolicySegments(path);
+    if (!segments || !isAbsolute(originRoot)) return "unavailable";
+    if (
+      (repositoryId !== null &&
+        !policy.authorizedRepositoryIds.includes(repositoryId)) ||
+      sanitizeConversationText(path, policy.excluded) !== path
+    )
+      return "excluded";
+    if (await retainedPathExcluded(originRoot, segments, policy.controlPaths))
+      return "excluded";
+    return undefined;
+  }
+  private async retainedItemUnavailable(
+    item: {
+      kind: "file" | "diff";
+      repositoryId: string | null;
+      path: string | null;
+      mime?: string;
+    },
+    bytes: Buffer,
+    originRoot: string,
+    policy: RetainedReadPolicy,
+  ): Promise<"excluded" | "unavailable" | undefined> {
+    if (!item.path) return "unavailable";
+    const sourcePath = await this.retainedPathUnavailable(
+      policy,
+      originRoot,
+      item.repositoryId,
+      item.path,
+    );
+    if (sourcePath) return sourcePath;
+    if (item.kind === "file") {
+      if (
+        (item.mime?.startsWith("text/") ||
+          item.mime === "application/json; charset=utf-8" ||
+          item.mime === "application/sql; charset=utf-8") &&
+        sanitizeConversationText(bytes.toString("utf8"), policy.excluded) !==
+          bytes.toString("utf8")
+      )
+        return "excluded";
+      return undefined;
+    }
+    const diff = parseRetainedDiff(bytes);
+    if (
+      !diff ||
+      diff.path !== item.path ||
+      diff.repositoryId !== item.repositoryId
+    )
+      return "unavailable";
+    for (const path of [
+      diff.path,
+      ...(diff.previousPath ? [diff.previousPath] : []),
+    ]) {
+      const unavailable = await this.retainedPathUnavailable(
+        policy,
+        originRoot,
+        diff.repositoryId,
+        path,
+      );
+      if (unavailable) return unavailable;
+    }
+    const sourceText = bytes.toString("utf8");
+    if (sanitizeConversationText(sourceText, policy.excluded) !== sourceText)
+      return "excluded";
+    for (const side of [diff.left, diff.right])
+      if (
+        side.state === "text" &&
+        sanitizeConversationText(side.text, policy.excluded) !== side.text
+      )
+        return "excluded";
+    return undefined;
+  }
   private async workspaceInspectionCurrent(
     taskId: string,
   ): Promise<WorkspaceInspectionCurrent> {
@@ -349,6 +633,485 @@ export class OperatorApi {
       return workspacePreviewReadSchema.parse({ data, observedAt });
     } catch (error) {
       return this.workspaceInspectionFailure(error);
+    }
+  }
+  async readRetainedResultEvidence(taskId: string, resultId: string) {
+    uuid.parse(resultId);
+    const task = this.requireTask(taskId);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    const unavailable = (reason: "not-retained" | "excluded" | "unavailable") =>
+      retainedResultEvidenceReadSchema.parse({
+        data: { taskId, resultId, state: "unavailable", reason },
+        observedAt: Date.now(),
+      });
+    if (
+      !policy ||
+      policy.projectId !== task.projectId ||
+      policy.taskVersion !== Number(task.version)
+    )
+      return unavailable("unavailable");
+    const store = this.service.retainedEvidence();
+    const manifest = store.result(taskId, resultId);
+    if (!manifest) {
+      let exists = false;
+      try {
+        exists =
+          this.service.taskReview().result(taskId, resultId) !== undefined;
+      } catch {
+        exists = false;
+      }
+      if (!exists) throw new OperatorApiError(404, "not-found");
+      const latest = await this.retainedEvidencePolicy(taskId);
+      return this.sameRetainedPolicy(latest, policy)
+        ? unavailable("not-retained")
+        : unavailable("unavailable");
+    }
+    const items = [];
+    let hidden = false;
+    for (const item of manifest.items) {
+      if (item.state === "gap") {
+        items.push({
+          itemId: item.itemId,
+          kind: item.kind,
+          state: "gap" as const,
+          reason: item.reason ?? "unavailable",
+        });
+        continue;
+      }
+      const content = store.item(taskId, resultId, item.itemId);
+      const pathReason = content
+        ? await this.retainedItemUnavailable(
+            item,
+            content.bytes,
+            content.originRoot,
+            policy,
+          )
+        : "unavailable";
+      const preview = content
+        ? previewRetainedBytes(content.bytes, item.mime ?? "")
+        : undefined;
+      if (
+        pathReason ||
+        !content ||
+        !preview ||
+        preview.sha256 !== item.sha256 ||
+        preview.size !== item.size
+      ) {
+        hidden = true;
+        items.push({
+          itemId: item.itemId,
+          kind: item.kind,
+          state: "unavailable" as const,
+          reason: pathReason ?? "unavailable",
+        });
+      } else {
+        items.push({ ...item, state: "available" as const });
+      }
+    }
+    const latest = await this.retainedEvidencePolicy(taskId);
+    if (!this.sameRetainedPolicy(latest, policy))
+      return unavailable("unavailable");
+    try {
+      return retainedResultEvidenceReadSchema.parse({
+        data: {
+          taskId,
+          resultId,
+          state: hidden ? "partial" : manifest.state,
+          evidenceId: manifest.evidenceId,
+          identity: {
+            taskVersion: manifest.taskVersion,
+            captureTaskVersion: manifest.captureTaskVersion,
+            assignmentId: manifest.assignmentId,
+            assignmentVersion: manifest.assignmentVersion,
+            workId: manifest.workId,
+            workRevision: manifest.workRevision,
+            requestSequence: manifest.requestSequence,
+            conversationRevision: manifest.conversationRevision,
+            instructionsRevision: manifest.instructionsRevision,
+            profileRevision: manifest.profileRevision,
+            profileId: manifest.profileId,
+            threadId: manifest.threadId,
+            turnId: manifest.turnId,
+          },
+          capturedAt: manifest.capturedAt,
+          sourceObservation: manifest.sourceObservation,
+          items,
+        },
+        observedAt: Date.now(),
+      });
+    } catch {
+      throw new OperatorApiError(503, "unavailable");
+    }
+  }
+  async readRetainedEvidenceItem(
+    taskId: string,
+    resultId: string,
+    itemId: string,
+  ) {
+    uuid.parse(resultId);
+    uuid.parse(itemId);
+    const task = this.requireTask(taskId);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    const unavailable = (reason: "excluded" | "unavailable") =>
+      retainedEvidenceItemContentReadSchema.parse({
+        data: { taskId, resultId, itemId, state: "unavailable", reason },
+        observedAt: Date.now(),
+      });
+    if (
+      !policy ||
+      policy.projectId !== task.projectId ||
+      policy.taskVersion !== Number(task.version)
+    )
+      return unavailable("unavailable");
+    const store = this.service.retainedEvidence();
+    const manifest = store.result(taskId, resultId);
+    if (!manifest) {
+      try {
+        if (!this.service.taskReview().result(taskId, resultId))
+          throw new OperatorApiError(404, "not-found");
+      } catch (error) {
+        if (error instanceof OperatorApiError) throw error;
+        throw new OperatorApiError(404, "not-found");
+      }
+      const latest = await this.retainedEvidencePolicy(taskId);
+      return this.sameRetainedPolicy(latest, policy)
+        ? unavailable("unavailable")
+        : unavailable("unavailable");
+    }
+    const item = manifest.items.find(
+      (candidate) => candidate.itemId === itemId,
+    );
+    if (!item) throw new OperatorApiError(404, "not-found");
+    if (item.state === "gap") {
+      const latest = await this.retainedEvidencePolicy(taskId);
+      if (!this.sameRetainedPolicy(latest, policy))
+        return unavailable("unavailable");
+      return retainedEvidenceItemContentReadSchema.parse({
+        data: {
+          taskId,
+          resultId,
+          itemId,
+          state: "gap",
+          reason: item.reason ?? "unavailable",
+        },
+        observedAt: Date.now(),
+      });
+    }
+    const content = store.item(taskId, resultId, itemId);
+    if (!content) return unavailable("unavailable");
+    const reason = await this.retainedItemUnavailable(
+      item,
+      content.bytes,
+      content.originRoot,
+      policy,
+    );
+    if (reason) return unavailable(reason);
+    const preview = previewRetainedBytes(content.bytes, item.mime ?? "");
+    if (
+      !preview ||
+      preview.sha256 !== item.sha256 ||
+      preview.size !== item.size
+    )
+      return unavailable("unavailable");
+    const latest = await this.retainedEvidencePolicy(taskId);
+    if (!this.sameRetainedPolicy(latest, policy))
+      return unavailable("unavailable");
+    return retainedEvidenceItemContentReadSchema.parse({
+      data: {
+        taskId,
+        resultId,
+        itemId,
+        state: "available",
+        item: { ...item, state: "available" },
+        preview,
+      },
+      observedAt: Date.now(),
+    });
+  }
+  private async retainedAnchorOriginRoot(
+    taskId: string,
+    repositoryId: string | null,
+    retainedRoot?: string,
+  ) {
+    if (retainedRoot) return retainedRoot;
+    const binding = await this.service.taskWorkspace(taskId);
+    if (!binding) return undefined;
+    if (!repositoryId) return binding.path;
+    return binding.repositories.find(
+      (repository) => repository.repositoryId === repositoryId,
+    )?.workspacePath;
+  }
+  private async retainedAnchorStatus(
+    anchor: NonNullable<
+      ReturnType<
+        ReturnType<StandaloneService["retainedEvidence"]>["reviewAnchor"]
+      >
+    >["anchor"],
+    bytes: Buffer,
+    policy: RetainedReadPolicy,
+    originRoot: string,
+  ): Promise<"current" | "outdated" | "unknown" | "excluded" | "unavailable"> {
+    if (anchor.sourceKind === "workspace-file") {
+      const current = await this.workspaceInspectionCurrent(anchor.taskId);
+      if (
+        current.binding?.state !== "ready" ||
+        current.taskVersion !== policy.taskVersion
+      )
+        return "unknown";
+      const path = relativePolicySegments(anchor.path);
+      if (!path) return "unknown";
+      const scope = anchor.repositoryId
+        ? { kind: "repository" as const, repositoryId: anchor.repositoryId }
+        : { kind: "workspace" as const };
+      const preview = await previewWorkspaceFile(
+        { taskId: anchor.taskId, scope, path, showIgnored: true },
+        () => this.workspaceInspectionCurrent(anchor.taskId),
+      );
+      let latestWorkspace: WorkspaceInspectionCurrent | undefined;
+      let latestPolicy: RetainedReadPolicy | undefined;
+      try {
+        [latestWorkspace, latestPolicy] = await Promise.all([
+          this.workspaceInspectionCurrent(anchor.taskId),
+          this.retainedEvidencePolicy(anchor.taskId),
+        ]);
+      } catch {
+        return "unknown";
+      }
+      if (
+        latestWorkspace.binding?.state !== "ready" ||
+        latestWorkspace.taskVersion !== current.taskVersion ||
+        workspaceInspectionBindingIdentity(latestWorkspace) !==
+          workspaceInspectionBindingIdentity(current) ||
+        !this.sameRetainedPolicy(latestPolicy, policy)
+      )
+        return "unknown";
+      if (preview.state === "missing") return "outdated";
+      if (preview.state !== "ready" || preview.preview?.kind !== "text")
+        return "unknown";
+      const currentBytes = Buffer.from(preview.preview.text, "utf8");
+      if (
+        currentBytes.byteLength !== preview.preview.size ||
+        createHash("sha256").update(currentBytes).digest("hex") !==
+          preview.preview.sha256
+      )
+        return "unknown";
+      if (preview.preview.sha256 !== anchor.sourceSha256) return "outdated";
+      return exactRetainedAnchorExcerpt(anchor, currentBytes, bytes)
+        ? "current"
+        : "unavailable";
+    }
+    if (anchor.sourceKind === "result-evidence") {
+      if (!anchor.resultId || !anchor.resultItemId) return "unknown";
+      const store = this.service.retainedEvidence();
+      const manifest = store.result(anchor.taskId, anchor.resultId);
+      const item = manifest?.items.find(
+        (candidate) => candidate.itemId === anchor.resultItemId,
+      );
+      const content = store.item(
+        anchor.taskId,
+        anchor.resultId,
+        anchor.resultItemId,
+      );
+      if (
+        !manifest ||
+        !item ||
+        !content ||
+        manifest.taskId !== anchor.taskId ||
+        manifest.workId !== anchor.workId ||
+        item.state !== "available" ||
+        item.kind !== "file" ||
+        item.path !== anchor.path ||
+        item.repositoryId !== anchor.repositoryId ||
+        item.sha256 !== anchor.sourceSha256 ||
+        createHash("sha256").update(content.bytes).digest("hex") !==
+          anchor.sourceSha256
+      )
+        return "unknown";
+      return exactRetainedAnchorExcerpt(anchor, content.bytes, bytes)
+        ? "current"
+        : "unavailable";
+    }
+
+    if (!anchor.comparisonId || anchor.side === "file") return "unknown";
+    const exported = this.service.workspaceComparisonExport(
+      anchor.taskId,
+      anchor.comparisonId,
+    );
+    if (!exported) return "unknown";
+    const comparison = exported.comparison;
+    if (
+      comparison.taskId !== anchor.taskId ||
+      comparison.comparisonId !== anchor.comparisonId ||
+      comparison.target !== anchor.context
+    )
+      return "unknown";
+    if (anchor.context === "turn") {
+      if (
+        exported.captureState !== "finished" ||
+        comparison.target !== "turn" ||
+        comparison.state !== "available" ||
+        comparison.outcome !== "completed" ||
+        comparison.workId !== anchor.workId ||
+        comparison.threadId !== anchor.threadId ||
+        comparison.turnId !== anchor.turnId
+      )
+        return "unknown";
+    } else if (comparison.state !== "available") {
+      return "unknown";
+    }
+    const matches = comparison.entries.filter((entry) => {
+      const selectedPath =
+        anchor.side === "left"
+          ? (entry.previousPath ?? entry.path)
+          : entry.path;
+      const repositoryId =
+        comparison.target === "turn"
+          ? (entry.repositoryId ?? null)
+          : comparison.repositoryId;
+      return (
+        selectedPath === anchor.path && repositoryId === anchor.repositoryId
+      );
+    });
+    if (matches.length !== 1) return "unknown";
+    const entry = matches[0];
+    if (!entry || entry.state !== "text") return "unknown";
+    for (const path of [
+      entry.path,
+      ...(entry.previousPath ? [entry.previousPath] : []),
+    ]) {
+      const reason = await this.retainedPathUnavailable(
+        policy,
+        originRoot,
+        anchor.repositoryId,
+        path,
+      );
+      if (reason === "excluded") return "excluded";
+      if (reason) return "unknown";
+    }
+    const selectedSide = anchor.side === "left" ? "left" : "right";
+    const content = entry[selectedSide];
+    const exportedSide = exported.sides.find(
+      (side) => side.entryIndex === comparison.entries.indexOf(entry),
+    );
+    const sideText =
+      selectedSide === "left"
+        ? exportedSide?.leftText
+        : exportedSide?.rightText;
+    if (
+      !content?.sha256 ||
+      sideText === undefined ||
+      content.size !== Buffer.byteLength(sideText, "utf8") ||
+      content.lineCount !== retainedTextLineCount(sideText) ||
+      createHash("sha256")
+        .update(Buffer.from(sideText, "utf8"))
+        .digest("hex") !== content.sha256
+    )
+      return "unknown";
+    if (content.sha256 !== anchor.sourceSha256) return "outdated";
+    return exactRetainedAnchorExcerpt(
+      anchor,
+      Buffer.from(sideText, "utf8"),
+      bytes,
+    )
+      ? "current"
+      : "unavailable";
+  }
+  async readRetainedReviewAnchor(taskId: string, anchorId: string) {
+    uuid.parse(anchorId);
+    const task = this.requireTask(taskId);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    const unavailable = (reason: "excluded" | "unavailable") =>
+      retainedReviewAnchorReadSchema.parse({
+        data: { taskId, anchorId, state: "unavailable", reason },
+        observedAt: Date.now(),
+      });
+    if (
+      !policy ||
+      policy.projectId !== task.projectId ||
+      policy.taskVersion !== Number(task.version)
+    )
+      return unavailable("unavailable");
+    const retained = this.service
+      .retainedEvidence()
+      .reviewAnchor(taskId, anchorId);
+    if (!retained) throw new OperatorApiError(404, "not-found");
+    const { anchor, bytes } = retained;
+    const originRoot = await this.retainedAnchorOriginRoot(
+      taskId,
+      anchor.repositoryId,
+      retained.originRoot,
+    );
+    if (!originRoot) return unavailable("unavailable");
+    const latestPath = await this.retainedPathUnavailable(
+      policy,
+      originRoot,
+      anchor.repositoryId,
+      anchor.path,
+    );
+    if (latestPath) return unavailable(latestPath);
+    if (anchor.state === "gap" || !bytes) {
+      const latest = await this.retainedEvidencePolicy(taskId);
+      if (!this.sameRetainedPolicy(latest, policy))
+        return unavailable("unavailable");
+      try {
+        return retainedReviewAnchorReadSchema.parse({
+          data: {
+            taskId,
+            anchorId,
+            state: "gap",
+            status: "unavailable",
+            anchor,
+          },
+          observedAt: Date.now(),
+        });
+      } catch {
+        throw new OperatorApiError(503, "unavailable");
+      }
+    }
+    const contentReason = await this.retainedItemUnavailable(
+      {
+        kind: "file",
+        repositoryId: anchor.repositoryId,
+        path: anchor.path,
+        ...(anchor.mime ? { mime: anchor.mime } : {}),
+      },
+      bytes,
+      originRoot,
+      policy,
+    );
+    if (contentReason) return unavailable(contentReason);
+    if (
+      bytes.byteLength !== anchor.size ||
+      createHash("sha256").update(bytes).digest("hex") !== anchor.excerptSha256
+    )
+      return unavailable("unavailable");
+    const preview = previewRetainedBytes(bytes, anchor.mime ?? "");
+    if (!preview) return unavailable("unavailable");
+    const status = await this.retainedAnchorStatus(
+      anchor,
+      bytes,
+      policy,
+      originRoot,
+    );
+    if (status === "excluded") return unavailable("excluded");
+    if (status === "unavailable") return unavailable("unavailable");
+    const latest = await this.retainedEvidencePolicy(taskId);
+    if (!this.sameRetainedPolicy(latest, policy))
+      return unavailable("unavailable");
+    try {
+      return retainedReviewAnchorReadSchema.parse({
+        data: {
+          taskId,
+          anchorId,
+          state: "available",
+          status,
+          anchor,
+          preview,
+        },
+        observedAt: Date.now(),
+      });
+    } catch {
+      throw new OperatorApiError(503, "unavailable");
     }
   }
   private comparisonRead(
@@ -2322,6 +3085,45 @@ export class OperatorApi {
   async readArtifact(taskId: string, artifactId: string) {
     uuid.parse(artifactId);
     this.requireTask(taskId);
+    const owner = this.service.taskReview().artifactOwner(taskId, artifactId);
+    if (owner) {
+      const manifest = this.service
+        .retainedEvidence()
+        .result(taskId, owner.resultId);
+      if (manifest) {
+        const item = manifest.items.find(
+          (candidate) => candidate.artifactId === artifactId,
+        );
+        if (
+          !item ||
+          item.state !== "available" ||
+          item.source !== "artifact-file"
+        )
+          throw new OperatorApiError(503, "unavailable");
+        const response = await this.readRetainedEvidenceItem(
+          taskId,
+          owner.resultId,
+          item.itemId,
+        );
+        const data = response.data;
+        if (
+          data.state !== "available" ||
+          data.item.artifactId !== artifactId ||
+          data.item.source !== "artifact-file"
+        )
+          throw new OperatorApiError(503, "unavailable");
+        const body =
+          data.preview.kind === "text"
+            ? Buffer.from(data.preview.text, "utf8")
+            : Buffer.from(data.preview.data, "base64");
+        if (
+          body.byteLength !== data.item.size ||
+          createHash("sha256").update(body).digest("hex") !== data.item.sha256
+        )
+          throw new OperatorApiError(503, "unavailable");
+        return { body, type: data.preview.mime };
+      }
+    }
     try {
       return await previewRecordedArtifact(async () => {
         const visibility = this.visibilityToken();

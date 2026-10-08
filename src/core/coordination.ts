@@ -29,6 +29,11 @@ import {
 } from "./structured-questions.js";
 import { DomainStore } from "./domain.js";
 import {
+  RetainedEvidenceStore,
+  unavailableRetainedEvidenceCandidate,
+  type RetainedEvidenceCandidate,
+} from "./retained-evidence.js";
+import {
   DeliveryStore,
   externalActionSchema,
   actionKinds,
@@ -448,6 +453,20 @@ export class CoordinationStore {
     return new TaskReviewStore(this.db);
   }
 
+  retainedEvidence(): RetainedEvidenceStore {
+    return new RetainedEvidenceStore(this.db);
+  }
+
+  hasResultForWork(workId: string, workRevision: number): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          "SELECT 1 FROM coordination_results WHERE workId=? AND workRevision=?",
+        )
+        .get(workId, workRevision),
+    );
+  }
+
   migrate(): void {
     new TaskReviewStore(this.db).migrate();
     this.db.exec("BEGIN IMMEDIATE");
@@ -656,6 +675,7 @@ export class CoordinationStore {
         ON coordination_inbox_events(routingOperationId)
         WHERE routingOperationId IS NOT NULL;`);
       new TaskReviewStore(this.db).populateMissingWithinTransaction();
+      new RetainedEvidenceStore(this.db).migrate();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -869,7 +889,11 @@ export class CoordinationStore {
     return this.parseReceipt(row);
   }
 
-  recordResult(input: CoordinationCall): {
+  recordResult(
+    input: CoordinationCall,
+    evidenceCandidate?: RetainedEvidenceCandidate,
+    options: { nativeResultCallback?: boolean } = {},
+  ): {
     result: AssignmentResult;
     response: CoordinationToolResponse;
     replayed: boolean;
@@ -946,6 +970,14 @@ export class CoordinationStore {
         String(binding.assignmentId),
         Number(binding.workRevision),
       );
+      if (
+        options.nativeResultCallback === true &&
+        !priorResult &&
+        !evidenceCandidate
+      )
+        throw new Error(
+          "Native result callback requires retained evidence capture",
+        );
       let result: AssignmentResult;
       if (priorResult) {
         if (priorResult.payloadHash !== callHash)
@@ -1028,6 +1060,44 @@ export class CoordinationStore {
             result.summary,
             result.createdAt * 1000,
           );
+        if (evidenceCandidate) {
+          const currentIdentity = this.retainedEvidenceIdentity(binding, call);
+          if (!currentIdentity)
+            throw new Error("Coordination callback request identity changed");
+          const evidenceStore = this.retainedEvidence();
+          const owner = {
+            resultId: result.resultId,
+            taskId: result.taskId,
+            assignmentId: result.assignmentId,
+            assignmentVersion: result.assignmentVersion,
+            workId: result.workId,
+            workRevision: result.workRevision,
+          };
+          this.db.exec("SAVEPOINT retained_result_evidence_write");
+          try {
+            evidenceStore.recordResultWithinTransaction(
+              owner,
+              currentIdentity,
+              evidenceCandidate,
+            );
+            this.db.exec("RELEASE SAVEPOINT retained_result_evidence_write");
+          } catch (evidenceWriteFailure) {
+            try {
+              this.db.exec(
+                "ROLLBACK TO SAVEPOINT retained_result_evidence_write",
+              );
+              this.db.exec("RELEASE SAVEPOINT retained_result_evidence_write");
+            } catch {
+              // SQLite may have aborted the transaction; retain the original write failure.
+              throw evidenceWriteFailure;
+            }
+            evidenceStore.recordResultWithinTransaction(
+              owner,
+              currentIdentity,
+              unavailableRetainedEvidenceCandidate(evidenceCandidate),
+            );
+          }
+        }
       }
       const settledEffect = this.db
         .prepare(`UPDATE execution_pending_effects
@@ -1075,7 +1145,11 @@ export class CoordinationStore {
       this.db.exec("COMMIT");
       return { result, response, replayed: false };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      try {
+        if (this.db.isTransaction !== false) this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure if SQLite already aborted the transaction.
+      }
       throw error;
     }
   }
@@ -3557,10 +3631,20 @@ export class CoordinationStore {
   }
 
   private currentBinding(threadId: string, turnId: string): Row | undefined {
+    const hasTurnRequests = Boolean(
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='turn_requests'",
+        )
+        .get(),
+    );
     const rows = this.db
       .prepare(`SELECT binding.taskId, task.version AS taskVersion,
       binding.assignmentId, binding.conversationRevision,
       binding.assignmentVersion, binding.instructionsRevision, binding.profileRevision,
+      assignment.profileId,
+      ${hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      ${hasTurnRequests ? "request.taskVersion" : "NULL"} AS admittedTaskVersion,
       revision.workRevision, intent.workId, assignment.resultDestination,
       assignment.resultRecipientAssignmentId, assignment.resultRecipientDisposition,
       assignment.requesterAssignmentId, assignment.projectId
@@ -3570,6 +3654,18 @@ export class CoordinationStore {
       JOIN execution_intents intent ON intent.workId = binding.workId
       JOIN domain_assignments assignment
         ON assignment.id = binding.assignmentId AND assignment.taskId = binding.taskId
+        AND assignment.instructionsRevision = binding.instructionsRevision
+        AND assignment.profileRevision = binding.profileRevision
+      ${
+        hasTurnRequests
+          ? `LEFT JOIN turn_requests request ON request.workId = binding.workId
+        AND request.kind = 'assignment' AND request.taskId = binding.taskId
+        AND request.assignmentId = binding.assignmentId
+        AND request.assignmentVersion = binding.assignmentVersion
+        AND request.instructionsRevision = binding.instructionsRevision
+        AND request.profileRevision = binding.profileRevision`
+          : ""
+      }
       JOIN assignment_conversations conversation
         ON conversation.assignmentId = binding.assignmentId
         AND conversation.revision = binding.conversationRevision
@@ -3592,6 +3688,32 @@ export class CoordinationStore {
     if (rows.length > 1)
       throw new Error("Coordination callback matches ambiguous work");
     return rows[0];
+  }
+
+  private retainedEvidenceIdentity(binding: Row, call: CoordinationCall) {
+    if (
+      binding.requestSequence === null ||
+      binding.requestSequence === undefined ||
+      binding.admittedTaskVersion === null ||
+      binding.admittedTaskVersion === undefined
+    )
+      return undefined;
+    return {
+      taskId: String(binding.taskId),
+      taskVersion: Number(binding.admittedTaskVersion),
+      captureTaskVersion: Number(binding.taskVersion),
+      assignmentId: String(binding.assignmentId),
+      assignmentVersion: Number(binding.assignmentVersion),
+      workId: String(binding.workId),
+      workRevision: Number(binding.workRevision),
+      requestSequence: Number(binding.requestSequence),
+      conversationRevision: Number(binding.conversationRevision),
+      instructionsRevision: Number(binding.instructionsRevision),
+      profileRevision: Number(binding.profileRevision),
+      profileId: String(binding.profileId),
+      threadId: call.threadId,
+      turnId: call.turnId,
+    };
   }
 
   private resolveRecipient(binding: Row): {

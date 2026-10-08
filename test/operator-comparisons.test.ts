@@ -504,12 +504,21 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
     repositoryId: "source-1",
     changeSet: "all",
   });
+  const allStartedAt = performance.now();
   const allResponse = await get(allQuery);
+  const allElapsedMs = Math.round(performance.now() - allStartedAt);
   const allBody = (await allResponse.json()) as {
     data: {
+      state: string;
+      reason?: string;
       comparisonId: string;
       comparison: {
+        state: string;
+        reason?: string;
+        truncated: boolean;
         entries: {
+          state: string;
+          reason?: string;
           path: string;
           repositoryId?: string | null;
           previousPath?: string;
@@ -521,6 +530,22 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
       };
     };
   };
+  t.diagnostic(
+    JSON.stringify({
+      httpStatus: allResponse.status,
+      elapsedMs: allElapsedMs,
+      state: allBody.data.state,
+      reason: allBody.data.reason ?? null,
+      comparisonState: allBody.data.comparison.state,
+      comparisonReason: allBody.data.comparison.reason ?? null,
+      entryCount: allBody.data.comparison.entries.length,
+      entryStates: allBody.data.comparison.entries.map((entry) => ({
+        state: entry.state,
+        reason: entry.reason ?? null,
+      })),
+      truncated: allBody.data.comparison.truncated,
+    }),
+  );
   const oldId = allBody.data.comparisonId;
   assert.ok(allBody.data.comparison.entries.length >= 3);
   const renamed = allBody.data.comparison.entries.find(

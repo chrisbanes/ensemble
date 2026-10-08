@@ -88,9 +88,17 @@ export interface TaskTurnCaptureIdentity extends TaskExecutionBinding {
   profileId: string;
   workRevision: number;
   requestSequence: number;
+  taskVersion: number;
 }
 
 export interface CoordinationExecutionBinding extends TaskExecutionBinding {
+  /** Current task revision for workspace and access-policy checks. */
+  taskVersion: number;
+  workRevision: number;
+  requestSequence: number | null;
+  /** Immutable revision admitted by the exact turn request. */
+  admittedTaskVersion: number | null;
+  profileId: string;
   state: "running" | "completed";
 }
 
@@ -1094,7 +1102,8 @@ export class ExecutionState {
         binding.assignmentVersion, binding.instructionsRevision,
         binding.profileRevision, binding.conversationRevision,
         assignment.profileId, revision.workRevision,
-        request.sequence AS requestSequence
+        request.sequence AS requestSequence,
+        request.taskVersion AS taskVersion
         FROM task_execution_bindings binding
         JOIN task_work_revisions revision ON revision.workId = binding.workId
         JOIN turn_requests request ON request.workId = binding.workId
@@ -1127,6 +1136,7 @@ export class ExecutionState {
         profileId: z.string().min(1),
         workRevision: z.number().int().positive(),
         requestSequence: z.number().int().positive(),
+        taskVersion: z.number().int().positive(),
       })
       .parse(rows[0]);
   }
@@ -1289,17 +1299,34 @@ export class ExecutionState {
     threadId: string,
     turnId: string,
   ): CoordinationExecutionBinding | undefined {
+    const requestJoin = this.hasTurnRequests
+      ? `LEFT JOIN turn_requests request ON request.workId = binding.workId
+        AND request.kind = 'assignment' AND request.taskId = binding.taskId
+        AND request.assignmentId = binding.assignmentId
+        AND request.assignmentVersion = binding.assignmentVersion
+        AND request.instructionsRevision = binding.instructionsRevision
+        AND request.profileRevision = binding.profileRevision`
+      : "";
     const rows = this.db
-      .prepare(`SELECT binding.workId, binding.taskId,
+      .prepare(`SELECT binding.workId, binding.taskId, task.version AS taskVersion,
       binding.assignmentId, binding.assignmentVersion,
       binding.instructionsRevision, binding.profileRevision,
-      binding.conversationRevision, intent.state
+      binding.conversationRevision, revision.workRevision,
+      assignment.profileId,
+      ${this.hasTurnRequests ? "request.sequence" : "NULL"} AS requestSequence,
+      ${this.hasTurnRequests ? "request.taskVersion" : "NULL"} AS admittedTaskVersion,
+      intent.state
       FROM task_execution_bindings binding
       JOIN execution_intents intent ON intent.workId = binding.workId
       JOIN task_work_revisions revision ON revision.workId = binding.workId
+      JOIN domain_tasks task ON task.id = binding.taskId
       JOIN assignment_conversations conversation
         ON conversation.assignmentId = binding.assignmentId
       JOIN domain_assignments assignment ON assignment.id = binding.assignmentId
+        AND assignment.taskId = binding.taskId
+        AND assignment.instructionsRevision = binding.instructionsRevision
+        AND assignment.profileRevision = binding.profileRevision
+      ${requestJoin}
       WHERE intent.threadId = ? AND intent.turnId = ?
         AND intent.state IN ('running','completed')
         AND assignment.version = binding.assignmentVersion
@@ -1316,9 +1343,7 @@ export class ExecutionState {
             AND newer.workRevision > revision.workRevision
         )
       LIMIT 2`)
-      .all(threadId, turnId) as Array<
-      TaskExecutionBinding & { state: "running" | "completed" }
-    >;
+      .all(threadId, turnId) as CoordinationExecutionBinding[];
     if (rows.length > 1)
       throw new Error("Coordination callback matches ambiguous work");
     return rows[0];

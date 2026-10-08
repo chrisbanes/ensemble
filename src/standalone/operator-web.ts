@@ -181,6 +181,32 @@ export class OperatorWebBoundary {
   async read(path: string, query = new URLSearchParams(), rawSearch?: string) {
     if (path === "/api/operator/search") return this.api.readSearch(query);
     if (path === "/api/operator/inbox") return this.api.readInbox(query);
+    const retainedEvidence = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/results\/([^/]+)\/evidence(?:\/([^/]+))?$/,
+    );
+    if (retainedEvidence) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return retainedEvidence[3]
+        ? this.api.readRetainedEvidenceItem(
+            retainedEvidence[1] ?? "",
+            retainedEvidence[2] ?? "",
+            retainedEvidence[3],
+          )
+        : this.api.readRetainedResultEvidence(
+            retainedEvidence[1] ?? "",
+            retainedEvidence[2] ?? "",
+          );
+    }
+    const retainedAnchor = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/review-anchors\/([^/]+)$/,
+    );
+    if (retainedAnchor) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return this.api.readRetainedReviewAnchor(
+        retainedAnchor[1] ?? "",
+        retainedAnchor[2] ?? "",
+      );
+    }
     const workspaceFiles = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/files$/,
     );
@@ -313,6 +339,10 @@ export class OperatorWebBoundary {
         path,
       ) ||
       /^\/api\/operator\/tasks\/[^/]+\/(?:files|preview)$/.test(path) ||
+      /^\/api\/operator\/tasks\/[^/]+\/results\/[^/]+\/evidence(?:\/[^/]+)?$/.test(
+        path,
+      ) ||
+      /^\/api\/operator\/tasks\/[^/]+\/review-anchors\/[^/]+$/.test(path) ||
       /^\/api\/operator\/tasks\/[^/]+\/comparisons$/.test(path) ||
       /^\/api\/operator\/tasks\/[^/]+\/questions\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||

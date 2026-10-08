@@ -549,8 +549,9 @@ immutable comparison sides. Capture or store failure remains an explicit gap;
 it does not determine runtime completion, clear a hold, or replace the previous
 finished capture. Exported side text is checked against its original byte hash,
 size, line count, path, side and range before it is retained or returned. This
-export is available to the result-retention work in #781; it does not implement
-that retention or a UI.
+export is consumed by #781's server-side result and review-context retention.
+The bounded copy remains distinct from the latest-turn slot and from the later
+#782 review-delivery lifecycle.
 
 Comparison and each before/after observation scan at most 4,096 entries and
 return at most 256. A text file or side is limited to 1 MiB, source bytes to
@@ -570,6 +571,68 @@ can produce incomplete comparisons and are engineering bounds, not a claim of a
 whole-workspace snapshot. The actual Codex runtime hook still requires its
 separate bounded qualification; fake-runtime evidence does not establish native
 runtime behavior.
+
+#### Retained result evidence and review context — #781
+
+The service captures bounded evidence during the accepted
+`ensemble_report_result` callback, before recording its result and callback
+receipt. Eligible sources are linked artifact files, supplied change-file
+references read through the existing safe workspace reader, and a compatible
+exact turn-comparison export. A direct result-recording path that does not pass
+through this callback keeps its prior behavior; pre-retention results remain
+references and are never backfilled from current files. A callback with no
+eligible file links records an empty manifest. Exact callback replay returns
+the committed result and original manifest without rereading the workspace.
+
+Each manifest binds its result, task, assignment and work revisions, request
+sequence, profile/instructions revisions, runtime thread and turn, capture
+time, and comparison observation identity. `taskVersion` is the exact revision
+admitted by the turn request; `captureTaskVersion` is the current task revision
+used for workspace and access-policy checks. A metadata edit after admission but
+before the callback preserves the admitted request identity while capture uses
+the current revision. If that current revision changes during capture, result,
+receipt and evidence commit together only when the exact binding still matches;
+otherwise the transaction is rejected without partial acceptance. Available
+bytes live in SQLite BLOBs. Capture, policy, read, size and quota failures are
+represented as explicit gaps while a valid result is recorded. A stale or
+foreign result binding remains rejected; an unrecoverable SQLite result/receipt
+commit failure rolls back the result and evidence together. Pending or unsettled
+comparison exports produce a diff gap. The service does not substitute an older
+turn or backfill that gap from a later comparison, and capture time does not
+imply that the callback stopped later workspace writes.
+
+Authenticated task-scoped reads resolve exact result and item IDs and recheck
+the current task, project, session, repository and path exclusions. A retained
+diff is withheld if any included path, including either rename path, is now
+excluded. A new retained gap or unavailable item never falls through to a
+matching live file. Legacy records without a retained manifest keep the
+existing reference behavior. Text and image/PDF previews retain the original
+captured bytes under the existing preview limits; original filesystem roots
+remain internal.
+
+Review anchors retain a bounded original excerpt, exact source hash, line and
+byte range, side, source identity and observation time. Drafts may select a
+current workspace file or an exact comparison side without a result. A supplied
+result association is validated against the same task/work and exact source
+comparison where applicable; a comparison-side anchor remains comparison
+evidence even when associated with a result whose callback-time diff is a gap.
+Sealing moves the exact anchor IDs into a durable submitted-context reference;
+it is not a review delivery or receipt. Discarding a sealed draft preserves its
+submitted context. Anchors continue to resolve their original excerpt after
+file edits, latest-turn replacement, workspace archive/cleanup and service
+restart; missing comparisons are reported as unknown or unavailable without
+retargeting to newer bytes. Review delivery and operator UI remain #782 scope.
+
+The logical payload limits are 1 MiB per retained text file, 8 MiB per image or
+PDF, 1 MiB per serialized observed diff, 32 selected files and 32 MiB per
+result, 128 MiB of result payload per task, and 512 MiB across retained result
+and review payloads per installation. Review context is limited to 256 KiB per
+anchor, 128 anchors and 16 MiB per task within the same installation pool.
+Quota pressure records a gap for new material and never evicts referenced
+bytes. These limits count logical BLOB payloads; SQLite pages, indexes, WAL and
+filesystem overhead can increase disk use. Offline SQLite backup, verification
+and restore include retained evidence BLOBs; managed workspace contents remain
+outside the snapshot.
 
 #### Local code review amendment — 6 October 2026
 

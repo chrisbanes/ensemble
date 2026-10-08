@@ -141,6 +141,8 @@ export interface WorkspaceComparisonExport {
 
 export interface WorkspaceTurnWorkIdentity {
   taskId: string;
+  /** Task revision admitted by this exact turn request. */
+  taskVersion: number;
   workId: string;
   workRevision: number;
   requestSequence: number;
@@ -177,6 +179,7 @@ export interface WorkspaceTurnComparisonSnapshot {
   outcome: "completed" | "failed" | "unknown";
   startedAt: number;
   observedAt: number;
+  taskVersion: number;
   workId: string;
   workRevision: number;
   requestSequence: number;
@@ -2215,6 +2218,7 @@ export function compareWorkspaceTurnObservations(
     outcome,
     startedAt,
     observedAt: after.observedAt,
+    taskVersion: identity.taskVersion,
     workId: identity.workId,
     workRevision: identity.workRevision,
     requestSequence: identity.requestSequence,

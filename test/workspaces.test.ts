@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -253,6 +254,116 @@ test("repository-free and multiple-repository tasks get durable independent root
     );
   } finally {
     f.close();
+  }
+});
+
+test("repository identity batching handles nested paths, linked worktrees, and ambiguous newline paths", async () => {
+  const controlled = controlledGit();
+  const f = fixture({ gitExecutable: controlled.executable });
+  try {
+    const source = repository(f.root, "identity-source");
+    const nestedSource = join(source, "nested", "deep");
+    mkdirSync(nestedSource, { recursive: true });
+    const nested = await f.manager.provision("nested-identity", [
+      { repositoryId: "repo", path: nestedSource },
+    ]);
+    assert.equal(nested.state, "ready");
+    assert.equal(
+      nested.repositories[0]?.gitCommonDir,
+      realpathSync(join(source, ".git")),
+    );
+    const nestedIdentityStarts = controlled
+      .events()
+      .filter(
+        ({ event, operation, cwd }) =>
+          event === "start" &&
+          operation === "repository-identity" &&
+          cwd === nestedSource,
+      );
+    assert.ok(nestedIdentityStarts.length > 0);
+    assert.ok(
+      nestedIdentityStarts.every(
+        ({ command }) =>
+          command === "rev-parse --show-toplevel --git-common-dir",
+      ),
+      JSON.stringify(nestedIdentityStarts),
+    );
+
+    const linkedSource = join(f.root, "identity-linked-source");
+    execFileSync(
+      "git",
+      [
+        "-C",
+        source,
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "identity-linked",
+        linkedSource,
+      ],
+      { stdio: "ignore" },
+    );
+    const nestedLinkedSource = join(linkedSource, "nested", "deep");
+    mkdirSync(nestedLinkedSource, { recursive: true });
+    const linked = await f.manager.provision("linked-identity", [
+      { repositoryId: "repo", path: nestedLinkedSource },
+    ]);
+    assert.equal(linked.state, "ready");
+    assert.equal(
+      linked.repositories[0]?.gitCommonDir,
+      realpathSync(join(source, ".git")),
+    );
+    const linkedIdentityStarts = controlled
+      .events()
+      .filter(
+        ({ event, operation, cwd }) =>
+          event === "start" &&
+          operation === "repository-identity" &&
+          cwd === nestedLinkedSource,
+      );
+    assert.ok(linkedIdentityStarts.length > 0);
+    assert.ok(
+      linkedIdentityStarts.every(
+        ({ command }) =>
+          command === "rev-parse --show-toplevel --git-common-dir",
+      ),
+      JSON.stringify(linkedIdentityStarts),
+    );
+
+    const newlineSource = repository(f.root, "identity-\n-source");
+    const newline = await f.manager.provision("newline-identity", [
+      { repositoryId: "repo", path: newlineSource },
+    ]);
+    assert.equal(newline.state, "ready");
+    assert.equal(
+      newline.repositories[0]?.gitCommonDir,
+      realpathSync(join(newlineSource, ".git")),
+    );
+    const canonicalNewlineSource = realpathSync(newlineSource);
+    const newlineIdentityStarts = controlled
+      .events()
+      .filter(
+        ({ event, operation, cwd }) =>
+          event === "start" &&
+          operation === "repository-identity" &&
+          (cwd === newlineSource || cwd === canonicalNewlineSource),
+      );
+    assert.deepEqual(
+      newlineIdentityStarts.slice(0, 3).map(({ command }) => command),
+      [
+        "rev-parse --show-toplevel --git-common-dir",
+        "rev-parse --show-toplevel",
+        "rev-parse --git-common-dir",
+      ],
+      JSON.stringify(newlineIdentityStarts),
+    );
+  } finally {
+    try {
+      await controlled.cleanup();
+    } finally {
+      f.close();
+    }
   }
 });
 
@@ -626,6 +737,16 @@ test("output overflow and sticky cancellation settle safely and retain uncertain
       assert.ok(
         controlled.events().some(({ event }) => event === "term"),
         `controlled Git signal events: ${JSON.stringify(controlled.events())}`,
+      );
+      assert.ok(
+        controlled
+          .events()
+          .some(
+            ({ event, operation, command }) =>
+              event === "start" &&
+              operation === "repository-identity" &&
+              command === "rev-parse --show-toplevel --git-common-dir",
+          ),
       );
     } finally {
       try {
