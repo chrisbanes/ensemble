@@ -252,9 +252,12 @@ These suites cover the server-side portions of WI03–WI06 and WI10–WI11:
 guard, finite deadlines/read count, delayed start and terminal handling,
 uncertain Stop/reopen hold preservation, and checkpoint privacy. Fake-runtime
 tests qualify this control boundary only; they do not prove native Codex
-behavior. The guarded `test/wi03/live-turn-capture.mjs` entry is built but has
-not been run. T5's one actual-runtime attempt remains pending the controller's
-fresh independent review and explicit continuation.
+behavior. The guarded `test/wi03/live-turn-capture.mjs` entry completed the
+single controller-authorized, repository-free actual journey. See the
+[WI03 turn-capture evidence](evidence/wi03-turn-capture.md) for runtime
+identity, exact capture assertions, SQLite readback, shutdown proof and limits.
+An earlier static ESM-link failure started no runtime or turn and did not
+reset the actual-journey allowance; the single actual journey is now spent.
 
 The implemented route is
 `GET /api/operator/tasks/{taskId}/comparisons`; see the #780 section in
@@ -265,12 +268,13 @@ time; it is not a strict wall-clock response guarantee.
 
 Use production service APIs, real filesystem/Git and SQLite fixtures for the
 deterministic cases, including bounded sizes, process restart and cleanup.
-Qualify the changed turn-capture boundary with a bounded real-runtime journey
-after deterministic coverage, then verify the integrated production UI on
-desktop and phone. Record source/runtime identity, observed captures, limits and
-exact resource cleanup; reuse unaffected runtime and #742 evidence. The
-implementation owner runs validation. Review the Pen interaction/state handoff
-before UI implementation and retain final integrated usability review.
+The bounded real-runtime journey for WI03 is recorded in the [turn-capture
+evidence](evidence/wi03-turn-capture.md). Verify the integrated production UI
+on desktop and phone under its separate acceptance scope. Record
+source/runtime identity, observed captures, limits and exact resource cleanup;
+reuse unaffected runtime and #742 evidence. The implementation owner runs
+validation. Review the Pen interaction/state handoff before UI implementation
+and retain final integrated usability review.
 
 ## Implemented service and integration proofs
 
