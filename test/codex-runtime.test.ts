@@ -328,6 +328,78 @@ test("a bound turn wait has no fixed deadline and still resolves on its terminal
   assert.equal(await wait, "completed");
 });
 
+test("a throwing unexpected-request listener on a native path fails the runtime instead of escaping", async (t) => {
+  const child = {} as ChildProcessWithoutNullStreams;
+  const throwing = () => {
+    const runtime = newTestRuntime();
+    const internal = runtime as unknown as {
+      child: ChildProcessWithoutNullStreams;
+      receive(child: ChildProcessWithoutNullStreams, line: string): void;
+      qualifyNativeRequest(threadId: string): Promise<void>;
+      request(): Promise<unknown>;
+      nativeTurns: Map<string, string>;
+      nativeReadbacks: Map<string, unknown>;
+    };
+    internal.child = child;
+    const failures: Error[] = [];
+    runtime.onFailure((error) => failures.push(error));
+    runtime.onUnexpectedRequest(() => {
+      throw new Error("hold storage unavailable");
+    });
+    return { internal, failures };
+  };
+  const hold =
+    /^Could not persist unexpected request hold: .*hold storage unavailable/;
+
+  await t.test("notification path", () => {
+    const { internal, failures } = throwing();
+    internal.receive(
+      child,
+      JSON.stringify({
+        method: "serverRequest/resolved",
+        params: { threadId: "thread-n", requestId: "unmatched" },
+      }),
+    );
+    assert.equal(failures.length, 1);
+    assert.match(failures[0]?.message ?? "", hold);
+  });
+
+  await t.test("asynchronous qualification path", async () => {
+    const { internal, failures } = throwing();
+    internal.request = () => Promise.reject(new Error("resume refused"));
+    internal.nativeTurns.set("thread-q", "turn-q");
+    internal.nativeReadbacks.set("thread-q", {
+      input: {
+        threadId: "thread-q",
+        turnId: "turn-q",
+        itemId: "item-q",
+        isBlocking: false,
+        autoResolutionMs: null,
+        questions: [
+          {
+            id: "q",
+            header: "Place",
+            question: "Where?",
+            isOther: true,
+            isSecret: false,
+            options: [{ label: "Local", description: "Here" }],
+          },
+        ],
+      },
+      id: "request-q",
+      child,
+      digest: "digest",
+      requested: false,
+      responded: false,
+      replays: 0,
+      invalid: false,
+    });
+    await assert.doesNotReject(internal.qualifyNativeRequest("thread-q"));
+    assert.equal(failures.length, 1);
+    assert.match(failures[0]?.message ?? "", hold);
+  });
+});
+
 test("a runtime failure rejects a pending turn wait", async () => {
   const runtime = newTestRuntime();
   bindTestTurn(runtime, "thread-lost", "turn-lost");

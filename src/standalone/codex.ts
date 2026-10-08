@@ -591,7 +591,7 @@ export class CodexRuntime implements Runtime {
         this.retireNativeEndpoint(endpoint.call.identity);
     } catch {
       endpoint.state = "uncertain";
-      this.unexpected?.({
+      this.reportUnexpected({
         method: "native-outcome-could-not-be-recorded",
         threadId: endpoint.call.identity.threadId,
         turnId: endpoint.call.identity.turnId,
@@ -999,12 +999,15 @@ export class CodexRuntime implements Runtime {
           )
             waiting.invalid = true;
         }
-        this.unexpected?.({
-          method: "stale-native-input",
-          nativeReplay,
-          threadId,
-          turnId: request.turnId,
-        });
+        this.reportUnexpected(
+          {
+            method: "stale-native-input",
+            nativeReplay,
+            threadId,
+            turnId: request.turnId,
+          },
+          child,
+        );
         return true;
       }
       if (prior) {
@@ -1018,12 +1021,15 @@ export class CodexRuntime implements Runtime {
             endpoint.call.identity,
             "Conflicting or repeated native request",
           );
-        this.unexpected?.({
-          method: "conflicting-native-input",
-          nativeReplay,
-          threadId,
-          turnId: request.turnId,
-        });
+        this.reportUnexpected(
+          {
+            method: "conflicting-native-input",
+            nativeReplay,
+            threadId,
+            turnId: request.turnId,
+          },
+          child,
+        );
         return true;
       }
       this.nativeReadbacks.set(threadId, {
@@ -1096,11 +1102,14 @@ export class CodexRuntime implements Runtime {
       this.nativeRequest?.(call);
     } catch {
       const turnId = nativeInputRequestSchema.parse(pending.input).turnId;
-      this.unexpected?.({
-        method: "unqualified-native-input",
-        threadId,
-        ...(turnId ? { turnId } : {}),
-      });
+      this.reportUnexpected(
+        {
+          method: "unqualified-native-input",
+          threadId,
+          ...(turnId ? { turnId } : {}),
+        },
+        pending.child,
+      );
     }
   }
   private receiveNativeNotification(method: string, params: unknown): void {
@@ -1129,7 +1138,7 @@ export class CodexRuntime implements Runtime {
         !endpoint
       ) {
         waiting.invalid = true;
-        this.unexpected?.({
+        this.reportUnexpected({
           method: "native-resolution-before-qualification",
           threadId: parsed.data.threadId,
         });
@@ -1157,7 +1166,7 @@ export class CodexRuntime implements Runtime {
         }
         return;
       }
-      this.unexpected?.({
+      this.reportUnexpected({
         method: "unmatched-native-resolution",
         threadId: parsed.data.threadId,
       });
@@ -1190,7 +1199,7 @@ export class CodexRuntime implements Runtime {
             turnId,
             "Unqualified asynchronous input origin",
           );
-          this.unexpected?.({
+          this.reportUnexpected({
             method: "unqualified-async-input",
             threadId,
             turnId,
@@ -2388,5 +2397,23 @@ export class CodexRuntime implements Runtime {
 
   private failChild(child: ChildProcessWithoutNullStreams, error: Error): void {
     if (this.child === child) this.fail(error);
+  }
+
+  /** A listener that cannot persist its hold fails the runtime instead of escaping the native path. */
+  private reportUnexpected(
+    request: UnexpectedRequest,
+    child = this.child,
+  ): void {
+    try {
+      this.unexpected?.(request);
+    } catch (error) {
+      if (child)
+        this.failChild(
+          child,
+          new Error(
+            `Could not persist unexpected request hold: ${String(error)}`,
+          ),
+        );
+    }
   }
 }
