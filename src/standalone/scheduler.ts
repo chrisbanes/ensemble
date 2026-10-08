@@ -181,6 +181,17 @@ export class SchedulerStore {
       .map((row) => this.parse(row as Record<string, unknown>));
   }
 
+  /** Work IDs only: admission checks must not load every request's prompt. */
+  heldWorkIds(assignmentId: string, excludeWorkId: string): string[] {
+    return (
+      this.db
+        .prepare(`SELECT workId FROM turn_requests
+          WHERE assignmentId = ? AND state = 'held' AND workId <> ?
+          ORDER BY sequence`)
+        .all(assignmentId, excludeWorkId) as Array<{ workId: string }>
+    ).map((row) => row.workId);
+  }
+
   setWorkspace(workId: string, workspace: string): void {
     const current = this.byWorkId(workId);
     if (current.workspace !== null && current.workspace !== workspace)

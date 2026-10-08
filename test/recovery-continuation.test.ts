@@ -472,6 +472,51 @@ test("validated recovery requires a new operator message, processes old batch wi
   }
 });
 
+test("an invalidated recovery continuation keeps the successor waiting without scanning every request", async () => {
+  const f = await heldFixture();
+  try {
+    await f.service.resolveHeldExecution(f.receipt);
+    f.pause(true);
+    await f.service.coordinationView().postOperatorMessage(f.message);
+    const { db, coordination } = internals(f.service);
+    db.prepare(
+      "INSERT INTO execution_pending_effects (workId, effectKey, state, reason) VALUES (?, 'late-effect', 'pending', 'unfinished')",
+    ).run(f.old.workId);
+    assert.equal(coordination.hasRecoveryContinuation(f.old.workId), false);
+    const { state } = internals(f.service);
+    const store = (
+      f.service as unknown as { schedulerStore: { list(): unknown[] } }
+    ).schedulerStore;
+    const begin = state.begin.bind(state);
+    const list = store.list.bind(store);
+    let admitting = false;
+    let scansDuringAdmission = 0;
+    state.begin = (...args) => {
+      admitting = true;
+      try {
+        return begin(...args);
+      } finally {
+        admitting = false;
+      }
+    };
+    store.list = () => {
+      if (admitting) scansDuringAdmission += 1;
+      return list();
+    };
+    f.pause(false);
+    await f.service.configureCapacity({ key: randomUUID(), globalLimit: 1 });
+    assert.equal(scansDuringAdmission, 0);
+    const waiting = f.service
+      .turnRequests()
+      .filter((request) => request.state === "queued");
+    assert.equal(waiting.length, 1);
+    assert.match(waiting[0]?.reason ?? "", /recovery-continuation-unresolved/);
+    assert.equal(f.runtime.turns, 2);
+  } finally {
+    await close(f);
+  }
+});
+
 test("wrong or unproved recovery never upgrades a pre-recovery message on replay", async () => {
   const f = await heldFixture();
   try {
