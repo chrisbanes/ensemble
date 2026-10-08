@@ -675,7 +675,7 @@ export class StandaloneService {
       this.scheduler = scheduler;
       scheduler.start();
       await this.wakeScheduler();
-      const githubInterval = this.options.github?.intervalMs ?? 60_000;
+      const githubInterval = this.options.github?.intervalMs ?? 300_000;
       if (
         !Number.isSafeInteger(githubInterval) ||
         githubInterval < 1000 ||

@@ -4,9 +4,12 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { mock, test } from "node:test";
+import { DeliveryStore } from "../src/core/delivery.js";
 import { DomainStore } from "../src/core/domain.js";
+import { GitHubSourceStore } from "../src/core/github-source.js";
 import { Store } from "../src/core/store.js";
+import { GitHubSynchronizer } from "../src/standalone/github-sync.js";
 import { StandaloneService } from "../src/standalone/service.js";
 import type {
   Runtime,
@@ -940,6 +943,483 @@ test("explicit and timer refresh converge, and stop settles an in-flight read be
     assert.equal(reads, beforeStop);
   } finally {
     release();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const idleRuntime = (): Runtime => ({
+  async start() {},
+  async stop() {},
+  onUnexpectedRequest() {},
+  async startThread() {
+    return "thread";
+  },
+  async resumeThread() {},
+  async startTurn() {
+    return "turn";
+  },
+  async interruptTurn() {},
+  async waitForTurn() {
+    return "completed";
+  },
+});
+
+function addGitHubProject(domain: DomainStore): string {
+  const projectId = randomUUID();
+  const profileId = randomUUID();
+  const execute = (command: object) =>
+    domain.execute({
+      actor: "operator",
+      key: randomUUID(),
+      ...command,
+    } as never);
+  execute({
+    type: "profile.create",
+    profileId,
+    name: "Lead",
+    instructions: "Lead",
+    capabilities: "work",
+  });
+  execute({
+    type: "project.create",
+    projectId,
+    name: "Alpha",
+    leadProfileId: profileId,
+  });
+  execute({
+    type: "github.configure",
+    projectId,
+    expectedVersion: 1,
+    credentialRef: "env:TEST_GITHUB",
+    selections: [
+      {
+        id: "repo",
+        kind: "repository",
+        repositoryId: "R_1",
+        owner: "org",
+        name: "repo",
+      },
+    ],
+    readiness: { mode: "any", conditions: [{ kind: "label", name: "ready" }] },
+    repositories: [],
+  });
+  execute({
+    type: "github.activate",
+    projectId,
+    selectionId: "repo",
+    expectedVersion: 2,
+  });
+  return projectId;
+}
+
+test("blocker reads skip closed issues unless their still-open imported task owns the delivery closure", async () => {
+  const db = new DatabaseSync(":memory:");
+  new Store(db).ensureHost("test");
+  const domain = new DomainStore(db);
+  domain.migrate();
+  const sources = new GitHubSourceStore(db);
+  sources.migrate();
+  try {
+    const projectId = addGitHubProject(domain);
+    const owned = { ...issue, nodeId: "I_owned", number: 11 };
+    const stale = {
+      ...issue,
+      nodeId: "I_stale",
+      number: 12,
+      state: "closed" as const,
+    };
+    const live = { ...issue, nodeId: "I_live", number: 13 };
+    sources.reconcileSelection(projectId, "repo", {
+      complete: true,
+      issues: [owned],
+      reason: null,
+    });
+    sources.reconcileBlockers("I_owned", {
+      complete: true,
+      blockers: [],
+      reason: null,
+    });
+    const taskId = String(sources.issue("I_owned")?.taskId);
+    domain.execute({
+      type: "delivery.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      expectedVersion: 1,
+      mode: "reviewable-pr",
+      credentialRef: null,
+      grants: [{ action: "issue.close", repositoryId: "R_1", mode: "allow" }],
+      requiredChecks: [],
+    });
+    const delivery = new DeliveryStore(db);
+    const operationId = randomUUID();
+    delivery.prepareAction(
+      {
+        operationId,
+        action: {
+          kind: "issue.close",
+          target: { repositoryId: "R_1", nodeId: "I_owned", number: 11 },
+          reviewedResultIds: [],
+        },
+      },
+      {
+        projectId,
+        taskId,
+        taskVersion: Number(domain.task(taskId).version),
+        assignmentId: randomUUID(),
+        assignmentVersion: 1,
+        workId: "w",
+        workRevision: 1,
+        conversationRevision: 1,
+      },
+      false,
+    );
+    delivery.beginAttempt(operationId, { state: "open" });
+    delivery.recordObservation(operationId, {
+      state: "confirmed-success",
+      reason: null,
+      receipt: { nodeId: "I_owned", issueClosed: true },
+    });
+    const closedOwned = { ...owned, state: "closed" as const };
+    sources.recordDeliveryClosure(
+      projectId,
+      domain.githubConfiguration(projectId).version,
+      closedOwned,
+      operationId,
+      null,
+    );
+    assert.equal(domain.hasOwnDeliveryClosure(taskId), true);
+
+    const blockerReads: string[] = [];
+    const reader: GitHubSourceReader = {
+      async readSelection() {
+        return {
+          complete: true,
+          issues: [closedOwned, stale, live],
+          reason: null,
+        };
+      },
+      async readBlockers(reference) {
+        blockerReads.push(reference.nodeId);
+        return { complete: true, blockers: [], reason: null };
+      },
+      async readIssueStatus() {
+        return { status: "open" };
+      },
+    };
+    const synchronizer = new GitHubSynchronizer(domain, sources, () => reader);
+    await synchronizer.refresh();
+    assert.deepEqual(blockerReads.sort(), ["I_live", "I_owned"]);
+
+    domain.execute({
+      type: "task.configure",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      expectedVersion: Number(domain.task(taskId).version),
+      state: "done",
+    });
+    blockerReads.length = 0;
+    await synchronizer.refresh();
+    assert.deepEqual(blockerReads, ["I_live"]);
+  } finally {
+    db.close();
+  }
+});
+
+test("a rate-limited read pauses manual refreshes until the reset without implying dependency clearance", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-github-rate-limit-")),
+  );
+  const calls: string[] = [];
+  let limited = false;
+  const reader: GitHubSourceReader = {
+    async readSelection() {
+      calls.push("selection");
+      return limited
+        ? {
+            complete: false,
+            issues: [],
+            reason: "rate-limited",
+            resumeAt: Date.now() + 60_000,
+          }
+        : { complete: true, issues: [issue], reason: null };
+    },
+    async readBlockers() {
+      calls.push("blockers");
+      return { complete: true, blockers: [], reason: null };
+    },
+    async readIssueStatus() {
+      calls.push("status");
+      return { status: "open" };
+    },
+  };
+  const service = new StandaloneService(
+    join(root, "data"),
+    idleRuntime,
+    undefined,
+    {
+      github: { readerFactory: () => reader, intervalMs: 3_600_000 },
+      power: { enabled: false },
+    },
+  );
+  try {
+    await service.start();
+    const domain = service.domain();
+    const projectId = addGitHubProject(domain);
+    mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    await service.refreshGitHub();
+    const taskId = String(service.githubSources().issue("I_1")?.taskId);
+    assert.equal(domain.task(taskId).importedBlockers, "clear");
+    assert.deepEqual(calls, ["selection", "blockers"]);
+
+    limited = true;
+    await service.refreshGitHub();
+    const readsAtLimit = calls.length;
+    for (let i = 0; i < 2; i++) {
+      await service.refreshGitHub();
+      const sync = service.githubSources().syncState(projectId, "repo");
+      assert.equal(sync?.complete, 0);
+      assert.equal(sync?.reason, "rate-limited");
+      assert.equal(domain.task(taskId).importedBlockers, "unknown");
+    }
+    assert.equal(calls.length, readsAtLimit);
+
+    limited = false;
+    mock.timers.tick(60_000);
+    await service.refreshGitHub();
+    assert.deepEqual(calls.slice(readsAtLimit), ["selection", "blockers"]);
+    assert.equal(
+      service.githubSources().syncState(projectId, "repo")?.complete,
+      1,
+    );
+    assert.equal(domain.task(taskId).importedBlockers, "clear");
+  } finally {
+    mock.timers.reset();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a rate-limit pause records a closed blocker as unknown so its local dependent stays blocked", async () => {
+  const db = new DatabaseSync(":memory:");
+  new Store(db).ensureHost("test");
+  const domain = new DomainStore(db);
+  domain.migrate();
+  const sources = new GitHubSourceStore(db);
+  sources.migrate();
+  try {
+    const projectId = addGitHubProject(domain);
+    sources.reconcileSelection(projectId, "repo", {
+      complete: true,
+      issues: [issue],
+      reason: null,
+    });
+    const blockerTask = String(sources.issue("I_1")?.taskId);
+    const localId = randomUUID();
+    domain.execute({
+      type: "task.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId: localId,
+      title: "Local dependent",
+      outcome: "Wait for the issue",
+      ready: true,
+    });
+    domain.execute({
+      type: "dependency.add",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId: localId,
+      blockerTaskId: blockerTask,
+      expectedVersion: Number(domain.task(localId).version),
+    });
+    sources.recordIssueStatus("I_1", { status: "closed" });
+    assert.ok(!domain.admission(localId).reasons.includes("local-dependency"));
+
+    let reads = 0;
+    const reader: GitHubSourceReader = {
+      async readSelection() {
+        reads++;
+        return {
+          complete: false,
+          issues: [],
+          reason: "rate-limited",
+          resumeAt: Date.now() + 3_600_000,
+        };
+      },
+      async readBlockers() {
+        reads++;
+        return { complete: true, blockers: [], reason: null };
+      },
+      async readIssueStatus() {
+        reads++;
+        return { status: "closed" };
+      },
+    };
+    const synchronizer = new GitHubSynchronizer(domain, sources, () => reader);
+    for (let pass = 0; pass < 2; pass++) {
+      await synchronizer.refresh();
+      const status = db
+        .prepare(
+          "SELECT status, reason FROM github_issue_status WHERE nodeId = ?",
+        )
+        .get("I_1");
+      assert.deepEqual(
+        { ...status },
+        { status: "unknown", reason: "rate-limited" },
+      );
+      assert.ok(domain.admission(localId).reasons.includes("local-dependency"));
+    }
+    assert.equal(reads, 1, "the paused second pass makes no reader call");
+  } finally {
+    db.close();
+  }
+});
+
+test("a rate limit mid-selection leaves the unread issues' imported blockers unknown, not clear", async () => {
+  const db = new DatabaseSync(":memory:");
+  new Store(db).ensureHost("test");
+  const domain = new DomainStore(db);
+  domain.migrate();
+  const sources = new GitHubSourceStore(db);
+  sources.migrate();
+  try {
+    const projectId = addGitHubProject(domain);
+    const issues = [1, 2, 3].map((number) => ({
+      ...issue,
+      nodeId: `I_${number}`,
+      number,
+    }));
+    let limited = false;
+    const blockerReads: string[] = [];
+    const reader: GitHubSourceReader = {
+      async readSelection() {
+        return { complete: true, issues, reason: null };
+      },
+      async readBlockers(reference) {
+        blockerReads.push(reference.nodeId);
+        return limited
+          ? {
+              complete: false,
+              blockers: [],
+              reason: "rate-limited",
+              resumeAt: Date.now() + 3_600_000,
+            }
+          : { complete: true, blockers: [], reason: null };
+      },
+      async readIssueStatus() {
+        return { status: "open" };
+      },
+    };
+    const synchronizer = new GitHubSynchronizer(domain, sources, () => reader);
+    const blockersOf = () =>
+      issues.map((entry) =>
+        String(
+          domain.task(String(sources.issue(entry.nodeId)?.taskId))
+            .importedBlockers,
+        ),
+      );
+    await synchronizer.refresh();
+    assert.deepEqual(blockersOf(), ["clear", "clear", "clear"]);
+
+    limited = true;
+    blockerReads.length = 0;
+    await synchronizer.refresh();
+    assert.deepEqual(
+      blockerReads,
+      ["I_1"],
+      "only the first read reaches GitHub",
+    );
+    assert.deepEqual(blockersOf(), ["unknown", "unknown", "unknown"]);
+  } finally {
+    db.close();
+  }
+});
+
+test("timer refreshes also wait out a rate limit", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-github-rate-limit-timer-")),
+  );
+  let reads = 0;
+  const reader: GitHubSourceReader = {
+    async readSelection() {
+      reads++;
+      return {
+        complete: false,
+        issues: [],
+        reason: "rate-limited",
+        resumeAt: Date.now() + 3_600_000,
+      };
+    },
+    async readBlockers() {
+      reads++;
+      return { complete: true, blockers: [], reason: null };
+    },
+    async readIssueStatus() {
+      reads++;
+      return { status: "open" };
+    },
+  };
+  const service = new StandaloneService(
+    join(root, "data"),
+    idleRuntime,
+    undefined,
+    {
+      github: { readerFactory: () => reader, intervalMs: 1000 },
+      power: { enabled: false },
+    },
+  );
+  try {
+    await service.start();
+    const projectId = addGitHubProject(service.domain());
+    const reconcile = mock.method(
+      service.githubSources(),
+      "reconcileSelection",
+    );
+    await service.refreshGitHub();
+    assert.equal(reads, 1);
+    assert.equal(reconcile.mock.callCount(), 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1150));
+    assert.ok(reconcile.mock.callCount() >= 2, "the timer pass ran");
+    assert.equal(reads, 1);
+    const sync = service.githubSources().syncState(projectId, "repo");
+    assert.equal(sync?.complete, 0);
+    assert.equal(sync?.reason, "rate-limited");
+  } finally {
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("GitHub refresh defaults to five minutes", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "ensemble-github-default-interval-")),
+  );
+  const delays: unknown[] = [];
+  const realSetInterval = globalThis.setInterval;
+  const spy = mock.method(globalThis, "setInterval", ((
+    ...args: Parameters<typeof setInterval>
+  ) => {
+    delays.push(args[1]);
+    return realSetInterval(...args);
+  }) as typeof setInterval);
+  const service = new StandaloneService(
+    join(root, "data"),
+    idleRuntime,
+    undefined,
+    { power: { enabled: false } },
+  );
+  try {
+    await service.start();
+    assert.ok(delays.includes(300_000), `intervals: ${delays.join(",")}`);
+    assert.ok(!delays.includes(60_000));
+  } finally {
+    spy.mock.restore();
     await service.stop();
     rmSync(root, { recursive: true, force: true });
   }

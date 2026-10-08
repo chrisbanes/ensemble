@@ -23,17 +23,25 @@ export interface IssueSnapshot {
     optionNodeId: string;
   }>;
 }
+/** `resumeAt` (epoch ms) marks a rate-limited read: do not read again before then. */
 export type SelectionSnapshot =
   | { complete: true; issues: IssueSnapshot[]; reason: null }
-  | { complete: false; issues: IssueSnapshot[]; reason: string };
+  | {
+      complete: false;
+      issues: IssueSnapshot[];
+      reason: string;
+      resumeAt?: number;
+    };
 export type IssueStatus = {
   status: "open" | "closed" | "unknown";
   reason?: string;
+  resumeAt?: number;
 };
 export type BlockerSnapshot = {
   complete: boolean;
   blockers: IssueSnapshot[];
   reason: string | null;
+  resumeAt?: number;
 };
 export interface IssueReference {
   nodeId: string;
