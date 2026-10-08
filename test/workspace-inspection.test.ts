@@ -458,10 +458,12 @@ test("Git ignore failure and timeout return an incomplete listing with no uncert
     "ignored",
   );
   const current = currentFor(binding);
+  const failingGit = join(f.directory, "failing-git");
+  writeFileSync(failingGit, "#!/bin/sh\nexit 2\n", { mode: 0o755 });
   const failed = await listWorkspaceDirectory(
     request(binding, { scope: { kind: "repository", repositoryId: "repo" } }),
     current,
-    { gitExecutable: "/bin/sh" },
+    { gitExecutable: failingGit },
   );
   assert.equal(failed.state, "unavailable");
   assert.equal(failed.ignoreStatus, "incomplete");
