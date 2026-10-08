@@ -1458,6 +1458,10 @@ export class CodexRuntime implements Runtime {
     createInterface({ input: child.stdout }).on("line", (line) =>
       this.receive(child, line),
     );
+    // Without stdout no terminal can arrive, so pending turn waits would never settle.
+    child.stdout.on("close", () =>
+      this.failChild(child, new Error("Codex App Server stdout closed")),
+    );
     try {
       await this.qualifyExecutable(environment);
       if (this.child !== child) throw new Error("Runtime stopped");
@@ -1902,6 +1906,12 @@ export class CodexRuntime implements Runtime {
         this.terminalAnomaly?.({
           reason: "Missing terminal identity or status",
         });
+        // An unattributable terminal could belong to any waiting turn.
+        this.failChild(
+          child,
+          new Error("Runtime terminal evidence unavailable"),
+        );
+        return;
       } else {
         const runtimeGeneration = this.nativeGeneration;
         if (!runtimeGeneration) {

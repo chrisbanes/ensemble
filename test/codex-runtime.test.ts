@@ -185,15 +185,20 @@ test("conflicting and identity-free terminal reports are surfaced as anomalies",
     method: "turn/completed",
     params: { threadId: "thread", turn: { id: "turn", status: "failed" } },
   });
+  await assert.rejects(runtime.waitForTurn("thread", "turn"), /uncertain/);
+  bindTestTurn(runtime, "thread", "pending");
+  const pending = runtime.waitForTurn("thread", "pending");
   receive({
     method: "turn/completed",
     params: { turn: { status: "completed" } },
   });
   assert.deepEqual(anomalies, [
     "Conflicting terminal status",
+    "Terminal evidence is incomplete or conflicting",
     "Missing terminal identity or status",
   ]);
-  await assert.rejects(runtime.waitForTurn("thread", "turn"), /uncertain/);
+  // Without a terminal identity no waiting turn can settle, so the runtime fails.
+  await assert.rejects(bounded(pending, 1000), /terminal evidence unavailable/);
 });
 
 test("failure evidence is exact-turn-bound and only classifies the retry allowlist", () => {
@@ -1425,6 +1430,43 @@ for await (const line of createInterface({input: process.stdin})) {
     processRef.child?.kill("SIGKILL");
     await runtime.stop();
     if (stopping) await Promise.allSettled([stopping]);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stdout closure while the App Server lives fails a pending turn wait", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-stdout-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.id === undefined) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = newTestRuntime(executable);
+  try {
+    await bounded(runtime.start(), 3000);
+    const child = (
+      runtime as unknown as { child?: ChildProcessWithoutNullStreams }
+    ).child;
+    assert.ok(child);
+    bindTestTurn(runtime, "thread-1", "turn-1");
+    const waiting = runtime.waitForTurn("thread-1", "turn-1");
+    child.stdout.emit("close");
+    await assert.rejects(bounded(waiting, 1000), /stdout closed/);
+  } finally {
+    await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });
