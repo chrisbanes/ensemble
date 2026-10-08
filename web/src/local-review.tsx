@@ -73,7 +73,19 @@ function useLocalReviewController({
   );
   const draft = resource.state.data?.data ?? null;
   if (!state.send) {
-    const restored = restoredSend(taskId);
+    const pending = draft?.pendingOperation;
+    const restored =
+      restoredSend(taskId) ??
+      (pending && draft
+        ? {
+            key: pending.key,
+            expectedDraftVersion: draft.version,
+            recipientAssignmentId: pending.recipientAssignmentId,
+            expectedAssignmentVersion: pending.expectedAssignmentVersion,
+            recipientName: lead?.name ?? "the project lead",
+            status: "unknown" as const,
+          }
+        : null);
     if (restored) state.send = restored;
   }
 
@@ -107,14 +119,10 @@ function useLocalReviewController({
         receipt.state === "prepared"
           ? "unknown"
           : (receipt.state as LocalReviewSend["status"]);
-    } else if (
-      result.state === "unknown" ||
-      result.code === "unavailable" ||
-      result.code === "command-outcome-unknown"
-    ) {
-      send.status = "unknown";
     } else {
-      send.status = "rejected";
+      // Without a receipt the send may still have committed; only the same-key
+      // reconciliation can confirm delivery or a no-delivery outcome.
+      send.status = "unknown";
       send.reason = result.code ?? result.state;
     }
     if (send.status === "recorded") state.inspectKey = send.key;
@@ -576,7 +584,11 @@ function SentReview({ operationKey }: { operationKey: string }) {
         Review {data.reviewId} · <StatusBadge>{data.state}</StatusBadge>
         {data.eventId ? ` · event ${data.eventId}` : ""}
       </p>
-      {data.summary && <p>Summary: {data.summary}</p>}
+      {data.summary === null ? (
+        <p>Summary withheld under current access.</p>
+      ) : (
+        data.summary && <p>Summary: {data.summary}</p>
+      )}
       <ol className="review-comments">
         {(data.comments ?? []).map((comment) => (
           <li key={comment.commentId}>

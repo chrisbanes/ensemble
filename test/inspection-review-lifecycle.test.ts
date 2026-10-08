@@ -163,10 +163,14 @@ test("three-start lifecycle: paused review, reporting repair, then a stopped rev
 
   // Turn 3 delivers the queued review; it reports a real result, then is stopped.
   await until(() => f.runtime.hasPending(3), "turn 3");
+  const delivered = f.runtime.prompts[2] ?? "";
+  assert.match(delivered, /operator-message.*Review after the bounded turns/);
+  // The lead receives exact identity and the original excerpt, not path/line alone.
   assert.match(
-    f.runtime.prompts[2] ?? "",
-    /operator-message.*Review after the bounded turns/,
+    delivered,
+    /task workspace marker\.txt · lines 1-1 · workspace · sha256 [a-f0-9]{64} · retained anchor /,
   );
+  assert.match(delivered, /\| turn one/);
   const third = f.service.list().find((work) => work.state === "running");
   assert.ok(third?.threadId && third.turnId);
   await writeFile(marker, "turn three\n");

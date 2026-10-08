@@ -70,6 +70,44 @@ type Draft = z.infer<typeof draftSchema>;
 type FrozenPayload = z.infer<typeof frozenPayloadSchema>;
 type Row = Record<string, string | number | null>;
 
+const maxExcerptLines = 12;
+const maxExcerptCharacters = 800;
+
+/** Exact identity plus a short original excerpt, so the lead never relies on path and line alone. */
+function anchorContext({
+  anchor,
+  bytes,
+}: NonNullable<ReturnType<RetainedEvidenceStore["reviewAnchor"]>>): string {
+  const source = [
+    `${anchor.repositoryId ? `repository ${anchor.repositoryId}` : "task workspace"} ${anchor.path}`,
+    `lines ${anchor.startLine}-${anchor.endLine}`,
+    anchor.context,
+    anchor.side === "left" ? "Before" : anchor.side === "right" ? "After" : "",
+    anchor.comparisonId ? `comparison ${anchor.comparisonId}` : "",
+    anchor.resultId ? `result ${anchor.resultId}` : "",
+    anchor.resultItemId ? `item ${anchor.resultItemId}` : "",
+    anchor.turnId ? `turn ${anchor.turnId}` : "",
+    anchor.sourceSha256 ? `sha256 ${anchor.sourceSha256}` : "",
+    `retained anchor ${anchor.anchorId}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (anchor.state !== "available" || !bytes)
+    return `  Context: ${source}\n  Original excerpt unavailable${anchor.reason ? ` (${anchor.reason})` : ""}.`;
+  const text = bytes.toString("utf8");
+  const lines = text.replace(/\n$/, "").split("\n");
+  let excerpt = lines.slice(0, maxExcerptLines).join("\n");
+  if (excerpt.length > maxExcerptCharacters)
+    excerpt = excerpt.slice(0, maxExcerptCharacters);
+  const shortened = excerpt.length < text.replace(/\n$/, "").length;
+  return `  Context: ${source}\n${excerpt
+    .split("\n")
+    .map((line) => `    | ${line}`)
+    .join(
+      "\n",
+    )}${shortened ? "\n    | … (excerpt shortened; the retained anchor keeps the full context)" : ""}`;
+}
+
 export type LocalReviewResponse = {
   operationId: string;
   taskId: string;
@@ -204,28 +242,56 @@ export class LocalReviewStore {
       FROM coordination_local_review_groups WHERE taskId=? AND ownerKey=?
       ORDER BY createdAt,groupId`)
       .all(taskId, ownerKey) as Row[];
+    const draft = row
+      ? draftSchema.parse(JSON.parse(String(row.draftJson)))
+      : draftSchema.parse({ summary: "", comments: [] });
+    const referenced = new Set(
+      draft.comments.flatMap((comment) => comment.anchorGroupIds),
+    );
+    // A frozen send stays reconcilable from any tab of the owning session.
+    const pending =
+      row?.state === "sending"
+        ? this.one(
+            `SELECT operationId,requestJson FROM coordination_local_review_operations
+            WHERE taskId=? AND ownerKey=? AND draftVersion=? AND state='prepared'`,
+            taskId,
+            ownerKey,
+            Number(row.version),
+          )
+        : undefined;
     return {
       taskId,
       version: row ? Number(row.version) : 0,
       state: row ? String(row.state) : "editable",
-      draft: row
-        ? draftSchema.parse(JSON.parse(String(row.draftJson)))
-        : draftSchema.parse({ summary: "", comments: [] }),
+      draft,
+      pendingOperation: pending
+        ? {
+            key: String(pending.operationId),
+            ...z
+              .object({
+                recipientAssignmentId: uuid,
+                expectedAssignmentVersion: z.number().int().positive(),
+              })
+              .parse(JSON.parse(String(pending.requestJson))),
+          }
+        : null,
       accessFingerprint: row ? String(row.accessFingerprint) : null,
       updatedAt: row ? Number(row.updatedAt) : null,
-      groups: groups.map((group) => ({
-        groupId: String(group.groupId),
-        anchorIds: z
-          .array(uuid)
-          .max(32)
-          .parse(JSON.parse(String(group.anchorIdsJson))),
-        state: String(group.state),
-        submittedContextId:
-          group.submittedContextId === null
-            ? null
-            : String(group.submittedContextId),
-        createdAt: Number(group.createdAt),
-      })),
+      groups: groups
+        .filter((group) => referenced.has(String(group.groupId)))
+        .map((group) => ({
+          groupId: String(group.groupId),
+          anchorIds: z
+            .array(uuid)
+            .max(32)
+            .parse(JSON.parse(String(group.anchorIdsJson))),
+          state: String(group.state),
+          submittedContextId:
+            group.submittedContextId === null
+              ? null
+              : String(group.submittedContextId),
+          createdAt: Number(group.createdAt),
+        })),
       unsentDraftLost: Boolean(
         this.one(
           "SELECT 1 AS found FROM coordination_local_review_losses WHERE taskId=?",
@@ -626,13 +692,13 @@ export class LocalReviewStore {
             const group = frozenGroups.find((item) => item.groupId === groupId);
             return (
               group?.anchorIds.map((anchorId) => {
-                const anchor = this.retained.reviewAnchor(
+                const retainedAnchor = this.retained.reviewAnchor(
                   request.taskId,
                   anchorId,
-                )?.anchor;
-                if (!anchor)
+                );
+                if (!retainedAnchor)
                   throw new Error("Local review anchor is unavailable");
-                return `  Context: ${anchor.context} ${anchor.path}:${anchor.startLine}-${anchor.endLine} (retained anchor ${anchor.anchorId})`;
+                return anchorContext(retainedAnchor);
               }) ?? []
             );
           });
@@ -967,13 +1033,14 @@ export class LocalReviewStore {
           ? undefined
           : String(row.accessFingerprint),
       requestHash: String(row.requestHash),
+      ownerKey: String(row.ownerKey),
     };
   }
 
   purgeEditableDrafts(ownerKey?: string, taskId?: string): number {
     return transaction(this.db, () => {
       const drafts = this.db
-        .prepare(`SELECT taskId,ownerKey FROM coordination_local_review_drafts
+        .prepare(`SELECT taskId,ownerKey,draftJson FROM coordination_local_review_drafts
         WHERE state IN ('editable','sending')${ownerKey === undefined ? "" : " AND ownerKey=?"}${taskId === undefined ? "" : " AND taskId=?"}`)
         .all(
           ...[
@@ -1002,13 +1069,22 @@ export class LocalReviewStore {
           .prepare(`SELECT groupId,anchorDraftId,anchorIdsJson,state
           FROM coordination_local_review_groups WHERE taskId=? AND ownerKey=?`)
           .all(taskId, currentOwner) as Row[];
+        const content = draftSchema.safeParse(
+          JSON.parse(String(draft.draftJson)),
+        );
+        // Only drafts with text or anchors are reported as lost.
+        const hadContent =
+          !content.success ||
+          content.data.summary !== "" ||
+          content.data.comments.length > 0 ||
+          groups.some((group) => group.state === "open");
         for (const group of groups)
           if (
             group.state === "open" &&
             !protectedGroups.has(String(group.groupId))
           )
             this.discardGroup(taskId, group);
-        affected.set(taskId, (affected.get(taskId) ?? 0) + 1);
+        if (hadContent) affected.set(taskId, (affected.get(taskId) ?? 0) + 1);
         this.db
           .prepare(
             `DELETE FROM coordination_local_review_drafts WHERE taskId=? AND ownerKey=?`,
@@ -1143,6 +1219,10 @@ export class LocalReviewStore {
     result: unknown,
     now: number,
   ) {
+    // Saving or clearing a draft acknowledges any earlier lost-draft notice.
+    this.db
+      .prepare("DELETE FROM coordination_local_review_losses WHERE taskId=?")
+      .run(input.taskId);
     this.db
       .prepare(`INSERT INTO coordination_local_review_draft_operations
       (scope,commandKey,taskId,ownerKey,requestHash,responseJson,createdAt) VALUES (?,?,?,?,?,?,?)`)

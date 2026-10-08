@@ -1249,6 +1249,7 @@ export class StandaloneService {
         ? {
             taskVersion: policy.taskVersion,
             fingerprint: policy.fingerprint,
+            accessFingerprint: policy.accessFingerprint,
             excluded: policy.excluded,
             authorizedRepositoryIds: policy.authorizedRepositoryIds,
           }
@@ -1303,7 +1304,7 @@ export class StandaloneService {
       stageOperationId: request.operationId,
       stageMaterialHash: retainedReviewAnchorMaterialHash(request),
       candidates,
-      accessFingerprint: initialPolicy.fingerprint,
+      accessFingerprint: initialPolicy.accessFingerprint,
     });
   }
 

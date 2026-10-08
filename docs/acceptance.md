@@ -303,6 +303,22 @@ does not imply that the result callback stopped later writes or that a review
 was delivered or received. Direct result-recording paths without a retention
 candidate and historical results preserve their earlier behavior.
 
+### #782 integrated UI and review evidence map
+
+Deterministic production-browser and service suites cover the #782 UI and
+local review scope. The bounded actual-runtime journey is recorded separately
+in the [#782 evidence record](evidence/wi01-wi13-workspace-review.md); it is
+not covered by #780's spent journey.
+
+| Criteria | Deterministic evidence |
+| --- | --- |
+| WI01–WI02 Files across repository-free and multiple repositories, safe previews, PDF canvas and no download | `operator-files-browser.test.ts`, `operator-pdf-render-browser.test.ts` |
+| WI04–WI05, WI08 Branch/Uncommitted per-repository baselines, gaps, stable reads and Refresh | `operator-changes-browser.test.ts`, `workspace-comparison.test.ts`, `workspaces.test.ts` (inspection identity reuse) |
+| WI06 pending and latest-finished Last turn, and the three-start lifecycle | `operator-changes-browser.test.ts`, `inspection-review-lifecycle.test.ts` |
+| WI07 retained original bytes after later edits and removal, explicit current-file action | `operator-retained-inspection-browser.test.ts` |
+| WI09 Board and Search origins, section links and exact direct links | `operator-inspection-navigation-browser.test.ts` |
+| WI10–WI13 multi-origin anchors, draft edits, reload continuity, lost-response reconciliation, sent inspection, next review and sign-out privacy | `operator-local-review-browser.test.ts`, `local-review.test.ts` |
+
 ## Implemented service and integration proofs
 
 These are later S02–S07 integration obligations (GitHub coverage starts in S06).

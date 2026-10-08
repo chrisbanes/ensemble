@@ -106,6 +106,8 @@ type RetainedReadPolicy = {
   controlPaths: readonly string[];
   authorizedRepositoryIds: readonly string[];
   fingerprint: string;
+  /** File-access inputs only; review drafts survive unrelated version changes. */
+  accessFingerprint: string;
 };
 type RetainedDiffPayload = {
   version: 1;
@@ -519,6 +521,18 @@ export class OperatorApi {
       controlPaths: [...this.controlPaths],
       authorizedRepositoryIds: repositories,
       fingerprint,
+      accessFingerprint: createHash("sha256")
+        .update(
+          JSON.stringify({
+            taskId,
+            projectId,
+            workspaceVisibility,
+            repositories,
+            excluded,
+            controlPaths: this.controlPaths,
+          }),
+        )
+        .digest("hex"),
     };
   }
   private sameRetainedPolicy(
@@ -3678,7 +3692,7 @@ export class OperatorApi {
     let draft = store.readDraft(taskId, session.ownerKey);
     if (
       draft.accessFingerprint &&
-      draft.accessFingerprint !== policy.fingerprint
+      draft.accessFingerprint !== policy.accessFingerprint
     ) {
       store.purgeEditableDrafts(session.ownerKey, taskId);
       draft = store.readDraft(taskId, session.ownerKey);
@@ -3700,7 +3714,15 @@ export class OperatorApi {
     const value = this.service.localReviews().operationMaterial(operationId);
     if (!value || value.response.taskId !== taskId)
       throw new OperatorApiError(404, "not-found");
-    const payload = value.payload;
+    // Definitively unsent text stays with its own session. Prepared operations
+    // remain visible for re-authenticated reconciliation.
+    const unsent =
+      value.response.state === "rejected" ||
+      value.response.state === "not-recorded";
+    const payload =
+      !unsent || value.ownerKey === session.ownerKey
+        ? value.payload
+        : undefined;
     const comments = payload?.comments.map((comment) => {
       const body = this.safe(comment.body, policy.excluded);
       return {
@@ -3853,7 +3875,7 @@ export class OperatorApi {
         expectedDraftVersion: c.expectedDraftVersion,
         draft: c.draft,
         requestHash,
-        accessFingerprint: policy.fingerprint,
+        accessFingerprint: policy.accessFingerprint,
       });
       return commandReceiptSchema.parse({
         kind: "local-review-draft",
@@ -3873,7 +3895,7 @@ export class OperatorApi {
       ownerKey: session.ownerKey,
       expectedDraftVersion: c.expectedDraftVersion,
       requestHash,
-      accessFingerprint: policy.fingerprint,
+      accessFingerprint: policy.accessFingerprint,
     });
     return commandReceiptSchema.parse({
       kind: "local-review-draft",
@@ -3945,7 +3967,7 @@ export class OperatorApi {
       if (!prepared.payload)
         throw new OperatorApiError(503, "command-outcome-unknown");
       const initial = await this.currentReviewPolicy(c.taskId, session);
-      if (prepared.accessFingerprint !== initial.fingerprint) {
+      if (prepared.accessFingerprint !== initial.accessFingerprint) {
         const rejected = store.rejectSend(c.key, requestHash, "policy-changed");
         if (!rejected)
           throw new OperatorApiError(503, "command-outcome-unknown");
@@ -4018,7 +4040,7 @@ export class OperatorApi {
       if (!this.sameRetainedPolicy(latest, initial))
         return this.localReviewReceipt(c.key, prepared.response);
       if (
-        prepared.accessFingerprint !== latest.fingerprint ||
+        prepared.accessFingerprint !== latest.accessFingerprint ||
         !this.reviewTaskIsOpen(c.taskId)
       ) {
         const rejected = store.rejectSend(
@@ -4036,7 +4058,7 @@ export class OperatorApi {
           request,
           requestHash,
           payload: prepared.payload,
-          accessFingerprint: latest.fingerprint,
+          accessFingerprint: latest.accessFingerprint,
           expectedIdentity: {
             projectId: latest.projectId,
             taskVersion: latest.taskVersion,
@@ -4109,7 +4131,7 @@ export class OperatorApi {
         ownerKey: session.ownerKey,
         requestHash,
         currentIdentity: this.reviewSyncIdentity(c.taskId),
-        currentAccessFingerprint: policy.fingerprint,
+        currentAccessFingerprint: policy.accessFingerprint,
       });
       return this.localReviewReceipt(c.key, result);
     }
@@ -4131,7 +4153,7 @@ export class OperatorApi {
       ownerKey: session.ownerKey,
       requestHash,
       currentIdentity: this.reviewSyncIdentity(c.taskId),
-      currentAccessFingerprint: policy.fingerprint,
+      currentAccessFingerprint: policy.accessFingerprint,
     });
     return this.localReviewReceipt(c.key, result);
   }

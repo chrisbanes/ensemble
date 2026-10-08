@@ -286,7 +286,11 @@ test("production local review composes exact multi-origin anchors and sends one 
     fullPage: false,
   });
   assert.deepEqual(
-    consoleErrors.filter((text) => !/Failed to load resource/.test(text)),
+    // Only the deliberately reset send and the post-sign-out session probe may fail.
+    consoleErrors.filter(
+      (text) =>
+        !/net::ERR_CONNECTION_RESET|status of 401 \(Unauthorized\)/.test(text),
+    ),
     [],
   );
   assert.deepEqual(pageErrors, []);

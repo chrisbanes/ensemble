@@ -1455,6 +1455,14 @@ export const localReviewDraftReadSchema = envelope(
       draft: localReviewDraftContentSchema,
       accessFingerprint: z.string().max(128).nullable(),
       updatedAt: time.nullable(),
+      pendingOperation: z
+        .object({
+          key: uuid,
+          recipientAssignmentId: uuid,
+          expectedAssignmentVersion: revision,
+        })
+        .strict()
+        .nullable(),
       groups: z
         .array(
           z
@@ -1467,7 +1475,7 @@ export const localReviewDraftReadSchema = envelope(
             })
             .strict(),
         )
-        .max(256),
+        .max(1024),
       unsentDraftLost: z.boolean(),
     })
     .strict(),
@@ -1502,7 +1510,7 @@ export const localReviewOperationReadSchema = envelope(
       eventId: uuid.optional(),
       recipientAssignmentId: uuid.optional(),
       reason: z.string().max(128).optional(),
-      summary: z.string().max(4000).optional(),
+      summary: z.string().max(16000).nullable().optional(),
       comments: z
         .array(
           z

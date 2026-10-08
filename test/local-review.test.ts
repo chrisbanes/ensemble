@@ -556,11 +556,17 @@ test("policy change during send rejects the frozen operation and restores editin
       hold = false;
       entered();
       await gate;
-      f.seedPersistedState((db) => {
-        db.prepare("UPDATE domain_tasks SET version=version+1 WHERE id=?").run(
-          taskId,
-        );
+      // New profile instructions are excluded content, so file access changed.
+      const domain = f.service.domain();
+      domain.execute({
+        type: "profile.configure",
+        actor: "operator",
+        key: randomUUID(),
+        profileId: task.profileId,
+        expectedVersion: Number(domain.profile(task.profileId).version),
+        instructions: "CHANGED PRIVATE INSTRUCTIONS",
       });
+      void taskId;
     }
     return originalPolicy(taskId);
   };
@@ -682,4 +688,150 @@ test("HTTP reconciliation tombstone fences an original POST delayed before serve
     continuations: 0,
     submissions: 0,
   });
+});
+
+test("unrelated task and configuration versions keep the editable draft", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Draft survives versions");
+  const other = await seedReviewTask(f, "Other project");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["kept.txt"]);
+  const domain = f.service.domain();
+  domain.execute({
+    type: "task.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: task.projectId,
+    taskId: task.taskId,
+    expectedVersion: Number(domain.task(task.taskId).version),
+    outcome: "Changed outcome text",
+  });
+  domain.execute({
+    type: "project.configure",
+    actor: "operator",
+    key: randomUUID(),
+    projectId: other.projectId,
+    expectedVersion: Number(domain.project(other.projectId).version),
+    paused: false,
+  });
+  const read = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(read.data.state, "editable");
+  assert.deepEqual(read.data.draft, draft.draft);
+  assert.equal(read.data.unsentDraftLost, false);
+});
+
+test("lost-draft notice counts only drafts with content and clears on the next save", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Loss notice");
+  const api = new OperatorApi(f.service, []);
+  const store = f.service.localReviews();
+  const empty = session();
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: 0,
+      draft: { summary: "", comments: [] },
+    },
+    empty,
+  );
+  store.purgeEditableDrafts(empty.ownerKey, task.taskId);
+  const next = session();
+  assert.equal(
+    (await api.readLocalReviewDraft(task.taskId, next)).data.unsentDraftLost,
+    false,
+  );
+  const withContent = session();
+  await stageDraft(f, api, task, withContent, ["lost.txt"]);
+  store.purgeEditableDrafts(withContent.ownerKey, task.taskId);
+  assert.equal(
+    (await api.readLocalReviewDraft(task.taskId, next)).data.unsentDraftLost,
+    true,
+  );
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: 0,
+      draft: { summary: "fresh", comments: [] },
+    },
+    next,
+  );
+  assert.equal(
+    (await api.readLocalReviewDraft(task.taskId, next)).data.unsentDraftLost,
+    false,
+  );
+});
+
+test("a frozen send is reconcilable from the draft read; unsent text stays with its session", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Pending operation");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["pending.txt"]);
+  const command = requestFor(
+    task,
+    randomUUID(),
+    draft.version,
+    Number(f.service.domain().assignment(task.assignmentId).version),
+  );
+  f.service.localReviews().prepareSend({
+    request: {
+      key: command.key,
+      taskId: command.taskId,
+      expectedDraftVersion: command.expectedDraftVersion,
+      recipientAssignmentId: command.recipientAssignmentId,
+      expectedAssignmentVersion: command.expectedAssignmentVersion,
+    },
+    ownerKey: owner.ownerKey,
+    requestHash: materialDigest({
+      taskId: command.taskId,
+      expectedDraftVersion: command.expectedDraftVersion,
+      recipientAssignmentId: command.recipientAssignmentId,
+      expectedAssignmentVersion: command.expectedAssignmentVersion,
+    }),
+  });
+  const read = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(read.data.state, "sending");
+  assert.deepEqual(read.data.pendingOperation, {
+    key: command.key,
+    recipientAssignmentId: task.assignmentId,
+    expectedAssignmentVersion: command.expectedAssignmentVersion,
+  });
+  const own = await api.readLocalReviewOperation(
+    task.taskId,
+    command.key,
+    owner,
+  );
+  assert.ok(own.data.comments?.length);
+  const rejected = f.service.localReviews().rejectSend(
+    command.key,
+    materialDigest({
+      taskId: command.taskId,
+      expectedDraftVersion: command.expectedDraftVersion,
+      recipientAssignmentId: command.recipientAssignmentId,
+      expectedAssignmentVersion: command.expectedAssignmentVersion,
+    }),
+    "policy-changed",
+  );
+  assert.equal(rejected?.state, "rejected");
+  const otherSession = await api.readLocalReviewOperation(
+    task.taskId,
+    command.key,
+    session(),
+  );
+  assert.equal(otherSession.data.state, "rejected");
+  assert.equal(otherSession.data.comments, undefined);
+  const sameSession = await api.readLocalReviewOperation(
+    task.taskId,
+    command.key,
+    owner,
+  );
+  assert.ok(sameSession.data.comments?.length);
 });
