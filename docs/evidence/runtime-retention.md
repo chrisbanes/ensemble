@@ -47,17 +47,44 @@ binding's created snapshot was no longer an active pin. The cache remained at
 after byte churn. During a later active turn it reported that separate
 157-byte snapshot as one actual pin; the pin retired on terminal observation.
 
+The follow-up pin-release cohort exercised four concurrent production
+`turn/start` requests with four distinct 100 KB tool snapshots. While those
+requests were pending, all four snapshots remained present as active pins:
+401,212 UTF-8 bytes, above the settled-cache byte limit. The test then failed
+all four requests without another cache insertion or cache lookup. All four
+service submissions remained held with no turn ID or native qualification;
+the cache immediately settled at two entries / 200,606 bytes, with zero pins.
+This covers the point where the last RPC owner releases, rather than relying on
+a later insertion to trigger eviction.
+
+Settled-budget trimming now runs after RPC timeout or response handling and
+after native endpoint or turn retirement. A failed/stopped runtime clears the
+snapshot cache before clearing its pending RPC map. Resume response handling
+validates the returned thread, installs any refreshed exact snapshot, and
+captures native qualification synchronously before the RPC-release trim, so
+the prior facts remain available for that check.
+
+A separate 140-thread cohort completed `thread/start` and `thread/resume`
+through the production adapter and service-owned SQLite qualification store.
+All 140 exact first-facts rows remained durable, while the settled snapshot
+cache stopped at 128 entries / 40,440 bytes with no active pins. No turn was
+started and no native endpoint or readback was exposed. Native qualification
+is now returned directly to the immediate callback qualification path; general
+resumes retain only the durable first facts and bounded thread snapshot, not a
+per-thread qualification object.
+
 For both workloads, the test enumerated the settled terminal and native
-payload caches, native qualifications, active endpoints and both indexes, the
-single joint thread-snapshot cache, native turns, invalid turns, readbacks,
+payload caches, active endpoints and both indexes, the single joint
+thread-snapshot cache, native turns, invalid turns, readbacks,
 failure-evidence cache, conversation turns, pending RPCs, service
 waiters/callbacks/active/background work/captures, and state prebindings.
 Every settled collection had count 0 and UTF-8 payload bytes 0. At one active
-native request, the test separately observed one endpoint, turn and RPC
-index, readback, turn, qualification, thread snapshot, service waiter and
-callback. The raw request was 304 bytes; enumerated active payloads were:
-qualification 400 bytes, endpoint 1,034, turn index 170, RPC index 180,
-thread snapshot 111, turn 48, readback 370, waiter 193, and callback key 23.
+native request, the test observed one endpoint, turn and RPC index, readback,
+turn, thread snapshot, service waiter and callback. The qualification is
+embedded in that endpoint's callback payload. The raw request was 304 bytes;
+enumerated active payloads were: endpoint 1,034 bytes, turn index 170, RPC
+index 180, thread snapshot 111, turn 48, readback 370, waiter 193, and
+callback key 23.
 Active child/stream/timer/function handles are not converted into payload
 bytes; their ownership and lifecycle are tested separately.
 
@@ -75,8 +102,8 @@ production runtime retention.
 
 | Workload | Durable rows and payload | Post-GC heap samples | Indexed lookup / cancellation | Settled in-memory payloads |
 | --- | --- | --- | --- | --- |
-| 10,000 terminal turns | 10,000 rows; 1,027,780 UTF-8 bytes | 5,000: 15,986,312 bytes; 10,000: 16,526,616 bytes; delta 540,304 | Terminal lookup, 1,000 iterations: median 0.057083 ms, p95 0.438916 ms, max 6.811167 ms | Every enumerated collection: 0 entries / 0 bytes |
-| 2,000 native questions | 2,000 question rows; 2,119,123 UTF-8 bytes; qualification rows: 2,000 / 530,890 bytes | 1,000: 19,766,312 bytes; 2,000: 20,454,104 bytes; delta 687,792 | Terminal lookup: 0.045625 / 0.055666 / 0.267042 ms; native endpoint lookup: 0.04275 / 0.056625 / 0.230792 ms; settled direct cancellation lookup: 0.000625 / 0.000958 / 0.076625 ms (median / p95 / max, each 1,000 iterations) | Every enumerated collection: 0 entries / 0 bytes |
+| 10,000 terminal turns | 10,000 rows; 1,027,780 UTF-8 bytes | 5,000: 16,589,904 bytes; 10,000: 16,606,624 bytes; delta 16,720 | Terminal lookup, 1,000 iterations: median 0.050000 ms, p95 0.087917 ms, max 0.597000 ms | Every enumerated collection: 0 entries / 0 bytes |
+| 2,000 native questions | 2,000 question rows; 2,119,123 UTF-8 bytes; qualification rows: 2,000 / 530,890 bytes | 1,000: 19,863,760 bytes; 2,000: 19,988,400 bytes; delta 124,640 | Terminal lookup: 0.049083 / 0.070625 / 0.265833 ms; native endpoint lookup: 0.045250 / 0.063042 / 0.296667 ms; settled direct cancellation lookup: 0.000666 / 0.000959 / 0.068208 ms (median / p95 / max, each 1,000 iterations) | Every enumerated collection: 0 entries / 0 bytes |
 
 SQLite used the `runtime_terminal_evidence` composite primary-key index for
 terminal lookups and the `coordination_runtime_questions` unique endpoint
@@ -119,16 +146,21 @@ PATH=/private/tmp/node-v24.21.0-darwin-arm64/bin:$PATH \
   node --expose-gc --unhandled-rejections=strict --test dist/test/runtime-retention.test.js
 ```
 
-On the repaired source it passed 7/7 tests with 0 failures and 0 skips. The
-same run covers the 10,000-turn and 2,000-question measurements, failed and
-unbound terminal classification, joint thread-snapshot budgets, changed or
-missing qualification facts, corrupt/missing/write-failed terminal evidence,
-and legacy migration. Its raw output is
-`/private/tmp/ensemble-790-runtime-retention-repair-final.log`.
+On the qualification-map repair source it passed 9/9 tests with 0 failures
+and 0 skips. It covers the 10,000-turn and 2,000-question measurements, the
+four-owner pin-release cohort, 140 successful resume responses with durable
+facts and no retained qualification map, failed and unbound terminal
+classification, joint snapshot budgets, changed or missing qualification
+facts, corrupt/missing/write-failed terminal evidence, and legacy migration.
+Its raw output is
+`/private/tmp/ensemble-790-qualification-map-retention-expose-gc.log`.
 
-The full Codex adapter suite passed 59/59, including all old-turn ownership,
-typed-ID reuse, replay, nonempty dynamic tools, immediate callback ordering,
-and changed/missing settings cases. Its output is
+The renewed adapter and retention matrix passed 68/68, including all old-turn
+ownership, typed-ID reuse, replay, native callback qualification carried by
+the exact callback, nonempty dynamic tools, immediate callback ordering,
+changed/missing settings, and the new successful-resume retention cohort. Its
+output is `/private/tmp/ensemble-790-qualification-map-focused.log`. The
+earlier adapter suite passed 59/59 in
 `/private/tmp/ensemble-790-codex-runtime-repair-final.log`. The smaller renewed
 review-boundary run passed 12/12 in
 `/private/tmp/ensemble-790-repair-boundaries-1.log`. It records two diagnosed
@@ -140,17 +172,34 @@ workspaces, test-stage counters, durable empty-tool digest recovery, and
 synchronous response validation repaired those cases; the final suites above
 pass without changing production hold or retry policy.
 
+The first expanded pin-release boundary run exposed a resume ordering regression
+in the initial trim placement: qualification ran before the refreshed snapshot
+was installed. The raw result is preserved in
+`/private/tmp/ensemble-790-pin-release-boundaries-1.log` (70 passed, 1 failed).
+Resume now validates the response, installs its refreshed snapshot, and checks
+qualification in the synchronous response callback before trimming. The
+focused follow-up passed both the 140-startup cohort and four-owner pin-release
+cohort in `/private/tmp/ensemble-790-pin-release-focused-3.log`. The renewed
+three-file runtime, retention, and native matrix passed 71/71 in
+`/private/tmp/ensemble-790-pin-release-boundaries-final.log`, including the
+10,000-terminal and 2,000-native workloads.
+
+The latest 10,000-turn heap delta was 16,720 bytes and the 2,000-question heap
+delta was 124,640 bytes under this synthetic workload; these are observations,
+not a memory guarantee.
+
 The final pinned full check ran with Node.js v24.21.0 and npm 12.2.0. It
-completed type checking, lint, formatting, build, and 1,028 tests with 1,028
-passes and no failures or skips (99,809 ms for the test suite). The captured
-full output is `/private/tmp/ensemble-790-full-check-repair-final-escalated.log`;
-its first two lines record Node.js and npm versions. The sandbox retry is
-preserved at `/private/tmp/ensemble-790-full-check-repair-final-retry.log`;
-after typecheck, lint and format passed, it reached the build and TypeScript
-was denied writes to ignored `dist/` outputs. The exact check passed with the
-necessary filesystem permission. The prior pre-repair full result remains
-recorded at `/private/tmp/ensemble-790-full-check-ui-cleanup-final-retry.log`
-and is superseded by this final 1,028-test run.
+completed type checking, lint, formatting, build, and 1,030 tests with 1,030
+passes and no failures or skips (91,818 ms for the test suite). The captured
+full output is
+`/private/tmp/ensemble-790-qualification-map-full-check-escalated.log`; its
+first two lines record Node.js and npm versions. The first check found one
+formatting issue in the test's diagnostic field, which was corrected. The
+subsequent sandbox attempt is preserved at
+`/private/tmp/ensemble-790-qualification-map-full-check-final.log`; after
+typecheck, lint, and format passed, TypeScript was denied writes to ignored
+`dist/` outputs. The exact pinned check passed with the necessary filesystem
+access.
 
 The renewed UI04/UI07 cleanup matrix passed 9/9 focused cases, including
 successful qualification, delayed browser creation, late cleanup failure,

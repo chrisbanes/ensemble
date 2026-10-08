@@ -188,7 +188,7 @@ class BoundedThreadSnapshotCache extends Map<string, RuntimeThreadSnapshot> {
     return { count, utf8Bytes, pinnedCount, pinnedUtf8Bytes };
   }
 
-  private trimSettledEntries(): void {
+  trimSettledEntries(): void {
     while (true) {
       const stats = this.settledStats();
       if (
@@ -518,10 +518,6 @@ export class CodexRuntime implements Runtime {
   private nativeExecutable:
     | { codexVersion: string; executableHash: string }
     | undefined;
-  private readonly nativeQualifications = new Map<
-    string,
-    NativeInputProtocolQualification
-  >();
   private readonly nativeEndpoints = new Map<string, NativeEndpoint>();
   private readonly nativeEndpointsByTurn = new Map<string, Set<string>>();
   private readonly nativeEndpointsByRpcId = new Map<string, Set<string>>();
@@ -671,9 +667,9 @@ export class CodexRuntime implements Runtime {
     if (this.nativeTurns.get(threadId) === turnId)
       this.nativeTurns.delete(threadId);
     if (ownsThreadState) {
-      this.nativeQualifications.delete(threadId);
       this.threadSnapshots.delete(threadId);
     }
+    this.threadSnapshots.trimSettledEntries();
   }
   async replyUserInput(
     identity: NativeInputEndpointIdentity,
@@ -791,8 +787,10 @@ export class CodexRuntime implements Runtime {
       /* General runtime remains usable without native qualification. */
     }
   }
-  private captureNativeQualification(threadId: string, input: unknown): void {
-    this.nativeQualifications.delete(threadId);
+  private captureNativeQualification(
+    threadId: string,
+    input: unknown,
+  ): NativeInputProtocolQualification | undefined {
     const parsed = z
       .object({
         thread: z.object({ id: z.literal(threadId) }),
@@ -813,13 +811,13 @@ export class CodexRuntime implements Runtime {
     const snapshot = this.threadSnapshots.get(threadId);
     const startedSettings = snapshot?.settings;
     if (!parsed.success || !this.nativeExecutable || !this.nativeGeneration)
-      return;
+      return undefined;
     const data = parsed.data;
     if (
       data.collaborationMode.settings.model !== data.model ||
       data.collaborationMode.settings.reasoning_effort !== data.reasoningEffort
     )
-      return;
+      return undefined;
     if (
       startedSettings &&
       ["model", "modelProvider", "reasoningEffort", "serviceTier"].some(
@@ -828,9 +826,9 @@ export class CodexRuntime implements Runtime {
           data[key as keyof typeof data],
       )
     )
-      return;
+      return undefined;
     const definitions = snapshot?.tools;
-    if (!definitions) return;
+    if (!definitions) return undefined;
     const toolDigest = createHash("sha256")
       .update(JSON.stringify(definitions))
       .digest("hex");
@@ -838,9 +836,9 @@ export class CodexRuntime implements Runtime {
     try {
       prior = this.options.safety.threadQualification(threadId);
     } catch {
-      return;
+      return undefined;
     }
-    if (!prior || prior.toolDigest !== toolDigest) return;
+    if (!prior || prior.toolDigest !== toolDigest) return undefined;
     const qualification = nativeInputQualificationSchema.safeParse({
       ...this.nativeExecutable,
       threadId,
@@ -859,7 +857,7 @@ export class CodexRuntime implements Runtime {
         .digest("hex"),
       continuation: "synchronous",
     });
-    if (!qualification.success) return;
+    if (!qualification.success) return undefined;
     const observed = {
       threadId,
       toolDigest,
@@ -883,7 +881,7 @@ export class CodexRuntime implements Runtime {
     ];
     try {
       if (priorFacts.every((value) => value === null)) {
-        if (!startedSettings) return;
+        if (!startedSettings) return undefined;
         this.options.safety.recordThreadQualification(observed);
       } else if (
         JSON.stringify(priorFacts) !==
@@ -897,12 +895,12 @@ export class CodexRuntime implements Runtime {
           observed.developerInstructionsDigest,
         ])
       ) {
-        return;
+        return undefined;
       }
     } catch {
-      return;
+      return undefined;
     }
-    this.nativeQualifications.set(threadId, qualification.data);
+    return qualification.data;
   }
   private receiveNativeRequest(
     child: ChildProcessWithoutNullStreams,
@@ -1018,7 +1016,6 @@ export class CodexRuntime implements Runtime {
             endpoint.call.identity,
             "Conflicting or repeated native request",
           );
-        this.nativeQualifications.delete(threadId);
         this.unexpected?.({
           method: "conflicting-native-input",
           nativeReplay,
@@ -1061,8 +1058,10 @@ export class CodexRuntime implements Runtime {
       const resumed = thread.parse(rawResponse);
       if (resumed.thread.id !== threadId)
         throw new Error("Native resume identity mismatch");
-      this.captureNativeQualification(threadId, rawResponse);
-      const qualification = this.nativeQualifications.get(threadId);
+      const qualification = this.captureNativeQualification(
+        threadId,
+        rawResponse,
+      );
       if (!qualification || pending.invalid || this.child !== pending.child)
         throw new Error("Native request unqualified");
       const request = parseNativeInputRequest(pending.input, qualification);
@@ -1094,8 +1093,6 @@ export class CodexRuntime implements Runtime {
       });
       this.nativeRequest?.(call);
     } catch {
-      if (this.nativeReadbacks.get(threadId) === pending)
-        this.nativeQualifications.delete(threadId);
       const turnId = nativeInputRequestSchema.parse(pending.input).turnId;
       this.unexpected?.({
         method: "unqualified-native-input",
@@ -1191,7 +1188,6 @@ export class CodexRuntime implements Runtime {
             turnId,
             "Unqualified asynchronous input origin",
           );
-          this.nativeQualifications.delete(threadId);
           this.unexpected?.({
             method: "unqualified-async-input",
             threadId,
@@ -1319,6 +1315,7 @@ export class CodexRuntime implements Runtime {
     const rpcKeys = this.nativeEndpointsByRpcId.get(rpcKey);
     rpcKeys?.delete(key);
     if (rpcKeys?.size === 0) this.nativeEndpointsByRpcId.delete(rpcKey);
+    this.threadSnapshots.trimSettledEntries();
   }
 
   private persistedTerminal(
@@ -1422,7 +1419,6 @@ export class CodexRuntime implements Runtime {
     this.clearConversationCaptures();
     const environment = this.options.spawnEnvironment?.() ?? process.env;
     this.nativeGeneration = randomUUID();
-    this.nativeQualifications.clear();
     this.nativeEndpoints.clear();
     this.nativeEndpointsByTurn.clear();
     this.nativeEndpointsByRpcId.clear();
@@ -1489,7 +1485,6 @@ export class CodexRuntime implements Runtime {
     for (const endpoint of [...this.nativeEndpoints.values()])
       this.cancelUserInput(endpoint.call.identity, "Runtime stopped");
     this.nativeGeneration = undefined;
-    this.nativeQualifications.clear();
     this.child = undefined;
     this.processIdentityValue = null;
     this.fail(new Error("Runtime stopped"));
@@ -1598,25 +1593,32 @@ export class CodexRuntime implements Runtime {
       if (restoredEmptyTools) snapshot = { tools: [] };
     }
     const definitions = registeredTools(tools ?? snapshot?.tools ?? []);
-    const rawResponse = await this.request("thread/resume", {
-      threadId,
-      approvalPolicy: "never",
-      sandbox: "workspace-write",
-      ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
-    });
-    const resumed = thread.parse(rawResponse);
-    if (resumed.thread.id !== threadId)
-      throw new Error("Resumed thread identity mismatch");
-    if (tools !== undefined || restoredEmptyTools) {
-      const nextSnapshot: RuntimeThreadSnapshot = {
-        ...(snapshot?.settings ? { settings: snapshot.settings } : {}),
-        tools: definitions,
-      };
-      this.threadSnapshots.set(threadId, nextSnapshot);
-      if (!this.threadSnapshots.has(threadId))
-        throw new Error("Runtime thread snapshot could not be retained safely");
-    }
-    this.captureNativeQualification(threadId, rawResponse);
+    await this.request(
+      "thread/resume",
+      {
+        threadId,
+        approvalPolicy: "never",
+        sandbox: "workspace-write",
+        ...(definitions.length > 0 ? { dynamicTools: definitions } : {}),
+      },
+      (raw) => {
+        const resumed = thread.parse(raw);
+        if (resumed.thread.id !== threadId)
+          throw new Error("Resumed thread identity mismatch");
+        if (tools !== undefined || restoredEmptyTools) {
+          const nextSnapshot: RuntimeThreadSnapshot = {
+            ...(snapshot?.settings ? { settings: snapshot.settings } : {}),
+            tools: definitions,
+          };
+          this.threadSnapshots.set(threadId, nextSnapshot);
+          if (!this.threadSnapshots.has(threadId))
+            throw new Error(
+              "Runtime thread snapshot could not be retained safely",
+            );
+        }
+        this.captureNativeQualification(threadId, raw);
+      },
+    );
   }
 
   async startTurn(
@@ -1631,7 +1633,6 @@ export class CodexRuntime implements Runtime {
       this.retireNativeTurn(threadId, previousTurn, "New turn requested");
     else {
       this.nativeReadbacks.delete(threadId);
-      this.nativeQualifications.delete(threadId);
     }
     const response = turn.parse(
       await this.request("turn/start", {
@@ -1772,6 +1773,7 @@ export class CodexRuntime implements Runtime {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.threadSnapshots.trimSettledEntries();
         reject(new Error(`${method} timed out`));
       }, 15000);
       this.pending.set(id, {
@@ -1862,34 +1864,38 @@ export class CodexRuntime implements Runtime {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(Number(message.id));
-      if (message.error !== undefined) {
-        const params = z
-          .object({ threadId: z.string() })
-          .safeParse(pending.params);
-        const rejection = archivedResumeRejectionSchema.safeParse({
-          method: pending.method,
-          requestId: message.id,
-          threadId: params.success ? params.data.threadId : undefined,
-          processIdentity: pending.processIdentity,
-          error: message.error,
-        });
-        pending.reject(
-          rejection.success &&
-            message.method === undefined &&
-            message.params === undefined &&
-            message.result === undefined
-            ? new ArchivedResumeRejectedError(rejection.data)
-            : new Error(JSON.stringify(message.error)),
-        );
-      } else {
-        try {
-          pending.beforeResolve?.(message.result);
-          pending.resolve(message.result);
-        } catch (error) {
+      try {
+        if (message.error !== undefined) {
+          const params = z
+            .object({ threadId: z.string() })
+            .safeParse(pending.params);
+          const rejection = archivedResumeRejectionSchema.safeParse({
+            method: pending.method,
+            requestId: message.id,
+            threadId: params.success ? params.data.threadId : undefined,
+            processIdentity: pending.processIdentity,
+            error: message.error,
+          });
           pending.reject(
-            error instanceof Error ? error : new Error(String(error)),
+            rejection.success &&
+              message.method === undefined &&
+              message.params === undefined &&
+              message.result === undefined
+              ? new ArchivedResumeRejectedError(rejection.data)
+              : new Error(JSON.stringify(message.error)),
           );
+        } else {
+          try {
+            pending.beforeResolve?.(message.result);
+            pending.resolve(message.result);
+          } catch (error) {
+            pending.reject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
         }
+      } finally {
+        this.threadSnapshots.trimSettledEntries();
       }
       return;
     }
@@ -2350,7 +2356,6 @@ export class CodexRuntime implements Runtime {
     for (const endpoint of [...this.nativeEndpoints.values()])
       this.cancelUserInput(endpoint.call.identity, "Runtime lost");
     this.nativeGeneration = undefined;
-    this.nativeQualifications.clear();
     this.threadSnapshots.clear();
     this.nativeTurns.clear();
     this.invalidNativeTurns.clear();

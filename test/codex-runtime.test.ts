@@ -2519,7 +2519,6 @@ for (const mode of [
                   invalid: boolean;
                 }
               >;
-              nativeQualifications: Map<string, unknown>;
             };
             const generation = runtime.currentUserInputGeneration();
             const fixture = runtimeFixtures.get(runtime)?.fixture;
@@ -2540,7 +2539,7 @@ for (const mode of [
               anomalies,
               terminalAnomalies,
               currentTurn: internals.nativeTurns.get(thread),
-              qualificationPresent: internals.nativeQualifications.has(thread),
+              qualificationPresent: Boolean(calls[1]?.qualification),
               pending: pending
                 ? {
                     input: pending.input,
@@ -2559,10 +2558,13 @@ for (const mode of [
         assert.equal(calls[1]?.identity.turnId, secondTurn);
         assert.equal(calls[1]?.identity.requestId, 702);
         const threadState = runtime as unknown as {
-          nativeQualifications: Map<string, unknown>;
           threadSnapshots: Map<string, unknown>;
         };
-        assert.ok(threadState.nativeQualifications.has(thread));
+        assert.equal(calls[1]?.qualification.threadId, thread);
+        assert.equal(
+          calls[1]?.qualification.runtimeGeneration,
+          calls[1]?.identity.runtimeGeneration,
+        );
         assert.ok(threadState.threadSnapshots.has(thread));
         const fixture = runtimeFixtures.get(runtime)?.fixture;
         assert.ok(fixture);

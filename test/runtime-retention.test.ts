@@ -45,7 +45,6 @@ type RuntimeInternals = {
     };
   };
   nativeTurns: Map<string, string>;
-  nativeQualifications: Map<string, unknown>;
   nativeEndpoints: Map<string, unknown>;
   nativeEndpointsByTurn: Map<string, Set<string>>;
   nativeEndpointsByRpcId: Map<string, Set<string>>;
@@ -401,7 +400,6 @@ function settledRuntimeCounts(f: ReturnType<typeof fixture>) {
     nativePrebindings: Map<string, unknown>;
   };
   return {
-    nativeQualifications: runtime.nativeQualifications.size,
     nativeEndpoints: runtime.nativeEndpoints.size,
     endpointsByTurn: runtime.nativeEndpointsByTurn.size,
     endpointsByRpcId: runtime.nativeEndpointsByRpcId.size,
@@ -489,7 +487,6 @@ function runtimeCollectionSizes(f: ReturnType<typeof fixture>) {
   return {
     terminalCache: { count: 0, utf8Bytes: 0 },
     settledNativePayloadCache: { count: 0, utf8Bytes: 0 },
-    nativeQualifications: map(runtime.nativeQualifications),
     nativeEndpoints: map(runtime.nativeEndpoints),
     endpointsByTurn: map(runtime.nativeEndpointsByTurn),
     endpointsByRpcId: map(runtime.nativeEndpointsByRpcId),
@@ -928,7 +925,7 @@ test("service bounds settled thread snapshots after held bindings and failed tur
       /Synthetic turn startup failure/,
     );
     f.setTurnStartFailure(false);
-    assert.equal(runtime.nativeQualifications.size, 0);
+    assert.equal(runtime.nativeEndpoints.size, 0);
 
     const heldBindingWorkId = "retention-held-binding-work";
     let heldBindingThread: string | undefined;
@@ -1032,13 +1029,15 @@ test("service bounds settled thread snapshots after held bindings and failed tur
       "fixture-model",
       "eviction preserves the exact durable first qualification",
     );
-    assert.equal(runtime.nativeQualifications.has(baselineThread), false);
     await f.runtime().resumeThread(baselineThread, []);
-    assert.ok(runtime.nativeQualifications.has(baselineThread));
-    runtime.nativeQualifications.delete(baselineThread);
+    assert.equal(
+      f.internals().state.runtimeThreadQualification(baselineThread)?.model,
+      "fixture-model",
+      "a matching resumed thread retains its exact durable first facts",
+    );
     f.setResumeModel("different-model");
     await f.runtime().resumeThread(baselineThread, []);
-    assert.equal(runtime.nativeQualifications.has(baselineThread), false);
+    assert.equal(runtime.nativeEndpoints.size, 0);
     assert.equal(
       f.internals().state.runtimeThreadQualification(baselineThread)?.model,
       "fixture-model",
@@ -1059,6 +1058,240 @@ test("service bounds settled thread snapshots after held bindings and failed tur
         activeTurnPinDuringChurn: pinnedStats,
         nativeQualificationAfterEvictedSnapshot: "exact durable prior matched",
         changedReadback: "withheld without overwriting first facts",
+      })}`,
+    );
+  } finally {
+    await f.service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("successful resumes do not retain unused native qualifications", {
+  timeout: 120_000,
+}, async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-runtime-resume-qualification-retention-"),
+  );
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  const f = fixture(root);
+  try {
+    await f.service.start();
+    const runtime = f.runtime() as unknown as RuntimeInternals;
+    const qualificationCount = 140;
+    let durableFacts = 0;
+    for (let index = 0; index < qualificationCount; index++) {
+      const tools = [
+        {
+          type: "function" as const,
+          name: `retention-resume-tool-${index}`,
+          description: `Tool snapshot ${index}`,
+          inputSchema: {
+            type: "object",
+            properties: { index: { type: "number" } },
+          },
+        },
+      ];
+      const threadId = await f.runtime().startThread(workspace, tools);
+      await f.runtime().resumeThread(threadId, tools);
+      const prior = f.internals().state.runtimeThreadQualification(threadId);
+      assert.equal(prior?.model, "fixture-model");
+      assert.equal(
+        prior?.toolDigest,
+        createHash("sha256").update(JSON.stringify(tools)).digest("hex"),
+      );
+      durableFacts++;
+    }
+
+    const stats = runtime.threadSnapshots.settledStats();
+    assert.equal(durableFacts, qualificationCount);
+    assert.ok(stats.count <= 128);
+    assert.ok(stats.utf8Bytes <= 256 * 1024);
+    assert.equal(stats.pinnedCount, 0);
+    assert.equal(runtime.nativeEndpoints.size, 0);
+    assert.equal(runtime.nativeTurns.size, 0);
+    assert.equal(runtime.nativeReadbacks.size, 0);
+    assert.equal(
+      Object.hasOwn(runtime, "nativeQualifications"),
+      false,
+      "validated resume facts are returned to their immediate consumer, not retained by thread",
+    );
+    const stored = f
+      .internals()
+      .db.prepare("SELECT COUNT(*) AS count FROM runtime_thread_qualification")
+      .get() as { count: number };
+    assert.equal(stored.count, qualificationCount);
+    assert.deepEqual(f.stageCounts(), {
+      threadStarts: qualificationCount,
+      turnStartRequests: 0,
+      successfulTurnStarts: 0,
+    });
+    console.log(
+      `runtime-retention-unused-resume-qualifications ${JSON.stringify({
+        fixture: "production-codex-adapter-and-standalone-service-real-sqlite",
+        successfulThreadStartsAndResumes: qualificationCount,
+        durableFirstFactsPreserved: durableFacts,
+        turnsStarted: 0,
+        nativeEndpoints: runtime.nativeEndpoints.size,
+        threadSnapshotCache: stats,
+        unownedQualificationMap: false,
+      })}`,
+    );
+  } finally {
+    await f.service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("service trims settled snapshots as concurrent failed turn-start owners release", {
+  timeout: 120_000,
+}, async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "ensemble-runtime-thread-release-retention-"),
+  );
+  const workspaceRoot = join(root, "workspaces");
+  mkdirSync(workspaceRoot);
+  const f = fixture(root);
+  try {
+    await f.service.start();
+    f.internals()
+      .db.prepare(
+        "UPDATE scheduler_capacity_limits SET globalLimit = 256 WHERE singleton = 1",
+      )
+      .run();
+
+    const runtime = f.runtime();
+    const internals = runtime as unknown as RuntimeInternals;
+    const productionRequest = (
+      Object.getPrototypeOf(runtime) as {
+        request: RuntimeInternals["request"];
+      }
+    ).request.bind(runtime);
+    internals.request = productionRequest;
+
+    const pendingTurnStarts: Array<{
+      id: number | string;
+      threadId: string;
+    }> = [];
+    let threadStartCount = 0;
+    const threadStartResult = (threadId: string) => ({
+      thread: { id: threadId },
+      approvalPolicy: "never",
+      sandbox: { type: "workspaceWrite" },
+      model: "fixture-model",
+      modelProvider: "fixture-provider",
+      reasoningEffort: null,
+      serviceTier: null,
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "fixture-model",
+          reasoning_effort: null,
+          developer_instructions: null,
+        },
+      },
+    });
+    const stdin = f.child.stdin as unknown as PassThrough;
+    stdin.write = ((chunk: Uint8Array | string, ...args: unknown[]) => {
+      const callback = args.find((arg) => typeof arg === "function") as
+        | ((error: Error | null) => void)
+        | undefined;
+      const message = JSON.parse(String(chunk)) as {
+        id?: number | string;
+        method?: string;
+        params?: { threadId?: string };
+      };
+      if (message.id !== undefined && message.method === "thread/start") {
+        const threadId = `retention-release-thread-${threadStartCount++}`;
+        queueMicrotask(() =>
+          internals.receive(
+            f.child,
+            JSON.stringify({
+              id: message.id,
+              result: threadStartResult(threadId),
+            }),
+          ),
+        );
+      } else if (
+        message.id !== undefined &&
+        message.method === "turn/start" &&
+        message.params?.threadId
+      ) {
+        pendingTurnStarts.push({
+          id: message.id,
+          threadId: message.params.threadId,
+        });
+      }
+      queueMicrotask(() => callback?.(null));
+      return true;
+    }) as typeof stdin.write;
+
+    const largeTools = (index: number) => [
+      {
+        type: "function" as const,
+        name: `release-retention-tool-${index}`,
+        description: "Large synthetic tool schema",
+        inputSchema: {
+          type: "object",
+          description: "x".repeat(100_000),
+        },
+      },
+    ];
+    const originalStartThread = runtime.startThread.bind(runtime);
+    let toolSet = 0;
+    runtime.startThread = async (workspace) =>
+      originalStartThread(workspace, largeTools(toolSet++));
+
+    const submissions = Array.from({ length: 4 }, (_, index) => {
+      const workspace = join(workspaceRoot, String(index));
+      mkdirSync(workspace);
+      return f.service.submit(
+        `retention-release-failed-start-${index}`,
+        "synthetic concurrent turn startup",
+        workspace,
+      );
+    });
+    await until(
+      () => pendingTurnStarts.length === 4,
+      "four pending production turn/start requests",
+    );
+
+    const activeStats = internals.threadSnapshots.settledStats();
+    assert.equal(activeStats.pinnedCount, 4);
+    assert.ok(activeStats.pinnedUtf8Bytes > 256 * 1024);
+    for (const pending of pendingTurnStarts)
+      assert.ok(internals.threadSnapshots.has(pending.threadId));
+
+    for (const pending of pendingTurnStarts)
+      internals.receive(
+        f.child,
+        JSON.stringify({
+          id: pending.id,
+          error: { code: -32000, message: "Synthetic turn startup failure" },
+        }),
+      );
+    const results = await Promise.all(submissions);
+
+    assert.equal(threadStartCount, 4);
+    assert.equal(pendingTurnStarts.length, 4);
+    assert.equal(internals.pending.size, 0);
+    assert.ok(results.every((result) => result.state === "held"));
+    assert.ok(results.every((result) => result.turnId === null));
+    const releasedStats = internals.threadSnapshots.settledStats();
+    assert.ok(releasedStats.count <= 128);
+    assert.ok(releasedStats.utf8Bytes <= 256 * 1024);
+    assert.equal(releasedStats.pinnedCount, 0);
+    console.log(
+      `runtime-retention-thread-pin-release ${JSON.stringify({
+        fixture:
+          "production-runtime-rpc-response-and-standalone-service-real-sqlite",
+        concurrentFailedTurnStarts: pendingTurnStarts.length,
+        activeOwners: activeStats,
+        ownersReleasedWithoutFurtherInsertion: true,
+        serviceStates: results.map((result) => result.state),
+        nativeQualificationAuthority:
+          "none; held submissions have no endpoint or turn",
+        afterRelease: releasedStats,
       })}`,
     );
   } finally {
@@ -1102,7 +1335,6 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           endpointRpcIndexes: number;
           readbacks: number;
           nativeTurns: number;
-          qualifications: number;
           threadSnapshots: number;
           serviceWaiters: number;
           callbackWorkItems: number;
@@ -1151,7 +1383,6 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           endpointRpcIndexes: runtime.nativeEndpointsByRpcId.size,
           readbacks: runtime.nativeReadbacks.size,
           nativeTurns: runtime.nativeTurns.size,
-          qualifications: runtime.nativeQualifications.size,
           threadSnapshots: runtime.threadSnapshots.size,
           serviceWaiters: f.internals().nativeWaiters.size,
           callbackWorkItems: f.internals().callbacks.size,
@@ -1167,7 +1398,6 @@ test("production service settles 2,000 native waiters and callbacks with SQLite 
           "endpointRpcIndexes",
           "readbacks",
           "nativeTurns",
-          "qualifications",
           "threadSnapshots",
           "serviceWaiters",
           "callbackWorkItems",
@@ -1514,7 +1744,7 @@ test("changed or missing legacy native qualification facts stay unqualified", {
       );
       assert.equal(f.internals().nativeWaiters.size, 0);
       assert.equal(f.internals().callbacks.size, 0);
-      assert.equal(runtime.nativeQualifications.size, 0);
+      assert.equal(runtime.nativeEndpoints.size, 0);
       receiveTerminal(
         f.runtime(),
         f.child,
