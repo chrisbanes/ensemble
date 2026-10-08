@@ -1413,7 +1413,7 @@ export class LocalOperatorHttp {
         response.end(data.body);
         return true;
       }
-      const data = await web.read(path, url.searchParams);
+      const data = await web.read(path, url.searchParams, url.search);
       if (!this.currentSession(session)) {
         deny(401, "unauthenticated");
         return true;

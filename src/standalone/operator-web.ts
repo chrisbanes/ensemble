@@ -2,11 +2,74 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { OperatorApiError, type OperatorApi } from "./operator-api.js";
+import type { WorkspaceInspectionRequest } from "./workspace-inspection.js";
 const mime: Record<string, string> = {
   js: "text/javascript; charset=utf-8",
   css: "text/css; charset=utf-8",
   woff2: "font/woff2",
 };
+type WorkspaceInspectionQuery = Omit<WorkspaceInspectionRequest, "taskId">;
+
+function parseWorkspaceInspectionQuery(
+  query: URLSearchParams,
+  rawSearch: string,
+): WorkspaceInspectionQuery {
+  const allowed = new Set(["scope", "repositoryId", "path", "showIgnored"]);
+  for (const key of query.keys())
+    if (!allowed.has(key) || query.getAll(key).length !== 1)
+      throw new OperatorApiError(400, "invalid-input");
+
+  const decode = (value: string) => {
+    try {
+      return decodeURIComponent(value.replace(/\+/g, " "));
+    } catch {
+      throw new OperatorApiError(400, "invalid-input");
+    }
+  };
+  const rawPathValues: string[] = [];
+  for (const field of rawSearch.replace(/^\?/, "").split("&")) {
+    if (!field) continue;
+    const separator = field.indexOf("=");
+    const key = decode(separator < 0 ? field : field.slice(0, separator));
+    if (key !== "path") continue;
+    const value = separator < 0 ? "" : field.slice(separator + 1);
+    if (/%(?:0[0-9a-f]|1[0-9a-f]|2f|5c|7f)/i.test(value))
+      throw new OperatorApiError(400, "invalid-input");
+    rawPathValues.push(decode(value));
+  }
+  if (rawPathValues.length !== query.getAll("path").length)
+    throw new OperatorApiError(400, "invalid-input");
+
+  const scope = query.get("scope");
+  const repositoryId = query.get("repositoryId");
+  const path = query.get("path");
+  const showIgnoredValue = query.get("showIgnored");
+  if (scope === "workspace") {
+    if (repositoryId !== null) throw new OperatorApiError(400, "invalid-input");
+  } else if (
+    scope !== "repository" ||
+    !repositoryId ||
+    repositoryId.length > 512
+  ) {
+    throw new OperatorApiError(400, "invalid-input");
+  }
+  if (
+    showIgnoredValue !== null &&
+    showIgnoredValue !== "true" &&
+    showIgnoredValue !== "false"
+  )
+    throw new OperatorApiError(400, "invalid-input");
+
+  const inspectionScope: WorkspaceInspectionQuery["scope"] =
+    scope === "workspace"
+      ? { kind: "workspace" }
+      : { kind: "repository", repositoryId: repositoryId ?? "" };
+  return {
+    scope: inspectionScope,
+    ...(path === null ? {} : { path: path.split("/") }),
+    showIgnored: showIgnoredValue === "true",
+  };
+}
 export class OperatorWebBundle {
   private constructor(
     private readonly files: ReadonlyMap<string, { body: Buffer; type: string }>,
@@ -83,9 +146,27 @@ export class OperatorWebBoundary {
       path.startsWith("/api/")
     );
   }
-  async read(path: string, query = new URLSearchParams()) {
+  async read(
+    path: string,
+    query = new URLSearchParams(),
+    rawSearch = query.toString(),
+  ) {
     if (path === "/api/operator/search") return this.api.readSearch(query);
     if (path === "/api/operator/inbox") return this.api.readInbox(query);
+    const workspaceFiles = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/files$/,
+    );
+    const workspacePreview = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/preview$/,
+    );
+    if (workspaceFiles) {
+      const request = parseWorkspaceInspectionQuery(query, rawSearch);
+      return this.api.readWorkspaceDirectory(workspaceFiles[1] ?? "", request);
+    }
+    if (workspacePreview) {
+      const request = parseWorkspaceInspectionQuery(query, rawSearch);
+      return this.api.readWorkspacePreview(workspacePreview[1] ?? "", request);
+    }
     const question = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/questions\/([^/]+)$/,
     );
@@ -193,6 +274,7 @@ export class OperatorWebBoundary {
       /^\/api\/operator\/tasks\/[^/]+\/(?:review|artifacts\/[^/]+)$/.test(
         path,
       ) ||
+      /^\/api\/operator\/tasks\/[^/]+\/(?:files|preview)$/.test(path) ||
       /^\/api\/operator\/tasks\/[^/]+\/questions\/[^/]+$/.test(path) ||
       /^\/api\/operator\/projects\/[^/]+\/composer-options$/.test(path) ||
       /^\/api\/operator\/assignments\/[^/]+\/(?:history|recovery)$/.test(path)

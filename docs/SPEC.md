@@ -482,6 +482,41 @@ to #649 and does not reopen the paused integrations in #734.
 The [post-MVP inspection acceptance scenarios](acceptance.md#post-mvp-task-workspace-inspection)
 define the required evidence without claiming any scenario has passed.
 
+#### #779 server inspection boundary
+
+As of 8 October 2026, the standalone service implements authenticated JSON GETs
+for a task workspace directory and one file preview. Each request names a
+current task and either the repository-free workspace root or an exact bound
+repository ID; clients cannot supply filesystem roots. The session is checked
+again after the awaited read. These routes do not provide a file download,
+terminal, edit action, comparison, capture, or preview UI.
+
+The server scans one directory level, with a maximum of 32 path segments and
+2,048 UTF-8 path bytes, 4,096 entries scanned and 256 returned, a 2-second Git
+ignore check with 1 MiB combined output cap, and a 2 MiB Git input cap. Text and
+code are limited to 1 MiB; PNG, JPEG, GIF, WebP and PDF payloads are limited to
+8 MiB. Raster dimensions are limited to 16 megapixels. PDF is returned only as
+bounded base64 data with a 10-page display handoff; a later renderer must
+enforce that limit and use an isolated rendering context before claiming a
+visual PDF preview. Failed Git ignore classification returns an incomplete
+availability result rather than revealing entries whose ignore state is
+unknown.
+
+Both workspace and repository scopes omit `.git`, `.ssh`, `.aws`, `.gnupg`,
+`.netrc`, `.npmrc`, `.pypirc`, `.env`, `.env.*`, `*.pem` and `*.key` path
+components, case-insensitively; direct requests return an empty excluded state.
+`showIgnored` reveals Git-ignored repository files and the documented
+repository-free clutter names (`.DS_Store`, `node_modules`, `.cache`,
+`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache` and `coverage`),
+but never overrides private-path exclusions. Previews require a regular
+single-link file, a no-follow open and stable file, root and task-binding
+identity around the read. Text, Markdown and HTML are inert UTF-8 in JSON;
+raster and PDF bytes are typed base64 data, never navigable file responses.
+These checks enforce path-based exclusions and bounded current-file reads;
+they are not semantic secret scanning or host-wide read isolation. Result
+snapshots, stable UI refresh behavior, comparisons, turn capture and the
+operator renderer remain later work.
+
 #### Local code review amendment — 6 October 2026
 
 Chris approved adding line-level feedback and batched local code reviews to this
