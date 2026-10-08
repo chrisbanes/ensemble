@@ -674,7 +674,7 @@ test("production Changes preserves exact repository baselines and last-good refr
     .getByRole("button", { name: /^Before line 1, guide\.md;/ })
     .click();
   await setStart.click();
-  await changes.getByText("Start fixed at line 1.", { exact: false }).waitFor();
+  await changes.getByText("Edge fixed at line 1.", { exact: false }).waitFor();
   await changes
     .getByRole("button", { name: /^Before line 2, guide\.md;/ })
     .click();

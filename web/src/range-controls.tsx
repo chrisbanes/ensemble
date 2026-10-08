@@ -39,11 +39,14 @@ export function RangeControls({
       >
         Set end
       </Button>
-      <span className="muted" role="status">
+      {/* Not a live region: the origin already announces the selected range. */}
+      <span className="muted">
         {line === null
           ? "Select a line to set a range start or end."
           : pin
-            ? `${pin === "start" ? "Start" : "End"} fixed at line ${anchor ?? line}. Select the ${pin === "start" ? "end" : "start"} line, then press Set ${pin === "start" ? "end" : "start"}.`
+            ? anchor === null || anchor === line
+              ? `Edge fixed at line ${anchor ?? line}. Select the other end, then press Set ${pin === "start" ? "end" : "start"}.`
+              : `Edge fixed at line ${anchor}; range ${Math.min(anchor, line)}–${Math.max(anchor, line)}. Press Set start or Set end to finish.`
             : `Line ${line} selected. Set start or Set end to build a range.`}
       </span>
     </div>

@@ -11,13 +11,9 @@ export function dateLabel(value: number | undefined) {
     : new Date(value).toLocaleString();
 }
 
-const agentName = (
-  assignments: Assignments,
-  assignmentId: string,
-  taskLeadName: string | null,
-) =>
+// Never substitute the lead's name for an unlisted or unnamed assignment.
+const agentName = (assignments: Assignments, assignmentId: string) =>
   assignments.find((item) => item.assignmentId === assignmentId)?.name ??
-  taskLeadName ??
   "Agent name unavailable";
 
 /** Actual identity of the latest finished turn capture, including what it could not observe. */
@@ -37,8 +33,8 @@ export function FinishedTurn({
     >
       <h5>Last turn</h5>
       <p>
-        Agent {agentName(assignments, snapshot.assignmentId, taskLeadName)} ·
-        profile {snapshot.profileId} · work {snapshot.workId} · assignment{" "}
+        Agent {agentName(assignments, snapshot.assignmentId)} · profile{" "}
+        {snapshot.profileId} · work {snapshot.workId} · assignment{" "}
         {snapshot.assignmentId}
       </p>
       <p>
@@ -76,13 +72,9 @@ export function PendingTurn({
   taskLeadName: string | null;
 }) {
   const pending = data.pending;
-  const agent = agentName(
-    assignments,
-    pending.identity.assignmentId,
-    taskLeadName,
-  );
+  const agent = agentName(assignments, pending.identity.assignmentId);
   const finishedAgent = data.latestFinished
-    ? agentName(assignments, data.latestFinished.assignmentId, taskLeadName)
+    ? agentName(assignments, data.latestFinished.assignmentId)
     : "";
   return (
     <section className="changes-pending-turn" aria-label="Current actual turn">

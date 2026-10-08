@@ -602,7 +602,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
       )) >= 44,
     );
   await setStart.click();
-  await page.getByText("Start fixed at line 3.", { exact: false }).waitFor();
+  await page.getByText("Edge fixed at line 3.", { exact: false }).waitFor();
   assert.equal(await setStart.getAttribute("aria-pressed"), "true");
   await page.getByRole("button", { name: /^Line 5: A \*\*bold\*\*/ }).click();
   await setEnd.click();

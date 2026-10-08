@@ -49,7 +49,10 @@ const textLines = (side: RetainedDiff["left"]) =>
 const maxLcsCells = 1_000_000;
 
 /** Unified-patch rows for two line lists; each change run lists deletions before additions. */
-function patchRows(before: string[], after: string[]) {
+function patchRows(
+  before: string[],
+  after: string[],
+): { rows: string[]; approximate: boolean } {
   let head = 0;
   while (
     head < before.length &&
@@ -74,7 +77,8 @@ function patchRows(before: string[], after: string[]) {
     deleted = [];
     added = [];
   };
-  if (old.length * next.length > maxLcsCells) {
+  const approximate = old.length * next.length > maxLcsCells;
+  if (approximate) {
     deleted = old.map((line) => `-${line}`);
     added = next.map((line) => `+${line}`);
   } else {
@@ -108,14 +112,14 @@ function patchRows(before: string[], after: string[]) {
   }
   flush();
   rows.push(...before.slice(before.length - tail).map((line) => ` ${line}`));
-  return rows;
+  return { rows, approximate };
 }
 
 /** One hunk holding both complete sides. */
 function retainedHunk(diff: RetainedDiff) {
   const before = textLines(diff.left);
   const after = textLines(diff.right);
-  const rows = patchRows(before, after);
+  const { rows, approximate } = patchRows(before, after);
   const hunk: DiffHunkData = {
     oldStart: before.length ? 1 : 0,
     oldLines: before.length,
@@ -123,7 +127,11 @@ function retainedHunk(diff: RetainedDiff) {
     newLines: after.length,
     patch: rows.slice(0, maxDiffLines).join("\n"),
   };
-  return { hunk, omitted: Math.max(0, rows.length - maxDiffLines) };
+  return {
+    hunk,
+    omitted: Math.max(0, rows.length - maxDiffLines),
+    approximate,
+  };
 }
 
 /** Original Before and After of a retained diff. No review anchor exists for a diff. */
@@ -169,6 +177,12 @@ function RetainedDiffView({
       </p>
       <DiffLayoutControls layout={layout} onChange={onLayout} />
       <DiffHunk hunk={rendered.hunk} hunkIndex={0} layout={layout} />
+      {rendered.approximate && (
+        <p role="status">
+          This diff is too large to align line by line; the changed section is
+          shown as removed and re-added lines. Both retained sides are complete.
+        </p>
+      )}
       {rendered.omitted > 0 && (
         <p role="status">
           Showing the first {maxDiffLines.toLocaleString()} diff lines;{" "}
