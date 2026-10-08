@@ -579,3 +579,141 @@ test("legacy signature/update restrictions hold and linear history restricts mer
   assert.ok(p.mergeBlockers.includes("classic-update-restriction-unproved"));
   assert.deepEqual(p.allowedMethods, ["squash"]);
 });
+
+function redirectFixture(routes: Record<string, () => Response>) {
+  const calls: Array<{
+    method: string;
+    href: string;
+    redirect?: RequestRedirect;
+  }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    calls.push({
+      method: init?.method ?? "GET",
+      href: url.href,
+      ...(init?.redirect ? { redirect: init.redirect } : {}),
+    });
+    if (url.pathname === "/graphql")
+      return Response.json({
+        data: { node: { id: "R1", nameWithOwner: "org/repo" } },
+      });
+    const route = routes[url.pathname];
+    if (route) return route();
+    if (url.pathname.endsWith("/issues/7"))
+      return Response.json({
+        node_id: "I7",
+        number: 7,
+        state: "closed",
+        title: "T",
+        body: "B",
+        labels: [],
+      });
+    throw new Error(`unexpected provider route ${url.href}`);
+  };
+  return {
+    calls,
+    provider: new GitHubHttpDeliveryProvider("fixture-marker", fetcher),
+  };
+}
+const target = { repositoryId: "R1", nodeId: "I7", number: 7 };
+const repositoryJson = () =>
+  Response.json({
+    node_id: "R1",
+    full_name: "org/repo",
+    allow_merge_commit: true,
+    allow_squash_merge: true,
+    allow_rebase_merge: false,
+  });
+const redirectTo = (status: number, location: string) =>
+  new Response(null, { status, headers: { location } });
+
+test("a GET follows up to three same-origin redirects and a fourth fails", async () => {
+  const routes = {
+    "/repos/org/repo": () => redirectTo(301, "/repositories/1"),
+    "/repositories/1": () =>
+      redirectTo(302, "https://api.github.com/repositories/2"),
+    "/repositories/2": () => redirectTo(307, "/repositories/3"),
+    "/repositories/3": repositoryJson,
+  };
+  const followed = redirectFixture(routes);
+  const snapshot = await followed.provider.inspectClosedIssue(target);
+  assert.equal(snapshot.nodeId, "I7");
+  assert.deepEqual(
+    followed.calls
+      .filter((call) => call.method === "GET")
+      .slice(0, 4)
+      .map((call) => call.href),
+    [
+      "https://api.github.com/repos/org/repo",
+      "https://api.github.com/repositories/1",
+      "https://api.github.com/repositories/2",
+      "https://api.github.com/repositories/3",
+    ],
+  );
+  assert.ok(
+    followed.calls
+      .filter((call) => call.method === "GET")
+      .every((call) => call.redirect === "manual"),
+  );
+
+  await assert.rejects(
+    redirectFixture({
+      ...routes,
+      "/repositories/3": () => redirectTo(301, "/repositories/4"),
+      "/repositories/4": repositoryJson,
+    }).provider.inspectClosedIssue(target),
+    /provider-origin-mismatch/,
+  );
+});
+
+test("a GET refuses a redirect away from the API origin", async () => {
+  for (const location of [
+    "https://evil.example/repos/org/repo",
+    "http://api.github.com/repos/org/repo",
+  ]) {
+    const { provider, calls } = redirectFixture({
+      "/repos/org/repo": () => redirectTo(302, location),
+    });
+    await assert.rejects(
+      provider.inspectClosedIssue(target),
+      /provider-origin-mismatch/,
+      location,
+    );
+    assert.equal(
+      calls.filter((call) => call.method === "GET").length,
+      1,
+      location,
+    );
+  }
+});
+
+test("a POST refuses redirects instead of replaying the body", async () => {
+  const record = commentRecord();
+  const { provider, calls } = redirectFixture({
+    "/repos/org/repo": repositoryJson,
+    "/repos/org/repo/issues/7/comments": () =>
+      redirectTo(307, "https://api.github.com/repos/org/repo/issues/7/other"),
+  });
+  assert.equal((await provider.performAction(record)).state, "uncertain");
+  const posts = calls.filter(
+    (call) => call.method === "POST" && call.href.endsWith("/comments"),
+  );
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.redirect, "error");
+  assert.ok(calls.every((call) => !call.href.endsWith("/other")));
+});
+
+test("pagination follows only a same-origin next link", async () => {
+  const record = commentRecord();
+  const { provider } = redirectFixture({
+    "/repos/org/repo": repositoryJson,
+    "/user": () => Response.json({ node_id: "U1" }),
+    "/repos/org/repo/issues/7/comments": () =>
+      Response.json([], {
+        headers: {
+          link: '<https://evil.example/repos/org/repo/issues/7/comments?page=2>; rel="next"',
+        },
+      }),
+  });
+  assert.equal((await provider.inspectAction(record)).state, "uncertain");
+});

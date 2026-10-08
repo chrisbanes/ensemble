@@ -1,5 +1,6 @@
 import { isOperatorDeliveryCaller } from "../core/delivery.js";
 import { z } from "zod";
+import { githubApi as api, githubFetch, nextPageLink } from "./github-http.js";
 import {
   actionObservationSchema,
   prObservationSchema,
@@ -49,7 +50,6 @@ export const deliveryDocuments = {
   EnsembleDeliveryProject: `mutation EnsembleDeliveryProject($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}`,
   EnsembleDeliveryReady: `mutation EnsembleDeliveryReady($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}`,
 } as const;
-const api = "https://api.github.com";
 const name = z.string().min(1);
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 const page = z.object({
@@ -136,23 +136,22 @@ export class GitHubHttpDeliveryProvider implements GitHubDeliveryProvider {
     const url = new URL(path, api);
     if (url.origin !== api) throw new Error("provider-origin-mismatch");
     if (!this.credential) throw new Error("provider-credential-unavailable");
-    const response = await this.fetcher(url.href, {
-      method,
-      redirect: "error",
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.credential}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json",
+    const response = await githubFetch(
+      this.fetcher,
+      url.href,
+      {
+        method,
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${this.credential}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    if (
-      response.redirected ||
-      (response.url && new URL(response.url).origin !== api)
-    )
-      throw new Error("provider-origin-mismatch");
+      () => new Error("provider-origin-mismatch"),
+    );
     if (!response.ok) throw new ProviderFailure(response.status);
     return {
       json: response.status === 204 ? null : await response.json(),
@@ -178,17 +177,10 @@ export class GitHubHttpDeliveryProvider implements GitHubDeliveryProvider {
       seen.add(next);
       const result = await this.request(next);
       rows.push(...z.array(z.unknown()).parse(result.json));
-      const link = result.response.headers.get("link");
-      next = null;
-      if (link) {
-        const entries = link.split(",");
-        const entry = entries.find((v) => /;\s*rel="next"/.test(v));
-        if (entry) {
-          const match = /<([^>]+)>/.exec(entry);
-          if (!match) throw new Error("provider-pagination-incomplete");
-          next = match[1] ?? null;
-        }
-      }
+      next = nextPageLink(
+        result.response,
+        () => new Error("provider-pagination-incomplete"),
+      );
     }
     return rows;
   }
@@ -518,11 +510,10 @@ export class GitHubHttpDeliveryProvider implements GitHubDeliveryProvider {
                 ? "success"
                 : "failure",
         });
-      const link = result.response.headers.get("link");
-      const entry = link?.split(",").find((v) => /;\s*rel="next"/.test(v));
-      next = entry ? (/<([^>]+)>/.exec(entry)?.[1] ?? null) : null;
-      if (entry && !next)
-        throw new Error("provider-check-pagination-incomplete");
+      next = nextPageLink(
+        result.response,
+        () => new Error("provider-check-pagination-incomplete"),
+      );
       if (!next && checks.length < runs.total_count)
         throw new Error("provider-check-pagination-incomplete");
     }
