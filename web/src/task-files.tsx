@@ -21,7 +21,9 @@ import {
   type TaskFilesState,
 } from "./task-workspace-state.js";
 import { CommentAction, ReviewComposer } from "./local-review.js";
+import { RangeControls } from "./range-controls.js";
 import { useOperatorResource } from "./resource.js";
+import { workspaceFileAnchor } from "./review-anchor.js";
 
 function requestUrl(
   taskId: string,
@@ -47,6 +49,24 @@ function pathLabel(scope: TaskFilesState["scope"], path: readonly string[]) {
       : `Repository ${scope.repositoryId}`,
     ...path,
   ].join("/");
+}
+
+type PreviewData = NonNullable<TaskFileTabState["preview"]>;
+
+function previewChange(previous: PreviewData | null, next: PreviewData) {
+  const hash = (value: PreviewData | null) =>
+    value?.state === "ready" ? value.preview?.sha256 : undefined;
+  const before = hash(previous);
+  const after = hash(next);
+  if (before && after)
+    return before === after
+      ? ""
+      : `Changed since previous observation: SHA-256 ${before.slice(0, 8)} → ${after.slice(0, 8)}. Earlier review comments stay attached to the bytes they selected.`;
+  if (before)
+    return `No longer readable since previous observation: the file is now ${next.state}${next.metadata?.reason ? ` (${next.metadata.reason})` : ""}. Previous SHA-256 ${before.slice(0, 8)}.`;
+  if (after && previous)
+    return `Readable now (was ${previous.state}); SHA-256 ${after.slice(0, 8)}.`;
+  return "";
 }
 
 function fileEntryKey(
@@ -247,6 +267,8 @@ function PdfDocumentView({
           disableAutoFetch: true,
           disableRange: true,
           disableStream: true,
+          enableXfa: false,
+          useWorkerFetch: false,
         });
         setLibraryVersion(pdfjs.version);
         const pdf = await loadingTask.promise;
@@ -376,21 +398,21 @@ function SourceLines({
   text,
   tab,
   wrapLines,
+  originKey,
   changed,
 }: {
   text: string;
   tab: TaskFileTabState;
   wrapLines: boolean;
+  /** Names the selected line as the composer's focus-return target. */
+  originKey?: string | undefined;
   changed: () => void;
 }) {
   const lineButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const lines = text.split("\n");
   const shown = lines.slice(0, maxSourceLines);
   const select = (number: number, extend: boolean) => {
-    tab.rangeAnchorLine = extend
-      ? (tab.rangeAnchorLine ?? tab.selectedLine)
-      : null;
-    tab.selectedLine = number;
+    tab.selectLine(number, extend);
     changed();
   };
   const focusLine = (index: number, extend: boolean) => {
@@ -400,58 +422,72 @@ function SourceLines({
   };
   const range = tab.selectedRange;
   return (
-    <div className={`file-source-scroll${wrapLines ? " is-wrapped" : ""}`}>
-      <ol className="file-source-lines" aria-label="Source lines">
-        {shown.map((line, index) => {
-          const number = index + 1;
-          return (
-            <li key={number} value={number}>
-              <button
-                ref={(element) => {
-                  lineButtons.current[index] = element;
-                }}
-                type="button"
-                className="file-source-line"
-                aria-label={`Line ${number}${line.length ? `: ${line}` : " (blank)"}`}
-                aria-pressed={
-                  range !== null &&
-                  number >= range.startLine &&
-                  number <= range.endLine
-                }
-                tabIndex={
-                  tab.selectedLine === number ||
-                  (tab.selectedLine === null && number === 1)
-                    ? 0
-                    : -1
-                }
-                onClick={(event) => select(number, event.shiftKey)}
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-                    event.preventDefault();
-                    focusLine(
-                      index + (event.key === "ArrowUp" ? -1 : 1),
-                      event.shiftKey,
-                    );
+    <>
+      <RangeControls
+        line={tab.selectedLine}
+        anchor={tab.rangeAnchorLine}
+        pin={tab.rangePin}
+        onSet={(edge) => {
+          tab.setRangeEdge(edge);
+          changed();
+        }}
+      />
+      <div className={`file-source-scroll${wrapLines ? " is-wrapped" : ""}`}>
+        <ol className="file-source-lines" aria-label="Source lines">
+          {shown.map((line, index) => {
+            const number = index + 1;
+            return (
+              <li key={number} value={number}>
+                <button
+                  ref={(element) => {
+                    lineButtons.current[index] = element;
+                  }}
+                  type="button"
+                  className="file-source-line"
+                  aria-label={`Line ${number}${line.length ? `: ${line}` : " (blank)"}`}
+                  aria-pressed={
+                    range !== null &&
+                    number >= range.startLine &&
+                    number <= range.endLine
                   }
-                }}
-              >
-                <span className="file-line-number" aria-hidden="true">
-                  {number}
-                </span>
-                <code className="file-line-text">{line}</code>
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-      {lines.length > maxSourceLines && (
-        <p className="file-preview-limit" role="status">
-          Source preview shows the first {maxSourceLines.toLocaleString()} of{" "}
-          {lines.length.toLocaleString()} lines. The full file remains bounded
-          by the service byte limit.
-        </p>
-      )}
-    </div>
+                  data-review-return={
+                    tab.selectedLine === number ? originKey : undefined
+                  }
+                  tabIndex={
+                    tab.selectedLine === number ||
+                    (tab.selectedLine === null && number === 1)
+                      ? 0
+                      : -1
+                  }
+                  onClick={(event) => select(number, event.shiftKey)}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+                      event.preventDefault();
+                      focusLine(
+                        index + (event.key === "ArrowUp" ? -1 : 1),
+                        event.shiftKey,
+                      );
+                    }
+                  }}
+                >
+                  <span className="file-line-number" aria-hidden="true">
+                    {number}
+                  </span>
+                  <code className="file-line-text">{line}</code>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+        {lines.length > maxSourceLines && (
+          <p className="file-preview-limit" role="status">
+            Source preview shows the first {maxSourceLines.toLocaleString()} of{" "}
+            {lines.length.toLocaleString()} lines. The full file remains bounded
+            by the service byte limit.
+          </p>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -672,6 +708,7 @@ export function FilePreviewBody({
                 text={data.text}
                 tab={tab}
                 wrapLines={tab.wrapSource}
+                originKey={comment?.originKey}
                 changed={changed}
               />
               {comment && (
@@ -679,7 +716,7 @@ export function FilePreviewBody({
                   <p className="muted" aria-live="polite">
                     {tab.selectedRange
                       ? `Selected lines ${tab.selectedRange.startLine}–${tab.selectedRange.endLine}`
-                      : "Select a line, or Shift-select a range, to comment."}
+                      : "Select a line, or use Set start and Set end for a range, to comment."}
                   </p>
                   <CommentAction
                     originKey={comment.originKey}
@@ -720,28 +757,36 @@ export function FilePreviewBody({
           <p>
             PDF · {data.size.toLocaleString()} bytes · SHA-256 {data.sha256}
           </p>
-          <PdfDocumentView
-            key={`${tab.key}:${data.sha256}`}
-            data={data.data}
-            maxDisplayedPages={data.maxDisplayedPages!}
-            maxCanvasPixels={data.maxCanvasPixels!}
-            page={tab.pdfPage}
-            zoom={tab.pdfZoom}
-            setPage={(page) => {
-              tab.pdfPage = page;
-              changed();
-            }}
-            setZoom={(zoom) => {
-              tab.pdfZoom = zoom;
-              changed();
-            }}
-            scrollLeft={tab.pdfScrollLeft}
-            scrollTop={tab.pdfScrollTop}
-            onScroll={(left, top) => {
-              tab.pdfScrollLeft = left;
-              tab.pdfScrollTop = top;
-            }}
-          />
+          {data.maxDisplayedPages !== undefined &&
+          data.maxCanvasPixels !== undefined ? (
+            <PdfDocumentView
+              key={`${tab.key}:${data.sha256}`}
+              data={data.data}
+              maxDisplayedPages={data.maxDisplayedPages}
+              maxCanvasPixels={data.maxCanvasPixels}
+              page={tab.pdfPage}
+              zoom={tab.pdfZoom}
+              setPage={(page) => {
+                tab.pdfPage = page;
+                changed();
+              }}
+              setZoom={(zoom) => {
+                tab.pdfZoom = zoom;
+                changed();
+              }}
+              scrollLeft={tab.pdfScrollLeft}
+              scrollTop={tab.pdfScrollTop}
+              onScroll={(left, top) => {
+                tab.pdfScrollLeft = left;
+                tab.pdfScrollTop = top;
+              }}
+            />
+          ) : (
+            <p role="alert">
+              This PDF could not be opened safely: the service did not state its
+              preview limits.
+            </p>
+          )}
         </>
       )}
     </>
@@ -862,6 +907,12 @@ export function TaskFiles({
       response.previewKey !== previewKey
     )
       return;
+    // A re-read of the same file is a Refresh; compare it with what was shown.
+    if (activeTab.preview !== response.response.data)
+      activeTab.changeNotice =
+        activeTab.previewKey === previewKey
+          ? previewChange(activeTab.preview, response.response.data)
+          : "";
     activeTab.preview = response.response.data;
     activeTab.previewKey = previewKey;
     activeTab.observedAt = response.response.observedAt;
@@ -1275,6 +1326,11 @@ export function TaskFiles({
                     {new Date(previewObservedAt).toLocaleTimeString()}
                   </p>
                 )}
+                {activeTab.changeNotice && (
+                  <p role="status" className="file-change-notice">
+                    {activeTab.changeNotice}
+                  </p>
+                )}
                 {previewResource.state.pending && !preview && (
                   <p role="status">Reading selected file…</p>
                 )}
@@ -1302,20 +1358,13 @@ export function TaskFiles({
                     comment={{
                       originKey: `files:${activeTab.key}`,
                       label: "current file",
-                      anchorFor: (startLine, endLine, contentSha256) => ({
-                        taskId,
-                        repositoryId:
-                          activeTab.scope.kind === "repository"
-                            ? activeTab.scope.repositoryId
-                            : null,
-                        path: activeTab.path.join("/"),
-                        sourceKind: "workspace-file",
-                        context: "workspace",
-                        side: "file",
-                        startLine,
-                        endLine,
-                        contentSha256,
-                      }),
+                      anchorFor: (startLine, endLine, contentSha256) =>
+                        workspaceFileAnchor(
+                          taskId,
+                          activeTab,
+                          { startLine, endLine },
+                          contentSha256,
+                        ),
                     }}
                   />
                 )}

@@ -13,6 +13,8 @@ type FeedbackReference = z.infer<typeof feedbackReferenceSchema>;
 type WorkspaceDirectory = z.infer<typeof workspaceDirectoryReadSchema>["data"];
 type WorkspacePreview = z.infer<typeof workspacePreviewReadSchema>["data"];
 
+export type RangePin = "start" | "end" | null;
+
 export type TaskChangeSelection = {
   entryKey: string;
   path: string;
@@ -27,8 +29,8 @@ export type TaskChangeSelection = {
   contentSha256: string;
   minLine: number;
   maxLine: number;
-  rangeStartSet: boolean;
-  rangeEndSet: boolean;
+  /** Edge fixed by Set start/Set end; later selections extend from it. */
+  pin: RangePin;
   workId?: string;
   threadId?: string;
   turnId?: string;
@@ -48,6 +50,27 @@ export class TaskFileTabState {
   selectedLine: number | null = null;
   /** Shift-selection origin; the range spans it and selectedLine. */
   rangeAnchorLine: number | null = null;
+  /** Set when Set start/Set end fixed one edge; later selections extend from it. */
+  rangePin: RangePin = null;
+  /** Plain selection replaces the range unless an edge is pinned or Shift extends it. */
+  selectLine(line: number, extend: boolean) {
+    this.rangeAnchorLine =
+      extend || this.rangePin
+        ? (this.rangeAnchorLine ?? this.selectedLine)
+        : null;
+    this.selectedLine = line;
+  }
+  /** The first press fixes this edge at the selected line; the other press completes the range. */
+  setRangeEdge(edge: "start" | "end") {
+    if (this.selectedLine === null) return;
+    if (this.rangePin && this.rangePin !== edge) this.rangePin = null;
+    else {
+      this.rangeAnchorLine = this.selectedLine;
+      this.rangePin = edge;
+    }
+  }
+  /** Notice for a refreshed preview whose bytes differ from the previous observation. */
+  changeNotice = "";
   get selectedRange() {
     if (this.selectedLine === null) return null;
     const anchor = this.rangeAnchorLine ?? this.selectedLine;
@@ -105,6 +128,8 @@ export class TaskChangesState {
   selectedEntryKey: string | null = null;
   selection: TaskChangeSelection | null = null;
   notice = "";
+  /** Summary of how an explicit Refresh differed from the previous observation. */
+  refreshNotice: { key: string; text: string } | null = null;
   comparisonReads: Record<string, WorkspaceComparisonRead["data"]> = {};
   repositoryIds: string[] = [];
   repositoryState: WorkspaceDirectory["state"] | null = null;
@@ -198,6 +223,7 @@ export class LocalReviewState {
 /** Reading state for one result's retained evidence; bytes are immutable. */
 export class RetainedEvidenceState {
   selectedItemId: string | null = null;
+  diffLayout: "split" | "unified" = "split";
   private readonly tabs = new Map<string, TaskFileTabState>();
   tab(itemId: string, scope: WorkspaceDirectory["scope"], path: string[]) {
     let tab = this.tabs.get(itemId);

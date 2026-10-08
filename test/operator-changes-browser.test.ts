@@ -590,6 +590,116 @@ test("production Changes preserves exact repository baselines and last-good refr
   await changes.getByText(/Selected After lines 1–2 · guide\.md/).waitFor();
   await captureBrowserEvidence(page, "1366-branch-diff-anchor");
 
+  // Roving tabindex: one tab stop per diff side; arrows move within it.
+  const panels = await changes
+    .locator(".changes-diff-side")
+    .evaluateAll((elements) =>
+      elements.map((element) => ({
+        stops: element.querySelectorAll(
+          'button.changes-selectable-line[tabindex="0"]',
+        ).length,
+        lines: element.querySelectorAll("button.changes-selectable-line")
+          .length,
+      })),
+    );
+  assert.equal(panels.length, 2);
+  for (const panel of panels) {
+    assert.equal(panel.stops, 1);
+    assert.ok(panel.lines > 1);
+  }
+  await afterBranchLine.focus();
+  await page.keyboard.press("Tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.textContent),
+    "Set start",
+    "Tab leaves the After panel for the range controls",
+  );
+  // The composer's focus return targets the current line of this comparison.
+  const returnTargets = await changes
+    .locator("[data-review-return]")
+    .evaluateAll((elements) =>
+      elements.map((element) => ({
+        origin: element.getAttribute("data-review-return"),
+        label: element.getAttribute("aria-label"),
+      })),
+    );
+  assert.deepEqual(returnTargets, [
+    {
+      origin: `changes:${alphaBody.data.comparisonId}`,
+      label: "After line 2, guide.md; hunk lines 1–3",
+    },
+  ]);
+
+  // Phone: unified rows keep old and new numbers apart; labelled 44px Start/End
+  // controls build a range on either side without Shift.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneDiff = changes.locator(".changes-diff-unified");
+  await phoneDiff.waitFor();
+  const numbers = (name: RegExp) =>
+    changes.getByRole("button", { name }).evaluate((element) => ({
+      old: element.querySelector(".changes-line-old")?.textContent,
+      next: element.querySelector(".changes-line-new")?.textContent,
+    }));
+  assert.deepEqual(await numbers(/^Before line 1, guide\.md;/), {
+    old: "1",
+    next: "",
+  });
+  assert.deepEqual(await numbers(/^After line 1, guide\.md;/), {
+    old: "",
+    next: "1",
+  });
+  assert.deepEqual(await numbers(/^After line 3, guide\.md;/), {
+    old: "3",
+    next: "3",
+  });
+  assert.equal(
+    await phoneDiff
+      .getByRole("button", { name: /^After line 3, guide\.md;/ })
+      .count(),
+    1,
+    "an unchanged row appears once in the unified diff",
+  );
+  const setStart = changes.getByRole("button", {
+    name: "Set start",
+    exact: true,
+  });
+  const setEnd = changes.getByRole("button", { name: "Set end", exact: true });
+  for (const control of [setStart, setEnd])
+    assert.ok(
+      (await control.evaluate(
+        (element) => element.getBoundingClientRect().height,
+      )) >= 44,
+    );
+  await changes
+    .getByRole("button", { name: /^Before line 1, guide\.md;/ })
+    .click();
+  await setStart.click();
+  await changes.getByText("Start fixed at line 1.", { exact: false }).waitFor();
+  await changes
+    .getByRole("button", { name: /^Before line 2, guide\.md;/ })
+    .click();
+  await setEnd.click();
+  await changes.getByText(/Selected Before lines 1–2 · guide\.md/).waitFor();
+  await captureBrowserEvidence(page, "390-phone-before-range-controls", {
+    fullPage: false,
+  });
+  // Switching side starts a new selection instead of transforming the range.
+  await setStart.click();
+  await changes
+    .getByRole("button", { name: /^After line 1, guide\.md;/ })
+    .click();
+  await changes.getByText(/Selected After lines 1–1 · guide\.md/).waitFor();
+  await setStart.click();
+  await changes
+    .getByRole("button", { name: /^After line 3, guide\.md;/ })
+    .click();
+  await setEnd.click();
+  await changes.getByText(/Selected After lines 1–3 · guide\.md/).waitFor();
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await afterBranchLine.click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await changes.getByText(/Selected After lines 1–2 · guide\.md/).waitFor();
+
   const failRefreshRoute = "**/api/operator/tasks/*/comparisons*";
   let markFailureRequestSeen!: () => void;
   const failureRequestSeen = new Promise<void>((resolve) => {
@@ -1180,6 +1290,10 @@ test("production Changes separates staged and unstaged snapshots and retains exp
     ),
   );
   await list.getByRole("button", { name: /added later\.txt/ }).waitFor();
+  assert.equal(
+    await changes.locator(".changes-refresh-notice").innerText(),
+    "Refresh found a different comparison since the previous observation: 2 added, 0 removed, 0 changed file entries.",
+  );
   await changes.getByText(/Selected After lines 1–1 · unstaged\.txt/).waitFor();
   await list.getByRole("button", { name: /added long\.txt/ }).click();
   const longLastLine = changes.getByRole("button", {
@@ -1436,6 +1550,95 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
 
   fixture.runtime.complete(2);
   await secondAction;
+  await until(
+    () =>
+      fixture.service.workspaceTurnCaptureSlots(task.taskId).latestFinished
+        ?.identity.workId !== latestFinished.workId,
+    "second Last-turn capture to finish",
+  );
+
+  // The finished capture is identified in full, not only while a turn runs.
+  const finishedRead = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith("/comparisons") &&
+      url.searchParams.get("target") === "last-turn" &&
+      !url.searchParams.has("comparisonId")
+    );
+  });
+  await changes
+    .getByRole("button", { name: "Refresh comparison", exact: true })
+    .click();
+  const finishedBody = (await (await finishedRead).json()) as {
+    data: {
+      state: string;
+      comparison: {
+        comparisonId: string;
+        workId: string;
+        threadId?: string;
+        turnId?: string;
+        profileId: string;
+        assignmentId: string;
+      };
+    };
+  };
+  assert.equal(finishedBody.data.state, "available");
+  const finishedTurn = changes.getByLabel("Last turn identity");
+  await finishedTurn.waitFor();
+  const finished = finishedBody.data.comparison;
+  assert.ok(finished.threadId && finished.turnId);
+  assert.notEqual(finished.workId, latestFinished.workId);
+  const finishedText = await finishedTurn.innerText();
+  for (const expected of [
+    finished.workId,
+    finished.assignmentId,
+    finished.profileId,
+    finished.threadId,
+    finished.turnId,
+    "outcome completed",
+    "capture available",
+    "Capture started",
+    "before observation",
+    "after observation",
+  ])
+    assert.ok(finishedText.includes(expected), expected);
+  assert.doesNotMatch(finishedText, /Capture incomplete/);
+  assert.match(
+    await changes.locator(".changes-refresh-notice").innerText(),
+    /^Refresh found a different comparison since the previous observation: \d+ added, \d+ removed, \d+ changed file entries\.$/,
+  );
+  await captureBrowserEvidence(page, "1366-finished-last-turn-identity");
+
+  // An incomplete finished capture discloses its gap instead of looking complete.
+  const gapRoute = "**/api/operator/tasks/*/comparisons*";
+  await page.route(gapRoute, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("target") !== "last-turn") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      data: {
+        state: string;
+        reason?: string;
+        comparison?: { state: string; reason?: string };
+      };
+    };
+    if (body.data.comparison) {
+      body.data.state = "gap";
+      body.data.reason = "time-limit";
+      body.data.comparison.state = "gap";
+      body.data.comparison.reason = "time-limit";
+    }
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await changes
+    .getByRole("button", { name: "Refresh comparison", exact: true })
+    .click();
+  await finishedTurn.getByText(/capture gap/).waitFor();
+  await finishedTurn.getByText(/Capture incomplete: time-limit\./).waitFor();
+  await page.unroute(gapRoute);
   assert.equal(fixture.service.taskHold(task.taskId), undefined);
   assert.deepEqual(consoleErrors, []);
   assert.ok(historyRace503s.length <= 4, JSON.stringify(historyRace503s));

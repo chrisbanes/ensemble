@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   workspaceComparisonReadSchema,
   workspaceDirectoryReadSchema,
@@ -18,36 +11,25 @@ import {
   type ExpectedWorkspaceComparisonRead,
 } from "./comparison-read-match.js";
 import { Button, StatusBadge } from "./components.js";
+import { DiffHunk, DiffLayoutControls, type Anchor } from "./diff-view.js";
 import { CommentAction, ReviewComposer } from "./local-review.js";
+import { RangeControls } from "./range-controls.js";
 import { useOperatorResource } from "./resource.js";
+import { comparisonSideAnchor } from "./review-anchor.js";
 import type {
   TaskChangeSelection,
   TaskChangesState,
 } from "./task-workspace-state.js";
+import { dateLabel, FinishedTurn, PendingTurn } from "./turn-identity.js";
 import { NativeSelect } from "./ui/native-select.js";
 
 type ComparisonData = WorkspaceComparisonRead["data"];
 type Snapshot = Extract<ComparisonData, { state: "available" }>["comparison"];
 type Entry = Snapshot["entries"][number];
-type Hunk = Entry["hunks"][number];
-type Anchor = NonNullable<Hunk["leftAnchor"]>;
 type SelectableAnchor = Omit<Anchor, "context"> & {
   context: Exclude<Anchor["context"], "result">;
 };
 type Target = TaskChangesState["target"];
-type PatchLine = {
-  kind: "context" | "deleted" | "added" | "note";
-  oldLine?: number;
-  newLine?: number;
-  text: string;
-};
-type PairedLine = { oldLine?: PatchLine; newLine?: PatchLine };
-
-function dateLabel(value: number | undefined) {
-  return value === undefined
-    ? "not retained"
-    : new Date(value).toLocaleString();
-}
 
 function entryKey(entry: Entry, index: number) {
   return [
@@ -58,48 +40,6 @@ function entryKey(entry: Entry, index: number) {
     entry.changeSet ?? "",
     String(index),
   ].join("\u0000");
-}
-
-function pairedLines(hunk: Hunk): PairedLine[] {
-  const result: PairedLine[] = [];
-  let oldLine = hunk.oldStart;
-  let newLine = hunk.newStart;
-  let removed: PatchLine[] = [];
-  let added: PatchLine[] = [];
-  const flush = () => {
-    for (let index = 0; index < Math.max(removed.length, added.length); index++)
-      result.push({
-        ...(removed[index] ? { oldLine: removed[index] } : {}),
-        ...(added[index] ? { newLine: added[index] } : {}),
-      });
-    removed = [];
-    added = [];
-  };
-  for (const source of hunk.patch.split("\n")) {
-    if (source.startsWith("@@") || source.startsWith("\\ No newline")) continue;
-    const marker = source[0];
-    const text = source.slice(1);
-    if (marker === " ") {
-      flush();
-      result.push({
-        oldLine: { kind: "context", oldLine, newLine, text },
-        newLine: { kind: "context", oldLine, newLine, text },
-      });
-      oldLine++;
-      newLine++;
-    } else if (marker === "-") {
-      removed.push({ kind: "deleted", oldLine, text });
-      oldLine++;
-    } else if (marker === "+") {
-      added.push({ kind: "added", newLine, text });
-      newLine++;
-    } else if (source) {
-      flush();
-      result.push({ oldLine: { kind: "note", text: source } });
-    }
-  }
-  flush();
-  return result;
 }
 
 function snapshotFor(data: ComparisonData | undefined): Snapshot | undefined {
@@ -197,6 +137,74 @@ function selectionMatch(
     }
   }
   return null;
+}
+
+type SelectionFields = Pick<
+  TaskChangeSelection,
+  | "entryKey"
+  | "currentLine"
+  | "rangeAnchorLine"
+  | "startLine"
+  | "endLine"
+  | "minLine"
+  | "maxLine"
+  | "pin"
+>;
+
+function changeSelection(
+  anchor: SelectableAnchor,
+  fields: SelectionFields,
+): TaskChangeSelection {
+  return {
+    ...fields,
+    path: anchor.path,
+    repositoryId: anchor.repositoryId,
+    context: anchor.context,
+    comparisonId: anchor.comparisonId,
+    side: anchor.side,
+    contentSha256: anchor.contentSha256,
+    ...(anchor.workId ? { workId: anchor.workId } : {}),
+    ...(anchor.threadId ? { threadId: anchor.threadId } : {}),
+    ...(anchor.turnId ? { turnId: anchor.turnId } : {}),
+  };
+}
+
+/** Entries are matched by repository, path and change set; a changed entry differs in content. */
+function entrySignature(entry: Entry) {
+  return [
+    entry.change,
+    entry.state,
+    entry.previousPath ?? "",
+    entry.left?.sha256 ?? "",
+    entry.right?.sha256 ?? "",
+  ].join("\u0000");
+}
+
+function refreshSummary(
+  previous: Snapshot | undefined,
+  next: Snapshot | undefined,
+) {
+  if (!previous || !next)
+    return "Refresh found a different comparison; it could not be compared with the previous observation.";
+  const identity = (entry: Entry) =>
+    [entry.repositoryId ?? "", entry.path, entry.changeSet ?? ""].join(
+      "\u0000",
+    );
+  const before = new Map(
+    previous.entries.map((entry) => [identity(entry), entrySignature(entry)]),
+  );
+  const after = new Map(
+    next.entries.map((entry) => [identity(entry), entrySignature(entry)]),
+  );
+  let added = 0;
+  let changed = 0;
+  for (const [key, signature] of after) {
+    const old = before.get(key);
+    if (old === undefined) added++;
+    else if (old !== signature) changed++;
+  }
+  const removed = [...before.keys()].filter((key) => !after.has(key)).length;
+  return `Refresh found a different comparison since the previous observation: ${added} added, ${removed} removed, ${changed} changed file entries.`;
 }
 
 function useTaskRepositories(
@@ -324,6 +332,12 @@ export function TaskWorkspaceChanges({
     if (reloadIsNew && reload) reloads.current.set(key, reload.id);
     setRequest({ key, pending: true, error: null });
     const authIsCurrent = client.captureAuthenticationScope();
+    const stale = () =>
+      controller.signal.aborted ||
+      requestSequence !== sequence.current ||
+      !authIsCurrent();
+    const invalid = () =>
+      setRequest({ key, pending: false, error: "invalid-response" });
     const query = new URLSearchParams({ target: state.target });
     if (state.target !== "last-turn" && repositoryId)
       query.set("repositoryId", repositoryId);
@@ -339,16 +353,9 @@ export function TaskWorkspaceChanges({
         controller.signal,
       )
       .then(async (read) => {
-        if (
-          controller.signal.aborted ||
-          requestSequence !== sequence.current ||
-          !authIsCurrent()
-        )
-          return;
-        if (!matchesWorkspaceComparisonRead(read.data, expected, taskId)) {
-          setRequest({ key, pending: false, error: "invalid-response" });
-          return;
-        }
+        if (stale()) return;
+        if (!matchesWorkspaceComparisonRead(read.data, expected, taskId))
+          return invalid();
         const exactId = responseIdForExactRead(read.data);
         let finalRead = read;
         if (exactId) {
@@ -361,27 +368,18 @@ export function TaskWorkspaceChanges({
             workspaceComparisonReadSchema,
             controller.signal,
           );
-          if (
-            controller.signal.aborted ||
-            requestSequence !== sequence.current ||
-            !authIsCurrent()
-          )
-            return;
+          if (stale()) return;
           if (
             !matchesWorkspaceComparisonRead(finalRead.data, expected, taskId) ||
             !exactReadMatches(finalRead.data, exactId)
-          ) {
-            setRequest({ key, pending: false, error: "invalid-response" });
-            return;
-          }
+          )
+            return invalid();
         }
         if (
           finalRead.data.state === "available" &&
           finalRead.data.comparisonId !== finalRead.data.comparison.comparisonId
-        ) {
-          setRequest({ key, pending: false, error: "invalid-response" });
-          return;
-        }
+        )
+          return invalid();
         const snapshot = snapshotFor(finalRead.data);
         if (
           expected.target === "branch" &&
@@ -393,35 +391,32 @@ export function TaskWorkspaceChanges({
           state.baseBranchOptionsScopeKey = baseBranchOptionsScopeKey;
           state.baseBranchOptions = [...snapshot.availableBaseBranches];
         }
-        const oldId = responseId(state.comparisonReads[key]);
-        if (state.selection && oldId !== responseId(finalRead.data)) {
+        const previousRead = state.comparisonReads[key];
+        const oldId = responseId(previousRead);
+        const newId = responseId(finalRead.data);
+        state.refreshNotice =
+          previousRead && oldId !== newId
+            ? {
+                key,
+                text: refreshSummary(snapshotFor(previousRead), snapshot),
+              }
+            : null;
+        if (state.selection && oldId !== newId) {
           const match =
             snapshot && selectionMatch(state.selection, snapshot, taskId);
           if (match) {
             const previousSelection = state.selection;
             state.selectedEntryKey = entryKey(match.entry, match.index);
-            state.selection = {
-              entryKey: entryKey(match.entry, match.index),
-              path: match.anchor.path,
-              repositoryId: match.anchor.repositoryId,
-              context: match.anchor.context,
-              comparisonId: match.anchor.comparisonId,
-              side: match.anchor.side,
+            state.selection = changeSelection(match.anchor, {
+              entryKey: state.selectedEntryKey,
               currentLine: previousSelection.currentLine,
               rangeAnchorLine: previousSelection.rangeAnchorLine,
               startLine: previousSelection.startLine,
               endLine: previousSelection.endLine,
-              contentSha256: match.anchor.contentSha256,
               minLine: match.minLine,
               maxLine: match.maxLine,
-              rangeStartSet: true,
-              rangeEndSet: true,
-              ...(match.anchor.workId ? { workId: match.anchor.workId } : {}),
-              ...(match.anchor.threadId
-                ? { threadId: match.anchor.threadId }
-                : {}),
-              ...(match.anchor.turnId ? { turnId: match.anchor.turnId } : {}),
-            };
+              pin: previousSelection.pin,
+            });
           } else {
             state.selection = null;
             state.selectedEntryKey = null;
@@ -434,12 +429,7 @@ export function TaskWorkspaceChanges({
         setRequest({ key, pending: false, error: null });
       })
       .catch((error: unknown) => {
-        if (
-          controller.signal.aborted ||
-          requestSequence !== sequence.current ||
-          !authIsCurrent()
-        )
-          return;
+        if (stale()) return;
         setRequest({
           key,
           pending: false,
@@ -503,21 +493,19 @@ export function TaskWorkspaceChanges({
     state.mobileView = "preview";
     changed();
   };
-  const selectAnchor = (
-    entry: Entry,
-    index: number,
+  const selectLine = (
     anchor: Anchor,
     currentLine: number,
     minLine: number,
     maxLine: number,
-    extend = false,
+    extend: boolean,
   ) => {
-    if (anchor.context === "result") return;
-    state.selectedEntryKey = entryKey(entry, index);
+    if (anchor.context === "result" || !selected) return;
+    const selectedKey = entryKey(selected, selectedIndex);
+    state.selectedEntryKey = selectedKey;
     const previous = state.selection;
     const sameRange =
-      extend &&
-      previous?.entryKey === entryKey(entry, index) &&
+      previous?.entryKey === selectedKey &&
       previous.path === anchor.path &&
       previous.repositoryId === anchor.repositoryId &&
       previous.context === anchor.context &&
@@ -526,36 +514,38 @@ export function TaskWorkspaceChanges({
       previous.contentSha256 === anchor.contentSha256 &&
       previous.minLine === minLine &&
       previous.maxLine === maxLine;
-    const rangeAnchorLine = sameRange ? previous.rangeAnchorLine : currentLine;
-    const startLine = Math.min(rangeAnchorLine, currentLine);
-    const endLine = Math.max(rangeAnchorLine, currentLine);
-    state.selection = {
-      entryKey: entryKey(entry, index),
-      path: anchor.path,
-      repositoryId: anchor.repositoryId,
-      context: anchor.context,
-      comparisonId: anchor.comparisonId,
-      side: anchor.side,
+    // Switching side or hunk starts a new selection; a fixed edge or Shift extends this one.
+    const extending = sameRange && (extend || previous.pin !== null);
+    const rangeAnchorLine = extending ? previous.rangeAnchorLine : currentLine;
+    state.selection = changeSelection(anchor as SelectableAnchor, {
+      entryKey: selectedKey,
       currentLine,
       rangeAnchorLine,
-      startLine,
-      endLine,
-      contentSha256: anchor.contentSha256,
+      startLine: Math.min(rangeAnchorLine, currentLine),
+      endLine: Math.max(rangeAnchorLine, currentLine),
       minLine,
       maxLine,
-      rangeStartSet: true,
-      rangeEndSet: true,
-      ...(anchor.workId ? { workId: anchor.workId } : {}),
-      ...(anchor.threadId ? { threadId: anchor.threadId } : {}),
-      ...(anchor.turnId ? { turnId: anchor.turnId } : {}),
-    };
+      pin: extending ? previous.pin : null,
+    });
     state.notice = "";
     state.mobileView = "preview";
+    changed();
+  };
+  const setRangeEdge = (edge: "start" | "end") => {
+    const selection = state.selection;
+    if (!selection) return;
+    if (selection.pin && selection.pin !== edge) selection.pin = null;
+    else {
+      selection.pin = edge;
+      selection.rangeAnchorLine = selection.currentLine;
+      selection.startLine = selection.endLine = selection.currentLine;
+    }
     changed();
   };
   const refresh = () => {
     setReload({ key, id: (reload?.id ?? 0) + 1 });
   };
+  const originKey = `changes:${snapshot?.comparisonId}`;
 
   return (
     <section
@@ -699,6 +689,14 @@ export function TaskWorkspaceChanges({
           </StatusBadge>
           {id && <span>Comparison {id}</span>}
           {snapshot && <span>Observed {dateLabel(snapshot.observedAt)}</span>}
+          {snapshot && snapshot.target !== "turn" && (
+            <span className="changes-baseline">
+              Baseline: repository {snapshot.repositoryId} ·{" "}
+              {snapshot.baseline
+                ? `${snapshot.baseline.kind}${snapshot.baseline.branch ? ` of ${snapshot.baseline.branch}` : ""} @ ${snapshot.baseline.commit}`
+                : "not established"}
+            </span>
+          )}
           {currentRequest?.pending && <span>Refreshing…</span>}
           {currentRequest?.error && (
             <span role="alert">
@@ -731,7 +729,19 @@ export function TaskWorkspaceChanges({
           </Button>
         </div>
       )}
+      {state.refreshNotice?.key === key && (
+        <p role="status" className="changes-refresh-notice">
+          {state.refreshNotice.text}
+        </p>
+      )}
       {state.notice && <p role="status">{state.notice}</p>}
+      {snapshot?.target === "turn" && current?.state !== "unsettled" && (
+        <FinishedTurn
+          snapshot={snapshot}
+          assignments={assignments}
+          taskLeadName={taskLeadName}
+        />
+      )}
       {current?.state === "unsettled" && (
         <PendingTurn
           data={current}
@@ -848,48 +858,26 @@ export function TaskWorkspaceChanges({
                   </p>
                 ) : (
                   <>
-                    <div
-                      className="task-actions changes-layout-controls"
-                      role="toolbar"
-                      aria-label="Diff layout"
-                    >
-                      <Button
-                        variant={
-                          state.layout === "split" ? "primary" : "secondary"
-                        }
-                        aria-pressed={state.layout === "split"}
-                        onClick={() => {
-                          state.layout = "split";
-                          changed();
-                        }}
-                      >
-                        Split
-                      </Button>
-                      <Button
-                        variant={
-                          state.layout === "unified" ? "primary" : "secondary"
-                        }
-                        aria-pressed={state.layout === "unified"}
-                        onClick={() => {
-                          state.layout = "unified";
-                          changed();
-                        }}
-                      >
-                        Unified
-                      </Button>
-                    </div>
+                    <DiffLayoutControls
+                      layout={state.layout}
+                      onChange={(layout) => {
+                        state.layout = layout;
+                        changed();
+                      }}
+                    />
                     {selected.hunks.map((hunk, index) => (
                       <DiffHunk
                         // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
                         key={`${snapshot.comparisonId}:${index}`}
-                        entry={selected}
-                        entryIndex={selectedIndex}
-                        comparisonId={snapshot.comparisonId}
                         hunk={hunk}
                         hunkIndex={index}
                         layout={state.layout}
-                        selection={state.selection}
-                        onSelect={selectAnchor}
+                        select={{
+                          comparisonId: snapshot.comparisonId,
+                          selection: state.selection,
+                          originKey,
+                          onSelect: selectLine,
+                        }}
                       />
                     ))}
                   </>
@@ -908,8 +896,14 @@ export function TaskWorkspaceChanges({
                     comparison {state.selection.comparisonId}
                   </p>
                 )}
+                <RangeControls
+                  line={state.selection?.currentLine ?? null}
+                  anchor={state.selection?.rangeAnchorLine ?? null}
+                  pin={state.selection?.pin ?? null}
+                  onSet={setRangeEdge}
+                />
                 <CommentAction
-                  originKey={`changes:${snapshot.comparisonId}`}
+                  originKey={originKey}
                   label={
                     snapshot.target === "turn"
                       ? "Last turn comparison"
@@ -917,33 +911,11 @@ export function TaskWorkspaceChanges({
                   }
                   anchor={
                     state.selection
-                      ? {
-                          taskId,
-                          repositoryId: state.selection.repositoryId,
-                          path: state.selection.path,
-                          sourceKind: "comparison-side",
-                          context: state.selection.context,
-                          comparisonId: state.selection.comparisonId,
-                          side: state.selection.side,
-                          startLine: state.selection.startLine,
-                          endLine: state.selection.endLine,
-                          contentSha256: state.selection.contentSha256,
-                          ...(state.selection.workId
-                            ? { workId: state.selection.workId }
-                            : {}),
-                          ...(state.selection.threadId
-                            ? { threadId: state.selection.threadId }
-                            : {}),
-                          ...(state.selection.turnId
-                            ? { turnId: state.selection.turnId }
-                            : {}),
-                        }
+                      ? comparisonSideAnchor(taskId, state.selection)
                       : null
                   }
                 />
-                <ReviewComposer
-                  originKey={`changes:${snapshot.comparisonId}`}
-                />
+                <ReviewComposer originKey={originKey} />
               </>
             ) : (
               <p className="changes-empty-selection">
@@ -953,329 +925,6 @@ export function TaskWorkspaceChanges({
           </div>
         </div>
       )}
-    </section>
-  );
-}
-
-function PendingTurn({
-  data,
-  assignments,
-  taskLeadName,
-}: {
-  data: Extract<ComparisonData, { state: "unsettled" }>;
-  assignments: Array<{ assignmentId: string; name: string | null }>;
-  taskLeadName: string | null;
-}) {
-  const pending = data.pending;
-  const assignment = assignments.find(
-    (item) => item.assignmentId === pending.identity.assignmentId,
-  );
-  const agent = assignment?.name ?? taskLeadName ?? "Agent name unavailable";
-  const finishedAssignment = data.latestFinished
-    ? assignments.find(
-        (item) => item.assignmentId === data.latestFinished?.assignmentId,
-      )
-    : undefined;
-  const finishedAgent =
-    finishedAssignment?.name ?? taskLeadName ?? "Agent name unavailable";
-  return (
-    <section className="changes-pending-turn" aria-label="Current actual turn">
-      <h5>Current actual turn</h5>
-      <p>
-        Agent {agent} · profile {pending.identity.profileId} · work{" "}
-        {pending.identity.workId} · assignment {pending.identity.assignmentId}
-      </p>
-      <p>
-        Turn {pending.turnId ?? "not yet bound"} · thread{" "}
-        {pending.threadId ?? "not yet bound"} · outcome {pending.outcome} ·{" "}
-        capture {pending.captureState}
-      </p>
-      <p>
-        Capture started {dateLabel(pending.startedAt)} · before observation{" "}
-        {pending.beforeObservedAt === undefined
-          ? (pending.beforeState ?? "not retained")
-          : dateLabel(pending.beforeObservedAt)}
-        {" · "}after observation{" "}
-        {pending.afterObservedAt === undefined
-          ? (pending.afterState ?? "not observed")
-          : dateLabel(pending.afterObservedAt)}
-      </p>
-      {pending.reason && <p>Capture limitation: {pending.reason}</p>}
-      {data.latestFinished && (
-        <p>
-          Latest finished capture remains separate: agent {finishedAgent} · work{" "}
-          {data.latestFinished.workId} · turn{" "}
-          {data.latestFinished.turnId ?? "not retained"} · outcome{" "}
-          {data.latestFinished.outcome} · capture started{" "}
-          {dateLabel(data.latestFinished.startedAt)} · before observation{" "}
-          {data.latestFinished.beforeObservedAt === undefined
-            ? "not retained"
-            : dateLabel(data.latestFinished.beforeObservedAt)}{" "}
-          · after observation {dateLabel(data.latestFinished.observedAt)}.
-        </p>
-      )}
-      <p>
-        A partial or unsettled capture does not establish that runtime writes
-        have ended or change a hold.
-      </p>
-    </section>
-  );
-}
-
-function DiffHunk({
-  entry,
-  entryIndex,
-  comparisonId,
-  hunk,
-  hunkIndex,
-  layout,
-  selection,
-  onSelect,
-}: {
-  entry: Entry;
-  entryIndex: number;
-  comparisonId: string;
-  hunk: Hunk;
-  hunkIndex: number;
-  layout: "split" | "unified";
-  selection: TaskChangeSelection | null;
-  onSelect: (
-    entry: Entry,
-    index: number,
-    anchor: Anchor,
-    line: number,
-    minLine: number,
-    maxLine: number,
-    extend?: boolean,
-  ) => void;
-}) {
-  const rows = useMemo(() => pairedLines(hunk), [hunk]);
-  const root = useRef<HTMLDivElement>(null);
-  const handleLineKeyDown = (
-    event: KeyboardEvent<HTMLButtonElement>,
-    side: "left" | "right",
-    row: number,
-    anchor: Anchor,
-    minLine: number,
-    maxLine: number,
-  ) => {
-    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      const targetSide = event.key === "ArrowLeft" ? "left" : "right";
-      const target = Array.from(
-        root.current?.querySelectorAll<HTMLButtonElement>(
-          `button[data-row="${row}"][data-side="${targetSide}"]`,
-        ) ?? [],
-      ).find((button) => button.getClientRects().length > 0);
-      if (target) {
-        event.preventDefault();
-        target.focus();
-      }
-      return;
-    }
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    const sideLines = Array.from(
-      root.current?.querySelectorAll<HTMLButtonElement>(
-        `button[data-side="${side}"]`,
-      ) ?? [],
-    ).filter((button) => button.getClientRects().length > 0);
-    const index = sideLines.indexOf(event.currentTarget);
-    const target = sideLines[index + (event.key === "ArrowDown" ? 1 : -1)];
-    if (!target) return;
-    const line = Number(target.dataset.line);
-    if (!Number.isSafeInteger(line)) return;
-    event.preventDefault();
-    target.focus();
-    const origin = Number(event.currentTarget.dataset.line);
-    // Shift extends from the focused line even when it was not yet selected.
-    if (event.shiftKey && Number.isSafeInteger(origin))
-      onSelect(entry, entryIndex, anchor, origin, minLine, maxLine, true);
-    onSelect(entry, entryIndex, anchor, line, minLine, maxLine, event.shiftKey);
-  };
-  const panel = (side: "left" | "right") => (
-    <div className="changes-diff-side">
-      <h6>{side === "left" ? "Before" : "After"}</h6>
-      {rows.map((pair, row) => {
-        const line = side === "left" ? pair.oldLine : pair.newLine;
-        const anchor = side === "left" ? hunk.leftAnchor : hunk.rightAnchor;
-        if (!line)
-          return (
-            <div
-              // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
-              key={row}
-              className="changes-line changes-line-empty"
-            >
-              <span aria-hidden="true"> </span>
-            </div>
-          );
-        const number = side === "left" ? line.oldLine : line.newLine;
-        const selectable =
-          line.kind === "context" ||
-          (side === "left" && line.kind === "deleted") ||
-          (side === "right" && line.kind === "added");
-        const minLine = side === "left" ? hunk.oldStart : hunk.newStart;
-        const maxLine =
-          minLine + (side === "left" ? hunk.oldLines : hunk.newLines) - 1;
-        if (selectable && anchor && number !== undefined) {
-          const matchingSelection =
-            selection?.comparisonId === comparisonId &&
-            selection.side === side &&
-            selection.path === anchor.path &&
-            selection.contentSha256 === anchor.contentSha256;
-          const selected =
-            matchingSelection &&
-            selection.startLine <= number &&
-            number <= selection.endLine;
-          const current = matchingSelection && selection.currentLine === number;
-          return (
-            <button
-              type="button"
-              className={`changes-line changes-selectable-line ${selected ? "is-selected" : ""}`}
-              // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
-              key={row}
-              aria-pressed={selected}
-              aria-current={current ? "true" : undefined}
-              aria-label={`${side === "left" ? "Before" : "After"} line ${number}, ${anchor.path}; hunk lines ${minLine}–${maxLine}`}
-              data-row={row}
-              data-side={side}
-              data-line={number}
-              onKeyDown={(event) =>
-                handleLineKeyDown(event, side, row, anchor, minLine, maxLine)
-              }
-              onClick={(event) =>
-                onSelect(
-                  entry,
-                  entryIndex,
-                  anchor,
-                  number,
-                  minLine,
-                  maxLine,
-                  event.shiftKey,
-                )
-              }
-            >
-              <span className="changes-line-number">{number}</span>
-              <code>{line.text}</code>
-            </button>
-          );
-        }
-        return (
-          <div
-            // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
-            key={row}
-            className={`changes-line changes-line-${line.kind}`}
-          >
-            <span className="changes-line-number">{number ?? ""}</span>
-            <code>{line.text || " "}</code>
-          </div>
-        );
-      })}
-    </div>
-  );
-  return (
-    <section
-      ref={root}
-      className="changes-hunk"
-      aria-label={`Diff hunk ${hunkIndex + 1}`}
-    >
-      <h6 className="changes-hunk-heading">
-        @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
-      </h6>
-      <div
-        className={`changes-diff-split ${layout === "split" ? "is-active" : ""}`}
-      >
-        {panel("left")}
-        {panel("right")}
-      </div>
-      <div
-        className={`changes-diff-unified ${layout === "unified" ? "is-active" : ""}`}
-      >
-        {rows.flatMap((pair, row) =>
-          [pair.oldLine, pair.newLine]
-            .filter((line): line is PatchLine => Boolean(line))
-            .map((line, sideIndex) => {
-              const side = line.kind === "deleted" ? "left" : "right";
-              const anchor =
-                side === "left" ? hunk.leftAnchor : hunk.rightAnchor;
-              const number = side === "left" ? line.oldLine : line.newLine;
-              const selectable =
-                line.kind === "context" ||
-                (side === "left" && line.kind === "deleted") ||
-                (side === "right" && line.kind === "added");
-              const minLine = side === "left" ? hunk.oldStart : hunk.newStart;
-              const maxLine =
-                minLine + (side === "left" ? hunk.oldLines : hunk.newLines) - 1;
-              const matchingSelection =
-                selection?.comparisonId === comparisonId &&
-                selection.side === side &&
-                selection.path === anchor?.path &&
-                selection.contentSha256 === anchor?.contentSha256;
-              const selected =
-                matchingSelection &&
-                number !== undefined &&
-                selection.startLine <= number &&
-                number <= selection.endLine;
-              const current =
-                matchingSelection && selection.currentLine === number;
-              if (selectable && anchor && number !== undefined)
-                return (
-                  <button
-                    type="button"
-                    className={`changes-line changes-selectable-line ${selected ? "is-selected" : ""}`}
-                    // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
-                    key={`${row}:${sideIndex}`}
-                    aria-pressed={selected}
-                    aria-current={current ? "true" : undefined}
-                    aria-label={`${side === "left" ? "Before" : "After"} line ${number}, ${anchor.path}; hunk lines ${minLine}–${maxLine}`}
-                    data-row={row}
-                    data-side={side}
-                    data-line={number}
-                    onKeyDown={(event) =>
-                      handleLineKeyDown(
-                        event,
-                        side,
-                        row,
-                        anchor,
-                        minLine,
-                        maxLine,
-                      )
-                    }
-                    onClick={(event) =>
-                      onSelect(
-                        entry,
-                        entryIndex,
-                        anchor,
-                        number,
-                        minLine,
-                        maxLine,
-                        event.shiftKey,
-                      )
-                    }
-                  >
-                    <span className="changes-line-number">
-                      {side === "left" ? `-${number}` : `+${number}`}
-                    </span>
-                    <code>{line.text}</code>
-                  </button>
-                );
-              return (
-                <div
-                  className={`changes-line changes-line-${line.kind}`}
-                  // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
-                  key={`${row}:${sideIndex}`}
-                >
-                  <span className="changes-line-number">
-                    {line.kind === "context"
-                      ? (line.oldLine ?? "")
-                      : side === "left"
-                        ? `-${number ?? ""}`
-                        : `+${number ?? ""}`}
-                  </span>
-                  <code>{line.text || " "}</code>
-                </div>
-              );
-            }),
-        )}
-      </div>
     </section>
   );
 }

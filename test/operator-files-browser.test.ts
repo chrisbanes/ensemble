@@ -591,6 +591,49 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   });
   await stableLine.click();
   assert.equal(await stableLine.getAttribute("aria-pressed"), "true");
+
+  // Phone range selection without Shift: labelled 44px Start/End controls.
+  const setStart = page.getByRole("button", { name: "Set start", exact: true });
+  const setEnd = page.getByRole("button", { name: "Set end", exact: true });
+  for (const control of [setStart, setEnd])
+    assert.ok(
+      (await control.evaluate(
+        (element) => element.getBoundingClientRect().height,
+      )) >= 44,
+    );
+  await setStart.click();
+  await page.getByText("Start fixed at line 3.", { exact: false }).waitFor();
+  assert.equal(await setStart.getAttribute("aria-pressed"), "true");
+  await page.getByRole("button", { name: /^Line 5: A \*\*bold\*\*/ }).click();
+  await setEnd.click();
+  await page.getByText("Selected lines 3–5", { exact: true }).waitFor();
+  for (const [name, pressed] of [
+    [/^Line 2 \(blank\)/, "false"],
+    [/^Line 3:/, "true"],
+    [/^Line 4 \(blank\)/, "true"],
+    [/^Line 5:/, "true"],
+    [/^Line 6 \(blank\)/, "false"],
+  ] as const)
+    assert.equal(
+      await page.getByRole("button", { name }).getAttribute("aria-pressed"),
+      pressed,
+    );
+  // The composer returns focus to the selected line of this origin only.
+  const returnTargets = await page
+    .locator('[data-review-return^="files:"]')
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("aria-label")),
+    );
+  assert.equal(returnTargets.length, 1);
+  assert.match(returnTargets[0] ?? "", /^Line 5: A \*\*bold\*\*/);
+  // Ending the range returns to ordinary selection: a plain tap replaces it.
+  await page.getByRole("button", { name: /^Line 5:/ }).click();
+  await page.getByText("Selected lines 5–5", { exact: true }).waitFor();
+  await stableLine.click();
+  await page.getByText("Selected lines 3–3", { exact: true }).waitFor();
+  await captureBrowserEvidence(page, "390-files-range-controls-phone", {
+    fullPage: false,
+  });
   const previewScroll = page.locator(".file-preview-scroll");
   await previewScroll.evaluate((element) => element.scrollTo(0, 500));
   await page.waitForFunction(
@@ -669,6 +712,12 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   await page
     .getByRole("button", { name: "Line 3: ## Current refreshed" })
     .waitFor();
+  assert.equal(
+    (await page.locator(".file-change-notice").innerText()).startsWith(
+      `Changed since previous observation: SHA-256 ${stableHash.slice(0, 8)} → ${refreshedHash.slice(0, 8)}`,
+    ),
+    true,
+  );
 
   const latestGuide = guideMarkdown("latest-unobserved");
   writeFileSync(alphaGuide, latestGuide);
@@ -977,6 +1026,10 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   await page
     .getByRole("status")
     .getByText(/Preview is missing/)
+    .waitFor();
+  await page
+    .locator(".file-change-notice")
+    .getByText(/^No longer readable since previous observation: .*now missing/)
     .waitFor();
 
   await page
