@@ -1,4 +1,4 @@
-# WI03 bounded live turn-capture evidence
+# #780 T5 live turn capture (actual-turn portion of WI06)
 
 **Result: passed for one repository-free actual journey.** This record covers
 the guarded #780 T5 journey at source commit
@@ -72,9 +72,11 @@ historical failure remains preserved; no attempt record was reset. This was
 the one actual journey: one of one actual-runtime journeys used, with one
 turn start.
 
-This run proves one repository-free actual journey. Git comparison cases use
-offline automated fixtures, including real temporary repositories. This run
-does not establish a whole-response latency guarantee: the five-second
+This run proves one successful repository-free actual journey. Successive
+turns, restart, and failed, interrupted or uncertain capture cases remain in
+offline coverage; they were not exercised natively here. Git comparison cases
+use offline automated fixtures, including real temporary repositories. This
+run does not establish a whole-response latency guarantee: the five-second
 observation budget does not bound all awaited validation and cleanup. Exact
 process exit does not prove descendants stopped or all filesystem effects
 ended. It does not qualify repository-backed live Git, X or native visibility,
