@@ -48,6 +48,8 @@ import {
   uuid,
   workspaceSchema,
   type Execution,
+  workspaceDirectoryReadSchema,
+  workspacePreviewReadSchema,
 } from "../operator/contracts.js";
 import {
   GitHubHttpSourceReader,
@@ -58,6 +60,13 @@ import {
   sanitizeConversationText,
   type ConversationHistoryBinding,
 } from "./conversation-history.js";
+import {
+  listWorkspaceDirectory,
+  previewWorkspaceFile,
+  WorkspaceInspectionInputError,
+  type WorkspaceInspectionCurrent,
+  type WorkspaceInspectionRequest,
+} from "./workspace-inspection.js";
 type Row =
   ReturnType<StandaloneService["domain"]> extends { task(id: string): infer R }
     ? R
@@ -279,6 +288,59 @@ export class OperatorApi {
   private exact(value: unknown, excluded: readonly string[] | undefined) {
     const safe = this.safe(value, excluded);
     return safe === String(value) ? safe : null;
+  }
+  private async workspaceInspectionCurrent(
+    taskId: string,
+  ): Promise<WorkspaceInspectionCurrent> {
+    this.requireTask(taskId);
+    const binding = await this.service.taskWorkspace(taskId);
+    const task = this.requireTask(taskId);
+    return {
+      taskId,
+      taskVersion: Number(task.version),
+      visibility: JSON.stringify({
+        operator: this.visibilityToken(),
+        workspace: this.service.taskWorkspaceVisibility(taskId),
+      }),
+      ...(binding ? { binding } : {}),
+      controlPaths: this.controlPaths,
+    };
+  }
+  private workspaceInspectionFailure(error: unknown): never {
+    if (error instanceof OperatorApiError) throw error;
+    if (error instanceof WorkspaceInspectionInputError)
+      throw new OperatorApiError(400, "invalid-input");
+    throw new OperatorApiError(503, "unavailable");
+  }
+  async readWorkspaceDirectory(
+    taskId: string,
+    request: Omit<WorkspaceInspectionRequest, "taskId">,
+  ) {
+    this.requireTask(taskId);
+    try {
+      const result = await listWorkspaceDirectory({ ...request, taskId }, () =>
+        this.workspaceInspectionCurrent(taskId),
+      );
+      const { observedAt, ...data } = result;
+      return workspaceDirectoryReadSchema.parse({ data, observedAt });
+    } catch (error) {
+      return this.workspaceInspectionFailure(error);
+    }
+  }
+  async readWorkspacePreview(
+    taskId: string,
+    request: Omit<WorkspaceInspectionRequest, "taskId">,
+  ) {
+    this.requireTask(taskId);
+    try {
+      const result = await previewWorkspaceFile({ ...request, taskId }, () =>
+        this.workspaceInspectionCurrent(taskId),
+      );
+      const { observedAt, ...data } = result;
+      return workspacePreviewReadSchema.parse({ data, observedAt });
+    } catch (error) {
+      return this.workspaceInspectionFailure(error);
+    }
   }
   private project(row: Row, excluded: readonly string[] | undefined) {
     return {

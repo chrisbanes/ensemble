@@ -68,6 +68,164 @@ export const workspaceSchema = envelope(
     })
     .strict(),
 );
+const workspaceInspectionScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("workspace") }).strict(),
+  z
+    .object({
+      kind: z.literal("repository"),
+      repositoryId: z.string().min(1).max(512),
+    })
+    .strict(),
+]);
+const workspaceInspectionPathSchema = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(255)
+      .refine(
+        (part) =>
+          !/\p{Cc}/u.test(part) && !part.includes("/") && !part.includes("\\"),
+      ),
+  )
+  .max(32)
+  .refine((parts) => new TextEncoder().encode(parts.join("/")).length <= 2048);
+const workspaceInspectionStateSchema = z.enum([
+  "ready",
+  "missing",
+  "provisioning",
+  "held",
+  "archiving",
+  "archived",
+  "excluded",
+  "ignored",
+  "conflict",
+  "unavailable",
+]);
+const workspaceInspectionEntrySchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("repository"),
+      repositoryId: z.string().min(1).max(128),
+      size: z.null(),
+      modifiedAt: z.null(),
+      ignored: z.literal(false),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.enum(["file", "directory", "symlink", "other"]),
+      name: z.string().min(1).max(255),
+      size: z.number().int().nonnegative().safe().nullable(),
+      modifiedAt: z.number().finite().nullable(),
+      ignored: z.boolean().nullable(),
+    })
+    .strict(),
+]);
+export const workspaceDirectoryReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      workspaceId: uuid.nullable(),
+      scope: workspaceInspectionScopeSchema,
+      path: workspaceInspectionPathSchema,
+      state: workspaceInspectionStateSchema,
+      entries: z.array(workspaceInspectionEntrySchema).max(256),
+      truncated: z.boolean(),
+      ignoreStatus: z.enum(["known", "not-applicable", "incomplete"]),
+    })
+    .strict(),
+);
+const workspacePreviewMetadataSchema = z
+  .object({
+    kind: z.enum(["file", "directory", "symlink", "other"]),
+    size: z.number().int().nonnegative().safe().nullable(),
+    modifiedAt: z.number().finite().nullable(),
+    ignored: z.boolean().nullable(),
+    reason: z
+      .enum([
+        "unsupported-format",
+        "binary-content",
+        "invalid-content",
+        "too-large",
+        "multiple-links",
+        "image-dimensions-exceed-limit",
+      ])
+      .optional(),
+  })
+  .strict();
+const workspacePreviewDataSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("text"),
+      mime: z.string().min(1).max(128),
+      text: z.string().max(1024 * 1024),
+      sha256: hash,
+      size: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(1024 * 1024)
+        .safe(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("base64"),
+      mime: z.enum([
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+      ]),
+      data: z.string().max(4 * Math.ceil((8 * 1024 * 1024) / 3)),
+      sha256: hash,
+      size: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(8 * 1024 * 1024)
+        .safe(),
+      width: z.number().int().positive().safe().optional(),
+      height: z.number().int().positive().safe().optional(),
+      maxDisplayedPages: z.number().int().positive().max(10).safe().optional(),
+    })
+    .strict(),
+]);
+export const workspacePreviewReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      workspaceId: uuid.nullable(),
+      scope: workspaceInspectionScopeSchema,
+      path: workspaceInspectionPathSchema,
+      state: z.union([
+        workspaceInspectionStateSchema,
+        z.literal("metadata-only"),
+      ]),
+      metadata: workspacePreviewMetadataSchema.optional(),
+      preview: workspacePreviewDataSchema.optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.state === "ready" && (!value.metadata || !value.preview))
+        context.addIssue({
+          code: "custom",
+          message: "ready preview requires metadata and data",
+        });
+      if (value.state === "metadata-only" && !value.metadata?.reason)
+        context.addIssue({
+          code: "custom",
+          message: "metadata-only preview requires a reason",
+        });
+      if (value.state !== "ready" && value.preview)
+        context.addIssue({
+          code: "custom",
+          message: "unavailable preview cannot contain file data",
+        });
+    }),
+);
 export const executionSchema = z
   .object({
     state: z.enum([

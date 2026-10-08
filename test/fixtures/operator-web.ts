@@ -247,7 +247,7 @@ export async function createOperatorFixture<
     advanceClock(ms: number) {
       now += ms;
     },
-    async startWeb() {
+    async startWeb(controlPaths: readonly string[] = [directory]) {
       const id = ++listenerSequence;
       const owned: OwnedWeb = {
         id,
@@ -334,7 +334,7 @@ export async function createOperatorFixture<
             routes,
             web: new OperatorWebBoundary(
               bundle,
-              new OperatorApi(service, [directory], undefined, readerFactory),
+              new OperatorApi(service, controlPaths, undefined, readerFactory),
             ),
           },
         );
