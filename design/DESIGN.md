@@ -1476,3 +1476,18 @@ zoom and text-scale behavior. Those need browser and physical-device evidence.
 No application build or test was run for this design-only proposal. Native
 save/reopen, resolved bounds and exported review images are recorded in the
 T1 evidence packet; production interaction remains for the implementation gate.
+
+Implementation differences recorded on 8 October 2026:
+
+- Question actions sit in flow directly below the bounded question body rather
+  than sticking to the page. A page-sticky footer covered the last field after
+  it scrolled into view. At 390 × 480 the actions are reached by scrolling the
+  page, so they are not always on screen as in `Sejey`.
+- The composer does not pre-disable Create and start for an unavailable
+  assignee or dependency. Either action opens the affected disclosure, focuses
+  its field and error, and sends no command.
+- Browser evidence covers Chromium and Playwright WebKit (`ux800-matrix`,
+  `ui08-shell`, `ui05-questions` and the task/composer suites). Forced colours
+  are emulated in Chromium only. The safe-area inset is checked through an
+  emulated custom property. Physical Safari/iPhone, virtual keyboards, the
+  recovery route and the retained HTML operator remain outside this matrix.
