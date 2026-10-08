@@ -1,4 +1,5 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { z } from "zod";
 import {
   retainedEvidenceItemContentReadSchema,
   retainedResultEvidenceReadSchema,
@@ -6,7 +7,13 @@ import {
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
 import { Button, StatusBadge } from "./components.js";
+import {
+  DiffHunk,
+  DiffLayoutControls,
+  type DiffHunkData,
+} from "./diff-view.js";
 import { useOperatorResource } from "./resource.js";
+import { resultEvidenceAnchor } from "./review-anchor.js";
 import { FilePreviewBody } from "./task-files.js";
 import type {
   RetainedEvidenceState,
@@ -15,6 +22,162 @@ import type {
 
 const time = (value: number | null) =>
   value === null ? "not observed" : new Date(value).toLocaleString();
+
+const diffSideSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("absent") }),
+  z.object({ state: z.literal("text"), text: z.string() }),
+]);
+/** Payload of a `workspace-diff+json` item: the complete Before and After texts. */
+const retainedDiffSchema = z.object({
+  version: z.literal(1),
+  repositoryId: z.string().nullable(),
+  path: z.string(),
+  previousPath: z.string().optional(),
+  left: diffSideSchema,
+  right: diffSideSchema,
+});
+type RetainedDiff = z.infer<typeof retainedDiffSchema>;
+
+const maxDiffLines = 5_000;
+
+const textLines = (side: RetainedDiff["left"]) =>
+  side.state === "absent" || side.text === ""
+    ? []
+    : side.text.replace(/\n$/, "").split("\n");
+
+// ponytail: above this many LCS cells the changed middle is shown as one replaced block.
+const maxLcsCells = 1_000_000;
+
+/** Unified-patch rows for two line lists; each change run lists deletions before additions. */
+function patchRows(before: string[], after: string[]) {
+  let head = 0;
+  while (
+    head < before.length &&
+    head < after.length &&
+    before[head] === after[head]
+  )
+    head++;
+  let tail = 0;
+  while (
+    tail < before.length - head &&
+    tail < after.length - head &&
+    before[before.length - 1 - tail] === after[after.length - 1 - tail]
+  )
+    tail++;
+  const old = before.slice(head, before.length - tail);
+  const next = after.slice(head, after.length - tail);
+  const rows = before.slice(0, head).map((line) => ` ${line}`);
+  let deleted: string[] = [];
+  let added: string[] = [];
+  const flush = () => {
+    rows.push(...deleted, ...added);
+    deleted = [];
+    added = [];
+  };
+  if (old.length * next.length > maxLcsCells) {
+    deleted = old.map((line) => `-${line}`);
+    added = next.map((line) => `+${line}`);
+  } else {
+    const width = next.length + 1;
+    const lcs = new Uint32Array((old.length + 1) * width);
+    for (let i = old.length - 1; i >= 0; i--)
+      for (let j = next.length - 1; j >= 0; j--)
+        lcs[i * width + j] =
+          old[i] === next[j]
+            ? (lcs[(i + 1) * width + j + 1] ?? 0) + 1
+            : Math.max(
+                lcs[(i + 1) * width + j] ?? 0,
+                lcs[i * width + j + 1] ?? 0,
+              );
+    let i = 0;
+    let j = 0;
+    while (i < old.length || j < next.length) {
+      if (i < old.length && j < next.length && old[i] === next[j]) {
+        flush();
+        rows.push(` ${old[i]}`);
+        i++;
+        j++;
+      } else if (
+        i < old.length &&
+        (j === next.length ||
+          (lcs[(i + 1) * width + j] ?? 0) >= (lcs[i * width + j + 1] ?? 0))
+      )
+        deleted.push(`-${old[i++]}`);
+      else added.push(`+${next[j++]}`);
+    }
+  }
+  flush();
+  rows.push(...before.slice(before.length - tail).map((line) => ` ${line}`));
+  return rows;
+}
+
+/** One hunk holding both complete sides. */
+function retainedHunk(diff: RetainedDiff) {
+  const before = textLines(diff.left);
+  const after = textLines(diff.right);
+  const rows = patchRows(before, after);
+  const hunk: DiffHunkData = {
+    oldStart: before.length ? 1 : 0,
+    oldLines: before.length,
+    newStart: after.length ? 1 : 0,
+    newLines: after.length,
+    patch: rows.slice(0, maxDiffLines).join("\n"),
+  };
+  return { hunk, omitted: Math.max(0, rows.length - maxDiffLines) };
+}
+
+/** Original Before and After of a retained diff. No review anchor exists for a diff. */
+function RetainedDiffView({
+  text,
+  layout,
+  onLayout,
+}: {
+  text: string;
+  layout: "split" | "unified";
+  onLayout: (layout: "split" | "unified") => void;
+}) {
+  const diff = useMemo(() => {
+    try {
+      const parsed = retainedDiffSchema.safeParse(JSON.parse(text));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }, [text]);
+  const rendered = useMemo(() => (diff ? retainedHunk(diff) : null), [diff]);
+  if (!diff || !rendered)
+    return (
+      <p role="alert">
+        This retained diff could not be displayed because its recorded payload
+        is not a recognised diff.
+      </p>
+    );
+  const describe = (side: RetainedDiff["left"]) =>
+    side.state === "absent"
+      ? "absent (no file on this side)"
+      : `${textLines(side).length.toLocaleString()} lines`;
+  return (
+    <div className="retained-diff">
+      <p>
+        {diff.previousPath ? `${diff.previousPath} → ` : ""}
+        {diff.path} · Before {describe(diff.left)} · After{" "}
+        {describe(diff.right)}
+      </p>
+      <p className="muted" role="note">
+        Review comments cannot be added to a retained diff. The service anchors
+        retained result evidence to retained file bytes only.
+      </p>
+      <DiffLayoutControls layout={layout} onChange={onLayout} />
+      <DiffHunk hunk={rendered.hunk} hunkIndex={0} layout={layout} />
+      {rendered.omitted > 0 && (
+        <p role="status">
+          Showing the first {maxDiffLines.toLocaleString()} diff lines;{" "}
+          {rendered.omitted.toLocaleString()} more are not displayed.
+        </p>
+      )}
+    </div>
+  );
+}
 
 function retainedScope(repositoryId: string | null): TaskFilesState["scope"] {
   return repositoryId
@@ -181,44 +344,50 @@ export function RetainedResultEvidence({
                 {content.item.repositoryId ?? "task workspace"}/
                 {content.item.path} · captured {time(content.item.capturedAt)}
               </p>
-              <FilePreviewBody
-                data={content.preview}
-                name={content.item.path}
-                tab={state.tab(
-                  content.itemId,
-                  retainedScope(content.item.repositoryId),
-                  content.item.path.split("/"),
-                )}
-                changed={changed}
-                {...(content.item.kind === "file"
-                  ? {
-                      comment: {
-                        originKey: `retained:${content.itemId}`,
-                        label: `retained result ${data.resultId}`,
-                        anchorFor: (
-                          startLine: number,
-                          endLine: number,
-                          contentSha256: string,
-                        ) => ({
-                          taskId,
-                          repositoryId: content.item.repositoryId,
-                          path: content.item.path,
-                          sourceKind: "result-evidence" as const,
-                          context: "result" as const,
-                          resultId: data.resultId,
-                          resultItemId: content.itemId,
-                          workId: data.identity.workId,
-                          threadId: data.identity.threadId,
-                          turnId: data.identity.turnId,
-                          side: "file" as const,
-                          startLine,
-                          endLine,
-                          contentSha256,
-                        }),
-                      },
-                    }
-                  : {})}
-              />
+              {content.item.kind === "diff" ? (
+                content.preview.kind === "text" ? (
+                  <>
+                    <p>
+                      {content.preview.mime} ·{" "}
+                      {content.preview.size.toLocaleString()} bytes · SHA-256{" "}
+                      {content.preview.sha256}
+                    </p>
+                    <RetainedDiffView
+                      text={content.preview.text}
+                      layout={state.diffLayout}
+                      onLayout={(layout) => {
+                        state.diffLayout = layout;
+                        changed();
+                      }}
+                    />
+                  </>
+                ) : (
+                  <p role="alert">This retained diff could not be displayed.</p>
+                )
+              ) : (
+                <FilePreviewBody
+                  data={content.preview}
+                  name={content.item.path}
+                  tab={state.tab(
+                    content.itemId,
+                    retainedScope(content.item.repositoryId),
+                    content.item.path.split("/"),
+                  )}
+                  changed={changed}
+                  comment={{
+                    originKey: `retained:${content.itemId}`,
+                    label: `retained result ${data.resultId}`,
+                    anchorFor: (startLine, endLine, contentSha256) =>
+                      resultEvidenceAnchor(
+                        taskId,
+                        { resultId: data.resultId, ...data.identity },
+                        content.item,
+                        { startLine, endLine },
+                        contentSha256,
+                      ),
+                  }}
+                />
+              )}
               {content.item.kind === "file" && (
                 <Button
                   variant="secondary"
