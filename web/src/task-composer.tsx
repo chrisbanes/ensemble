@@ -84,6 +84,36 @@ export function TaskComposer({
     taskLoader,
   );
   const edit = (patch: Partial<ComposerInput>) => state.edit(patch);
+  // Fresh options can show a stored selection is no longer permitted before submit.
+  const fresh =
+    state.phase === "editable" && options.state.status === "fresh"
+      ? options.state.data?.data
+      : undefined;
+  const unavailable: Record<string, string> = {};
+  if (
+    fresh &&
+    input.profileId &&
+    !fresh.profiles.some((p) => p.id === input.profileId)
+  )
+    unavailable.profileId = "Choose a currently permitted assignee.";
+  if (
+    fresh &&
+    input.blockerTaskIds.some(
+      (id) => !fresh.dependencies.some((d) => d.id === id),
+    )
+  )
+    unavailable.blockerTaskIds =
+      "Choose existing dependencies in this project.";
+  const unavailableFields = Object.keys(unavailable).join();
+  useEffect(() => {
+    if (!unavailableFields) return;
+    setExpanded((open) => {
+      const next = new Set(open);
+      for (const field of unavailableFields.split(","))
+        next.add(sectionOf[field] ?? field);
+      return next;
+    });
+  }, [unavailableFields]);
   // Collapsed sections stay mounted, so an error target only needs its section opened.
   const reveal = (field: string) => {
     flushSync(() =>
@@ -102,28 +132,12 @@ export function TaskComposer({
       render((n) => n + 1);
       return;
     }
-    if (state.phase === "editable" && options.state.data) {
-      const o = options.state.data.data;
-      if (
-        input.profileId &&
-        !o.profiles.some((p) => p.id === input.profileId)
-      ) {
-        state.errors.profileId = "Choose a currently permitted assignee.";
-        render((n) => n + 1);
-        reveal("profileId");
-        return;
-      }
-      if (
-        input.blockerTaskIds.some(
-          (id) => !o.dependencies.some((d) => d.id === id),
-        )
-      ) {
-        state.errors.blockerTaskIds =
-          "Choose existing dependencies in this project.";
-        render((n) => n + 1);
-        reveal("blockerTaskIds");
-        return;
-      }
+    const blocked = Object.keys(unavailable)[0];
+    if (blocked) {
+      state.errors[blocked] = unavailable[blocked] as string;
+      render((n) => n + 1);
+      reveal(blocked);
+      return;
     }
     const isCurrent = state.captureScope();
     await state.submit(client, session.csrfToken, ready);
@@ -212,12 +226,16 @@ export function TaskComposer({
         </a>
       </section>
     );
-  const error = (field: string) =>
-    state.errors[field] && (
-      <span role="alert" className="body error-text">
-        {state.errors[field]}
-      </span>
+  const error = (field: string) => {
+    const message = state.errors[field] ?? unavailable[field];
+    return (
+      message && (
+        <span role="alert" className="body error-text">
+          {message}
+        </span>
+      )
     );
+  };
   const o = options.state.data?.data;
   const disclosure = (
     section: string,
@@ -463,7 +481,13 @@ export function TaskComposer({
           {disclosure(
             "dependencies",
             "Dependencies",
-            count(input.blockerTaskIds.length, "selected", "selected"),
+            [
+              count(input.blockerTaskIds.length, "selected", "selected"),
+              unavailable.blockerTaskIds &&
+                `${input.blockerTaskIds.filter((id) => !fresh?.dependencies.some((d) => d.id === id)).length} unavailable`,
+            ]
+              .filter(Boolean)
+              .join(" · "),
             <fieldset
               className="dependency-options"
               disabled={!o || options.state.status !== "fresh"}

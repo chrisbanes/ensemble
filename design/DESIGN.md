@@ -1399,7 +1399,7 @@ entry point, or product behavior.
 | Tablet composer / validation disclosure | `LBzlj` | 1024 × 768 | Optional summaries, expanded dependency error, focus treatment, and both actions. |
 | Tablet all-projects Board | `nKHGv` | 1024 × 768 | Ready 0, Running 2, Waiting 3 and Paused 1; Stopping and Uncertain remain reachable. Held Ready work remains Ready and is grouped in Waiting. |
 | Phone question / short viewport | `Sejey` | 390 × 480 | Q-204/r2 Q2–Q3 scroll position, retained Q1 selection, over-limit Q2 error, Q3 draft, and one disabled Submit answers action. |
-| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries; unavailable dependency keeps Create and start visibly disabled beside Save draft. |
+| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries; unavailable dependency shows its error before submit while Save draft and Create and start stay enabled. |
 
 The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
 `E7qC9` / `MUFPD` (Board), `cGjau` (Inbox), `RyH7J` (task detail),
@@ -1440,8 +1440,8 @@ choose retry limits and Jonas as lead in both List and Board. List / Board chang
 presentation only and does not imply drag or state mutation. Composer summaries
 show the supplied context,
 references, assignee and dependency; expanding the dependency reveals the
-validation error without discarding its value. The disabled Create and start
-action remains visible beside Save draft. The supplied-values panel keeps its
+validation error without discarding its value. Save draft and Create and start
+stay enabled; either one focuses the error and sends no command. The supplied-values panel keeps its
 unfinished-input notice concise and omits creation-receipt/admission explanation
 before submission. Implementation notes stay in this handoff: measure navigation
 and textarea behavior, verify scroll ownership and caret retention, and validate
@@ -1484,9 +1484,12 @@ Implementation differences recorded on 8 October 2026:
   it scrolled into view. At 390 × 480 the actions are reached by scrolling the
   task page, or the bounded Inbox detail, which is the Inbox's only question
   scroll owner. They are not always on screen as in `Sejey`.
-- The composer does not pre-disable Create and start for an unavailable
-  assignee or dependency. Either action opens the affected disclosure, focuses
-  its field and error, and sends no command.
+- Create and start is not disabled for an unavailable assignee or dependency.
+  When fresh options show a stored selection is no longer permitted, the
+  composer opens that section with its error before submit. Either action then
+  refocuses the error and sends no command. The frames were updated to match on
+  8 October 2026: a disabled button explains nothing, and the same check also
+  blocks Save draft.
 - Browser evidence covers Chromium and Playwright WebKit (`ux800-matrix`,
   `ui08-shell`, `ui05-questions` and the task/composer suites). Forced colours
   are emulated in Chromium only. The safe-area inset is checked through an
@@ -1499,8 +1502,8 @@ Consistency pass on 8 October 2026 across `h23qD`–`g5wmIu`:
   desktop and phone baselines.
 - Phone composer `g5wmIu` shows the same four Context / References /
   Assignee / Dependencies rows as `LBzlj` and the production composer. It is
-  shown scrolled to its end, so the unavailable dependency sits beside the
-  disabled Create and start action.
+  shown scrolled to its end, so the unavailable dependency and its error sit
+  above the enabled actions.
 - `Sejey` shows the Q2 limit error in the destructive colour, as `FsTwL` does.
 - Search and Overview now describe AT-155 and Q-204/r2 with the same state and
   next actor as Board.

@@ -481,6 +481,17 @@ test("composer disclosures keep supplied values and open the section of each val
     (await summaries())[2]?.summary,
     "AssigneeSelected assignee unavailable",
   );
+  // Fresh options reveal the problem before submission; both actions stay enabled.
+  await page
+    .getByText("Choose a currently permitted assignee.", { exact: true })
+    .waitFor();
+  assert.equal((await summaries())[2]?.open, true);
+  for (const name of ["Create and start", "Save draft"])
+    assert.equal(
+      await page.getByRole("button", { name, exact: true }).isEnabled(),
+      true,
+    );
+  assert.equal(commandWrites, 0);
   await page
     .getByRole("button", { name: "Create and start", exact: true })
     .click();

@@ -92410,7 +92410,7 @@
           "x": 1200,
           "y": 914,
           "name": "04E · Tablet composer / validation disclosure · 1024 × 768",
-          "context": "Optional disclosure summaries are exact current values. This validation specimen shows the affected dependency section expanded and focused. Collapsing retains values; successful creation, saved drafts and unknown outcomes retain their existing command/receipt semantics.",
+          "context": "Optional disclosure summaries are exact current values. This validation specimen shows fresh options opening the affected dependency section with its error before submit. Both actions stay enabled; either one focuses the error and sends no command. Collapsing retains values; successful creation, saved drafts and unknown outcomes retain their existing command/receipt semantics.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -92947,10 +92947,10 @@
                               "type": "text",
                               "id": "bKO9U",
                               "name": "Dependency validation error",
-                              "fill": "$X:--foreground",
+                              "fill": "$X:--destructive",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Choose an available task.",
+                              "content": "Choose existing dependencies in this project.",
                               "lineHeight": 1.35,
                               "fontFamily": "Inter",
                               "fontSize": 12,
@@ -93083,7 +93083,7 @@
                   "fill": "$X:--muted-foreground",
                   "textGrowth": "fixed-width",
                   "width": 696,
-                  "content": "Validation issue · no create command sent",
+                  "content": "Shown before submit · both actions stay enabled · submitting sends no command",
                   "lineHeight": 1.35,
                   "fontFamily": "Inter",
                   "fontSize": 12,
@@ -93116,7 +93116,7 @@
                   "id": "p2g9o",
                   "type": "ref",
                   "ref": "X:VSnC2",
-                  "name": "Create and start disabled",
+                  "name": "Create and start",
                   "width": 148,
                   "height": 44,
                   "enabled": true,
@@ -93127,17 +93127,17 @@
                   },
                   "x": 856,
                   "y": 8,
-                  "fill": "$X:--muted",
+                  "fill": "$X:--primary",
                   "descendants": {
                     "X:8jVfJ": {
                       "enabled": false
                     },
                     "X:WNalu": {
-                      "fill": "$X:--muted-foreground"
+                      "fill": "$X:--primary-foreground"
                     },
                     "X:8tnXG": {
                       "content": "Create and start",
-                      "fill": "$X:--muted-foreground"
+                      "fill": "$X:--primary-foreground"
                     }
                   }
                 }
@@ -94642,7 +94642,7 @@
           "x": 2790,
           "y": 1736,
           "name": "04H · Phone composer / short viewport · 390 × 480",
-          "context": "390×480 short-height composer. The dependency is unavailable, so Create and start stays visibly disabled; Save draft remains separate and available. The form is shown scrolled to its end; both actions stay in the viewport. Disclosure summaries reflect current values, and resizing input is expected to preserve value, selection and caret. Real safe-area insets, scrolling and resize behavior need device evidence.",
+          "context": "390×480 short-height composer. Fresh options show the selected dependency is unavailable, so its section opens with the error before submit. Save draft and Create and start stay enabled; either one refocuses the error and sends no command. The form is shown scrolled to its end; both actions stay in the viewport. Disclosure summaries reflect current values, and resizing input is expected to preserve value, selection and caret. Real safe-area insets, scrolling and resize behavior need device evidence.",
           "theme": {
             "X:Mode": "Dark",
             "X:Base": "Neutral",
@@ -94714,7 +94714,7 @@
                   "id": "fTREM",
                   "layoutPosition": "absolute",
                   "x": 12,
-                  "y": -58,
+                  "y": -74,
                   "name": "Composer phone content",
                   "width": 366,
                   "layout": "vertical",
@@ -95112,6 +95112,19 @@
                               "fill": "$X:--muted-foreground"
                             }
                           ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "oiHIW",
+                          "name": "Dependencies validation error",
+                          "fill": "$X:--destructive",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Choose existing dependencies in this project.",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -95185,17 +95198,17 @@
                     "X:Base": "Neutral",
                     "X:Accent": "Default"
                   },
-                  "fill": "$X:--muted",
+                  "fill": "$X:--primary",
                   "descendants": {
                     "X:8jVfJ": {
                       "enabled": false
                     },
                     "X:WNalu": {
-                      "fill": "$X:--muted-foreground"
+                      "fill": "$X:--primary-foreground"
                     },
                     "X:8tnXG": {
                       "content": "Create and start",
-                      "fill": "$X:--muted-foreground"
+                      "fill": "$X:--primary-foreground"
                     }
                   }
                 }
