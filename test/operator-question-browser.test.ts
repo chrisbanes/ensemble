@@ -595,24 +595,64 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
     JSON.stringify(detailMetrics),
   );
   assert.equal(detailMetrics.overscroll, "contain");
+  // The detail is the only question scroll owner; a nested bound would trap the wheel.
   const questionMetrics = await form
     .locator(".question-content")
     .evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
-      overscroll: getComputedStyle(element).overscrollBehaviorY,
     }));
-  assert.ok(questionMetrics.scrollHeight > questionMetrics.clientHeight);
-  assert.equal(questionMetrics.overscroll, "contain");
-  // The bounded phone detail starts at the page top; wheel past its bottom edge.
+  assert.ok(
+    questionMetrics.scrollHeight <= questionMetrics.clientHeight + 1,
+    JSON.stringify(questionMetrics),
+  );
   await page.evaluate(() => window.scrollTo(0, 0));
   await detail.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
+    element.scrollTop = 0;
   });
   const detailPageScroll = await page.evaluate(() => window.scrollY);
   const detailBox = await detail.boundingBox();
-  assert.ok(detailBox && detailBox.y >= 0 && detailBox.y + 12 <= 480);
-  await page.mouse.move(detailBox.x + detailBox.width / 2, detailBox.y + 12);
+  assert.ok(detailBox && detailBox.y + detailBox.height <= 480);
+  const submit = form.getByRole("button", {
+    name: "Submit answer",
+    exact: true,
+  });
+  // Wheel over the detail, as a reader would, until the action shows.
+  let actionBox = null,
+    visibleDetail = null;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await page.mouse.move(
+      detailBox.x + detailBox.width / 2,
+      detailBox.y + detailBox.height / 2,
+    );
+    await page.mouse.wheel(0, 200);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    actionBox = await submit.boundingBox();
+    visibleDetail = await detail.boundingBox();
+    if (
+      actionBox &&
+      visibleDetail &&
+      actionBox.y >= visibleDetail.y &&
+      actionBox.y + actionBox.height <=
+        visibleDetail.y + visibleDetail.height &&
+      actionBox.y + actionBox.height <= 480
+    )
+      break;
+  }
+  assert.ok(
+    actionBox &&
+      visibleDetail &&
+      actionBox.y >= Math.max(0, visibleDetail.y) &&
+      actionBox.y + actionBox.height <=
+        Math.min(480, visibleDetail.y + visibleDetail.height),
+    JSON.stringify({ actionBox, visibleDetail }),
+  );
+  // Further wheeling at the detail end does not chain into the page.
   await page.mouse.wheel(0, 800);
   await page.evaluate(
     () =>
@@ -621,21 +661,6 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
       ),
   );
   assert.equal(await page.evaluate(() => window.scrollY), detailPageScroll);
-  const submit = form.getByRole("button", {
-    name: "Submit answer",
-    exact: true,
-  });
-  await submit.scrollIntoViewIfNeeded();
-  const actionBox = await submit.boundingBox();
-  const visibleDetail = await detail.boundingBox();
-  assert.ok(actionBox && visibleDetail);
-  assert.ok(
-    actionBox.y >= visibleDetail.y &&
-      actionBox.y + actionBox.height <=
-        visibleDetail.y + visibleDetail.height &&
-      actionBox.y >= 0 &&
-      actionBox.y + actionBox.height <= 480,
-  );
   await captureBrowserEvidence(page, "390x480-inbox-question-detail", {
     fullPage: false,
   });

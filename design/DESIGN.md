@@ -1414,7 +1414,7 @@ the production browser test checks 1119, 1120, and 1121px as well as 759, 760,
 and 800px. This measured shell breakpoint does not qualify the task-row,
 Inbox, or reading layouts by itself. The approved proposal also uses a textarea
 growth cap measured against content and scrolling inside each named viewport;
-those rules and cross-engine behavior still need implementation evidence. The
+the implementation differences below record their browser evidence. The
 approved rules supersede conflicting historical
 224px sidebar, 760px drawer, and fixed 260px desktop / 180px phone
 outcome-editor guidance for this work; retain those values as historical
@@ -1482,7 +1482,8 @@ Implementation differences recorded on 8 October 2026:
 - Question actions sit in flow directly below the bounded question body rather
   than sticking to the page. A page-sticky footer covered the last field after
   it scrolled into view. At 390 × 480 the actions are reached by scrolling the
-  page, so they are not always on screen as in `Sejey`.
+  task page, or the bounded Inbox detail, which is the Inbox's only question
+  scroll owner. They are not always on screen as in `Sejey`.
 - The composer does not pre-disable Create and start for an unavailable
   assignee or dependency. Either action opens the affected disclosure, focuses
   its field and error, and sends no command.

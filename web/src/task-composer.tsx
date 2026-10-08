@@ -246,8 +246,10 @@ export function TaskComposer({
     </details>
   );
   const assigneeName = input.profileId
-    ? (o?.profiles.find((p) => p.id === input.profileId)?.name ??
-      "Selected assignee unavailable")
+    ? !o
+      ? "Loading assignee options"
+      : (o.profiles.find((p) => p.id === input.profileId)?.name ??
+        "Selected assignee unavailable")
     : o?.routingEnabled
       ? "Automatic allocation via project routing"
       : "Default project lead allocation";
@@ -401,7 +403,11 @@ export function TaskComposer({
           {disclosure(
             "links",
             "Reference links",
-            count(input.links.length, "link", "links"),
+            count(
+              input.links.filter((link) => link.trim()).length,
+              "link",
+              "links",
+            ),
             <label className="field body" htmlFor="composer-links">
               Reference links
               <Textarea

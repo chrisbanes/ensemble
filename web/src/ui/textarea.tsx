@@ -18,32 +18,22 @@ function Textarea({
   const ref = useRef<HTMLTextAreaElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: a controlled value change must re-measure the content height.
   useLayoutEffect(() => {
+    if (autoGrow && ref.current)
+      fit(ref.current, minAutoGrowHeight, maxAutoGrowHeight);
+  }, [autoGrow, maxAutoGrowHeight, minAutoGrowHeight, props.value]);
+  useLayoutEffect(() => {
     const element = ref.current;
     if (!autoGrow || !element) return;
     let width = element.clientWidth;
-    const measure = () => {
-      const start = element.selectionStart,
-        end = element.selectionEnd,
-        direction = element.selectionDirection;
-      element.style.height = "auto";
-      const contentHeight = element.scrollHeight;
-      element.style.height = `${Math.min(
-        maxAutoGrowHeight,
-        Math.max(minAutoGrowHeight, contentHeight),
-      )}px`;
-      element.style.overflowY =
-        contentHeight > maxAutoGrowHeight ? "auto" : "hidden";
-      if (document.activeElement === element)
-        element.setSelectionRange(start, end, direction);
-      width = element.clientWidth;
-    };
-    measure();
+    // Rewrapping at a new width changes the content height; height changes alone do not.
     const observer = new ResizeObserver(() => {
-      if (element.clientWidth !== width) measure();
+      if (element.clientWidth === width) return;
+      width = element.clientWidth;
+      fit(element, minAutoGrowHeight, maxAutoGrowHeight);
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [autoGrow, maxAutoGrowHeight, minAutoGrowHeight, props.value]);
+  }, [autoGrow, maxAutoGrowHeight, minAutoGrowHeight]);
   return (
     <textarea
       ref={ref}
@@ -56,6 +46,15 @@ function Textarea({
       {...props}
     />
   );
+}
+
+// Height changes never move the selection, so IME composition is left untouched.
+function fit(element: HTMLTextAreaElement, min: number, max: number) {
+  element.style.height = "auto";
+  const border = element.offsetHeight - element.clientHeight,
+    content = element.scrollHeight + border;
+  element.style.height = `${Math.min(max, Math.max(min, content))}px`;
+  element.style.overflowY = content > max ? "auto" : "hidden";
 }
 
 export { Textarea };

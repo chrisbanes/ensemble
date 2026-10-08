@@ -19,7 +19,9 @@ function layoutProblems(page: Page) {
     const inScroller = (element: Element) => {
       for (let e = element.parentElement; e; e = e.parentElement) {
         const x = getComputedStyle(e).overflowX;
-        if (x === "auto" || x === "scroll") return true;
+        // Only a real horizontal scroller (the Board) may hold controls offscreen.
+        if ((x === "auto" || x === "scroll") && e.scrollWidth > e.clientWidth)
+          return true;
       }
       return false;
     };
