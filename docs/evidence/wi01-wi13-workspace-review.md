@@ -1,7 +1,7 @@
 # #782 workspace inspection and local review (WI01–WI13)
 
-**Status: deterministic service and production-browser evidence recorded;
-the bounded actual-runtime journey has not been run.** This record follows the
+**Status: deterministic service and production-browser evidence and the
+granted bounded actual-runtime journey are recorded.** This record follows the
 [#782 implementation plan](https://github.com/chrisbanes/ensemble/issues/782#issuecomment-6059477544)
 and the [#782 implemented behaviour](../SPEC.md#782-workspace-inspection-and-local-review--implemented-behaviour).
 No release, deployment or cutover is implied.
@@ -60,9 +60,44 @@ extension or notification inspection entry points exist, and none were added.
 
 ## Actual-runtime journey
 
-Not run. The guarded entry exists but needs the owner's separately reviewed
-#782 grant; #780's spent journey does not cover it and its one-attempt guard is
-unchanged.
+**Result: passed (one granted attempt, 9 October 2026).** Chris granted a single
+run of the entry below at source `3b39dae0cd13b021931541a876c4ed8dd71bff4f`.
+Entry SHA-256 `74f2f29e8e567fb6a6e77f57c93cadc496027437e083513ed92edf286ca56e83`;
+Node `v24.21.0`, npm `12.2.0`, Codex CLI `0.162.0-alpha.2`. Launcher SHA-256
+`50ab38ba21d0d9f8346f32f41848382f15b556190f3c7a07e885a4fb73e379c8` (same as #780);
+compiled adapter SHA-256
+`bcc28b8af1df12eff5e4f63baaed96d241b3ebde67147ab5b037d08dd2e2806f`.
+
+Preflight validated the ChatGPT account, `approvalPolicy=never` and
+`sandboxMode=workspace-write`, with the project paused and zero starts before
+dispatch. One runtime start and one process identity (pid 62528, same boot)
+were observed. The guard recorded exactly 3 `Runtime.startTurn` calls, no
+refused starts, no deviations and no unproved rows.
+
+| Turn | Work | Thread / turn | Terminal | Result | Capture |
+| --- | --- | --- | --- | --- | --- |
+| T1 | `assignment:22ca054e-…:initial` | `01a11dd7-a6ce…` / `01a11dd7-a7f3…` | completed (9.3 s) | R1 `5a176a0e-df99-40d3-b1f5-7df6b817a9bd` | `89f968d0…` finished |
+| T2 | `assignment:181de374-…:initial` | `01a11dd7-cc67…` / `01a11dd7-ce65…` | completed (9.7 s) | `87ab5f12-30aa-4102-9cc6-095e72063b04` | `e5d2b624…` finished, replaced C1 |
+| T3 | `assignment:e494bbd1-…:initial` | `01a11dd7-f4b3…` / `01a11dd7-f53a…` | failed after Stop (78 ms) | none | `29c46ba3…` unsettled |
+
+- **WI06:**
+  - C2 replaced C1 as the latest finished capture; C1's row no longer exists.
+  - T3's pending capture stayed unsettled, outcome failed, and the Stop left the hold `Task stopped`.
+  - The Codex interrupt was acknowledged and the terminal observed.
+  - Stop landed 26 ms after T3's turn start, before `marker-3.txt` existed, so this run observed an interruption without partial writes.
+- **WI07:** R1's retained `marker-1.txt` kept the original bytes A (SHA-256 `ae09a9678bcb1c129a19ebaa541dd577c92da00f8f61299720a0ec7793317e7d`) after T2 overwrote the file. The authenticated evidence and item reads, and the read-only SQLite reopen, agree.
+- **Production UI:** at 1366 and 390 px, Last turn showed T3's exact identity, the outcome, the unsettled capture and the separate latest finished T2 capture. Retained R1 showed bytes A and not B. There were no unexpected console errors and no tolerated race 503s. Screenshots are in the private attempt directory.
+- **Shutdown:**
+  - The service stop returned.
+  - The exact Codex process exit was verified (`mac-pid-absent-same-boot`).
+  - The fixture with its Stop hold is retained for recovery, not deleted.
+  - Checkpoint status `shutdown-verified`.
+
+This run proves only the native turn and capture behaviour listed above. Review
+delivery remains qualified offline. Process exit does not prove that
+descendant processes ended, and the accepted S01 limits still apply.
+
+### Journey design
 
 The approved reduced journey has no local review. Review delivery is qualified
 offline only (`local-review`, `operator-local-review-browser` and
