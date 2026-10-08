@@ -27,12 +27,6 @@ import {
 function TaskContents({ task }: { task: TaskListSummary }) {
   return (
     <>
-      <p className="metadata muted task-project-metadata">
-        {task.project.name ?? "Project name unavailable"} ·{" "}
-        {task.source
-          ? `GitHub ${task.source.repositoryName ?? "repository unavailable"} #${task.source.number ?? "?"}`
-          : "Local task"}
-      </p>
       <a className="small-heading task-title" href={taskDetailHref(task)}>
         {task.title ?? "Title unavailable"}
       </a>
@@ -44,20 +38,26 @@ function TaskContents({ task }: { task: TaskListSummary }) {
           {task.ready ? "Ready" : "Not Ready"} · {task.execution.state}
         </span>
       </p>
+      {taskReasons(task).map((reason) => (
+        <p key={reason} className="body muted task-reason">
+          {reason}
+        </p>
+      ))}
       <p className="metadata task-lead">
         Task lead:{" "}
         {task.lead?.name ?? (task.lead ? "Name unavailable" : "Unconfigured")}
+      </p>
+      <p className="metadata muted task-project-metadata">
+        {task.project.name ?? "Project name unavailable"} ·{" "}
+        {task.source
+          ? `GitHub ${task.source.repositoryName ?? "repository unavailable"} #${task.source.number ?? "?"}`
+          : "Local task"}
       </p>
       {task.source && (
         <p className="metadata muted task-source-state">
           GitHub source: {task.source.state ?? "state unavailable"}
         </p>
       )}
-      {taskReasons(task).map((reason) => (
-        <p key={reason} className="body muted task-reason">
-          {reason}
-        </p>
-      ))}
     </>
   );
 }

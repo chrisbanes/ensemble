@@ -805,6 +805,8 @@ async function seedCatalog(
     readiness: { mode: "all", conditions: [{ kind: "label", name: "ready" }] },
     repositories: [],
   });
+  const importedTitle =
+    "Imported task with a deliberately long source title for narrow operator list and board layouts";
   d.execute({
     type: "github.activate",
     key: randomUUID(),
@@ -823,7 +825,7 @@ async function seedCatalog(
         repositoryId: "R-UI03",
         repositoryName: "fixture/source",
         number: 42,
-        title: "Imported source task",
+        title: importedTitle,
         body: "Source-owned imported outcome",
         state: "open",
         labels: ["ready"],
@@ -831,12 +833,11 @@ async function seedCatalog(
       },
     ],
   });
-  const imported = d
-    .tasks(projectId)
-    .find((t) => t.title === "Imported source task");
+  const imported = d.tasks(projectId).find((t) => t.title === importedTitle);
   assert.ok(imported);
   return {
     projectId,
+    importedTitle,
     profileId,
     blocker,
     draft,
@@ -853,6 +854,227 @@ async function seedCatalog(
     importedId: String(imported.id),
   };
 }
+
+test("populated task List and Board keep the approved hierarchy at responsive widths", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const ids = await seedCatalog(f);
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await signIn(page, web.origin, web.password);
+  let commandPosts = 0;
+  page.on("request", (request) => {
+    if (
+      request.url().endsWith("/api/operator/commands") &&
+      request.method() === "POST"
+    )
+      commandPosts++;
+  });
+
+  const widths = [390, 759, 760, 800, 1024, 1119, 1120, 1121, 1366];
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 768 });
+    const overflow = await page.evaluate(() => ({
+      document: document.documentElement.scrollWidth,
+      viewport: document.documentElement.clientWidth,
+    }));
+    assert.ok(
+      overflow.document <= overflow.viewport,
+      `${width}px List has no horizontal page overflow`,
+    );
+    const listIds = await page
+      .locator(".task-list [data-task-id]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-task-id")).sort(),
+      );
+    assert.ok(listIds.includes(ids.importedId));
+    assert.ok(listIds.includes(ids.question.id));
+
+    const importedRow = page.locator(
+      `.task-list [data-task-id="${ids.importedId}"]`,
+    );
+    const titleMetrics = await importedRow
+      .getByRole("link", { name: ids.importedTitle, exact: true })
+      .evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          width: rect.width,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+          text: element.textContent?.trim(),
+        };
+      });
+    assert.equal(titleMetrics.text, ids.importedTitle, `${width}px title text`);
+    assert.ok(titleMetrics.width >= 200, `${width}px title has readable width`);
+    assert.ok(
+      titleMetrics.scrollWidth <= titleMetrics.clientWidth,
+      `${width}px long title wraps inside its link`,
+    );
+    const importedMetadata = await importedRow
+      .locator(".task-project-metadata")
+      .innerText();
+    assert.match(importedMetadata, /Service integration/);
+    assert.match(importedMetadata, /GitHub fixture\/source #42/);
+    assert.equal(
+      await importedRow.locator(".task-lead").innerText(),
+      "Task lead: Accountable lead",
+    );
+    assert.equal(
+      await importedRow.locator(".task-source-state").innerText(),
+      "GitHub source: open",
+    );
+    const questionRow = page.locator(
+      `.task-list [data-task-id="${ids.question.id}"]`,
+    );
+    assert.match(
+      await questionRow.locator(".task-status").innerText(),
+      /Running/,
+    );
+    await questionRow
+      .getByText("Question needs an answer", { exact: true })
+      .waitFor({ state: "visible" });
+    await questionRow
+      .getByText("Task lead: Accountable lead", { exact: true })
+      .waitFor({ state: "visible" });
+    const rowOverflow = await page
+      .locator(".task-list .task-row")
+      .evaluateAll((rows) =>
+        rows
+          .map((row) => ({
+            title: row.querySelector<HTMLElement>(".task-title"),
+            rowWidth: row.clientWidth,
+            rowScrollWidth: row.scrollWidth,
+          }))
+          .filter(
+            (item) =>
+              !item.title ||
+              item.rowScrollWidth > item.rowWidth ||
+              item.title.scrollWidth > item.title.clientWidth,
+          ),
+      );
+    assert.deepEqual(rowOverflow, [], `${width}px task rows do not clip`);
+    if ([390, 760, 800, 1121, 1366].includes(width))
+      await screenshot(page, `${width}-responsive-list`);
+
+    await page.getByRole("button", { name: "Board", exact: true }).click();
+    const boardIds = await page
+      .locator(".board-columns [data-task-id]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-task-id")).sort(),
+      );
+    assert.deepEqual(boardIds, listIds, `${width}px List and Board task IDs`);
+    assert.equal(
+      await page
+        .locator(`.board-columns [data-task-id="${ids.question.id}"]`)
+        .evaluate((element) =>
+          element
+            .closest<HTMLElement>(".board-column")
+            ?.getAttribute("aria-label"),
+        ),
+      "Running tasks",
+      `${width}px preserves state-derived Board grouping`,
+    );
+    assert.equal(
+      await page
+        .locator(
+          `.board-columns [data-task-id="${ids.importedId}"] .task-title`,
+        )
+        .textContent(),
+      ids.importedTitle,
+      `${width}px Board keeps long source title`,
+    );
+    const boardOverflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    assert.equal(boardOverflow, false, `${width}px Board has no page overflow`);
+    if ([390, 760, 800, 1121, 1366].includes(width))
+      await screenshot(page, `${width}-responsive-board`);
+    await page.getByRole("button", { name: "List", exact: true }).click();
+  }
+
+  await page.setViewportSize({ width: 800, height: 768 });
+  await page.goto(`${web.origin}/app/tasks`);
+  await page
+    .locator(`.task-list [data-task-id="${ids.paused}"]`)
+    .waitFor({ state: "visible" });
+  const crossProjectIds = await page
+    .locator(".task-list [data-task-id]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-task-id")).sort(),
+    );
+  const expectedProjectIds = f.service
+    .domain()
+    .tasks(ids.projectId)
+    .map((task) => task.id)
+    .sort();
+  assert.ok(crossProjectIds.includes(ids.paused));
+  assert.ok(
+    expectedProjectIds.length < crossProjectIds.length,
+    `all-project List has ${crossProjectIds.length} rows; project filter has ${expectedProjectIds.length}`,
+  );
+  await page.getByLabel("Project", { exact: true }).selectOption(ids.projectId);
+  await page.waitForURL(
+    (url) => url.searchParams.get("project") === ids.projectId,
+  );
+  await page.waitForFunction(
+    (count) =>
+      document.querySelectorAll(".task-list [data-task-id]").length === count,
+    expectedProjectIds.length,
+  );
+  const filteredListIds = await page
+    .locator(".task-list [data-task-id]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-task-id")).sort(),
+    );
+  assert.deepEqual(filteredListIds, expectedProjectIds);
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  assert.deepEqual(
+    await page
+      .locator(".board-columns [data-task-id]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-task-id")).sort(),
+      ),
+    expectedProjectIds,
+    "project filter selects the same tasks in Board",
+  );
+  await page.getByRole("button", { name: "List", exact: true }).click();
+  await page.waitForURL((url) => url.searchParams.get("view") === null);
+  await page
+    .locator(`.task-list [data-task-id="${ids.importedId}"] .task-title`)
+    .click();
+  await page
+    .getByRole("heading", { name: "Evidence review", exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Back to originating view", exact: true })
+    .click();
+  assert.equal(new URL(page.url()).searchParams.get("project"), ids.projectId);
+  assert.deepEqual(
+    await page
+      .locator(".task-list [data-task-id]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-task-id")).sort(),
+      ),
+    expectedProjectIds,
+    "task return restores the selected project and task IDs",
+  );
+  assert.equal(commandPosts, 0);
+});
+
 for (const viewport of [
   { width: 1366, height: 820 },
   { width: 390, height: 844 },
@@ -1177,7 +1399,7 @@ for (const viewport of [
       `${web.origin}/app/projects/${ids.projectId}?source=github`,
     );
     await page
-      .getByRole("link", { name: "Imported source task", exact: true })
+      .getByRole("link", { name: ids.importedTitle, exact: true })
       .waitFor();
     assert.equal(
       await page
@@ -1187,7 +1409,7 @@ for (const viewport of [
       "page",
     );
     await page
-      .getByRole("link", { name: "Imported source task", exact: true })
+      .getByRole("link", { name: ids.importedTitle, exact: true })
       .click();
     assert.ok(page.url().endsWith(`/app/tasks/${ids.importedId}`));
     await page

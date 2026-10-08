@@ -1375,13 +1375,14 @@ remain with #782 and the service slices.
 
 ## Operator refinement proposal — #800 T1, 7 October 2026
 
-[#800](https://github.com/chrisbanes/ensemble/issues/800) owns this design-only
-proposal. The exact implementation plan remains the published
+[#800](https://github.com/chrisbanes/ensemble/issues/800) owns this design proposal.
+The exact implementation plan remains the published
 [implementation plan](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6047644893).
-T1 prepares a concrete native canvas and this handoff; T2 still requires Chris's
-explicit review of both the Pen composition and implementation plan before any
-UI or application source work. Existing product contracts and #793 source,
-return, and task anchors remain unchanged.
+Chris explicitly approved both that plan and the Pen composition in
+[resume comment 6062834729](https://github.com/chrisbanes/ensemble/issues/800#issuecomment-6062834729).
+Implementation and its browser evidence proceed within that unchanged scope.
+Existing product contracts and #793 source, return, and task anchors remain
+unchanged.
 
 The new canvas section is `qIVmm` (`#800 · Operator refinement review`). It
 contains eight static compositions, all using the installed Dark / Neutral /
@@ -1394,26 +1395,31 @@ entry point, or product behavior.
 | Tablet Overview / List | `h23qD` | 1024 × 768 | Existing drawer, attention summary, compact task rows, and List/Board switch. |
 | Compact tablet Inbox / question | `FsTwL` | 800 × 768 | Fieldnotes Q-204/r2 is one three-question form with one disabled Submit answers action while Q2 exceeds its limit; the task remains Paused. |
 | Tablet task detail / evidence | `dUUIS` | 1024 × 768 | Task situation and next actor stay distinct from the evidence rail. |
-| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Canonical Atlas AT-142 identity, source, next actor and return anchor; A-108 remains a separate cold-start task. |
+| Tablet Search / selected result | `Z8BqXF` | 1024 × 768 | Canonical Atlas AT-142 identity, source, next actor and return anchor; AT-155 is the separate running cold-start task and A-108 its recorded Eli repair assignment. |
 | Tablet composer / validation disclosure | `LBzlj` | 1024 × 768 | Optional summaries, expanded dependency error, focus treatment, and both actions. |
 | Tablet all-projects Board | `nKHGv` | 1024 × 768 | Ready 0, Running 2, Waiting 3 and Paused 1; Stopping and Uncertain remain reachable. Held Ready work remains Ready and is grouped in Waiting. |
 | Phone question / short viewport | `Sejey` | 390 × 480 | Q-204/r2 Q2–Q3 scroll position, retained Q1 selection, over-limit Q2 error, Q3 draft, and one disabled Submit answers action. |
-| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries with Save draft and Create and start retained. |
+| Phone composer / short viewport | `g5wmIu` | 390 × 480 | Long fields and optional summaries; unavailable dependency keeps Create and start visibly disabled beside Save draft. |
 
 The desktop baseline remains `N9G11A` (Overview), `nD0nh` (List),
 `E7qC9` / `MUFPD` (Board), `cGjau` (Inbox), `RyH7J` (task detail),
 `WaBk5` (Search), and `Z315o` / `MhM7z` (collapsed/full composer). Existing
 phone references remain `pmu7r` / `YzbOM` / `m6ZUJR` (question), `i3glx`
 (composer), and `wXiWx` / `JX4dm` (expanded/collapsed validation). The new
-tablet frames propose using the existing navigation drawer at 1024px and keeping
-Inbox queue and detail side by side at 800px. The proposal uses content-measured
-navigation thresholds, a textarea growth cap measured against content, and
-scrolling inside its named viewport. These are T1 review proposals, not approved
-CSS breakpoints or dimensions. If Chris approves them at T2, they would replace
-or conflict with the historical 224px desktop sidebar, drawer below 760px, and
-fixed 260px desktop / 180px phone outcome-editor sizes recorded above; retain
-those values as historical evidence. No proposed navigation threshold,
-textarea cap, or scroll rule becomes an implementation contract before T2.
+tablet frames use the existing navigation drawer at 1024px and keep the Inbox
+queue and detail side by side at 800px. The shell implementation switches to
+the navigation drawer through 1120 CSS pixels. The 224px sidebar plus the
+existing 40px horizontal page padding leaves 857px of task content at 1121px;
+the production browser test checks 1119, 1120, and 1121px as well as 759, 760,
+and 800px. This measured shell breakpoint does not qualify the task-row,
+Inbox, or reading layouts by itself. The approved proposal also uses a textarea
+growth cap measured against content and scrolling inside each named viewport;
+those rules and cross-engine behavior still need implementation evidence. The
+approved rules supersede conflicting historical
+224px sidebar, 760px drawer, and fixed 260px desktop / 180px phone
+outcome-editor guidance for this work; retain those values as historical
+evidence. Continue to record measured textarea cap, scroll ownership, safe
+areas, focus, and input-resize evidence as those slices are implemented.
 
 The List, Board, Inbox, Search and composer specimens preserve current routing
 and state semantics. Q-204/r2 is one unsubmitted three-answer group: Q1 is valid,
@@ -1422,12 +1428,17 @@ its supplied text. The single Submit answers action stays disabled until the
 answers are valid. Recording answers does not resume Fieldnotes F-203 or clear
 independent holds. Search keeps its query, filters, selected result, and return
 origin; selected Atlas AT-142 retains `acme/atlas#142`, Mira, A-105 / Builder,
-source S2, W-18, R3 `b72e910` at 11:40, and its next actor. The A-108 cold-start
-result remains distinct. Task evidence does not decide source ownership or
+source S2, W-18, R3 `b72e910` at 11:40, and its next actor. The separate cold-start result is task AT-155; A-108 names Eli's recorded
+repair assignment. Task evidence does not decide source ownership or
 release a hold. The All-projects Board preserves Ready readiness while grouping
 tasks with dependency holds in Waiting; Q-204 remains Paused until separately
-resumed. List / Board changes presentation only and does not imply drag or state
-mutation. Composer summaries show the supplied context,
+resumed. The cold-start fixture is running task AT-155: its latest check failed,
+Eli's check-repair assignment A-108 is recorded, and no operator request is
+recorded. Overview, Board, Search, and detail preserve that same state and next
+actor. `Document retry policy` remains Waiting with the operator action to
+choose retry limits and Jonas as lead in both List and Board. List / Board changes
+presentation only and does not imply drag or state mutation. Composer summaries
+show the supplied context,
 references, assignee and dependency; expanding the dependency reveals the
 validation error without discarding its value. The disabled Create and start
 action remains visible beside Save draft. The supplied-values panel keeps its

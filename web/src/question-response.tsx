@@ -237,6 +237,7 @@ export function QuestionResponse({
                           {q.label}
                           <Textarea
                             id={`${qid}-text`}
+                            autoGrow
                             value={answer.text}
                             disabled={!canEdit}
                             maxLength={q.maxLength ?? 16000}
@@ -308,6 +309,7 @@ export function QuestionResponse({
                               Custom answer: {q.label}
                               <Textarea
                                 id={`${qid}-custom`}
+                                autoGrow
                                 disabled={!canEdit}
                                 value={answer.text}
                                 maxLength={q.maxLength ?? 16000}

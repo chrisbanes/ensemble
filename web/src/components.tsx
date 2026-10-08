@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useRef,
   type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -154,12 +155,23 @@ export function MobileNavigation({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const trigger = useRef<HTMLButtonElement>(null);
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetTrigger asChild>
-        <Button variant="secondary">Projects and navigation</Button>
+        <Button ref={trigger} variant="secondary">
+          Projects and navigation
+        </Button>
       </SheetTrigger>
-      <SheetContent className="drawer">
+      <SheetContent
+        className="drawer"
+        onCloseAutoFocus={(event) => {
+          if (trigger.current) {
+            event.preventDefault();
+            trigger.current.focus();
+          }
+        }}
+      >
         <SheetHeader>
           <SheetTitle className="section-heading">
             Projects and navigation
