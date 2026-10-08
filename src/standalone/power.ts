@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
@@ -27,8 +27,8 @@ export interface PowerEventSource {
 export type PowerLogReader = (
   command: string,
   args: string[],
-  options: { timeoutMs: number; maxBufferBytes: number },
-) => Promise<string>;
+  options: { timeoutMs: number; maxLineBytes: number },
+) => AsyncIterable<string>;
 
 const pmsetTimeCursor = /^pmset-time:(\d+)$/;
 const pmsetEventCursorPattern = /^pmset-event:(\d+):(\d+):([a-f0-9]{16})$/;
@@ -57,29 +57,23 @@ function knownPmsetSummary(line: string): boolean {
   );
 }
 
-/** Parses only the documented, timestamped Sleep/Wake rows from `pmset -g log`. */
-export function parsePmsetPowerLog(
-  output: string,
-  requested: PowerEventCursor | null,
-): PowerEventBatch {
+/**
+ * Incremental parser for the documented, timestamped Sleep/Wake rows of
+ * `pmset -g log`. Feed it exactly the pieces of `output.split(/\r?\n/)` so
+ * persisted line-index cursors stay valid; state grows with events, not log size.
+ */
+function createPmsetParser(requested: PowerEventCursor | null) {
   const requestedTime = requested?.value.match(pmsetTimeCursor);
   const requestedEvent = requested?.value.match(pmsetEventCursorPattern);
-  if (requested && requested.version !== 1) {
-    return {
-      complete: false,
-      fromCursor: requested,
-      cursor: requested,
-      events: [],
-    };
-  }
-  if (requested && !requestedTime && !requestedEvent) {
-    return {
-      complete: false,
-      fromCursor: requested,
-      cursor: requested,
-      events: [],
-    };
-  }
+  const rejected = (): PowerEventBatch => ({
+    complete: false,
+    fromCursor: requested,
+    cursor: requested,
+    events: [],
+  });
+  const unusable =
+    requested !== null &&
+    (requested.version !== 1 || (!requestedTime && !requestedEvent));
 
   const events: Array<{
     cursor: PowerEventCursor;
@@ -91,24 +85,27 @@ export function parsePmsetPowerLog(
   let previousTimestamp = Number.NEGATIVE_INFINITY;
   let malformed = false;
   let inSummary = false;
-  const lines = output.split(/\r?\n/);
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    const line = lines[lineIndex]?.trimEnd() ?? "";
-    if (line.trim().startsWith("Assertion status system-wide:")) {
+  let lineIndex = -1;
+
+  function line(text: string): void {
+    lineIndex++;
+    if (unusable) return;
+    const trimmed = text.trimEnd();
+    if (trimmed.trim().startsWith("Assertion status system-wide:")) {
       inSummary = true;
-      continue;
+      return;
     }
-    if (inSummary || knownPmsetSummary(line)) continue;
-    const normalized = line.trim();
+    if (inSummary || knownPmsetSummary(trimmed)) return;
+    const normalized = trimmed.trim();
     const match = timestampPrefix.exec(normalized);
     if (!match) {
       malformed = true;
-      continue;
+      return;
     }
     const timestamp = parseTimestamp(match[1] ?? "");
     if (timestamp === undefined || timestamp < previousTimestamp) {
       malformed = true;
-      continue;
+      return;
     }
     earliestTimestamp ??= timestamp;
     previousTimestamp = timestamp;
@@ -119,16 +116,15 @@ export function parsePmsetPowerLog(
         .update(normalized)
         .digest("hex")
         .slice(0, 16);
-      const cursor = createPmsetEventCursor(
-        `pmset-event:${timestamp}:${lineIndex}:${hash}`,
-      );
       events.push({
-        cursor,
+        cursor: createPmsetEventCursor(
+          `pmset-event:${timestamp}:${lineIndex}:${hash}`,
+        ),
         timestamp,
         lineIndex,
         transition: kind.toLowerCase() === "sleep" ? "sleep" : "wake",
       });
-      continue;
+      return;
     }
     const category = body.split(/\s+/, 1)[0] ?? "";
     if (
@@ -138,124 +134,156 @@ export function parsePmsetPowerLog(
       malformed = true;
   }
 
-  if (malformed || earliestTimestamp === undefined)
-    return {
-      complete: false,
-      fromCursor: requested,
-      cursor: requested,
-      events: [],
-    };
+  function finish(): PowerEventBatch {
+    if (unusable || malformed || earliestTimestamp === undefined)
+      return rejected();
+    let afterLine = Number.NEGATIVE_INFINITY;
+    if (requestedEvent) {
+      const timestamp = Number(requestedEvent[1]);
+      const requestedLine = Number(requestedEvent[2]);
+      const found = events.find(
+        (event) => event.cursor.value === requested?.value,
+      );
+      if (
+        !found ||
+        found.timestamp !== timestamp ||
+        found.lineIndex !== requestedLine
+      )
+        return rejected();
+      afterLine = requestedLine;
+    } else if (requestedTime) {
+      const timestamp = Number(requestedTime[1]);
+      if (
+        !Number.isSafeInteger(timestamp) ||
+        timestamp < 0 ||
+        earliestTimestamp > timestamp
+      )
+        return rejected();
+    }
 
-  let afterLine = Number.NEGATIVE_INFINITY;
-  if (requestedEvent) {
-    const timestamp = Number(requestedEvent[1]);
-    const lineIndex = Number(requestedEvent[2]);
-    const found = events.find(
-      (event) => event.cursor.value === requested?.value,
+    const selected = events.filter((event) =>
+      requestedEvent
+        ? event.lineIndex > afterLine
+        : requestedTime
+          ? event.timestamp >= Number(requestedTime[1])
+          : false,
     );
-    if (
-      !found ||
-      found.timestamp !== timestamp ||
-      found.lineIndex !== lineIndex
-    )
-      return {
-        complete: false,
-        fromCursor: requested,
-        cursor: requested,
-        events: [],
+    let previous = requested;
+    const chained: PowerEvent[] = selected.map((event) => {
+      const item = {
+        cursor: event.cursor,
+        previousCursor: previous,
+        transition: event.transition,
       };
-    afterLine = lineIndex;
-  } else if (requestedTime) {
-    const timestamp = Number(requestedTime[1]);
-    if (
-      !Number.isSafeInteger(timestamp) ||
-      timestamp < 0 ||
-      earliestTimestamp > timestamp
-    )
-      return {
-        complete: false,
-        fromCursor: requested,
-        cursor: requested,
-        events: [],
-      };
+      previous = event.cursor;
+      return item;
+    });
+    return {
+      complete: true,
+      fromCursor: requested,
+      cursor: chained.at(-1)?.cursor ?? requested,
+      events: chained,
+    };
   }
 
-  const selected = events.filter((event) =>
-    requestedEvent
-      ? event.lineIndex > afterLine
-      : requestedTime
-        ? event.timestamp >= Number(requestedTime[1])
-        : false,
-  );
-  let previous = requested;
-  const chained: PowerEvent[] = selected.map((event) => {
-    const item = {
-      cursor: event.cursor,
-      previousCursor: previous,
-      transition: event.transition,
-    };
-    previous = event.cursor;
-    return item;
+  return { line, finish };
+}
+
+/** Parses only the documented, timestamped Sleep/Wake rows from `pmset -g log`. */
+export function parsePmsetPowerLog(
+  output: string,
+  requested: PowerEventCursor | null,
+): PowerEventBatch {
+  const parser = createPmsetParser(requested);
+  for (const line of output.split(/\r?\n/)) parser.line(line);
+  return parser.finish();
+}
+
+/**
+ * Streams stdout of a child as the same pieces `split(/\r?\n/)` yields, with no
+ * total-size cap. An over-long line, timeout or non-zero exit rejects, and the
+ * child is killed on any of those or when the consumer stops early.
+ */
+export async function* spawnPowerLogReader(
+  command: string,
+  args: string[],
+  options: { timeoutMs: number; maxLineBytes: number },
+): AsyncGenerator<string> {
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"] });
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`${command} exited (${code ?? signal})`)),
+    );
   });
-  return {
-    complete: true,
-    fromCursor: requested,
-    cursor: chained.at(-1)?.cursor ?? requested,
-    events: chained,
+  exited.catch(() => {});
+  const timer = setTimeout(() => child.kill("SIGKILL"), options.timeoutMs);
+  const checked = (line: string) => {
+    if (Buffer.byteLength(line) > options.maxLineBytes)
+      throw new Error("Power-log line exceeds the line limit");
+    return line;
   };
+  try {
+    child.stdout.setEncoding("utf8");
+    let pending = "";
+    for await (const chunk of child.stdout) {
+      pending += chunk;
+      let newline = pending.indexOf("\n");
+      while (newline >= 0) {
+        const end = pending[newline - 1] === "\r" ? newline - 1 : newline;
+        yield checked(pending.slice(0, end));
+        pending = pending.slice(newline + 1);
+        newline = pending.indexOf("\n");
+      }
+      checked(pending);
+    }
+    yield checked(pending);
+    await exited;
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+  }
 }
 
 /** Reads a bounded macOS power history; missing or unfamiliar history is incomplete. */
 export class MacPowerEventSource implements PowerEventSource {
   constructor(
-    private readonly readLog: PowerLogReader = (command, args, options) =>
-      new Promise((resolve, reject) => {
-        execFile(
-          command,
-          args,
-          {
-            encoding: "utf8",
-            timeout: options.timeoutMs,
-            maxBuffer: options.maxBufferBytes,
-          },
-          (error, stdout) => {
-            if (error) reject(error);
-            else resolve(stdout);
-          },
-        );
-      }),
-    private readonly timeoutMs = 2500,
-    private readonly maxBufferBytes = 4 * 1024 * 1024,
+    private readonly readLog: PowerLogReader = spawnPowerLogReader,
+    private readonly timeoutMs = 10_000,
+    private readonly maxLineBytes = 64 * 1024,
     private readonly now: () => number = Date.now,
   ) {
     if (
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs <= 0 ||
-      !Number.isSafeInteger(maxBufferBytes) ||
-      maxBufferBytes <= 0
+      !Number.isSafeInteger(maxLineBytes) ||
+      maxLineBytes <= 0
     )
       throw new Error("Power-event read bounds must be positive integers");
   }
 
   async readSince(cursor: PowerEventCursor | null): Promise<PowerEventBatch> {
     try {
-      const output = await this.readLog("/usr/bin/pmset", ["-g", "log"], {
+      const parser = createPmsetParser(cursor);
+      for await (const line of this.readLog("/usr/bin/pmset", ["-g", "log"], {
         timeoutMs: this.timeoutMs,
-        maxBufferBytes: this.maxBufferBytes,
-      });
-      if (cursor === null) {
-        const parsed = parsePmsetPowerLog(output, null);
-        const now = this.now();
-        return parsed.complete && Number.isSafeInteger(now) && now >= 0
-          ? {
-              complete: true,
-              fromCursor: null,
-              cursor: createPmsetEventCursor(`pmset-time:${now}`),
-              events: [],
-            }
-          : parsed;
-      }
-      return parsePmsetPowerLog(output, cursor);
+        maxLineBytes: this.maxLineBytes,
+      }))
+        parser.line(line);
+      const parsed = parser.finish();
+      if (cursor !== null) return parsed;
+      const now = this.now();
+      return parsed.complete && Number.isSafeInteger(now) && now >= 0
+        ? {
+            complete: true,
+            fromCursor: null,
+            cursor: createPmsetEventCursor(`pmset-time:${now}`),
+            events: [],
+          }
+        : parsed;
     } catch {
       return { complete: false, fromCursor: cursor, cursor, events: [] };
     }

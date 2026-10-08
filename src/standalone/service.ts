@@ -633,7 +633,7 @@ export class StandaloneService {
         (powerOptions?.eventSource !== undefined ||
           runtime instanceof CodexRuntime);
       if (powerEnabled) {
-        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 5000;
+        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 60_000;
         if (
           !Number.isSafeInteger(pollIntervalMs) ||
           pollIntervalMs <= 0 ||

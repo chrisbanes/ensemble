@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "./temp.js";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { StandaloneService } from "../src/standalone/service.js";
 import type {
   Runtime,
@@ -248,6 +248,33 @@ test("power-source shutdown failure does not retain the service database owner",
     const internals = service as unknown as { power: unknown };
     internals.power = undefined;
     await service.stop().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("power polling defaults to a 60 second interval", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-power-default-interval-"));
+  const delays: unknown[] = [];
+  const realSetInterval = globalThis.setInterval;
+  const spy = mock.method(globalThis, "setInterval", ((
+    ...args: Parameters<typeof setInterval>
+  ) => {
+    delays.push(args[1]);
+    return realSetInterval(...args);
+  }) as typeof setInterval);
+  const service = new StandaloneService(
+    join(root, "data"),
+    () => new FakeRuntime(),
+    undefined,
+    { power: { enabled: true, eventSource: new FakePowerEvents() } },
+  );
+  try {
+    await service.start();
+    assert.ok(delays.includes(60_000), `intervals: ${delays.join(",")}`);
+    assert.ok(!delays.includes(5000));
+  } finally {
+    spy.mock.restore();
+    await service.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });

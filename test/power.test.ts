@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,16 +61,18 @@ const parsePmsetPowerLog = powerModule.parsePmsetPowerLog as (
   output: string,
   cursor: PowerEventCursor | null,
 ) => Awaited<ReturnType<PowerEventSource["readSince"]>>;
+type PowerLogReader = (
+  command: string,
+  args: string[],
+  options: { timeoutMs: number; maxLineBytes: number },
+) => AsyncIterable<string>;
 const MacPowerEventSource = powerModule.MacPowerEventSource as unknown as new (
-  readLog: (
-    command: string,
-    args: string[],
-    options: { timeoutMs: number; maxBufferBytes: number },
-  ) => Promise<string>,
-  timeoutMs: number,
-  maxBufferBytes: number,
-  now: () => number,
+  readLog?: PowerLogReader,
+  timeoutMs?: number,
+  maxLineBytes?: number,
+  now?: () => number,
 ) => PowerEventSource;
+const spawnPowerLogReader = powerModule.spawnPowerLogReader as PowerLogReader;
 
 class FakePowerEvents implements PowerEventSource {
   cursor: PowerEventCursor | null = null;
@@ -762,16 +764,12 @@ test("macOS pmset source accepts ordered sleep/wake rows and rejects gaps or amb
     "Listed by owning process:",
     "Kernel Assertions: 0x0=NONE",
   ].join("\n");
-  const readLog = async (
-    command: string,
-    args: string[],
-    options: { timeoutMs: number; maxBufferBytes: number },
-  ) => {
+  const readLog: PowerLogReader = async function* (command, args, options) {
     assert.equal(command, "/usr/bin/pmset");
     assert.deepEqual(args, ["-g", "log"]);
     assert.equal(options.timeoutMs, 2500);
-    assert.equal(options.maxBufferBytes, 4096);
-    return fixture;
+    assert.equal(options.maxLineBytes, 4096);
+    yield* fixture.split(/\r?\n/);
   };
   const baselineMs = Date.parse("2026-09-29T08:59:00Z");
   const source = new MacPowerEventSource(readLog, 2500, 4096, () => baselineMs);
@@ -798,4 +796,134 @@ test("macOS pmset source accepts ordered sleep/wake rows and rejects gaps or amb
     "2026-09-29 10:06:00 +0100 UnknownWakeSummary",
   );
   assert.equal(parsePmsetPowerLog(ambiguous, baseline.cursor).complete, false);
+});
+
+const pmsetRows = [
+  "PM ASL data store: /var/log/powermanagement",
+  "2026-09-29 09:50:00 +0100 Assertions\tPID 10(app) Created PreventUserIdleSystemSleep",
+  "2026-09-29 10:00:00 +0100 Sleep\tEntering Sleep state due to 'Clamshell Sleep'",
+  "2026-09-29 10:05:00 +0100 Wake\tWake from Deep Idle due to EC.LidOpen",
+  "2026-09-29 10:06:00 +0100 Sleep\tEntering Sleep state due to 'Idle Sleep'",
+  "2026-09-29 10:07:00 +0100 Wake\tWake from Normal Sleep",
+  "Assertion status system-wide:",
+  "   PreventSystemSleep             0",
+  "",
+];
+
+function printLines(lines: string[], eol: string): string[] {
+  return ["-e", `process.stdout.write(${JSON.stringify(lines.join(eol))})`];
+}
+
+test("the default pmset reader streams lines so cursors match the whole-output parser, with CRLF or a trailing newline", async () => {
+  const baselineMs = Date.parse("2026-09-29T08:59:00Z");
+  for (const eol of ["\n", "\r\n"]) {
+    for (const text of [pmsetRows, [...pmsetRows, ""]]) {
+      const reader: PowerLogReader = (_c, _a, options) =>
+        spawnPowerLogReader(process.execPath, printLines(text, eol), options);
+      const source = new MacPowerEventSource(
+        reader,
+        10_000,
+        65_536,
+        () => baselineMs,
+      );
+      const baseline = await source.readSince(null);
+      const batch = await source.readSince(baseline.cursor);
+      const expected = parsePmsetPowerLog(text.join(eol), baseline.cursor);
+      assert.equal(batch.complete, true);
+      assert.deepEqual(batch, expected);
+      assert.deepEqual(
+        batch.events.map((event) => event.cursor.value.split(":")[2]),
+        ["2", "3", "4", "5"],
+      );
+      const resumed = await source.readSince(batch.events[1]?.cursor ?? null);
+      assert.deepEqual(
+        resumed.events.map((event) => event.transition),
+        ["sleep", "wake"],
+      );
+    }
+  }
+});
+
+test("a multi-megabyte valid log streams to a complete batch without a total-size cap", async () => {
+  const script = `const row="2026-09-29 09:50:00 +0100 Assertions\\tPID 10(app) Created PreventUserIdleSystemSleep";
+let out="";for(let i=0;i<60000;i++){out+=row+"\\n";if(out.length>1e5){process.stdout.write(out);out=""}}
+process.stdout.write(out+"2026-09-29 10:00:00 +0100 Sleep\\tx\\n");`;
+  const reader: PowerLogReader = (_c, _a, options) =>
+    spawnPowerLogReader(process.execPath, ["-e", script], options);
+  const baselineMs = Date.parse("2026-09-29T08:59:00Z");
+  const source = new MacPowerEventSource(
+    reader,
+    20_000,
+    65_536,
+    () => baselineMs,
+  );
+  const baseline = await source.readSince(null);
+  assert.equal(baseline.complete, true);
+  const batch = await source.readSince(baseline.cursor);
+  assert.equal(batch.complete, true);
+  assert.deepEqual(
+    batch.events.map((event) => event.transition),
+    ["sleep"],
+  );
+});
+
+test("an over-long line, a timeout, a failing exit or a reader error make the batch incomplete and stop the child", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ensemble-power-reader-"));
+  try {
+    const pidFile = join(dir, "pid");
+    const hang = `require("fs").writeFileSync(${JSON.stringify(pidFile)},String(process.pid));process.stdout.write("2026-09-29 10:00:00 +0100 Sleep\\n");setInterval(()=>{},1000)`;
+    const flood = `require("fs").writeFileSync(${JSON.stringify(pidFile)},String(process.pid));process.stdout.write("x".repeat(70*1024));setInterval(()=>{},1000)`;
+    const cases: Array<[string, string[], number]> = [
+      ["timeout", ["-e", hang], 1000],
+      ["70 KiB line", ["-e", flood], 10_000],
+      ["non-zero exit", ["-e", "process.exit(3)"], 10_000],
+    ];
+    for (const [label, args, timeoutMs] of cases) {
+      const reader: PowerLogReader = (_c, _a, options) =>
+        spawnPowerLogReader(process.execPath, args, { ...options, timeoutMs });
+      const source = new MacPowerEventSource(
+        reader,
+        timeoutMs,
+        64 * 1024,
+        () => 0,
+      );
+      const batch = await source.readSince(null);
+      assert.equal(batch.complete, false, label);
+      if (label === "non-zero exit") continue;
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.throws(
+        () => process.kill(pid, 0),
+        /ESRCH/,
+        `${label}: child stopped`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const failing: PowerLogReader = async function* () {
+    yield "2026-09-29 10:00:00 +0100 Sleep";
+    throw new Error("injected reader failure");
+  };
+  const batch = await new MacPowerEventSource(failing).readSince(null);
+  assert.equal(batch.complete, false);
+});
+
+test("the pmset source defaults to a 10 second timeout and 64 KiB lines", async () => {
+  let seen: { timeoutMs: number; maxLineBytes: number } | undefined;
+  const reader: PowerLogReader = async function* (_c, _a, options) {
+    seen = options;
+    yield* pmsetRows;
+  };
+  await new MacPowerEventSource(reader).readSince(null);
+  assert.deepEqual(seen, { timeoutMs: 10_000, maxLineBytes: 64 * 1024 });
 });
