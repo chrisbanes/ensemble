@@ -391,18 +391,22 @@ const limitedReader = (response: () => Response) =>
   new GitHubHttpSourceReader("fixture-token", async () => response());
 
 test("403 with an exhausted limit or 429 with retry-after reports a rate-limited incomplete read that names when to resume", async () => {
+  const reset = Math.ceil(Date.now() / 1000) + 120;
   const exhausted = await limitedReader(
     () =>
       new Response("limit", {
         status: 403,
-        headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "4000" },
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(reset),
+        },
       }),
   ).readSelection(repoSelection);
   assert.equal(exhausted.complete, false);
   assert.equal(exhausted.reason, "rate-limited");
   assert.equal(
     exhausted.complete === false ? exhausted.resumeAt : undefined,
-    4_000_000,
+    reset * 1000,
   );
 
   const before = Date.now();
@@ -464,6 +468,26 @@ test("a 403 without rate-limit headers stays an http failure", async () => {
       }),
   ).readSelection(repoSelection);
   assert.equal(remaining.reason, "http-403");
+});
+
+test("empty, negative or past rate-limit deadlines fall back to one minute", async () => {
+  for (const headers of [
+    { "retry-after": "" },
+    { "retry-after": "-5" },
+    { "retry-after": "0" },
+    { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1" },
+  ]) {
+    const before = Date.now();
+    const result = await limitedReader(
+      () => new Response("limited", { status: 429, headers }),
+    ).readSelection(repoSelection);
+    const after = Date.now();
+    const label = JSON.stringify(headers);
+    assert.equal(result.reason, "rate-limited", label);
+    assert.ok(result.resumeAt !== undefined, label);
+    assert.ok(result.resumeAt >= before + 60_000, label);
+    assert.ok(result.resumeAt <= after + 60_000, label);
+  }
 });
 
 test("a 429 without rate-limit headers pauses for GitHub's one-minute minimum", async () => {

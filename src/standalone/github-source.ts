@@ -173,10 +173,13 @@ function rateLimitResumeAt(response: Response): number | undefined {
   )
     return undefined;
   const now = Date.now();
+  // Only positive whole seconds are usable; empty, negative or past values fall back.
+  const seconds = (value: string | null) =>
+    value !== null && /^\d+$/.test(value.trim()) ? Number(value) : Number.NaN;
   const times = [
-    Number(header("x-ratelimit-reset") ?? Number.NaN) * 1000,
-    now + Number(retryAfter ?? Number.NaN) * 1000,
-  ].filter(Number.isFinite);
+    seconds(header("x-ratelimit-reset")) * 1000,
+    now + seconds(retryAfter) * 1000,
+  ].filter((time) => Number.isFinite(time) && time > now);
   // GitHub documents waiting at least one minute when no header gives a reset time.
   // Headers are external input: cap at GitHub's one-hour primary window so they cannot pause discovery indefinitely.
   return times.length
