@@ -1770,9 +1770,9 @@ export class StandaloneService {
       )
       .digest("hex");
   }
-  taskWorkspace(taskId: string) {
+  taskWorkspace(taskId: string, options?: { reuseRecentIdentity?: boolean }) {
     this.domain().task(taskId);
-    return this.requireWorkspaces().get(taskId);
+    return this.requireWorkspaces().get(taskId, options);
   }
 
   replaceWorkspaceComparison(
@@ -1827,7 +1827,9 @@ export class StandaloneService {
     taskId: string,
   ): Promise<WorkspaceInspectionCurrent> {
     const task = this.domain().task(taskId);
-    const binding = await this.taskWorkspace(taskId);
+    const binding = await this.taskWorkspace(taskId, {
+      reuseRecentIdentity: true,
+    });
     return {
       taskId,
       taskVersion: Number(task.version),

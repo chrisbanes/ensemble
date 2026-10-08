@@ -71,6 +71,16 @@ export class TaskFilesState {
   directory: WorkspaceDirectory | null = null;
   directoryKey: string | null = null;
   directoryObservedAt: number | null = null;
+  /** Explicitly opens current bytes, e.g. from retained evidence; never implied. */
+  openCurrentFile(scope: WorkspaceDirectory["scope"], path: string[]) {
+    const key = JSON.stringify([scope, path]);
+    if (!this.tabs.some((tab) => tab.key === key))
+      this.tabs.push(new TaskFileTabState(key, scope, [...path]));
+    this.activeTabKey = key;
+    this.scope = scope;
+    this.path = path.slice(0, -1);
+    this.mobileView = "preview";
+  }
 }
 
 export class TaskChangesState {
@@ -127,10 +137,33 @@ class TaskReplyState {
   }
   uncertain = false;
 }
+/** Reading state for one result's retained evidence; bytes are immutable. */
+export class RetainedEvidenceState {
+  selectedItemId: string | null = null;
+  private readonly tabs = new Map<string, TaskFileTabState>();
+  tab(itemId: string, scope: WorkspaceDirectory["scope"], path: string[]) {
+    let tab = this.tabs.get(itemId);
+    if (!tab) {
+      tab = new TaskFileTabState(`retained:${itemId}`, scope, path);
+      this.tabs.set(itemId, tab);
+    }
+    return tab;
+  }
+}
+
 export class TaskWorkspaceState {
   constructor(private readonly reply = new TaskReplyState()) {}
   readonly files = new TaskFilesState();
   readonly changes = new TaskChangesState();
+  private readonly retainedEvidence = new Map<string, RetainedEvidenceState>();
+  retained(resultId: string) {
+    let value = this.retainedEvidence.get(resultId);
+    if (!value) {
+      value = new RetainedEvidenceState();
+      this.retainedEvidence.set(resultId, value);
+    }
+    return value;
+  }
   expanded = new Set<string>();
   chronological = false;
   get sourceObservation() {

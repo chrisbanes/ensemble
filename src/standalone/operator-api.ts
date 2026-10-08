@@ -615,7 +615,9 @@ export class OperatorApi {
     taskId: string,
   ): Promise<WorkspaceInspectionCurrent> {
     this.requireTask(taskId);
-    const binding = await this.service.taskWorkspace(taskId);
+    const binding = await this.service.taskWorkspace(taskId, {
+      reuseRecentIdentity: true,
+    });
     const task = this.requireTask(taskId);
     return {
       taskId,

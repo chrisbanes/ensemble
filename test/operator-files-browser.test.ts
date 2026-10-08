@@ -257,10 +257,11 @@ test("production Files reads service PDF bytes and bounds page, canvas and cance
   assert.equal(dimensions[0]?.page, 1);
   assert.ok(dimensions[0]!.pixels <= dimensions[0]!.max);
   assert.ok(dimensions[0]!.max <= payload.data.preview.maxCanvasPixels);
-  assert.match(
-    await page.locator(".pdf-preview").innerText(),
-    /scaled down to stay within the 16,000,000-pixel preview cap/,
-  );
+  // The scaled-render notice replaces "Rendering page…" once the canvas settles.
+  await page
+    .locator(".pdf-preview")
+    .getByText(/scaled down to stay within the 16,000,000-pixel preview cap/)
+    .waitFor();
 
   await page.getByRole("button", { name: "Next page", exact: true }).click();
   for (let pageNumber = 3; pageNumber <= 10; pageNumber++)

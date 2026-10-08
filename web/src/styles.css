@@ -1649,3 +1649,36 @@ textarea[data-auto-grow="true"] {
     min-height: 44px;
   }
 }
+.retained-evidence {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.retained-items {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.retained-items button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  justify-content: flex-start;
+}
+.retained-provenance {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  overflow-wrap: anywhere;
+}
+.retained-provenance dt {
+  font-weight: 600;
+}
+.retained-preview {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}

@@ -31,6 +31,7 @@ import { NativeSelect } from "./ui/native-select.js";
 import { Textarea } from "./ui/textarea.js";
 import { TaskFiles } from "./task-files.js";
 import { TaskWorkspaceChanges } from "./inspection-changes.js";
+import { RetainedResultEvidence } from "./retained-evidence.js";
 
 type Reference = z.infer<typeof feedbackReferenceSchema>;
 type History = z.infer<typeof assignmentHistorySchema>["data"];
@@ -162,6 +163,9 @@ export function TaskWorkspace({
     if (!state.selectionInitialized) {
       state.selectionInitialized = true;
       state.selectedResult = params.get("result");
+      const evidenceItem = params.get("evidence");
+      if (state.selectedResult && evidenceItem)
+        state.retained(state.selectedResult).selectedItemId = evidenceItem;
       state.selectedSource = params.get("source");
       if (params.has("assignment"))
         state.expanded.add(params.get("assignment") ?? "");
@@ -1191,6 +1195,28 @@ export function TaskWorkspace({
                 ask={ask}
               />
             )}
+            <RetainedResultEvidence
+              key={selected.resultId}
+              client={client}
+              session={session}
+              taskId={taskId}
+              resultId={selected.resultId}
+              state={state.retained(selected.resultId)}
+              changed={changed}
+              openCurrent={(scope, filePath) => {
+                state.files.openCurrentFile(scope, filePath);
+                changed();
+                requestAnimationFrame(() => {
+                  const files = document.getElementById("files");
+                  files?.scrollIntoView();
+                  const heading = files?.querySelector<HTMLElement>("h3");
+                  if (heading) {
+                    heading.tabIndex = -1;
+                    heading.focus({ preventScroll: true });
+                  }
+                });
+              }}
+            />
           </div>
         ) : (
           !state.selectedResult && <p>No result recorded.</p>

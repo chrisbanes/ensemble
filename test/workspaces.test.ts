@@ -987,6 +987,7 @@ test("repeated readiness checks reuse an unchanged worktree identity only briefl
     assert.equal(binding.state, "ready");
     const workspacePath = binding.repositories[0]?.workspacePath;
     assert.ok(workspacePath);
+    const inspection = { reuseRecentIdentity: true };
     const identityReads = () =>
       controlled
         .events()
@@ -997,27 +998,48 @@ test("repeated readiness checks reuse an unchanged worktree identity only briefl
             cwd === workspacePath,
         ).length;
 
-    assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+    assert.equal(
+      (await f.manager.get("recheck-task", inspection))?.state,
+      "ready",
+    );
     const afterFirst = identityReads();
     for (let index = 0; index < 5; index += 1)
-      assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
+      assert.equal(
+        (await f.manager.get("recheck-task", inspection))?.state,
+        "ready",
+      );
     assert.equal(identityReads(), afterFirst, "unchanged rechecks reuse Git");
-
-    const gitEntry = join(workspacePath, ".git");
-    writeFileSync(gitEntry, readFileSync(gitEntry));
     assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
     assert.equal(
       identityReads(),
       afterFirst + 1,
+      "execution reads always rerun Git",
+    );
+
+    const gitEntry = join(workspacePath, ".git");
+    writeFileSync(gitEntry, readFileSync(gitEntry));
+    assert.equal(
+      (await f.manager.get("recheck-task", inspection))?.state,
+      "ready",
+    );
+    assert.equal(
+      identityReads(),
+      afterFirst + 2,
       "a changed .git entry rereads",
     );
 
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    assert.equal((await f.manager.get("recheck-task"))?.state, "ready");
-    assert.equal(identityReads(), afterFirst + 2, "reuse expires");
+    assert.equal(
+      (await f.manager.get("recheck-task", inspection))?.state,
+      "ready",
+    );
+    assert.equal(identityReads(), afterFirst + 3, "reuse expires");
 
     writeFileSync(gitEntry, "gitdir: /nonexistent-ensemble-worktree\n");
-    assert.equal((await f.manager.get("recheck-task"))?.state, "held");
+    assert.equal(
+      (await f.manager.get("recheck-task", inspection))?.state,
+      "held",
+    );
   } finally {
     f.close();
   }

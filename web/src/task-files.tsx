@@ -567,6 +567,140 @@ function RasterDocumentView({
   );
 }
 
+/** Renders ready preview bytes; shared by current Files and retained evidence. */
+export function FilePreviewBody({
+  data,
+  name,
+  tab,
+  changed,
+}: {
+  data: NonNullable<NonNullable<TaskFileTabState["preview"]>["preview"]>;
+  name: string;
+  tab: TaskFileTabState;
+  changed: () => void;
+}) {
+  const isMarkdown =
+    data.kind === "text" &&
+    (data.mime.includes("markdown") ||
+      /\.(?:md|markdown|mdown|mkdn)$/i.test(name));
+  return (
+    <>
+      {data.kind === "text" && (
+        <>
+          <p>
+            {data.mime} · {data.size.toLocaleString()} bytes · SHA-256{" "}
+            {data.sha256}
+          </p>
+          {isMarkdown && (
+            <div
+              className="task-actions file-preview-controls"
+              role="toolbar"
+              aria-label="Markdown view"
+            >
+              <Button
+                variant="secondary"
+                aria-pressed={tab.sourceMode === "rendered"}
+                onClick={() => {
+                  tab.sourceMode = "rendered";
+                  changed();
+                }}
+              >
+                Rendered
+              </Button>
+              <Button
+                variant="secondary"
+                aria-pressed={tab.sourceMode === "source"}
+                onClick={() => {
+                  tab.sourceMode = "source";
+                  changed();
+                }}
+              >
+                Source
+              </Button>
+            </div>
+          )}
+          {(!isMarkdown || tab.sourceMode === "source") && (
+            <div
+              className="task-actions file-preview-controls"
+              role="toolbar"
+              aria-label="Source presentation"
+            >
+              <Button
+                variant="secondary"
+                aria-pressed={tab.wrapSource}
+                onClick={() => {
+                  tab.wrapSource = !tab.wrapSource;
+                  changed();
+                }}
+              >
+                Wrap
+              </Button>
+            </div>
+          )}
+          {isMarkdown && tab.sourceMode === "rendered" ? (
+            <MarkdownPreview text={data.text} />
+          ) : (
+            <>
+              {data.mime !== "text/markdown" && !isMarkdown && (
+                <p className="muted">Source view · selectable lines</p>
+              )}
+              <SourceLines
+                text={data.text}
+                tab={tab}
+                wrapLines={tab.wrapSource}
+                changed={changed}
+              />
+            </>
+          )}
+        </>
+      )}
+      {data.kind === "base64" && data.mime !== "application/pdf" && (
+        <>
+          <p>
+            Bounded raster preview · {data.width} × {data.height} pixels ·
+            SHA-256 {data.sha256}
+          </p>
+          <RasterDocumentView
+            key={tab.key}
+            preview={data}
+            tab={tab}
+            changed={changed}
+          />
+        </>
+      )}
+      {data.kind === "base64" && data.mime === "application/pdf" && (
+        <>
+          <p>
+            PDF · {data.size.toLocaleString()} bytes · SHA-256 {data.sha256}
+          </p>
+          <PdfDocumentView
+            key={`${tab.key}:${data.sha256}`}
+            data={data.data}
+            maxDisplayedPages={data.maxDisplayedPages!}
+            maxCanvasPixels={data.maxCanvasPixels!}
+            page={tab.pdfPage}
+            zoom={tab.pdfZoom}
+            setPage={(page) => {
+              tab.pdfPage = page;
+              changed();
+            }}
+            setZoom={(zoom) => {
+              tab.pdfZoom = zoom;
+              changed();
+            }}
+            scrollLeft={tab.pdfScrollLeft}
+            scrollTop={tab.pdfScrollTop}
+            onScroll={(left, top) => {
+              tab.pdfScrollLeft = left;
+              tab.pdfScrollTop = top;
+            }}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
 export function TaskFiles({
   client,
   session,
@@ -788,11 +922,6 @@ export function TaskFiles({
   useLayoutEffect(() => {
     if (activeTab) readingArea.current?.scrollTo(0, activeTab.readingScrollTop);
   }, [activeTab?.key]);
-  const isMarkdown =
-    preview?.state === "ready" &&
-    preview.preview?.kind === "text" &&
-    (preview.preview.mime.includes("markdown") ||
-      /\.(?:md|markdown|mdown|mkdn)$/i.test(activeTab?.path.at(-1) ?? ""));
 
   return (
     <section id="files" className="task-files" aria-labelledby="files-heading">
@@ -1117,129 +1246,14 @@ export function TaskFiles({
                     . File bytes are unavailable.
                   </p>
                 )}
-                {preview?.state === "ready" &&
-                  preview.preview?.kind === "text" && (
-                    <>
-                      <p>
-                        {preview.preview.mime} ·{" "}
-                        {preview.preview.size.toLocaleString()} bytes · SHA-256{" "}
-                        {preview.preview.sha256}
-                      </p>
-                      {isMarkdown && (
-                        <div
-                          className="task-actions file-preview-controls"
-                          role="toolbar"
-                          aria-label="Markdown view"
-                        >
-                          <Button
-                            variant="secondary"
-                            aria-pressed={activeTab.sourceMode === "rendered"}
-                            onClick={() => {
-                              activeTab.sourceMode = "rendered";
-                              changed();
-                            }}
-                          >
-                            Rendered
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            aria-pressed={activeTab.sourceMode === "source"}
-                            onClick={() => {
-                              activeTab.sourceMode = "source";
-                              changed();
-                            }}
-                          >
-                            Source
-                          </Button>
-                        </div>
-                      )}
-                      {(!isMarkdown || activeTab.sourceMode === "source") && (
-                        <div
-                          className="task-actions file-preview-controls"
-                          role="toolbar"
-                          aria-label="Source presentation"
-                        >
-                          <Button
-                            variant="secondary"
-                            aria-pressed={activeTab.wrapSource}
-                            onClick={() => {
-                              activeTab.wrapSource = !activeTab.wrapSource;
-                              changed();
-                            }}
-                          >
-                            Wrap
-                          </Button>
-                        </div>
-                      )}
-                      {isMarkdown && activeTab.sourceMode === "rendered" ? (
-                        <MarkdownPreview text={preview.preview.text} />
-                      ) : (
-                        <>
-                          {preview.preview.mime !== "text/markdown" &&
-                            !isMarkdown && (
-                              <p className="muted">
-                                Source view · selectable lines
-                              </p>
-                            )}
-                          <SourceLines
-                            text={preview.preview.text}
-                            tab={activeTab}
-                            wrapLines={activeTab.wrapSource}
-                            changed={changed}
-                          />
-                        </>
-                      )}
-                    </>
-                  )}
-                {preview?.state === "ready" &&
-                  preview.preview?.kind === "base64" &&
-                  preview.preview.mime !== "application/pdf" && (
-                    <>
-                      <p>
-                        Bounded raster preview · {preview.preview.width} ×{" "}
-                        {preview.preview.height} pixels · SHA-256{" "}
-                        {preview.preview.sha256}
-                      </p>
-                      <RasterDocumentView
-                        key={activeTab.key}
-                        preview={preview.preview}
-                        tab={activeTab}
-                        changed={changed}
-                      />
-                    </>
-                  )}
-                {preview?.state === "ready" &&
-                  preview.preview?.kind === "base64" &&
-                  preview.preview.mime === "application/pdf" && (
-                    <>
-                      <p>
-                        PDF · {preview.preview.size.toLocaleString()} bytes ·
-                        SHA-256 {preview.preview.sha256}
-                      </p>
-                      <PdfDocumentView
-                        key={`${activeTab.key}:${preview.preview.sha256}`}
-                        data={preview.preview.data}
-                        maxDisplayedPages={preview.preview.maxDisplayedPages!}
-                        maxCanvasPixels={preview.preview.maxCanvasPixels!}
-                        page={activeTab.pdfPage}
-                        zoom={activeTab.pdfZoom}
-                        setPage={(page) => {
-                          activeTab.pdfPage = page;
-                          changed();
-                        }}
-                        setZoom={(zoom) => {
-                          activeTab.pdfZoom = zoom;
-                          changed();
-                        }}
-                        scrollLeft={activeTab.pdfScrollLeft}
-                        scrollTop={activeTab.pdfScrollTop}
-                        onScroll={(left, top) => {
-                          activeTab.pdfScrollLeft = left;
-                          activeTab.pdfScrollTop = top;
-                        }}
-                      />
-                    </>
-                  )}
+                {preview?.state === "ready" && preview.preview && (
+                  <FilePreviewBody
+                    data={preview.preview}
+                    name={activeTab.path.at(-1) ?? ""}
+                    tab={activeTab}
+                    changed={changed}
+                  />
+                )}
                 <Button
                   className="file-refresh-preview"
                   variant="secondary"
