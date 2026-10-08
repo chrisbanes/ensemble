@@ -651,8 +651,8 @@ export function LocalReviewPanel() {
       </p>
       {draft?.unsentDraftLost && (
         <p role="status">
-          An unsent draft from an earlier session was removed when that session
-          ended. It cannot be recovered here.
+          An unsent draft was removed when its session ended or its access
+          changed. It cannot be recovered here.
         </p>
       )}
       {review.resource.state.error && !draft && (

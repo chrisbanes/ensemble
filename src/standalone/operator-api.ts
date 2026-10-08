@@ -3699,9 +3699,13 @@ export class OperatorApi {
       // Keep the draft unless its text or anchors are now actually excluded.
       const retained = this.service.retainedEvidence();
       const anchors = draft.groups.flatMap((group) =>
-        group.anchorIds.map(
-          (anchorId) => retained.reviewAnchor(taskId, anchorId)?.anchor,
-        ),
+        group.anchorIds.map((anchorId) => {
+          try {
+            return retained.reviewAnchor(taskId, anchorId)?.anchor;
+          } catch {
+            return undefined; // An unreadable anchor is not permitted.
+          }
+        }),
       );
       const allowed =
         draft.state === "editable" &&
