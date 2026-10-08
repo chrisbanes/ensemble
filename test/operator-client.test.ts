@@ -4,7 +4,7 @@ import { OperatorClient, ClientError } from "../web/src/api.js";
 import { ResourceController } from "../web/src/resource.js";
 import { workspaceSchema, type Workspace } from "../src/operator/contracts.js";
 const good: Workspace = {
-  data: { projects: [], profiles: [] },
+  data: { projects: [], profiles: [], runtime: { state: "available" } },
   observedAt: 42,
 };
 test("validated client rejects invalid success and lost writes remain unknown with original key", async () => {

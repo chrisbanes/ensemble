@@ -266,6 +266,7 @@ export class StandaloneService {
   private power: ExecutionPower | undefined;
   private powerPollTimer: NodeJS.Timeout | undefined;
   private runtime: Runtime | undefined;
+  private runtimeUnavailableSince: number | undefined;
   private conversationHistory: ConversationHistoryStore | undefined;
   private readonly conversationCaptures = new Map<
     string,
@@ -533,6 +534,11 @@ export class StandaloneService {
       context.spawnEnvironment();
       const runtime = this.runtimeFactory(context);
       this.runtime = runtime;
+      this.runtimeUnavailableSince = undefined;
+      runtime.onFailure?.(() => {
+        if (this.runtime === runtime)
+          this.runtimeUnavailableSince ??= Date.now();
+      });
       this.supervisor = new ExecutionSupervisor(
         state,
         runtime,
@@ -1065,6 +1071,15 @@ export class StandaloneService {
 
   powerStatus() {
     return this.power?.status() ?? null;
+  }
+
+  /** In-memory only: a manual service restart is the recovery path. */
+  runtimeStatus():
+    | { state: "available" }
+    | { state: "unavailable"; since: number } {
+    return this.runtimeUnavailableSince === undefined
+      ? { state: "available" }
+      : { state: "unavailable", since: this.runtimeUnavailableSince };
   }
 
   resolveHeldExecution(receipt: RecoveryReceipt) {
@@ -3397,6 +3412,13 @@ export class StandaloneService {
         !generation.accepting
       )
         return;
+      if (this.runtimeUnavailableSince !== undefined) {
+        // Queued work stays queued: nothing is admitted or held until restart.
+        const reason = "Codex runtime unavailable; restart the service";
+        state.wait(intent.id, reason);
+        store.wait(request.workId, reason);
+        return;
+      }
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),

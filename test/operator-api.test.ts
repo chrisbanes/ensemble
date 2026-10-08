@@ -56,6 +56,21 @@ test("API preserves original durable task receipts independently of current vers
     "Real project",
   );
 });
+test("workspace reports the Codex runtime as unavailable after a runtime failure", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const api = new OperatorApi(f.service, [f.directory]);
+  assert.deepEqual((await api.readWorkspace()).data.runtime, {
+    state: "available",
+  });
+  f.runtime.crash();
+  const { runtime } = (await api.readWorkspace()).data;
+  assert.equal(runtime.state, "unavailable");
+  assert.equal(
+    runtime.state === "unavailable" && Number.isSafeInteger(runtime.since),
+    true,
+  );
+});
 async function seed(
   f: Awaited<ReturnType<typeof createOperatorFixture>>,
   active = false,
@@ -951,6 +966,7 @@ test("global labels exclude retained private revisions without any task or proje
   };
   const isolated = new OperatorApi({
     domain: () => domain,
+    runtimeStatus: () => ({ state: "available" }),
   } as unknown as ConstructorParameters<typeof OperatorApi>[0]);
   assert.doesNotMatch(
     JSON.stringify(await isolated.readWorkspace()),
@@ -978,6 +994,7 @@ test("global snapshot privacy fails closed before excessive revision lookup work
   };
   const api = new OperatorApi({
     domain: () => domain,
+    runtimeStatus: () => ({ state: "available" }),
   } as unknown as ConstructorParameters<typeof OperatorApi>[0]);
   const read = await api.readWorkspace();
   assert.equal(read.data.profiles[0]?.name, null);

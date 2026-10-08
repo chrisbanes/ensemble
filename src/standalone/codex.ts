@@ -466,6 +466,8 @@ export interface Runtime {
     turnId: string,
   ): Promise<"completed" | "failed">;
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void;
+  /** Called once when the runtime process is lost; the runtime does not restart itself. */
+  onFailure?(listener: (error: Error) => void): void;
   onToolCall?(
     listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>,
   ): void;
@@ -1389,6 +1391,10 @@ export class CodexRuntime implements Runtime {
 
   onUnexpectedRequest(listener: (request: UnexpectedRequest) => void): void {
     this.unexpected = listener;
+  }
+
+  onFailure(listener: (error: Error) => void): void {
+    this.events.on("failure", listener);
   }
 
   onToolCall(

@@ -1595,6 +1595,7 @@ export class OperatorApi {
           .projects()
           .map((p) => this.project(p, excluded)),
         profiles: this.profiles(excluded),
+        runtime: this.service.runtimeStatus(),
       },
       observedAt: Date.now(),
     });

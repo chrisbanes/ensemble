@@ -71,6 +71,7 @@ export interface RuntimeOperatorApi {
   list(): ExecutionIntent[];
   recoveryView(): RecoveryRecord[];
   powerStatus(): ReturnType<StandaloneService["powerStatus"]>;
+  runtimeStatus(): ReturnType<StandaloneService["runtimeStatus"]>;
   turnRequests(): TurnRequest[];
   capacityLimits(projectIds?: string[]): CapacityLimits;
   configureCapacity(
@@ -92,7 +93,11 @@ function overview(api: RuntimeOperatorApi, csrfToken: string): string {
   const capacity = api.capacityLimits(
     projects.map((project) => String(project.id)),
   );
-  return `<main><h1>Runtime</h1><section><h2>Capacity</h2><p>Global active turns: ${capacity.globalLimit}; currently in use: ${capacity.currentUsage.global}.</p><p>Default project active turns: ${capacity.defaultProjectLimit}.</p>${projects
+  const unavailable =
+    api.runtimeStatus().state === "unavailable"
+      ? '<p role="alert">Codex runtime unavailable — restart the service</p>'
+      : "";
+  return `<main><h1>Runtime</h1>${unavailable}<section><h2>Capacity</h2><p>Global active turns: ${capacity.globalLimit}; currently in use: ${capacity.currentUsage.global}.</p><p>Default project active turns: ${capacity.defaultProjectLimit}.</p>${projects
     .map((project) => {
       const projectId = String(project.id);
       const projectCapacity = capacity.effectiveProjectLimits[projectId] ?? 2;

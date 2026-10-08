@@ -1373,3 +1373,81 @@ test("capacity one yields a completed requester to its child and resumes it once
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+class CrashableRuntime extends GatedRuntime {
+  private failureListener: ((error: Error) => void) | undefined;
+  private lost: ((error: Error) => void) | undefined;
+  onFailure(listener: (error: Error) => void) {
+    this.failureListener = listener;
+  }
+  override async waitForTurn(threadId: string, turnId: string) {
+    const lost = new Promise<never>((_, reject) => {
+      this.lost = reject;
+    });
+    return await Promise.race([super.waitForTurn(threadId, turnId), lost]);
+  }
+  /** Mirrors CodexRuntime.fail: failure listeners first, then pending waits reject. */
+  crash() {
+    const error = new Error("Runtime lost");
+    this.failureListener?.(error);
+    this.lost?.(error);
+  }
+}
+
+test("runtime failure holds the running turn, blocks admission and keeps queued work queued", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-runtime-failure-"));
+  const runningWorkspace = join(root, "running");
+  const queuedWorkspace = join(root, "queued");
+  mkdirSync(runningWorkspace);
+  mkdirSync(queuedWorkspace);
+  const runtime = new CrashableRuntime();
+  const service = new StandaloneService(join(root, "data"), () => runtime);
+  const gate = deferred();
+  let entered = 0;
+  runtime.entered = () => entered++;
+  runtime.release = gate.promise;
+  try {
+    await service.start();
+    assert.deepEqual(service.runtimeStatus(), { state: "available" });
+    const first = service.submit("running", "Running", runningWorkspace);
+    assert.equal(await waitUntil(() => entered === 1), true);
+
+    const before = Date.now();
+    runtime.crash();
+    // A wrongly admitted turn would now complete instead of hanging the test.
+    gate.resolve();
+    assert.equal((await first).state, "held");
+    const status = service.runtimeStatus();
+    assert.equal(status.state, "unavailable");
+    assert.ok(status.state === "unavailable" && status.since >= before);
+
+    const queued = await service.submit("queued", "Queued", queuedWorkspace);
+    assert.equal(queued.state, "ready");
+    assert.match(queued.reason ?? "", /Codex runtime unavailable/);
+    const request = service
+      .turnRequests()
+      .find((item) => item.workId === "queued");
+    assert.equal(request?.state, "queued");
+    assert.match(request?.reason ?? "", /Codex runtime unavailable/);
+    assert.equal(runtime.turns, 1);
+    assert.equal(
+      service.list().filter((intent) => intent.state === "held").length,
+      1,
+    );
+    assert.equal(
+      countRows(
+        service,
+        "SELECT COUNT(*) AS count FROM execution_capacity_reservations WHERE workId = ?",
+        "queued",
+      ),
+      0,
+    );
+    await service.stop();
+    await service.start();
+    assert.deepEqual(service.runtimeStatus(), { state: "available" });
+  } finally {
+    gate.resolve();
+    await service.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
