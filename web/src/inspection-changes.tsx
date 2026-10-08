@@ -43,7 +43,9 @@ type PatchLine = {
 type PairedLine = { oldLine?: PatchLine; newLine?: PatchLine };
 
 function dateLabel(value: number | undefined) {
-  return value === undefined ? "not retained" : new Date(value).toLocaleString();
+  return value === undefined
+    ? "not retained"
+    : new Date(value).toLocaleString();
 }
 
 function entryKey(entry: Entry, index: number) {
@@ -73,11 +75,7 @@ function pairedLines(hunk: Hunk): PairedLine[] {
     added = [];
   };
   for (const source of hunk.patch.split("\n")) {
-    if (
-      source.startsWith("@@") ||
-      source.startsWith("\\ No newline")
-    )
-      continue;
+    if (source.startsWith("@@") || source.startsWith("\\ No newline")) continue;
     const marker = source[0];
     const text = source.slice(1);
     if (marker === " ") {
@@ -121,7 +119,10 @@ function responseId(data: ComparisonData | undefined): string | null {
 function responseIdForExactRead(data: ComparisonData): string | null {
   if (data.state === "available") return data.comparisonId;
   if (data.state === "unsettled") return data.pending.comparisonId;
-  return data.comparisonId ?? ("comparison" in data ? data.comparison?.comparisonId ?? null : null);
+  return (
+    data.comparisonId ??
+    ("comparison" in data ? (data.comparison?.comparisonId ?? null) : null)
+  );
 }
 
 function exactReadMatches(data: ComparisonData, requestedId: string) {
@@ -197,7 +198,7 @@ function selectionMatch(
   return null;
 }
 
-function taskRepositories(
+function useTaskRepositories(
   client: OperatorClient,
   session: Session,
   taskId: string,
@@ -234,7 +235,7 @@ export function TaskWorkspaceChanges({
   state: TaskChangesState;
   changed: () => void;
 }) {
-  const repositoriesResource = taskRepositories(client, session, taskId);
+  const repositoriesResource = useTaskRepositories(client, session, taskId);
   const directory = repositoriesResource.state.data?.data;
   const repositories = useMemo(
     () =>
@@ -303,6 +304,7 @@ export function TaskWorkspaceChanges({
     changedRef.current();
   }, [baseBranchOptionsScopeKey, state]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key encodes auth, task and exact comparison inputs; reload id requests an explicit Refresh.
   useEffect(() => {
     const controller = new AbortController();
     const requestSequence = ++sequence.current;
@@ -444,8 +446,8 @@ export function TaskWorkspaceChanges({
         });
       });
     return () => controller.abort();
-  // reloadIsNew is ref-derived and flips during this effect; including it
-  // would abort the explicit refresh on its own pending-state rerender.
+    // reloadIsNew is ref-derived and flips during this effect; including it
+    // would abort the explicit refresh on its own pending-state rerender.
   }, [
     client,
     taskId,
@@ -471,7 +473,8 @@ export function TaskWorkspaceChanges({
           (entry, index) => entryKey(entry, index) === state.selectedEntryKey,
         )
       : -1;
-  const selected = selectedIndex >= 0 ? snapshot?.entries[selectedIndex] : undefined;
+  const selected =
+    selectedIndex >= 0 ? snapshot?.entries[selectedIndex] : undefined;
   const availableBaseBranches =
     (current && "availableBaseBranches" in current
       ? current.availableBaseBranches
@@ -565,9 +568,10 @@ export function TaskWorkspaceChanges({
         remain below.
       </p>
       <div className="task-actions changes-controls">
-        <label>
+        <label htmlFor="changes-target">
           Comparison target
           <NativeSelect
+            id="changes-target"
             aria-label="Comparison target"
             value={state.target}
             onChange={(event) => setTarget(event.target.value as Target)}
@@ -576,10 +580,7 @@ export function TaskWorkspaceChanges({
               Branch
             </option>
             <option value="last-turn">Last turn</option>
-            <option
-              value="uncommitted"
-              disabled={repositories.length === 0}
-            >
+            <option value="uncommitted" disabled={repositories.length === 0}>
               Uncommitted
             </option>
           </NativeSelect>
@@ -594,9 +595,10 @@ export function TaskWorkspaceChanges({
       </div>
       {state.target !== "last-turn" && (
         <div className="changes-filters">
-          <label>
+          <label htmlFor="changes-repository">
             Repository
             <NativeSelect
+              id="changes-repository"
               aria-label="Repository"
               value={repositoryId ?? ""}
               onChange={(event) => {
@@ -617,9 +619,10 @@ export function TaskWorkspaceChanges({
             </NativeSelect>
           </label>
           {state.target === "branch" && repositoryId && (
-            <label>
+            <label htmlFor="changes-base-branch">
               Local base branch
               <NativeSelect
+                id="changes-base-branch"
                 aria-label="Local base branch"
                 value={baseBranch ?? ""}
                 onChange={(event) => {
@@ -641,16 +644,15 @@ export function TaskWorkspaceChanges({
             </label>
           )}
           {state.target === "uncommitted" && repositoryId && (
-            <label>
+            <label htmlFor="changes-change-set">
               Change set
               <NativeSelect
+                id="changes-change-set"
                 aria-label="Change set"
                 value={changeSet}
                 onChange={(event) => {
-                  state.changeSetByRepository[repositoryId] = event.target.value as
-                    | "all"
-                    | "staged"
-                    | "unstaged";
+                  state.changeSetByRepository[repositoryId] = event.target
+                    .value as "all" | "staged" | "unstaged";
                   state.selectedEntryKey = null;
                   state.selection = null;
                   state.notice = "";
@@ -690,7 +692,9 @@ export function TaskWorkspaceChanges({
                   : "neutral"
             }
           >
-            {current.state === "unsettled" ? "Current turn unsettled" : current.state}
+            {current.state === "unsettled"
+              ? "Current turn unsettled"
+              : current.state}
           </StatusBadge>
           {id && <span>Comparison {id}</span>}
           {snapshot && <span>Observed {dateLabel(snapshot.observedAt)}</span>}
@@ -703,7 +707,9 @@ export function TaskWorkspaceChanges({
           )}
           {current.state === "unavailable" &&
             current.reason === "base-branch-required" && (
-              <span>Select a local branch. No branch is inferred or checked out.</span>
+              <span>
+                Select a local branch. No branch is inferred or checked out.
+              </span>
             )}
           {current.state === "unavailable" &&
             current.reason === "no-merge-base" && (
@@ -742,7 +748,9 @@ export function TaskWorkspaceChanges({
         <p role="alert">Comparison is unavailable ({currentRequest.error}).</p>
       )}
       {current?.state === "unavailable" && (
-        <p role="status">No current comparison is available for this selection.</p>
+        <p role="status">
+          No current comparison is available for this selection.
+        </p>
       )}
       {current?.state === "gap" && (
         <p role="status">
@@ -766,7 +774,10 @@ export function TaskWorkspaceChanges({
             aria-label="Changed files"
           >
             <h5>Changed files</h5>
-            <div role="list" aria-label="Workspace comparison files">
+            <ul
+              className="changes-entry-list"
+              aria-label="Workspace comparison files"
+            >
               {snapshot.entries.map((entry, index) => {
                 const selectedEntryKey = entryKey(entry, index);
                 const label =
@@ -775,7 +786,7 @@ export function TaskWorkspaceChanges({
                     : entry.path;
                 const isSelected = state.selectedEntryKey === selectedEntryKey;
                 return (
-                  <div key={selectedEntryKey} role="listitem">
+                  <li key={selectedEntryKey}>
                     <button
                       type="button"
                       className="changes-entry"
@@ -787,16 +798,18 @@ export function TaskWorkspaceChanges({
                       <StatusBadge>{entry.change.toUpperCase()}</StatusBadge>
                       <span className="changes-entry-path">{label}</span>
                       {entry.changeSet && (
-                        <span className="changes-entry-set">{entry.changeSet}</span>
+                        <span className="changes-entry-set">
+                          {entry.changeSet}
+                        </span>
                       )}
                     </button>
-                  </div>
+                  </li>
                 );
               })}
-              {snapshot.entries.length === 0 && (
-                <p>No changed entries in this observation.</p>
-              )}
-            </div>
+            </ul>
+            {snapshot.entries.length === 0 && (
+              <p>No changed entries in this observation.</p>
+            )}
           </aside>
           <div
             className="changes-reading-area"
@@ -836,11 +849,14 @@ export function TaskWorkspaceChanges({
                   <>
                     <div
                       className="task-actions changes-layout-controls"
+                      role="toolbar"
                       aria-label="Diff layout"
                     >
                       <Button
                         className="changes-split-control"
-                        variant={state.layout === "split" ? "primary" : "secondary"}
+                        variant={
+                          state.layout === "split" ? "primary" : "secondary"
+                        }
                         aria-pressed={state.layout === "split"}
                         onClick={() => {
                           state.layout = "split";
@@ -850,7 +866,9 @@ export function TaskWorkspaceChanges({
                         Split
                       </Button>
                       <Button
-                        variant={state.layout === "unified" ? "primary" : "secondary"}
+                        variant={
+                          state.layout === "unified" ? "primary" : "secondary"
+                        }
                         aria-pressed={state.layout === "unified"}
                         onClick={() => {
                           state.layout = "unified";
@@ -862,6 +880,7 @@ export function TaskWorkspaceChanges({
                     </div>
                     {selected.hunks.map((hunk, index) => (
                       <DiffHunk
+                        // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
                         key={`${snapshot.comparisonId}:${index}`}
                         entry={selected}
                         entryIndex={selectedIndex}
@@ -882,8 +901,9 @@ export function TaskWorkspaceChanges({
                 </p>
                 {state.selection && (
                   <p role="status" className="changes-selection">
-                    Selected {state.selection.side === "left" ? "Before" : "After"}{" "}
-                    lines {state.selection.startLine}–{state.selection.endLine} ·{" "}
+                    Selected{" "}
+                    {state.selection.side === "left" ? "Before" : "After"} lines{" "}
+                    {state.selection.startLine}–{state.selection.endLine} ·{" "}
                     {state.selection.path} · {state.selection.contentSha256} ·
                     comparison {state.selection.comparisonId}
                   </p>
@@ -931,17 +951,17 @@ function PendingTurn({
       </p>
       <p>
         Turn {pending.turnId ?? "not yet bound"} · thread{" "}
-        {pending.threadId ?? "not yet bound"} · outcome {pending.outcome} ·
-        {" "}capture {pending.captureState}
+        {pending.threadId ?? "not yet bound"} · outcome {pending.outcome} ·{" "}
+        capture {pending.captureState}
       </p>
       <p>
         Capture started {dateLabel(pending.startedAt)} · before observation{" "}
         {pending.beforeObservedAt === undefined
-          ? pending.beforeState ?? "not retained"
+          ? (pending.beforeState ?? "not retained")
           : dateLabel(pending.beforeObservedAt)}
         {" · "}after observation{" "}
         {pending.afterObservedAt === undefined
-          ? pending.afterState ?? "not observed"
+          ? (pending.afterState ?? "not observed")
           : dateLabel(pending.afterObservedAt)}
       </p>
       {pending.reason && <p>Capture limitation: {pending.reason}</p>}
@@ -954,8 +974,8 @@ function PendingTurn({
           {dateLabel(data.latestFinished.startedAt)} · before observation{" "}
           {data.latestFinished.beforeObservedAt === undefined
             ? "not retained"
-            : dateLabel(data.latestFinished.beforeObservedAt)} · after observation{" "}
-          {dateLabel(data.latestFinished.observedAt)}.
+            : dateLabel(data.latestFinished.beforeObservedAt)}{" "}
+          · after observation {dateLabel(data.latestFinished.observedAt)}.
         </p>
       )}
       <p>
@@ -1029,25 +1049,25 @@ function DiffHunk({
     if (!Number.isSafeInteger(line)) return;
     event.preventDefault();
     target.focus();
-    onSelect(
-      entry,
-      entryIndex,
-      anchor,
-      line,
-      minLine,
-      maxLine,
-      event.shiftKey,
-    );
+    const origin = Number(event.currentTarget.dataset.line);
+    // Shift extends from the focused line even when it was not yet selected.
+    if (event.shiftKey && Number.isSafeInteger(origin))
+      onSelect(entry, entryIndex, anchor, origin, minLine, maxLine, true);
+    onSelect(entry, entryIndex, anchor, line, minLine, maxLine, event.shiftKey);
   };
   const panel = (side: "left" | "right") => (
-    <div className="changes-diff-side" aria-label={side === "left" ? "Before" : "After"}>
+    <div className="changes-diff-side">
       <h6>{side === "left" ? "Before" : "After"}</h6>
       {rows.map((pair, row) => {
         const line = side === "left" ? pair.oldLine : pair.newLine;
         const anchor = side === "left" ? hunk.leftAnchor : hunk.rightAnchor;
         if (!line)
           return (
-            <div className="changes-line changes-line-empty" key={row}>
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
+              key={row}
+              className="changes-line changes-line-empty"
+            >
               <span aria-hidden="true"> </span>
             </div>
           );
@@ -1074,6 +1094,7 @@ function DiffHunk({
             <button
               type="button"
               className={`changes-line changes-selectable-line ${selected ? "is-selected" : ""}`}
+              // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
               key={row}
               aria-pressed={selected}
               aria-current={current ? "true" : undefined}
@@ -1102,7 +1123,11 @@ function DiffHunk({
           );
         }
         return (
-          <div className={`changes-line changes-line-${line.kind}`} key={row}>
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
+            key={row}
+            className={`changes-line changes-line-${line.kind}`}
+          >
             <span className="changes-line-number">{number ?? ""}</span>
             <code>{line.text || " "}</code>
           </div>
@@ -1119,17 +1144,22 @@ function DiffHunk({
       <h6 className="changes-hunk-heading">
         @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
       </h6>
-      <div className={`changes-diff-split ${layout === "split" ? "is-active" : ""}`}>
+      <div
+        className={`changes-diff-split ${layout === "split" ? "is-active" : ""}`}
+      >
         {panel("left")}
         {panel("right")}
       </div>
-      <div className={`changes-diff-unified ${layout === "unified" ? "is-active" : ""}`}>
+      <div
+        className={`changes-diff-unified ${layout === "unified" ? "is-active" : ""}`}
+      >
         {rows.flatMap((pair, row) =>
           [pair.oldLine, pair.newLine]
             .filter((line): line is PatchLine => Boolean(line))
             .map((line, sideIndex) => {
               const side = line.kind === "deleted" ? "left" : "right";
-              const anchor = side === "left" ? hunk.leftAnchor : hunk.rightAnchor;
+              const anchor =
+                side === "left" ? hunk.leftAnchor : hunk.rightAnchor;
               const number = side === "left" ? line.oldLine : line.newLine;
               const selectable =
                 line.kind === "context" ||
@@ -1149,13 +1179,13 @@ function DiffHunk({
                 selection.startLine <= number &&
                 number <= selection.endLine;
               const current =
-                matchingSelection &&
-                selection.currentLine === number;
+                matchingSelection && selection.currentLine === number;
               if (selectable && anchor && number !== undefined)
                 return (
                   <button
                     type="button"
                     className={`changes-line changes-selectable-line ${selected ? "is-selected" : ""}`}
+                    // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
                     key={`${row}:${sideIndex}`}
                     aria-pressed={selected}
                     aria-current={current ? "true" : undefined}
@@ -1194,11 +1224,12 @@ function DiffHunk({
               return (
                 <div
                   className={`changes-line changes-line-${line.kind}`}
+                  // biome-ignore lint/suspicious/noArrayIndexKey: rows of an immutable observed diff are identified by position.
                   key={`${row}:${sideIndex}`}
                 >
                   <span className="changes-line-number">
                     {line.kind === "context"
-                      ? line.oldLine ?? ""
+                      ? (line.oldLine ?? "")
                       : side === "left"
                         ? `-${number ?? ""}`
                         : `+${number ?? ""}`}

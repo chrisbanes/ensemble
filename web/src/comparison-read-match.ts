@@ -31,7 +31,10 @@ export function matchesWorkspaceComparisonRead(
   )
     return false;
   if (expected.target === "branch") {
-    if (!expected.baseBranch || snapshot.baseline?.branch === expected.baseBranch)
+    if (
+      !expected.baseBranch ||
+      snapshot.baseline?.branch === expected.baseBranch
+    )
       return true;
     return (
       snapshot.state === "unavailable" &&

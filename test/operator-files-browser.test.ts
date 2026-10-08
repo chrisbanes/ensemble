@@ -623,7 +623,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
     Math.round((await page.locator(".file-rail").boundingBox())?.width ?? 0),
     238,
   );
-  await page.getByRole("group", { name: "Open file tabs" }).waitFor();
+  await page.getByRole("toolbar", { name: "Open file tabs" }).waitFor();
   await page.getByRole("navigation", { name: "File path" }).waitFor();
   await captureBrowserEvidence(page, "1280-files-workbench-desktop", {
     fullPage: false,

@@ -960,7 +960,8 @@ nav h2 {
   height: 24px;
   min-height: 24px;
   border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--color-border) 45%, transparent);
   padding: 0;
   color: inherit;
   text-align: left;
@@ -1069,8 +1070,12 @@ nav h2 {
   padding: 12px;
   background: transparent;
 }
-.file-entry-list {
+.file-entry-list,
+.changes-entry-list {
   min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .file-entry {
   display: grid;

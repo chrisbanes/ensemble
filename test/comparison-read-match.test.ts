@@ -33,7 +33,10 @@ const noMergeBase = {
 } satisfies WorkspaceComparisonRead["data"];
 
 test("no-merge-base is scoped to the exact listed task, repository, and target", () => {
-  assert.equal(matchesWorkspaceComparisonRead(noMergeBase, expected, taskId), true);
+  assert.equal(
+    matchesWorkspaceComparisonRead(noMergeBase, expected, taskId),
+    true,
+  );
   assert.equal(
     matchesWorkspaceComparisonRead(
       noMergeBase,
@@ -55,7 +58,10 @@ test("no-merge-base is scoped to the exact listed task, repository, and target",
   );
   assert.equal(
     matchesWorkspaceComparisonRead(
-      { ...noMergeBase, target: "uncommitted" } as WorkspaceComparisonRead["data"],
+      {
+        ...noMergeBase,
+        target: "uncommitted",
+      } as WorkspaceComparisonRead["data"],
       expected,
       taskId,
     ),

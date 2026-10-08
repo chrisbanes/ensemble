@@ -3970,7 +3970,9 @@ export class OperatorApi {
       }
       for (const group of prepared.payload.groups)
         for (const anchorId of group.anchorIds) {
-          let read;
+          let read: Awaited<
+            ReturnType<OperatorApi["readRetainedReviewAnchor"]>
+          >;
           try {
             read = await this.readRetainedReviewAnchor(c.taskId, anchorId);
           } catch {
@@ -4026,7 +4028,7 @@ export class OperatorApi {
           throw new OperatorApiError(503, "command-outcome-unknown");
         return this.localReviewReceipt(c.key, rejected);
       }
-      let committed;
+      let committed: ReturnType<typeof store.commitSend>;
       try {
         committed = store.commitSend({
           request,

@@ -167,6 +167,7 @@ function PdfPageCanvas({
     };
   }, [document, pageNumber, zoom, maxCanvasPixels, availableWidth]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore the saved scroll after each newly rendered page.
   useLayoutEffect(() => {
     wrapper.current?.scrollTo(scrollLeft, scrollTop);
   }, [pageNumber, scrollLeft, scrollTop]);
@@ -267,7 +268,11 @@ function PdfDocumentView({
 
   return (
     <div className="pdf-preview">
-      <div className="task-actions pdf-controls" aria-label="PDF controls">
+      <div
+        className="task-actions pdf-controls"
+        role="toolbar"
+        aria-label="PDF controls"
+      >
         <Button
           variant="secondary"
           disabled={!document || page <= 1}
@@ -352,7 +357,7 @@ const markdownComponents: Components = {
     </span>
   ),
   input: ({ checked }) => (
-    <span aria-label={checked ? "checked task" : "unchecked task"}>
+    <span role="img" aria-label={checked ? "checked task" : "unchecked task"}>
       {checked ? "[x]" : "[ ]"}
     </span>
   ),
@@ -475,6 +480,7 @@ function RasterDocumentView({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore saved pan only when the tab or observed bytes change, not on every pan update.
   useLayoutEffect(() => {
     viewport.current?.scrollTo(tab.imageScrollLeft, tab.imageScrollTop);
   }, [tab.key, preview.sha256]);
@@ -489,6 +495,7 @@ function RasterDocumentView({
     <div className="file-raster-viewer">
       <div
         className="task-actions file-preview-controls"
+        role="toolbar"
         aria-label="Raster controls"
       >
         <Button
@@ -574,7 +581,7 @@ export function TaskFiles({
   const [, render] = useState(0);
   const readingArea = useRef<HTMLDivElement>(null);
   const explorerEntries = useRef<Array<HTMLButtonElement | null>>([]);
-  const changed = () => render((value) => value + 1);
+  const changed = useCallback(() => render((value) => value + 1), []);
   const activeTab =
     state.tabs.find((tab) => tab.key === state.activeTabKey) ?? null;
   const directoryKey = JSON.stringify([
@@ -582,6 +589,7 @@ export function TaskFiles({
     state.path,
     state.showIgnored,
   ]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: directoryKey captures scope, path and ignored visibility by value from mutable task state.
   const directoryLoader = useCallback(
     async (signal: AbortSignal) => {
       const current = client.captureAuthenticationScope();
@@ -630,12 +638,13 @@ export function TaskFiles({
       window.requestAnimationFrame(() =>
         explorerEntries.current[index]?.focus(),
       );
-  }, [directory, directoryKey, state]);
+  }, [directory, directoryKey, state, changed]);
   const directoryObservedAt =
     directoryResource.state.data?.observedAt ?? state.directoryObservedAt;
   const previewKey = activeTab
     ? JSON.stringify([activeTab.scope, activeTab.path, state.showIgnored])
     : "";
+  // biome-ignore lint/correctness/useExhaustiveDependencies: previewKey captures the tab scope, path and ignored visibility by value.
   const previewLoader = useCallback(
     async (signal: AbortSignal) => {
       if (!activeTab) throw new Error("No file selected");
@@ -676,7 +685,7 @@ export function TaskFiles({
     activeTab.previewKey = previewKey;
     activeTab.observedAt = response.response.observedAt;
     changed();
-  }, [previewResource.state.data, previewKey, activeTab]);
+  }, [previewResource.state.data, previewKey, activeTab, changed]);
   const currentPreviewResponse =
     activeTab &&
     previewResource.state.data?.tabKey === activeTab.key &&
@@ -775,6 +784,7 @@ export function TaskFiles({
       path: crumbPath.slice(0, index + 1),
     })),
   ];
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore reading position only when switching tabs.
   useLayoutEffect(() => {
     if (activeTab) readingArea.current?.scrollTo(0, activeTab.readingScrollTop);
   }, [activeTab?.key]);
@@ -858,9 +868,8 @@ export function TaskFiles({
           <h4>Explorer</h4>
           <p className="file-current-location">{currentPath}</p>
           {directory?.state === "ready" ? (
-            <div
+            <ul
               className="file-entry-list"
-              role="list"
               aria-label={`Files in ${currentPath}`}
             >
               {directory.entries.map((entry, index) => {
@@ -878,7 +887,7 @@ export function TaskFiles({
                       ? entry.kind
                       : `${entry.kind} · ${entry.size.toLocaleString()} bytes`;
                 return (
-                  <div key={`${entry.kind}:${name}`} role="listitem">
+                  <li key={`${entry.kind}:${name}`}>
                     <button
                       type="button"
                       className="file-entry"
@@ -977,13 +986,13 @@ export function TaskFiles({
                         {entry.ignored ? " · ignored" : ""}
                       </span>
                     </button>
-                  </div>
+                  </li>
                 );
               })}
               {directory.entries.length === 0 && (
-                <p>No entries in this location.</p>
+                <li>No entries in this location.</li>
               )}
-            </div>
+            </ul>
           ) : (
             <p role="status">
               {directory?.state
@@ -1001,6 +1010,7 @@ export function TaskFiles({
               <nav className="file-breadcrumbs" aria-label="File path">
                 {crumbs.map((crumb, index) => (
                   <Button
+                    // biome-ignore lint/suspicious/noArrayIndexKey: breadcrumb depth is its identity; labels can repeat.
                     key={`${index}:${crumb.label}`}
                     variant="secondary"
                     onClick={() => navigate(crumb.scope, crumb.path)}
@@ -1017,7 +1027,7 @@ export function TaskFiles({
               </nav>
               <div
                 className="file-tabs"
-                role="group"
+                role="toolbar"
                 aria-label="Open file tabs"
               >
                 {state.tabs.map((tab) => {
@@ -1118,6 +1128,7 @@ export function TaskFiles({
                       {isMarkdown && (
                         <div
                           className="task-actions file-preview-controls"
+                          role="toolbar"
                           aria-label="Markdown view"
                         >
                           <Button
@@ -1145,6 +1156,7 @@ export function TaskFiles({
                       {(!isMarkdown || activeTab.sourceMode === "source") && (
                         <div
                           className="task-actions file-preview-controls"
+                          role="toolbar"
                           aria-label="Source presentation"
                         >
                           <Button

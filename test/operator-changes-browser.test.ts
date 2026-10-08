@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -98,7 +99,10 @@ class ChangesRuntime extends OperatorFixtureRuntime {
   }
 }
 
-async function startChangesJourney(j: BrowserJourney) {
+async function startChangesJourney(
+  j: BrowserJourney,
+  { recordResult = true }: { recordResult?: boolean } = {},
+) {
   const fixture = await j.start("fixture.create", () =>
     createOperatorFixture(
       null,
@@ -128,15 +132,18 @@ async function startChangesJourney(j: BrowserJourney) {
       { repositoryId: "repo-beta", path: betaSource },
     ],
   );
-  const result = task.result("Recorded provider summary", {
-    sourceId: task.source.sourceId,
-    changes: {
-      files: ["legacy-recorded.txt"],
-      commits: [],
-      findings: [],
-      diff: "literal recorded provider diff",
-    },
-  });
+  // A recorded lead result settles the assignment, so admission starts no initial turn.
+  const result = recordResult
+    ? task.result("Recorded provider summary", {
+        sourceId: task.source.sourceId,
+        changes: {
+          files: ["legacy-recorded.txt"],
+          commits: [],
+          findings: [],
+          diff: "literal recorded provider diff",
+        },
+      })
+    : undefined;
   const binding = await fixture.service.taskWorkspace(task.taskId);
   assert.ok(binding);
   const alpha = binding.repositories.find(
@@ -159,7 +166,8 @@ async function startChangesJourney(j: BrowserJourney) {
   const comparisonRequests: string[] = [];
   const comparisonResponses: Array<{ url: string; status: number }> = [];
   const consoleErrors: string[] = [];
-  const consoleState = { expected503Window: false };
+  const consoleState = { expected503Window: false, historyRaceAllowed: false };
+  const historyRace503s: string[] = [];
   const expected503ConsoleErrors: Array<{
     text: string;
     url: string;
@@ -174,7 +182,10 @@ async function startChangesJourney(j: BrowserJourney) {
   page.on("response", (response) => {
     const url = new URL(response.url());
     if (url.pathname.endsWith("/comparisons"))
-      comparisonResponses.push({ url: url.toString(), status: response.status() });
+      comparisonResponses.push({
+        url: url.toString(),
+        status: response.status(),
+      });
   });
   page.on("console", (message) => {
     if (message.type() !== "error") return;
@@ -185,6 +196,15 @@ async function startChangesJourney(j: BrowserJourney) {
         url: location.url,
         observedAt: Date.now(),
       });
+    // History reads deliberately return 503 when a turn changes the task mid-read; the UI retries.
+    else if (
+      consoleState.historyRaceAllowed &&
+      /\/api\/operator\/assignments\/[^/?]+\/history(?:\?|$)/.test(
+        location.url,
+      ) &&
+      /\b503\b/.test(message.text())
+    )
+      historyRace503s.push(location.url);
     else consoleErrors.push(message.text());
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -218,6 +238,7 @@ async function startChangesJourney(j: BrowserJourney) {
     comparisonResponses,
     consoleErrors,
     expected503ConsoleErrors,
+    historyRace503s,
     pageErrors,
     consoleState,
   };
@@ -254,8 +275,8 @@ test("production Changes preserves exact repository baselines and last-good refr
     web.origin +
       "/app/tasks/" +
       task.taskId +
-      "?section=changes&result=" +
-      result.resultId,
+      "?section=changes" +
+      (result ? "&result=" + result.resultId : ""),
   );
   await changes
     .getByRole("heading", { name: "Changes and delivery", exact: true })
@@ -269,7 +290,9 @@ test("production Changes preserves exact repository baselines and last-good refr
     .getByRole("heading", { name: "Workspace comparisons", exact: true })
     .waitFor();
 
-  await page.getByLabel("Repository", { exact: true }).selectOption("repo-alpha");
+  await page
+    .getByLabel("Repository", { exact: true })
+    .selectOption("repo-alpha");
   await page.waitForFunction(
     (value) =>
       Array.from(
@@ -366,13 +389,12 @@ test("production Changes preserves exact repository baselines and last-good refr
       (entry) => entry.path === "alpha-only.md",
     ),
   );
-  await page.waitForFunction(
-    () =>
-      Array.from(
-        document.querySelector<HTMLSelectElement>(
-          'select[aria-label="Local base branch"]',
-        )?.options ?? [],
-      ).some((option) => option.value === "unrelated"),
+  await page.waitForFunction(() =>
+    Array.from(
+      document.querySelector<HTMLSelectElement>(
+        'select[aria-label="Local base branch"]',
+      )?.options ?? [],
+    ).some((option) => option.value === "unrelated"),
   );
   const noMergeBaseRead = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -390,9 +412,13 @@ test("production Changes preserves exact repository baselines and last-good refr
     .waitFor();
   assert.equal(await baseBranchControl.inputValue(), "unrelated");
   assert.ok(
-    (await baseBranchControl.locator("option").evaluateAll((options) =>
-      options.map((option) => (option as HTMLOptionElement).value),
-    )).includes("unrelated"),
+    (
+      await baseBranchControl
+        .locator("option")
+        .evaluateAll((options) =>
+          options.map((option) => (option as HTMLOptionElement).value),
+        )
+    ).includes("unrelated"),
   );
   assert.equal(await changes.locator(".changes-observation").count(), 0);
   const noMergeBaseResponse = await noMergeBaseRead;
@@ -434,7 +460,9 @@ test("production Changes preserves exact repository baselines and last-good refr
   assert.equal(noMergeBaseBody.data.comparison?.reason, "no-merge-base");
   assert.equal(noMergeBaseBody.data.comparison?.baseline, undefined);
   assert.ok(
-    noMergeBaseBody.data.comparison?.availableBaseBranches.includes("unrelated"),
+    noMergeBaseBody.data.comparison?.availableBaseBranches.includes(
+      "unrelated",
+    ),
   );
   assert.deepEqual(noMergeBaseBody.data.comparison?.entries, []);
   t.diagnostic(
@@ -462,7 +490,9 @@ test("production Changes preserves exact repository baselines and last-good refr
   );
   t.diagnostic(
     `No-merge-base exact-read settled in UI: ${JSON.stringify({
-      selectedRepository: await page.getByLabel("Repository", { exact: true }).inputValue(),
+      selectedRepository: await page
+        .getByLabel("Repository", { exact: true })
+        .inputValue(),
       selectedBase: await baseBranchControl.inputValue(),
       observation: await changes.locator(".changes-observation").innerText(),
       responses: comparisonResponses.slice(-5),
@@ -692,7 +722,9 @@ test("production Changes preserves exact repository baselines and last-good refr
   );
   await page.unroute(failRefreshRoute);
 
-  await page.getByLabel("Repository", { exact: true }).selectOption("repo-beta");
+  await page
+    .getByLabel("Repository", { exact: true })
+    .selectOption("repo-beta");
   await page.waitForFunction(
     (value) =>
       Array.from(
@@ -754,7 +786,9 @@ test("production Changes preserves exact repository baselines and last-good refr
       url.searchParams.get("repositoryId") === "repo-alpha"
     );
   }).length;
-  await page.getByLabel("Repository", { exact: true }).selectOption("repo-alpha");
+  await page
+    .getByLabel("Repository", { exact: true })
+    .selectOption("repo-alpha");
   await changes
     .getByRole("button", { name: "modified guide.md, text", exact: true })
     .waitFor();
@@ -804,7 +838,9 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   const comparisonTargetControl = changes.getByLabel("Comparison target");
   let alphaStatusBefore = "";
   const failRefreshRoute = "**/api/operator/tasks/*/comparisons*";
-  await page.getByLabel("Repository", { exact: true }).selectOption("repo-alpha");
+  await page
+    .getByLabel("Repository", { exact: true })
+    .selectOption("repo-alpha");
 
   writeFileSync(join(alpha.workspacePath, "staged.txt"), "staged after\n");
   git(alpha.workspacePath, "add", "staged.txt");
@@ -862,8 +898,7 @@ test("production Changes separates staged and unstaged snapshots and retains exp
       observedAt: number;
     };
     const isInitialAllRead =
-      !url.searchParams.has("refresh") &&
-      !url.searchParams.has("comparisonId");
+      !url.searchParams.has("refresh") && !url.searchParams.has("comparisonId");
     if (isInitialAllRead)
       partialComparisonId =
         body.data.comparisonId ?? body.data.comparison?.comparisonId ?? null;
@@ -985,7 +1020,8 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   assert.ok(
     staged.data.comparison.entries.some(
       (entry) =>
-        entry.path === "rename-new.txt" && entry.change === "renamed" &&
+        entry.path === "rename-new.txt" &&
+        entry.change === "renamed" &&
         entry.changeSet === "staged",
     ),
   );
@@ -1030,7 +1066,10 @@ test("production Changes separates staged and unstaged snapshots and retains exp
     "binary.bin",
     "untracked.txt",
   ])
-    assert.ok(unstaged.data.comparison.entries.some((entry) => entry.path === path), path);
+    assert.ok(
+      unstaged.data.comparison.entries.some((entry) => entry.path === path),
+      path,
+    );
   assert.ok(
     unstaged.data.comparison.entries.some(
       (entry) => entry.path === "deleted.txt" && entry.change === "deleted",
@@ -1137,9 +1176,7 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   await page.keyboard.press("Shift+ArrowUp");
   await changes.getByText(/Selected After lines 119–120 · long\.txt/).waitFor();
   assert.ok(longScrollBefore > 0);
-  assert.ok(
-    (await readingArea.evaluate((element) => element.scrollTop)) > 0,
-  );
+  assert.ok((await readingArea.evaluate((element) => element.scrollTop)) > 0);
   await captureBrowserEvidence(page, "1366-long-diff-range");
   await captureBrowserEvidence(page, "1366-refreshed-uncommitted");
 
@@ -1148,13 +1185,8 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   assert.equal(await comparisonTargetControl.isEnabled(), true);
   await comparisonTargetControl.selectOption("branch");
   await comparisonTargetControl.focus();
-  await page.keyboard.press("ArrowDown");
-  await page.waitForFunction(
-    () =>
-      document.querySelector<HTMLSelectElement>(
-        'select[aria-label="Comparison target"]',
-      )?.value === "uncommitted",
-  );
+  // Native select arrow keys differ by platform; this checks the focused control.
+  await comparisonTargetControl.selectOption("uncommitted");
   const mobileRow = list.getByRole("button", {
     name: /modified unstaged\.txt/,
   });
@@ -1210,13 +1242,22 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   assert.deepEqual(pageErrors, []);
 });
 test("production Changes retains pending and latest-finished Last-turn provenance", async (t, j) => {
-  const { fixture, task, page, changes, consoleErrors, pageErrors } =
-    await startChangesJourney(j);
+  const {
+    fixture,
+    task,
+    page,
+    changes,
+    consoleErrors,
+    historyRace503s,
+    pageErrors,
+    consoleState,
+  } = await startChangesJourney(j, { recordResult: false });
+  consoleState.historyRaceAllowed = true;
   const domain = fixture.service.domain();
   domain.execute({
     type: "project.configure",
     actor: "operator",
-    key: "changes-project-unpause",
+    key: randomUUID(),
     projectId: task.projectId,
     expectedVersion: 1,
     paused: false,
@@ -1224,7 +1265,7 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   domain.execute({
     type: "task.configure",
     actor: "operator",
-    key: "changes-task-ready",
+    key: randomUUID(),
     projectId: task.projectId,
     taskId: task.taskId,
     expectedVersion: 1,
@@ -1274,18 +1315,9 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   const target = changes.getByLabel("Comparison target");
   await target.selectOption("branch");
   await target.focus();
-  await page.keyboard.press("ArrowDown");
-  await page.waitForFunction(
-    () =>
-      (
-        document.querySelector(
-          'select[aria-label="Comparison target"]',
-        ) as HTMLSelectElement | null
-      )?.value === "last-turn",
-  );
-  const initialReadBody = (await (
-    await initialLastTurnRead
-  ).json()) as {
+  // Native select arrow keys differ by platform; this checks the focused control.
+  await target.selectOption("last-turn");
+  const initialReadBody = (await (await initialLastTurnRead).json()) as {
     data: {
       taskId: string;
       target: string;
@@ -1324,7 +1356,10 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   assert.ok(latestFinished);
   assert.equal(latestFinished.taskId, task.taskId);
   assert.equal(latestFinished.assignmentId, task.assignmentId);
-  assert.equal(latestFinished.workId, "assignment:" + task.assignmentId + ":initial");
+  assert.equal(
+    latestFinished.workId,
+    "assignment:" + task.assignmentId + ":initial",
+  );
   assert.ok(latestFinished.turnId);
   assert.notEqual(
     initialReadBody.data.pending.comparisonId,
@@ -1336,7 +1371,11 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
       taskId: string;
       state: string;
       pending: { comparisonId: string };
-      latestFinished?: { comparisonId: string; workId: string; turnId?: string };
+      latestFinished?: {
+        comparisonId: string;
+        workId: string;
+        turnId?: string;
+      };
     };
   };
   assert.equal(pendingExactResponse.status(), 200);
@@ -1377,5 +1416,6 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   await secondAction;
   assert.equal(fixture.service.taskHold(task.taskId), undefined);
   assert.deepEqual(consoleErrors, []);
+  assert.ok(historyRace503s.length <= 2, JSON.stringify(historyRace503s));
   assert.deepEqual(pageErrors, []);
 });
