@@ -74,8 +74,17 @@ function useLocalReviewController({
   const draft = resource.state.data?.data ?? null;
   if (!state.send) {
     const pending = draft?.pendingOperation;
+    const stored = restoredSend(taskId);
+    // The server's pending operation wins; a stored identity is used only when
+    // no current draft content could be locked by it (e.g. after sign-out).
     const restored =
-      restoredSend(taskId) ??
+      (stored &&
+      draft &&
+      !pending &&
+      draft.draft.comments.length === 0 &&
+      draft.draft.summary === ""
+        ? stored
+        : null) ??
       (pending && draft
         ? {
             key: pending.key,
@@ -119,6 +128,10 @@ function useLocalReviewController({
         receipt.state === "prepared"
           ? "unknown"
           : (receipt.state as LocalReviewSend["status"]);
+    } else if (result.code === "local-review-batch-too-large") {
+      // Refused before any operation was recorded.
+      send.status = "rejected";
+      send.reason = "too large to send; shorten or remove comments";
     } else {
       // Without a receipt the send may still have committed; only the same-key
       // reconciliation can confirm delivery or a no-delivery outcome.
@@ -825,6 +838,14 @@ export function LocalReviewPanel() {
           <p>
             Review sent to {send.recipientName}. One local message was queued.
           </p>
+          {draft?.state !== "sent" && (
+            <Button
+              variant="secondary"
+              onClick={() => review.acknowledgeRejection()}
+            >
+              Dismiss
+            </Button>
+          )}
         </div>
       )}
       {state.inspectKey && <SentReview operationKey={state.inspectKey} />}

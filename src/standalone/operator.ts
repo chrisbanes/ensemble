@@ -674,6 +674,8 @@ function publicMessage(code: string): string {
     unavailable: "Service unavailable. Try again.",
     "command-outcome-unknown":
       "Command outcome is unknown. Reconcile the same key and input.",
+    "local-review-batch-too-large":
+      "The review is too large to send. Shorten or remove comments.",
   };
   return messages[code] ?? "Request unavailable.";
 }

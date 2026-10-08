@@ -702,8 +702,10 @@ state and never substitute other bytes.
   discarded, which starts the next review and keeps submitted context.
 - A draft belongs to its authenticated session and to an access fingerprint
   made of the task, project, workspace binding, exclusions, linked repositories
-  and control paths. Sign-out, expiry, restart or an access change removes an
-  editable draft. A "removed unsent draft" notice appears only when the removed
+  and control paths. Sign-out, expiry and restart remove an editable draft.
+  After an access change the draft's text and anchors are rechecked: it is
+  kept and rebound when still permitted, and removed only when something is
+  now excluded. A "removed unsent draft" notice appears only when the removed
   draft had text or anchors, and clears on the next draft save. Unrelated task,
   profile or configuration version changes do not remove a draft.
 - `review.send` freezes one operation for the named project lead, who must be
@@ -715,7 +717,11 @@ state and never substitute other bytes.
 - The lead's message gives each comment's exact source: repository or task
   workspace, path, lines, context, side, comparison or result item, turn,
   source hash and retained anchor ID, plus an original excerpt of up to 12
-  lines or 800 characters. A shortened excerpt is marked as shortened.
+  lines or 800 characters. A shortened excerpt is marked as shortened. When
+  excerpts would take the message past 16,000 bytes, all excerpts are omitted
+  and the message says so. If identities alone still exceed the limit, the send
+  is refused with `local-review-batch-too-large` before any operation is
+  recorded, and the draft stays editable.
   `GET /api/operator/tasks/{taskId}/local-reviews/{operationId}` shows the sent
   review with original anchor context under current access policy. Text from a
   rejected or not-recorded operation is shown only to its own session.

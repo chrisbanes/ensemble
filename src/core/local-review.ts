@@ -70,14 +70,25 @@ type Draft = z.infer<typeof draftSchema>;
 type FrozenPayload = z.infer<typeof frozenPayloadSchema>;
 type Row = Record<string, string | number | null>;
 
+/** Definitive pre-operation rejection: nothing was recorded or sent. */
+export class LocalReviewBatchTooLargeError extends Error {
+  constructor() {
+    super("Local review batch exceeds the message limit");
+    this.name = "LocalReviewBatchTooLargeError";
+  }
+}
+
 const maxExcerptLines = 12;
 const maxExcerptCharacters = 800;
 
 /** Exact identity plus a short original excerpt, so the lead never relies on path and line alone. */
-function anchorContext({
-  anchor,
-  bytes,
-}: NonNullable<ReturnType<RetainedEvidenceStore["reviewAnchor"]>>): string {
+function anchorContext(
+  {
+    anchor,
+    bytes,
+  }: NonNullable<ReturnType<RetainedEvidenceStore["reviewAnchor"]>>,
+  includeExcerpt: boolean,
+): string {
   const source = [
     `${anchor.repositoryId ? `repository ${anchor.repositoryId}` : "task workspace"} ${anchor.path}`,
     `lines ${anchor.startLine}-${anchor.endLine}`,
@@ -92,6 +103,8 @@ function anchorContext({
   ]
     .filter(Boolean)
     .join(" · ");
+  if (!includeExcerpt)
+    return `  Context: ${source}\n  Excerpt omitted to fit the message limit; the retained anchor keeps it.`;
   if (anchor.state !== "available" || !bytes)
     return `  Context: ${source}\n  Original excerpt unavailable${anchor.reason ? ` (${anchor.reason})` : ""}.`;
   const text = bytes.toString("utf8");
@@ -685,30 +698,39 @@ export class LocalReviewStore {
           sealOperationId: randomUUID(),
         };
       });
-      const message = [
-        draft.summary ? `Review summary:\n${draft.summary}` : "",
-        ...draft.comments.map((comment) => {
-          const lines = comment.anchorGroupIds.flatMap((groupId) => {
-            const group = frozenGroups.find((item) => item.groupId === groupId);
-            return (
-              group?.anchorIds.map((anchorId) => {
-                const retainedAnchor = this.retained.reviewAnchor(
-                  request.taskId,
-                  anchorId,
-                );
-                if (!retainedAnchor)
-                  throw new Error("Local review anchor is unavailable");
-                return anchorContext(retainedAnchor);
-              }) ?? []
-            );
-          });
-          return `Comment:\n${comment.body}${lines.length ? `\n${lines.join("\n")}` : ""}`;
-        }),
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      const render = (includeExcerpt: boolean) =>
+        [
+          draft.summary ? `Review summary:\n${draft.summary}` : "",
+          ...draft.comments.map((comment) => {
+            const lines = comment.anchorGroupIds.flatMap((groupId) => {
+              const group = frozenGroups.find(
+                (item) => item.groupId === groupId,
+              );
+              return (
+                group?.anchorIds.map((anchorId) => {
+                  const retainedAnchor = this.retained.reviewAnchor(
+                    request.taskId,
+                    anchorId,
+                  );
+                  if (!retainedAnchor)
+                    throw new Error("Local review anchor is unavailable");
+                  return anchorContext(retainedAnchor, includeExcerpt);
+                }) ?? []
+              );
+            });
+            return `Comment:\n${comment.body}${lines.length ? `\n${lines.join("\n")}` : ""}`;
+          }),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+      // Excerpts are dropped as a whole before the batch is refused as too large.
+      const withExcerpts = render(true);
+      const message =
+        Buffer.byteLength(withExcerpts, "utf8") <= 16_000
+          ? withExcerpts
+          : render(false);
       if (!message || Buffer.byteLength(message, "utf8") > 16_000)
-        throw new Error("Local review batch exceeds the message limit");
+        throw new LocalReviewBatchTooLargeError();
       const reviewId = randomUUID();
       const payload = frozenPayloadSchema.parse({
         taskId: request.taskId,
@@ -1035,6 +1057,19 @@ export class LocalReviewStore {
       requestHash: String(row.requestHash),
       ownerKey: String(row.ownerKey),
     };
+  }
+
+  /** Re-binds an editable draft whose content was rechecked under current access. */
+  refreshAccessFingerprint(
+    taskId: string,
+    ownerKey: string,
+    version: number,
+    accessFingerprint: string,
+  ) {
+    this.db
+      .prepare(`UPDATE coordination_local_review_drafts SET accessFingerprint=?
+      WHERE taskId=? AND ownerKey=? AND version=? AND state='editable'`)
+      .run(accessFingerprint, taskId, ownerKey, version);
   }
 
   purgeEditableDrafts(ownerKey?: string, taskId?: string): number {

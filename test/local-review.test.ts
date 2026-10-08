@@ -579,10 +579,11 @@ test("policy change during send rejects the frozen operation and restores editin
     f.service.localReviews().operationMaterial(key)?.response.reason,
     "policy-changed",
   );
-  assert.equal(
-    f.service.localReviews().readDraft(task.taskId, owner.ownerKey).state,
-    "editable",
-  );
+  // Read through the API: the rechecked draft stays editable after rejection.
+  const afterRejection = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(afterRejection.data.state, "editable");
+  assert.equal(afterRejection.data.draft.summary, "Policy-bound review");
+  assert.equal(afterRejection.data.unsentDraftLost, false);
   assert.deepEqual(counts(f, task.taskId, key), {
     events: 0,
     receipts: 0,
@@ -834,4 +835,138 @@ test("a frozen send is reconcilable from the draft read; unsent text stays with 
     owner,
   );
   assert.ok(sameSession.data.comments?.length);
+});
+
+test("an access change purges only a draft whose text became excluded", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Exclusion recheck");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: 0,
+      draft: { summary: "mentions NEWSECRETVALUE later", comments: [] },
+    },
+    owner,
+  );
+  const domain = f.service.domain();
+  domain.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: task.profileId,
+    expectedVersion: Number(domain.profile(task.profileId).version),
+    instructions: "NEWSECRETVALUE",
+  });
+  const read = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(read.data.draft.summary, "");
+  assert.equal(read.data.unsentDraftLost, true);
+});
+
+test("large reviews drop excerpts before a definitive too-large rejection", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Review size");
+  const workspace = await f.service.taskWorkspace(task.taskId);
+  assert.ok(workspace);
+  const api = new OperatorApi(f.service, []);
+  const stageMany = async (
+    owner: OperatorReviewSessionContext,
+    count: number,
+    body: string,
+  ) => {
+    let version = 0;
+    const comments = [];
+    for (let index = 0; index < count; index++) {
+      const path = `big-${index}.txt`;
+      const bytes = Array.from({ length: 12 }, (_, line) =>
+        `${line}`.padEnd(60, "x"),
+      ).join("\n");
+      await writeFile(join(workspace.path, path), `${bytes}\n`);
+      const receipt = (await api.execute(
+        {
+          type: "review.anchor.stage",
+          key: randomUUID(),
+          taskId: task.taskId,
+          expectedDraftVersion: version,
+          anchors: [
+            {
+              taskId: task.taskId,
+              repositoryId: null,
+              path,
+              sourceKind: "workspace-file",
+              context: "workspace",
+              side: "file",
+              startLine: 1,
+              endLine: 12,
+              contentSha256: createHash("sha256")
+                .update(`${bytes}\n`)
+                .digest("hex"),
+            },
+          ],
+        },
+        owner,
+      )) as { groupId: string; draftVersion: number };
+      version = receipt.draftVersion;
+      comments.push({
+        commentId: randomUUID(),
+        body,
+        anchorGroupIds: [receipt.groupId],
+      });
+    }
+    const saved = (await api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: version,
+        draft: { summary: "", comments },
+      },
+      owner,
+    )) as { version: number };
+    return saved.version;
+  };
+  const version = Number(
+    f.service.domain().assignment(task.assignmentId).version,
+  );
+
+  const fits = session();
+  const fitsVersion = await stageMany(fits, 14, "a".repeat(600));
+  const key = randomUUID();
+  const sent = (await api.execute(
+    requestFor(task, key, fitsVersion, version),
+    fits,
+  )) as { state: string };
+  assert.equal(sent.state, "recorded");
+  let message = "";
+  f.seedPersistedState((db) => {
+    message = String(
+      (
+        db
+          .prepare(
+            "SELECT payloadJson FROM coordination_local_review_operations WHERE operationId=?",
+          )
+          .get(key) as { payloadJson: string }
+      ).payloadJson,
+    );
+  });
+  assert.match(message, /Excerpt omitted to fit the message limit/);
+
+  const tooLarge = session();
+  const tooLargeVersion = await stageMany(tooLarge, 26, "b".repeat(380));
+  await assert.rejects(
+    api.execute(
+      requestFor(task, randomUUID(), tooLargeVersion, version),
+      tooLarge,
+    ),
+    (error: unknown) =>
+      (error as { code?: string }).code === "local-review-batch-too-large",
+  );
+  const still = await api.readLocalReviewDraft(task.taskId, tooLarge);
+  assert.equal(still.data.state, "editable");
+  assert.equal(still.data.draft.comments.length, 26);
 });

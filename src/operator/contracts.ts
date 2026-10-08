@@ -2378,6 +2378,7 @@ export const apiErrorSchema = z
           "conflict",
           "unavailable",
           "command-outcome-unknown",
+          "local-review-batch-too-large",
         ]),
         message: z.string().max(256),
         fieldPaths: z.array(z.string().max(128)).optional(),

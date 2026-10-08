@@ -68,9 +68,10 @@ import {
   type RetainedReviewAnchorStageRequest,
 } from "./retained-evidence.js";
 import { materialDigest } from "../core/delivery.js";
-import type {
-  LocalReviewRequest,
-  LocalReviewSyncIdentity,
+import {
+  LocalReviewBatchTooLargeError,
+  type LocalReviewRequest,
+  type LocalReviewSyncIdentity,
 } from "../core/local-review.js";
 import { ArtifactUnavailable, previewRecordedArtifact } from "./task-review.js";
 import {
@@ -250,7 +251,8 @@ export class OperatorApiError extends Error {
       | "conflict"
       | "unavailable"
       | "unauthenticated"
-      | "command-outcome-unknown",
+      | "command-outcome-unknown"
+      | "local-review-batch-too-large",
     readonly fieldPaths?: readonly string[],
   ) {
     super(code);
@@ -3694,7 +3696,34 @@ export class OperatorApi {
       draft.accessFingerprint &&
       draft.accessFingerprint !== policy.accessFingerprint
     ) {
-      store.purgeEditableDrafts(session.ownerKey, taskId);
+      // Keep the draft unless its text or anchors are now actually excluded.
+      const retained = this.service.retainedEvidence();
+      const anchors = draft.groups.flatMap((group) =>
+        group.anchorIds.map(
+          (anchorId) => retained.reviewAnchor(taskId, anchorId)?.anchor,
+        ),
+      );
+      const allowed =
+        draft.state === "editable" &&
+        [
+          draft.draft.summary,
+          ...draft.draft.comments.map((comment) => comment.body),
+        ].every((value) => this.safe(value, policy.excluded) === value) &&
+        anchors.every(
+          (anchor) =>
+            anchor !== undefined &&
+            (anchor.repositoryId === null ||
+              policy.authorizedRepositoryIds.includes(anchor.repositoryId)) &&
+            this.safe(anchor.path, policy.excluded) === anchor.path,
+        );
+      if (allowed)
+        store.refreshAccessFingerprint(
+          taskId,
+          session.ownerKey,
+          draft.version,
+          policy.accessFingerprint,
+        );
+      else store.purgeEditableDrafts(session.ownerKey, taskId);
       draft = store.readDraft(taskId, session.ownerKey);
     }
     return { data: draft, observedAt: Date.now() };
@@ -4545,6 +4574,8 @@ export class OperatorApi {
     } catch (error) {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)
         throw error;
+      if (error instanceof LocalReviewBatchTooLargeError)
+        throw new OperatorApiError(400, "local-review-batch-too-large");
       if (
         error instanceof Error &&
         /^(?:Feedback (?:source|result|work|criterion|artifact)|Local review|Review anchor)/.test(

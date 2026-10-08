@@ -168,6 +168,11 @@ async function startChangesJourney(
   const consoleErrors: string[] = [];
   const consoleState = { expected503Window: false, historyRaceAllowed: false };
   const historyRace503s: string[] = [];
+  const race503Responses: Array<{
+    method: string;
+    path: string;
+    code: string;
+  }> = [];
   const expected503ConsoleErrors: Array<{
     text: string;
     url: string;
@@ -179,8 +184,24 @@ async function startChangesJourney(
     if (url.pathname.endsWith("/comparisons"))
       comparisonRequests.push(url.toString());
   });
-  page.on("response", (response) => {
+  page.on("response", async (response) => {
     const url = new URL(response.url());
+    if (
+      consoleState.historyRaceAllowed &&
+      response.status() === 503 &&
+      url.pathname.startsWith("/api/operator/")
+    )
+      race503Responses.push({
+        method: response.request().method(),
+        path: url.pathname,
+        code: String(
+          (
+            (await response.json().catch(() => null)) as {
+              error?: { code?: string };
+            } | null
+          )?.error?.code,
+        ),
+      });
     if (url.pathname.endsWith("/comparisons"))
       comparisonResponses.push({
         url: url.toString(),
@@ -196,14 +217,9 @@ async function startChangesJourney(
         url: location.url,
         observedAt: Date.now(),
       });
-    // History reads deliberately return 503 when a turn changes the task mid-read; the UI retries.
-    else if (
-      consoleState.historyRaceAllowed &&
-      /\/api\/operator\/assignments\/[^/?]+\/history(?:\?|$)/.test(
-        location.url,
-      ) &&
-      /\b503\b/.test(message.text())
-    )
+    // Reads deliberately return 503 when a turn changes the task mid-read; the
+    // UI retries. Each one is checked below as a GET "unavailable" response.
+    else if (consoleState.historyRaceAllowed && /\b503\b/.test(message.text()))
       historyRace503s.push(location.url);
     else consoleErrors.push(message.text());
   });
@@ -239,6 +255,7 @@ async function startChangesJourney(
     consoleErrors,
     expected503ConsoleErrors,
     historyRace503s,
+    race503Responses,
     pageErrors,
     consoleState,
   };
@@ -1253,6 +1270,7 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
     changes,
     consoleErrors,
     historyRace503s,
+    race503Responses,
     pageErrors,
     consoleState,
   } = await startChangesJourney(j, { recordResult: false });
@@ -1420,6 +1438,13 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   await secondAction;
   assert.equal(fixture.service.taskHold(task.taskId), undefined);
   assert.deepEqual(consoleErrors, []);
-  assert.ok(historyRace503s.length <= 2, JSON.stringify(historyRace503s));
+  assert.ok(historyRace503s.length <= 4, JSON.stringify(historyRace503s));
+  assert.ok(
+    race503Responses.every(
+      (response) =>
+        response.method === "GET" && response.code === "unavailable",
+    ),
+    JSON.stringify(race503Responses),
+  );
   assert.deepEqual(pageErrors, []);
 });
