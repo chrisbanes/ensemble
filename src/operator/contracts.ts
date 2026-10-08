@@ -1500,6 +1500,27 @@ const localReviewOperationAnchorSchema = z.union([
     })
     .strict(),
 ]);
+/** Recorded reviews for a task, newest first; unsent operations are never listed. */
+export const localReviewListReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      reviews: z
+        .array(
+          z
+            .object({
+              operationId: uuid,
+              reviewId: uuid,
+              recipientAssignmentId: uuid,
+              eventId: uuid,
+              recordedAt: time,
+            })
+            .strict(),
+        )
+        .max(50),
+    })
+    .strict(),
+);
 export const localReviewOperationReadSchema = envelope(
   z
     .object({
@@ -1510,6 +1531,7 @@ export const localReviewOperationReadSchema = envelope(
       eventId: uuid.optional(),
       recipientAssignmentId: uuid.optional(),
       reason: z.string().max(128).optional(),
+      recordedAt: time.optional(),
       summary: z.string().max(16000).nullable().optional(),
       comments: z
         .array(
