@@ -198,6 +198,13 @@ export class OperatorWebBoundary {
       if ([...query].length) throw new OperatorApiError(400, "invalid-input");
       return this.api.readLocalReviewDraft(reviewDraft[1] ?? "", reviewSession);
     }
+    const localReviews = path.match(
+      /^\/api\/operator\/tasks\/([^/]+)\/local-reviews$/,
+    );
+    if (localReviews) {
+      if ([...query].length) throw new OperatorApiError(400, "invalid-input");
+      return this.api.readLocalReviewList(localReviews[1] ?? "", reviewSession);
+    }
     const localReview = path.match(
       /^\/api\/operator\/tasks\/([^/]+)\/local-reviews\/([^/]+)$/,
     );
@@ -371,7 +378,7 @@ export class OperatorWebBoundary {
         path,
       ) ||
       /^\/api\/operator\/tasks\/[^/]+\/review-anchors\/[^/]+$/.test(path) ||
-      /^\/api\/operator\/tasks\/[^/]+\/(?:review-draft|local-reviews\/[^/]+)$/.test(
+      /^\/api\/operator\/tasks\/[^/]+\/(?:review-draft|local-reviews(?:\/[^/]+)?)$/.test(
         path,
       ) ||
       /^\/api\/operator\/tasks\/[^/]+\/comparisons$/.test(path) ||

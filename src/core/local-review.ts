@@ -9,18 +9,20 @@ import { transaction, type Database } from "./store.js";
 import type { InboxEvent } from "./coordination.js";
 
 const uuid = z.string().uuid();
+const maxReviewItems = 32;
+const maxReviewMessageBytes = 16_000;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const commentSchema = z
   .object({
     commentId: uuid,
     body: z.string().trim().min(1).max(4000),
-    anchorGroupIds: z.array(uuid).max(32),
+    anchorGroupIds: z.array(uuid).max(maxReviewItems),
   })
   .strict();
 const draftSchema = z
   .object({
     summary: z.string().trim().max(4000),
-    comments: z.array(commentSchema).max(32),
+    comments: z.array(commentSchema).max(maxReviewItems),
   })
   .strict()
   .superRefine((draft, ctx) => {
@@ -36,7 +38,9 @@ const draftSchema = z
         code: "custom",
         message: "duplicate-local-review-reference",
       });
-    if (Buffer.byteLength(JSON.stringify(draft), "utf8") > 16_000)
+    if (
+      Buffer.byteLength(JSON.stringify(draft), "utf8") > maxReviewMessageBytes
+    )
       ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
   });
 const operationState = z.enum([
@@ -45,25 +49,26 @@ const operationState = z.enum([
   "rejected",
   "not-recorded",
 ]);
+const groupState = z.enum(["open", "sealed", "discarded"]);
 const frozenPayloadSchema = z
   .object({
     taskId: uuid,
     reviewId: uuid,
     summary: z.string().max(4000),
-    comments: z.array(commentSchema).max(32),
-    message: z.string().min(1).max(16_000),
+    comments: z.array(commentSchema).max(maxReviewItems),
+    message: z.string().min(1).max(maxReviewMessageBytes),
     groups: z
       .array(
         z
           .object({
             groupId: uuid,
             anchorDraftId: uuid,
-            anchorIds: z.array(uuid).min(1).max(32),
+            anchorIds: z.array(uuid).min(1).max(maxReviewItems),
             sealOperationId: uuid,
           })
           .strict(),
       )
-      .max(32),
+      .max(maxReviewItems),
   })
   .strict();
 type Draft = z.infer<typeof draftSchema>;
@@ -75,6 +80,14 @@ export class LocalReviewBatchTooLargeError extends Error {
   constructor() {
     super("Local review batch exceeds the message limit");
     this.name = "LocalReviewBatchTooLargeError";
+  }
+}
+
+/** Definitive pre-operation rejection: the recipient is no longer the active lead. */
+export class LocalReviewRecipientUnavailableError extends Error {
+  constructor() {
+    super("Local review recipient must be the accountable lead");
+    this.name = "LocalReviewRecipientUnavailableError";
   }
 }
 
@@ -129,6 +142,7 @@ export type LocalReviewResponse = {
   eventId?: string | undefined;
   recipientAssignmentId?: string | undefined;
   reason?: string | undefined;
+  recordedAt?: number | undefined;
 };
 
 export type LocalReviewRequest = {
@@ -166,6 +180,7 @@ function responseSchema() {
       eventId: uuid.optional(),
       recipientAssignmentId: uuid.optional(),
       reason: z.string().max(128).optional(),
+      recordedAt: z.number().int().nonnegative().optional(),
     })
     .strict();
 }
@@ -181,6 +196,8 @@ function asResponse(row: Row): LocalReviewResponse {
       ? {}
       : { recipientAssignmentId: String(row.recipientAssignmentId) }),
     ...(row.reason === null ? {} : { reason: String(row.reason) }),
+    // A recorded operation's updatedAt is the moment commitSend recorded it.
+    ...(row.state === "recorded" ? { recordedAt: Number(row.updatedAt) } : {}),
   });
 }
 
@@ -296,9 +313,9 @@ export class LocalReviewStore {
           groupId: String(group.groupId),
           anchorIds: z
             .array(uuid)
-            .max(32)
+            .max(maxReviewItems)
             .parse(JSON.parse(String(group.anchorIdsJson))),
-          state: String(group.state),
+          state: groupState.parse(group.state),
           submittedContextId:
             group.submittedContextId === null
               ? null
@@ -345,7 +362,7 @@ export class LocalReviewStore {
     return z
       .object({
         groupId: uuid,
-        anchorIds: z.array(uuid).max(32),
+        anchorIds: z.array(uuid).max(maxReviewItems),
         draftVersion: z.number().int().positive(),
       })
       .strict()
@@ -496,7 +513,7 @@ export class LocalReviewStore {
         );
         const expected = z
           .array(uuid)
-          .max(32)
+          .max(maxReviewItems)
           .parse(JSON.parse(String(group.anchorIdsJson)));
         if (
           !retained ||
@@ -539,7 +556,7 @@ export class LocalReviewStore {
         if (group.state === "open" && !refs.has(String(group.groupId)))
           this.discardGroup(input.taskId, group);
       const result = { version: next, state: "editable" as const };
-      this.saveDraftOperation("save", input, result, now);
+      this.recordDraftOperation("save", input, result, now);
       return result;
     });
   }
@@ -601,7 +618,7 @@ export class LocalReviewStore {
             now,
           );
       const result = { version: next, state: "discarded" as const };
-      this.saveDraftOperation("discard", input, result, now);
+      this.recordDraftOperation("discard", input, result, now);
       return result;
     });
   }
@@ -659,7 +676,7 @@ export class LocalReviewStore {
       const draft = draftSchema.parse(JSON.parse(String(draftRow.draftJson)));
       if (!draft.summary && draft.comments.length === 0)
         throw new Error("Local review draft is empty");
-      this.validateLead(request);
+      this.validateLead(request, true);
       const groupIds = draft.comments.flatMap(
         (comment) => comment.anchorGroupIds,
       );
@@ -678,7 +695,7 @@ export class LocalReviewStore {
         const anchorIds = z
           .array(uuid)
           .min(1)
-          .max(32)
+          .max(maxReviewItems)
           .parse(JSON.parse(String(group.anchorIdsJson)));
         const retainedDraft = this.retained.reviewAnchorDraft(
           request.taskId,
@@ -726,10 +743,13 @@ export class LocalReviewStore {
       // Excerpts are dropped as a whole before the batch is refused as too large.
       const withExcerpts = render(true);
       const message =
-        Buffer.byteLength(withExcerpts, "utf8") <= 16_000
+        Buffer.byteLength(withExcerpts, "utf8") <= maxReviewMessageBytes
           ? withExcerpts
           : render(false);
-      if (!message || Buffer.byteLength(message, "utf8") > 16_000)
+      if (
+        !message ||
+        Buffer.byteLength(message, "utf8") > maxReviewMessageBytes
+      )
         throw new LocalReviewBatchTooLargeError();
       const reviewId = randomUUID();
       const payload = frozenPayloadSchema.parse({
@@ -842,7 +862,7 @@ export class LocalReviewStore {
         const ids = z
           .array(uuid)
           .min(1)
-          .max(32)
+          .max(maxReviewItems)
           .parse(JSON.parse(String(stored.anchorIdsJson)));
         if (
           ids.length !== group.anchorIds.length ||
@@ -1041,6 +1061,24 @@ export class LocalReviewStore {
     });
   }
 
+  /** Recorded reviews only, newest first; unsent operations are never listed. */
+  listRecorded(taskId: string, limit = 50) {
+    uuid.parse(taskId);
+    return (
+      this.db
+        .prepare(`SELECT operationId,reviewId,recipientAssignmentId,eventId,updatedAt
+        FROM coordination_local_review_operations WHERE taskId=? AND state='recorded'
+        ORDER BY updatedAt DESC,rowid DESC LIMIT ?`)
+        .all(taskId, limit) as Row[]
+    ).map((row) => ({
+      operationId: String(row.operationId),
+      reviewId: String(row.reviewId),
+      recipientAssignmentId: String(row.recipientAssignmentId),
+      eventId: String(row.eventId),
+      recordedAt: Number(row.updatedAt),
+    }));
+  }
+
   operationMaterial(operationId: string) {
     const row = this.operation(operationId);
     if (!row) return undefined;
@@ -1136,13 +1174,19 @@ export class LocalReviewStore {
     });
   }
 
-  private validateLead(request: LocalReviewRequest): void {
+  private validateLead(
+    request: LocalReviewRequest,
+    beforeOperation = false,
+  ): void {
     const lead = this.leadIdentity(
       request.taskId,
       request.recipientAssignmentId,
     );
+    // Only before the operation row exists is this a definitive no-delivery rejection.
     if (!lead)
-      throw new Error("Local review recipient must be the accountable lead");
+      throw beforeOperation
+        ? new LocalReviewRecipientUnavailableError()
+        : new Error("Local review recipient must be the accountable lead");
     if (lead.version !== request.expectedAssignmentVersion)
       throw new Error("Local review recipient assignment version conflict");
   }
@@ -1163,7 +1207,7 @@ export class LocalReviewStore {
   private operation(operationId: string) {
     return this.one(
       `SELECT operationId,taskId,ownerKey,requestHash,requestJson,payloadJson,payloadHash,
-      reviewId,accessFingerprint,recipientAssignmentId,assignmentVersion,draftVersion,eventId,state,reason
+      reviewId,accessFingerprint,recipientAssignmentId,assignmentVersion,draftVersion,eventId,state,reason,updatedAt
       FROM coordination_local_review_operations WHERE operationId=?`,
       operationId,
     );
@@ -1243,7 +1287,7 @@ export class LocalReviewStore {
       .parse(JSON.parse(String(prior.responseJson)));
   }
 
-  private saveDraftOperation(
+  private recordDraftOperation(
     scope: "save" | "discard",
     input: {
       commandKey: string;

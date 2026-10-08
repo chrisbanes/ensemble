@@ -176,59 +176,6 @@ const operatorMessageSchema = z
     reference: feedbackReferenceSchema.optional(),
   })
   .strict();
-const localReviewCommentSchema = z
-  .object({
-    commentId: uuid,
-    body: z.string().trim().min(1).max(4000),
-    anchorGroupIds: z.array(uuid).max(32),
-  })
-  .strict();
-const localReviewDraftContentSchema = z
-  .object({
-    summary: z.string().trim().max(4000),
-    comments: z.array(localReviewCommentSchema).max(32),
-  })
-  .strict()
-  .superRefine((draft, ctx) => {
-    const comments = draft.comments.map((comment) => comment.commentId);
-    const groups = draft.comments.flatMap((comment) => comment.anchorGroupIds);
-    if (
-      new Set(comments).size !== comments.length ||
-      new Set(groups).size !== groups.length
-    )
-      ctx.addIssue({
-        code: "custom",
-        message: "duplicate-local-review-reference",
-      });
-    if (Buffer.byteLength(JSON.stringify(draft), "utf8") > 16_000)
-      ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
-  });
-const localReviewRequestSchema = z
-  .object({
-    key: uuid,
-    taskId: uuid,
-    expectedDraftVersion: z.number().int().nonnegative().safe(),
-    recipientAssignmentId: uuid,
-    expectedAssignmentVersion: z.number().int().positive().safe(),
-  })
-  .strict();
-const localReviewOperationStateSchema = z.enum([
-  "prepared",
-  "recorded",
-  "rejected",
-  "not-recorded",
-]);
-const localReviewOperationResponseSchema = z
-  .object({
-    operationId: uuid,
-    taskId: uuid,
-    reviewId: uuid,
-    state: localReviewOperationStateSchema,
-    eventId: uuid.optional(),
-    recipientAssignmentId: uuid.optional(),
-    reason: z.string().max(128).optional(),
-  })
-  .strict();
 const routingFallbackAttentionSchema = z
   .object({
     routingOperationId: uuid,
@@ -390,19 +337,6 @@ export interface InboxEvent {
   payload: string;
   createdAt: number;
 }
-
-export type LocalReviewDraftContent = z.infer<
-  typeof localReviewDraftContentSchema
->;
-export type LocalReviewOperationResponse = z.infer<
-  typeof localReviewOperationResponseSchema
->;
-export type LocalReviewSyncIdentity = {
-  projectId: string;
-  taskVersion: number;
-  visibility: string;
-  workspaceVisibility: string;
-};
 
 export interface RoutingFallbackAttention {
   routingOperationId: string;

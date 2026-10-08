@@ -70,6 +70,7 @@ import {
 import { materialDigest } from "../core/delivery.js";
 import {
   LocalReviewBatchTooLargeError,
+  LocalReviewRecipientUnavailableError,
   type LocalReviewRequest,
   type LocalReviewSyncIdentity,
 } from "../core/local-review.js";
@@ -252,7 +253,8 @@ export class OperatorApiError extends Error {
       | "unavailable"
       | "unauthenticated"
       | "command-outcome-unknown"
-      | "local-review-batch-too-large",
+      | "local-review-batch-too-large"
+      | "local-review-recipient-unavailable",
     readonly fieldPaths?: readonly string[],
   ) {
     super(code);
@@ -3686,10 +3688,7 @@ export class OperatorApi {
     context?: OperatorReviewSessionContext,
   ) {
     const session = this.requireReviewSession(context);
-    const policy = await this.retainedEvidencePolicy(taskId);
-    if (!policy) throw new OperatorApiError(503, "unavailable");
-    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
-    this.assertReviewPolicy(taskId, policy);
+    const policy = await this.currentReviewPolicy(taskId, session);
     const store = this.service.localReviews();
     let draft = store.readDraft(taskId, session.ownerKey);
     if (
@@ -3731,6 +3730,24 @@ export class OperatorApi {
       draft = store.readDraft(taskId, session.ownerKey);
     }
     return { data: draft, observedAt: Date.now() };
+  }
+
+  async readLocalReviewList(
+    taskId: string,
+    context?: OperatorReviewSessionContext,
+  ) {
+    const session = this.requireReviewSession(context);
+    uuid.parse(taskId);
+    const policy = await this.retainedEvidencePolicy(taskId);
+    if (!policy) throw new OperatorApiError(404, "not-found");
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    this.assertReviewPolicy(taskId, policy);
+    const reviews = this.service.localReviews().listRecorded(taskId);
+    const latest = await this.retainedEvidencePolicy(taskId);
+    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
+    if (!this.sameRetainedPolicy(latest, policy))
+      throw new OperatorApiError(503, "unavailable");
+    return { data: { taskId, reviews }, observedAt: Date.now() };
   }
 
   async readLocalReviewOperation(
@@ -3885,10 +3902,7 @@ export class OperatorApi {
     if (c.type === "review.send.reconcile")
       return this.reconcileLocalReview(c, session);
 
-    const policy = await this.retainedEvidencePolicy(c.taskId);
-    if (!policy) throw new OperatorApiError(503, "unavailable");
-    if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
-    this.assertReviewPolicy(c.taskId, policy);
+    const policy = await this.currentReviewPolicy(c.taskId, session);
     if (c.type === "review.draft.save") {
       const values = [
         c.draft.summary,
@@ -3943,33 +3957,15 @@ export class OperatorApi {
     c: Extract<LocalReviewCommand, { type: "review.send" }>,
     session: OperatorReviewSessionContext,
   ) {
-    const request: LocalReviewRequest = {
-      key: c.key,
-      taskId: c.taskId,
-      expectedDraftVersion: c.expectedDraftVersion,
-      recipientAssignmentId: c.recipientAssignmentId,
-      expectedAssignmentVersion: c.expectedAssignmentVersion,
-    };
-    const requestHash = materialDigest({
-      taskId: c.taskId,
-      expectedDraftVersion: c.expectedDraftVersion,
-      recipientAssignmentId: c.recipientAssignmentId,
-      expectedAssignmentVersion: c.expectedAssignmentVersion,
-    });
+    const { request, requestHash } = this.localReviewRequest(c);
     this.reviewSyncIdentity(c.taskId);
     if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
     const store = this.service.localReviews();
     const active = this.activeReviewSends.get(c.key);
     if (active) {
-      const policy = await this.currentReviewPolicy(c.taskId, session);
+      await this.currentReviewPolicy(c.taskId, session);
       if (active !== requestHash) throw new OperatorApiError(409, "conflict");
-      const current = store.operationMaterial(c.key);
-      if (
-        current?.response.taskId === c.taskId &&
-        current.requestHash === requestHash
-      )
-        return this.localReviewReceipt(c.key, current.response);
-      throw new OperatorApiError(503, "command-outcome-unknown");
+      return this.activeLocalReviewReceipt(c, requestHash);
     }
     const existing = store.operationMaterial(c.key);
     if (
@@ -4001,29 +3997,16 @@ export class OperatorApi {
         throw new OperatorApiError(503, "command-outcome-unknown");
       const initial = await this.currentReviewPolicy(c.taskId, session);
       if (prepared.accessFingerprint !== initial.accessFingerprint) {
-        const rejected = store.rejectSend(c.key, requestHash, "policy-changed");
-        if (!rejected)
-          throw new OperatorApiError(503, "command-outcome-unknown");
-        return this.localReviewReceipt(c.key, rejected);
+        return this.rejectLocalReview(c.key, requestHash, "policy-changed");
       }
       if (!this.reviewTaskIsOpen(c.taskId)) {
-        const rejected = store.rejectSend(c.key, requestHash, "task-not-open");
-        if (!rejected)
-          throw new OperatorApiError(503, "command-outcome-unknown");
-        return this.localReviewReceipt(c.key, rejected);
+        return this.rejectLocalReview(c.key, requestHash, "task-not-open");
       }
       if (
         this.safe(prepared.payload.message, initial.excluded) !==
         prepared.payload.message
       ) {
-        const rejected = store.rejectSend(
-          c.key,
-          requestHash,
-          "excluded-content",
-        );
-        if (!rejected)
-          throw new OperatorApiError(503, "command-outcome-unknown");
-        return this.localReviewReceipt(c.key, rejected);
+        return this.rejectLocalReview(c.key, requestHash, "excluded-content");
       }
       for (const group of prepared.payload.groups)
         for (const anchorId of group.anchorIds) {
@@ -4038,32 +4021,24 @@ export class OperatorApi {
           }
           if (!session.current())
             throw new OperatorApiError(401, "unauthenticated");
-          if (read.data.state === "unavailable") {
-            if (read.data.reason === "excluded") {
-              const rejected = store.rejectSend(
-                c.key,
-                requestHash,
-                "excluded-anchor",
-              );
-              if (!rejected)
-                throw new OperatorApiError(503, "command-outcome-unknown");
-              return this.localReviewReceipt(c.key, rejected);
-            }
-            return this.localReviewReceipt(c.key, prepared.response);
-          }
+          if (read.data.state === "unavailable")
+            return this.rejectLocalReview(
+              c.key,
+              requestHash,
+              read.data.reason === "excluded"
+                ? "excluded-anchor"
+                : "anchor-unavailable",
+            );
           if (
             read.data.state === "available" &&
             this.safe(read.data.anchor.path, initial.excluded) !==
               read.data.anchor.path
           ) {
-            const rejected = store.rejectSend(
+            return this.rejectLocalReview(
               c.key,
               requestHash,
               "excluded-anchor",
             );
-            if (!rejected)
-              throw new OperatorApiError(503, "command-outcome-unknown");
-            return this.localReviewReceipt(c.key, rejected);
           }
         }
       const latest = await this.retainedEvidencePolicy(c.taskId);
@@ -4076,14 +4051,11 @@ export class OperatorApi {
         prepared.accessFingerprint !== latest.accessFingerprint ||
         !this.reviewTaskIsOpen(c.taskId)
       ) {
-        const rejected = store.rejectSend(
+        return this.rejectLocalReview(
           c.key,
           requestHash,
           this.reviewTaskIsOpen(c.taskId) ? "policy-changed" : "task-not-open",
         );
-        if (!rejected)
-          throw new OperatorApiError(503, "command-outcome-unknown");
-        return this.localReviewReceipt(c.key, rejected);
       }
       let committed: ReturnType<typeof store.commitSend>;
       try {
@@ -4130,19 +4102,7 @@ export class OperatorApi {
     c: Extract<LocalReviewCommand, { type: "review.send.reconcile" }>,
     session: OperatorReviewSessionContext,
   ) {
-    const request: LocalReviewRequest = {
-      key: c.key,
-      taskId: c.taskId,
-      expectedDraftVersion: c.expectedDraftVersion,
-      recipientAssignmentId: c.recipientAssignmentId,
-      expectedAssignmentVersion: c.expectedAssignmentVersion,
-    };
-    const requestHash = materialDigest({
-      taskId: c.taskId,
-      expectedDraftVersion: c.expectedDraftVersion,
-      recipientAssignmentId: c.recipientAssignmentId,
-      expectedAssignmentVersion: c.expectedAssignmentVersion,
-    });
+    const { request, requestHash } = this.localReviewRequest(c);
     this.reviewSyncIdentity(c.taskId);
     if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
     const store = this.service.localReviews();
@@ -4150,15 +4110,8 @@ export class OperatorApi {
     if (active) {
       const policy = await this.currentReviewPolicy(c.taskId, session);
       if (active !== requestHash) throw new OperatorApiError(409, "conflict");
-      if (this.activeReviewSends.get(c.key) === requestHash) {
-        const current = store.operationMaterial(c.key);
-        if (
-          current?.response.taskId === c.taskId &&
-          current.requestHash === requestHash
-        )
-          return this.localReviewReceipt(c.key, current.response);
-        throw new OperatorApiError(503, "command-outcome-unknown");
-      }
+      if (this.activeReviewSends.get(c.key) === requestHash)
+        return this.activeLocalReviewReceipt(c, requestHash);
       const result = store.reconcileSend({
         request,
         ownerKey: session.ownerKey,
@@ -4173,13 +4126,7 @@ export class OperatorApi {
     if (activeAfterPolicy) {
       if (activeAfterPolicy !== requestHash)
         throw new OperatorApiError(409, "conflict");
-      const current = store.operationMaterial(c.key);
-      if (
-        current?.response.taskId === c.taskId &&
-        current.requestHash === requestHash
-      )
-        return this.localReviewReceipt(c.key, current.response);
-      throw new OperatorApiError(503, "command-outcome-unknown");
+      return this.activeLocalReviewReceipt(c, requestHash);
     }
     const result = store.reconcileSend({
       request,
@@ -4189,6 +4136,44 @@ export class OperatorApi {
       currentAccessFingerprint: policy.accessFingerprint,
     });
     return this.localReviewReceipt(c.key, result);
+  }
+
+  private localReviewRequest(
+    c: Extract<
+      LocalReviewCommand,
+      { type: "review.send" | "review.send.reconcile" }
+    >,
+  ) {
+    const material = {
+      taskId: c.taskId,
+      expectedDraftVersion: c.expectedDraftVersion,
+      recipientAssignmentId: c.recipientAssignmentId,
+      expectedAssignmentVersion: c.expectedAssignmentVersion,
+    };
+    const request: LocalReviewRequest = { key: c.key, ...material };
+    return { request, requestHash: materialDigest(material) };
+  }
+
+  /** Another request of this process is mid-send: report what is stored without touching it. */
+  private activeLocalReviewReceipt(
+    c: { key: string; taskId: string },
+    requestHash: string,
+  ) {
+    const current = this.service.localReviews().operationMaterial(c.key);
+    if (
+      current?.response.taskId === c.taskId &&
+      current.requestHash === requestHash
+    )
+      return this.localReviewReceipt(c.key, current.response);
+    throw new OperatorApiError(503, "command-outcome-unknown");
+  }
+
+  private rejectLocalReview(key: string, requestHash: string, reason: string) {
+    const rejected = this.service
+      .localReviews()
+      .rejectSend(key, requestHash, reason);
+    if (!rejected) throw new OperatorApiError(503, "command-outcome-unknown");
+    return this.localReviewReceipt(key, rejected);
   }
 
   private localReviewReceipt(
@@ -4580,6 +4565,8 @@ export class OperatorApi {
         throw error;
       if (error instanceof LocalReviewBatchTooLargeError)
         throw new OperatorApiError(400, "local-review-batch-too-large");
+      if (error instanceof LocalReviewRecipientUnavailableError)
+        throw new OperatorApiError(409, "local-review-recipient-unavailable");
       if (
         error instanceof Error &&
         /^(?:Feedback (?:source|result|work|criterion|artifact)|Local review|Review anchor)/.test(

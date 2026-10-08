@@ -1469,7 +1469,7 @@ export const localReviewDraftReadSchema = envelope(
             .object({
               groupId: uuid,
               anchorIds: z.array(uuid).max(32),
-              state: z.string().min(1).max(32),
+              state: z.enum(["open", "sealed", "discarded"]),
               submittedContextId: uuid.nullable(),
               createdAt: time,
             })
@@ -2401,6 +2401,7 @@ export const apiErrorSchema = z
           "unavailable",
           "command-outcome-unknown",
           "local-review-batch-too-large",
+          "local-review-recipient-unavailable",
         ]),
         message: z.string().max(256),
         fieldPaths: z.array(z.string().max(128)).optional(),

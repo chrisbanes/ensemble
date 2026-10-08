@@ -723,8 +723,18 @@ state and never substitute other bytes.
   is refused with `local-review-batch-too-large` before any operation is
   recorded, and the draft stays editable.
   `GET /api/operator/tasks/{taskId}/local-reviews/{operationId}` shows the sent
-  review with original anchor context under current access policy. Text from a
+  review with original anchor context under current access policy, and a
+  recorded one carries `recordedAt`, the time it was recorded. Text from a
   rejected or not-recorded operation is shown only to its own session.
+  `GET /api/operator/tasks/{taskId}/local-reviews` (no query parameters) lists
+  up to 50 recorded reviews newest first, each with `operationId`, `reviewId`,
+  `recipientAssignmentId`, `eventId` and `recordedAt`. Unsent operations are
+  never listed. Both reads apply the current session and access policy.
+- Definitive no-delivery outcomes keep the draft editable. A frozen operation
+  whose anchor is unavailable when sent is rejected with `anchor-unavailable`
+  (an excluded anchor with `excluded-anchor`). When the named recipient is no
+  longer the lead's pending or running assignment, the send is refused with
+  `local-review-recipient-unavailable` (409) before any operation exists.
 - Review delivery queues one local operator message and receipt. It never calls
   GitHub or changes approval, readiness, completion, merge authority or holds.
   As with ordinary messages, a lead that has completed its assignment cannot

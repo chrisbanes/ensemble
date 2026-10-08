@@ -676,6 +676,8 @@ function publicMessage(code: string): string {
       "Command outcome is unknown. Reconcile the same key and input.",
     "local-review-batch-too-large":
       "The review is too large to send. Shorten or remove comments.",
+    "local-review-recipient-unavailable":
+      "The project lead cannot receive reviews now.",
   };
   return messages[code] ?? "Request unavailable.";
 }

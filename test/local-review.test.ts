@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { materialDigest } from "../src/core/delivery.js";
+import { localReviewListReadSchema } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import type { OperatorReviewSessionContext } from "../src/standalone/operator-api.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
@@ -969,4 +970,180 @@ test("large reviews drop excerpts before a definitive too-large rejection", asyn
   const still = await api.readLocalReviewDraft(task.taskId, tooLarge);
   assert.equal(still.data.state, "editable");
   assert.equal(still.data.draft.comments.length, 26);
+});
+
+test("the sent list holds only recorded reviews, newest first, with recordedAt, over HTTP too", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Sent review list");
+  const api = new OperatorApi(f.service, []);
+  const sendOne = async (label: string) => {
+    const owner = session();
+    const draft = await stageDraft(f, api, task, owner, [`${label}.txt`]);
+    const key = randomUUID();
+    const receipt = (await api.execute(
+      requestFor(
+        task,
+        key,
+        draft.version,
+        Number(f.service.domain().assignment(task.assignmentId).version),
+      ),
+      owner,
+    )) as { state: string; eventId: string };
+    assert.equal(receipt.state, "recorded");
+    return { key, eventId: receipt.eventId, owner };
+  };
+  const reader = session();
+  assert.deepEqual((await api.readLocalReviewList(task.taskId, reader)).data, {
+    taskId: task.taskId,
+    reviews: [],
+  });
+  const first = await sendOne("first");
+  const second = await sendOne("second");
+  // An unsent operation never appears in the list.
+  f.seedPersistedState((db) => {
+    db.prepare(
+      `INSERT INTO coordination_local_review_operations
+      (operationId,taskId,ownerKey,requestHash,requestJson,reviewId,recipientAssignmentId,
+       assignmentVersion,draftVersion,state,reason,createdAt,updatedAt)
+      SELECT ?,taskId,ownerKey,?,requestJson,?,recipientAssignmentId,assignmentVersion,
+        draftVersion,'rejected','policy-changed',createdAt,updatedAt+1000
+      FROM coordination_local_review_operations WHERE operationId=?`,
+    ).run(randomUUID(), randomUUID(), randomUUID(), second.key);
+  });
+
+  const listed = (await api.readLocalReviewList(task.taskId, reader)).data;
+  assert.deepEqual(
+    listed.reviews.map((review) => [review.operationId, review.eventId]),
+    [
+      [second.key, second.eventId],
+      [first.key, first.eventId],
+    ],
+  );
+  const single = (
+    await api.readLocalReviewOperation(task.taskId, first.key, reader)
+  ).data;
+  assert.equal(single.recordedAt, listed.reviews[1]?.recordedAt);
+  assert.ok((single.recordedAt ?? 0) > 0);
+  await assert.rejects(
+    api.readLocalReviewList(task.taskId, {
+      ownerKey: randomUUID(),
+      current: () => false,
+    }),
+    (error: unknown) => (error as { status?: number }).status === 401,
+  );
+
+  const web = await f.startWeb();
+  t.after(() => web.close());
+  let response = await fetch(`${web.origin}/api/operator/session`);
+  let cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "";
+  const csrfToken = ((await response.json()) as { csrfToken: string })
+    .csrfToken;
+  const path = `${web.origin}/api/operator/tasks/${task.taskId}/local-reviews`;
+  assert.equal((await fetch(path)).status, 401);
+  response = await fetch(`${web.origin}/api/operator/login`, {
+    method: "POST",
+    headers: {
+      cookie,
+      origin: web.origin,
+      "x-csrf-token": csrfToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ password: web.password }),
+  });
+  assert.equal(response.status, 200);
+  cookie = response.headers.get("set-cookie")?.split(";")[0] ?? cookie;
+  const read = await fetch(path, { headers: { cookie } });
+  assert.equal(read.status, 200);
+  const body = localReviewListReadSchema.parse(await read.json());
+  assert.deepEqual(body.data, listed);
+  assert.equal(
+    (await fetch(`${path}?limit=1`, { headers: { cookie } })).status,
+    400,
+  );
+});
+
+test("an unavailable anchor at send is a definitive rejection that keeps the draft editable", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Unavailable anchor at send");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["gone.txt"]);
+  const key = randomUUID();
+  const readAnchor = api.readRetainedReviewAnchor.bind(api);
+  api.readRetainedReviewAnchor = async (taskId, anchorId) => {
+    const read = await readAnchor(taskId, anchorId);
+    return {
+      ...read,
+      data: {
+        taskId,
+        anchorId,
+        state: "unavailable" as const,
+        reason: "unavailable" as const,
+      },
+    };
+  };
+  const receipt = (await api.execute(
+    requestFor(
+      task,
+      key,
+      draft.version,
+      Number(f.service.domain().assignment(task.assignmentId).version),
+    ),
+    owner,
+  )) as { state: string };
+  assert.equal(receipt.state, "rejected");
+  assert.equal(
+    f.service.localReviews().operationMaterial(key)?.response.reason,
+    "anchor-unavailable",
+  );
+  const after = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(after.data.state, "editable");
+  assert.deepEqual(after.data.draft, draft.draft);
+  assert.deepEqual(counts(f, task.taskId, key), {
+    events: 0,
+    receipts: 0,
+    continuations: 0,
+    submissions: 0,
+  });
+  assert.deepEqual(
+    (await api.readLocalReviewList(task.taskId, owner)).data.reviews,
+    [],
+  );
+});
+
+test("a lead that can no longer receive reviews is a definitive rejection before any operation", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Lead no longer active");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["lead.txt"]);
+  const version = Number(
+    f.service.domain().assignment(task.assignmentId).version,
+  );
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "UPDATE domain_assignments SET state='completed' WHERE id=?",
+    ).run(task.assignmentId);
+  });
+  const key = randomUUID();
+  await assert.rejects(
+    api.execute(requestFor(task, key, draft.version, version), owner),
+    (error: unknown) =>
+      (error as { status?: number }).status === 409 &&
+      (error as { code?: string }).code ===
+        "local-review-recipient-unavailable",
+  );
+  assert.equal(f.service.localReviews().operationMaterial(key), undefined);
+  assert.deepEqual(counts(f, task.taskId, key), {
+    events: 0,
+    receipts: 0,
+    continuations: 0,
+    submissions: 0,
+  });
+  const after = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(after.data.state, "editable");
+  assert.deepEqual(after.data.draft, draft.draft);
 });
