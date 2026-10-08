@@ -155,8 +155,10 @@ test("production local review composes exact multi-origin anchors and sends one 
     .getByRole("button", { name: "Save comment", exact: true })
     .click();
   await fileComposer.waitFor({ state: "detached" });
+  // Focus returns to the invoking line (lines 2–3; the current line is 3).
   await page.waitForFunction(
-    () => document.activeElement?.textContent === "Add review comment",
+    () =>
+      document.activeElement?.getAttribute("aria-label") === "Line 3: third",
   );
 
   // Escape cancels without saving and restores focus.
@@ -164,8 +166,10 @@ test("production local review composes exact multi-origin anchors and sends one 
   await page.keyboard.type("discarded text");
   await page.keyboard.press("Escape");
   await fileComposer.waitFor({ state: "detached" });
+  // Focus returns to the invoking line (lines 2–3; the current line is 3).
   await page.waitForFunction(
-    () => document.activeElement?.textContent === "Add review comment",
+    () =>
+      document.activeElement?.getAttribute("aria-label") === "Line 3: third",
   );
 
   // Changes: Before deleted lines from an exact Uncommitted comparison.
@@ -357,12 +361,12 @@ test("local review keeps focus on the selection, the next comment and the headin
   await commentOnLine(page, "Line 2: second", "Second note");
   await commentOnLine(page, "Line 3: third", "Third note");
 
-  // Saving and Escape both return to the origin's line, else its Add button.
+  // Saving and Escape both return focus to the invoking line.
   const files = page.locator("#files");
   await page.waitForFunction(
     () =>
-      document.activeElement?.hasAttribute("data-review-return") ||
-      document.activeElement?.hasAttribute("data-review-origin"),
+      document.activeElement?.hasAttribute("data-review-return") === true &&
+      document.activeElement?.textContent?.includes("third") === true,
   );
   await files
     .getByRole("button", { name: "Add review comment", exact: true })
@@ -373,8 +377,8 @@ test("local review keeps focus on the selection, the next comment and the headin
   });
   await page.waitForFunction(
     () =>
-      document.activeElement?.hasAttribute("data-review-return") ||
-      document.activeElement?.hasAttribute("data-review-origin"),
+      document.activeElement?.hasAttribute("data-review-return") === true &&
+      document.activeElement?.textContent?.includes("third") === true,
   );
 
   const review = page.locator("#local-review");

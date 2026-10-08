@@ -3739,7 +3739,7 @@ export class OperatorApi {
     const session = this.requireReviewSession(context);
     uuid.parse(taskId);
     const policy = await this.retainedEvidencePolicy(taskId);
-    if (!policy) throw new OperatorApiError(404, "not-found");
+    if (!policy) throw new OperatorApiError(503, "unavailable");
     if (!session.current()) throw new OperatorApiError(401, "unauthenticated");
     this.assertReviewPolicy(taskId, policy);
     const reviews = this.service.localReviews().listRecorded(taskId);
