@@ -310,7 +310,7 @@ export class OperatorWebBoundary {
     if (path === "/api/operator/source-observations")
       return this.api.readSourceObservations();
     if (path === "/api/operator/workspace") return this.api.readWorkspace();
-    let match = path.match(/^\/api\/operator\/projects\/([^/]+)$/);
+    const match = path.match(/^\/api\/operator\/projects\/([^/]+)$/);
     if (match) return this.api.readProject(match[1] ?? "");
     return undefined;
   }
