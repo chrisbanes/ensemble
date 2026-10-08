@@ -207,6 +207,43 @@ test("runtime overview reports effective access limits without exposing configur
   }
 });
 
+test("runtime overview shows the restart notice only after a runtime failure", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-runtime-failure-"));
+  let fail!: (error: Error) => void;
+  const service = new StandaloneService(join(directory, "data"), () => ({
+    ...runtime,
+    onFailure(listener: (error: Error) => void) {
+      fail = listener;
+    },
+  }));
+  t.after(async () => {
+    await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await service.start();
+  const route = runtimeOperatorRoutes(service).find(
+    (candidate) => candidate.method === "GET" && candidate.path === "/runtime",
+  );
+  assert.ok(route);
+  const read = async () => {
+    const page = await route.handler({
+      params: {},
+      fields: {},
+      csrfToken: "test-token",
+    });
+    assert.equal(page.kind, "html");
+    return page.kind === "html" ? page.body : "";
+  };
+  assert.doesNotMatch(await read(), /Codex runtime unavailable/);
+  fail(new Error("Runtime lost <script>"));
+  const body = await read();
+  assert.match(
+    body,
+    /<p role="alert">Codex runtime unavailable — restart the service<\/p>/,
+  );
+  assert.doesNotMatch(body, /Runtime lost|<script>/);
+});
+
 test("runtime details distinguish selected, queued, and running assignments across projects", async (t) => {
   const directory = mkdtempSync(
     join(tmpdir(), "ensemble-runtime-status-matrix-"),

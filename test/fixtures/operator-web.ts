@@ -52,6 +52,7 @@ export class OperatorFixtureRuntime implements Runtime {
   private tool:
     | ((call: RuntimeToolCall) => Promise<RuntimeToolResult>)
     | undefined;
+  private failureListener: ((error: Error) => void) | undefined;
   async start() {}
   async stop() {
     for (const done of this.outcomes.values()) done("completed");
@@ -74,6 +75,12 @@ export class OperatorFixtureRuntime implements Runtime {
     return new Promise((done) => this.outcomes.set(turn, done));
   }
   onUnexpectedRequest() {}
+  onFailure(listener: (error: Error) => void) {
+    this.failureListener = listener;
+  }
+  crash() {
+    this.failureListener?.(new Error("Fixture runtime lost"));
+  }
   onToolCall(listener: (call: RuntimeToolCall) => Promise<RuntimeToolResult>) {
     this.tool = listener;
   }

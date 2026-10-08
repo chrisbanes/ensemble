@@ -528,6 +528,78 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   assert.equal(f.runtime.turns, 0);
 });
 
+test("React shell announces an unavailable Codex runtime without a reload", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 820 },
+  });
+  const page = await context.newPage();
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.clock.install();
+  await page.goto(`${web.origin}/login`);
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  const banner = page
+    .getByRole("alert")
+    .filter({ hasText: "Codex runtime unavailable — restart the service" });
+  await page.getByText("No projects yet.", { exact: true }).first().waitFor();
+  assert.equal(await banner.count(), 0);
+  f.runtime.crash();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await banner.waitFor();
+  assert.equal(await banner.count(), 1);
+});
+
+test("React shell Inbox poll surfaces a runtime failure on its own", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 820 },
+  });
+  const page = await context.newPage();
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.clock.install();
+  await page.goto(`${web.origin}/login`);
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  const loaded = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operator/workspace"),
+  );
+  await page.goto(`${web.origin}/app/inbox`);
+  await loaded;
+  await page.getByRole("heading", { name: "Inbox", exact: true }).waitFor();
+  const banner = page
+    .getByRole("alert")
+    .filter({ hasText: "Codex runtime unavailable — restart the service" });
+  assert.equal(await banner.count(), 0);
+  f.runtime.crash();
+  await page.clock.fastForward(16000);
+  await banner.waitFor();
+});
+
 nodeTest(
   "failed browser assertion surfaces without listener/client cleanup deadlock",
   {

@@ -111,6 +111,13 @@ plist and manually bootstrap it, then verify the loopback operator page and
 service state. This is the documented fallback only: this procedure did not
 reboot the host and does not claim unattended pre-login service startup.
 
+If the Codex App Server process exits while the service runs, the operator
+workspace and `/runtime` page show "Codex runtime unavailable — restart the
+service". Queued requests stay queued with that reason and nothing new is
+admitted; turns already running are held for recovery. Nothing restarts the
+App Server automatically, so recover with `launchctl kickstart -k` on the exact
+label; startup reconciliation and the usual admission checks then apply.
+
 ## Offline snapshot and restore
 
 Stop the exact per-user job with `launchctl bootout`, wait for its process to
