@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import {
   CodexRuntime,
   type RuntimeConversationEvent,
@@ -282,6 +282,55 @@ test("failure evidence is exact-turn-bound and only classifies the retry allowli
     "unknown",
   );
   assert.equal(evidence("another-thread", "overloaded"), undefined);
+});
+
+test("a bound turn wait has no fixed deadline and still resolves on its terminal", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread-long", "turn-long");
+  const child = {} as ChildProcessWithoutNullStreams;
+  const internal = runtime as unknown as {
+    child: ChildProcessWithoutNullStreams;
+    receive(child: ChildProcessWithoutNullStreams, line: string): void;
+  };
+  internal.child = child;
+
+  let settled = false;
+  const wait = runtime.waitForTurn("thread-long", "turn-long").then(
+    (status) => {
+      settled = true;
+      return status;
+    },
+    (error: unknown) => {
+      settled = true;
+      throw error;
+    },
+  );
+  mock.timers.tick(181_000);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  internal.receive(
+    child,
+    JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-long",
+        turn: { id: "turn-long", status: "completed" },
+      },
+    }),
+  );
+  assert.equal(await wait, "completed");
+});
+
+test("a runtime failure rejects a pending turn wait", async () => {
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread-lost", "turn-lost");
+  const wait = runtime.waitForTurn("thread-lost", "turn-lost");
+  (runtime as unknown as { fail(error: Error): void }).fail(
+    new Error("Runtime lost"),
+  );
+  await assert.rejects(wait, /Runtime lost/);
 });
 
 test("error notifications do not settle an exact turn before its terminal", async () => {

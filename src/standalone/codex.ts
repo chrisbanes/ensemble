@@ -1747,12 +1747,7 @@ export class CodexRuntime implements Runtime {
         cleanup();
         reject(error);
       };
-      const timer = setTimeout(
-        () => onFailure(new Error("Turn terminal status timed out")),
-        180000,
-      );
       const cleanup = () => {
-        clearTimeout(timer);
         this.events.off("turn/completed", onTerminal);
         this.events.off("failure", onFailure);
       };
