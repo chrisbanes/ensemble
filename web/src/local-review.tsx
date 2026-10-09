@@ -10,6 +10,11 @@ import {
 } from "../../src/operator/contracts.js";
 import type { CommandState, OperatorClient } from "./api.js";
 import { Button, StatusBadge } from "./components.js";
+import {
+  leadAwaitingRecoveryNotice,
+  leadResumeNotice,
+  type LeadFeedbackMode,
+} from "./lead-feedback.js";
 import { useOperatorResource } from "./resource.js";
 import type {
   LocalReviewSend,
@@ -23,9 +28,11 @@ type Lead = {
   version: number;
   name: string;
   state: string;
+  feedbackMode: LeadFeedbackMode;
+  awaitingRecoveryMessage: boolean;
 };
-const leadReceives = (lead: Lead | null) =>
-  lead?.state === "pending" || lead?.state === "running";
+const leadAccepts = (lead: Lead | null) =>
+  lead !== null && lead.feedbackMode !== "unavailable";
 
 // Mirrors LocalReviewSend: sessionStorage is not trusted data.
 const storedSendSchema = z
@@ -43,6 +50,7 @@ const storedSendSchema = z
       "not-recorded",
     ]),
     reason: z.string().optional(),
+    resumedLead: z.literal(true).optional(),
   })
   .strict();
 
@@ -75,7 +83,7 @@ function restoredSend(taskId: string): LocalReviewSend | null {
     if (!raw) return null;
     const value = storedSendSchema.safeParse(JSON.parse(raw));
     if (!value.success) return null;
-    const { reason, ...rest } = value.data;
+    const { reason, resumedLead: _resumedLead, ...rest } = value.data;
     return { ...rest, status: "unknown", ...(reason ? { reason } : {}) };
   } catch {
     return null;
@@ -181,6 +189,7 @@ function useLocalReviewController({
         receipt.state === "prepared"
           ? "unknown"
           : (receipt.state as LocalReviewSend["status"]);
+      if (receipt.resumedLead) send.resumedLead = true;
     } else if (result.code === "local-review-batch-too-large") {
       // Refused before any operation was recorded.
       send.status = "rejected";
@@ -376,7 +385,7 @@ function useLocalReviewController({
       changed();
     },
     async send() {
-      if (!draft || !leadReceives(lead) || !lead || state.send) return;
+      if (!draft || !lead || !leadAccepts(lead) || state.send) return;
       const send: LocalReviewSend = {
         key: crypto.randomUUID(),
         expectedDraftVersion: draft.version,
@@ -953,7 +962,7 @@ export function LocalReviewPanel() {
           </p>
           <Button
             disabled={
-              !leadReceives(review.lead) ||
+              !leadAccepts(review.lead) ||
               unanchored ||
               locked ||
               state.pending ||
@@ -965,7 +974,13 @@ export function LocalReviewPanel() {
             Send review ({comments.length} comment
             {comments.length === 1 ? "" : "s"})
           </Button>
-          {review.lead && !leadReceives(review.lead) && (
+          {review.lead?.feedbackMode === "resumes" && (
+            <p role="status">{leadResumeNotice(review.lead.name)}</p>
+          )}
+          {review.lead?.awaitingRecoveryMessage && (
+            <p role="status">{leadAwaitingRecoveryNotice(review.lead.name)}</p>
+          )}
+          {review.lead && !leadAccepts(review.lead) && (
             <p role="status">
               The project lead's assignment is {review.lead.state} and cannot
               receive a review. Your comments stay in the draft.
@@ -1028,7 +1043,10 @@ export function LocalReviewPanel() {
       {send?.status === "recorded" && (
         <div role="status">
           <p>
-            Review sent to {send.recipientName}. One local message was queued.
+            Review sent to {send.recipientName}.{" "}
+            {send.resumedLead
+              ? `${send.recipientName} was resumed with this review as a follow-up.`
+              : "One local message was queued."}
           </p>
           {draft?.state !== "sent" && (
             <Button variant="secondary" onClick={() => review.clearSend()}>

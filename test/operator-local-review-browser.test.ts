@@ -10,6 +10,10 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import {
+  leadAwaitingRecoveryNotice,
+  leadResumeNotice,
+} from "../web/src/lead-feedback.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 
 const test = browserSuite("ui10-local-review");
@@ -106,6 +110,21 @@ async function startReview(
     });
     return count;
   };
+  const followUps = () => {
+    let count = 0;
+    fixture.seedPersistedState((db) => {
+      count = Number(
+        (
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM coordination_inbox_events WHERE taskId=? AND eventType='assignment-follow-up'",
+            )
+            .get(task.taskId) as { count: number | bigint }
+        ).count,
+      );
+    });
+    return count;
+  };
 
   const web = await j.start("fixture.web", () => fixture.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
@@ -120,7 +139,16 @@ async function startReview(
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  return { fixture, task, web, page, consoleErrors, pageErrors, events };
+  return {
+    fixture,
+    task,
+    web,
+    page,
+    consoleErrors,
+    pageErrors,
+    events,
+    followUps,
+  };
 }
 
 test("production local review composes exact multi-origin anchors and sends one receipt", async (_t, j) => {
@@ -502,8 +530,17 @@ test("phone local review comments and sends to a receipt using the keyboard", as
   assert.deepEqual(pageErrors, []);
 });
 
-test("send is disabled with an explanation once the project lead has completed", async (_t, j) => {
-  const { web, task, page, events, pageErrors } = await startReview(j);
+const noHorizontalScroll = async (page: Page, label: string) =>
+  assert.ok(
+    (await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    )) <= 1,
+    label,
+  );
+
+test("a completed lead is resumed by a review, with the status line before sending", async (_t, j) => {
+  const { web, task, page, events, followUps, pageErrors } =
+    await startReview(j);
   await signIn(
     page,
     web.origin,
@@ -515,26 +552,40 @@ test("send is disabled with an explanation once the project lead has completed",
   const send = review.getByRole("button", {
     name: /^Send review \(1 comment\)/,
   });
-  assert.equal(await send.isEnabled(), true);
+  const notice = review.getByText(leadResumeNotice("Task lead"), {
+    exact: true,
+  });
+  assert.equal(await notice.count(), 0);
 
   // A terminal result completes the accountable lead's assignment.
   task.result("Terminal lead result");
   await page.reload();
   await review.getByText("Comment for a finished lead").waitFor();
-  assert.equal(await send.isDisabled(), true);
+  await notice.waitFor();
+  assert.equal(await send.isEnabled(), true);
+  await send.click();
   await review
     .getByText(
-      /The project lead's assignment is completed and cannot receive a review/,
+      "Review sent to Task lead. Task lead was resumed with this review as a follow-up.",
     )
     .waitFor();
   assert.equal(events(), 0);
+  assert.equal(followUps(), 1);
   assert.deepEqual(pageErrors, []);
 });
 
-// Depends on the server's local-review-recipient-unavailable (409) rejection.
-test("a lead that completes after the page loaded gives a definitive rejection", async (_t, j) => {
-  const { web, task, page, events, consoleErrors, pageErrors } =
-    await startReview(j);
+// Depends on the server resuming a lead that completed after the page loaded.
+test("a lead that completes after the page loaded is resumed; a held lead is a definitive rejection", async (_t, j) => {
+  const {
+    fixture,
+    web,
+    task,
+    page,
+    events,
+    followUps,
+    consoleErrors,
+    pageErrors,
+  } = await startReview(j);
   await signIn(
     page,
     web.origin,
@@ -548,21 +599,118 @@ test("a lead that completes after the page loaded gives a definitive rejection",
     .getByRole("button", { name: /^Send review \(1 comment\)/ })
     .click();
   await review
+    .getByText(/Task lead was resumed with this review as a follow-up/)
+    .waitFor();
+  assert.equal(followUps(), 1);
+
+  // The resumed lead completes again and is then held: the next review is refused.
+  await review.getByRole("button", { name: "Start a new review" }).click();
+  await commentOnLine(page, "Line 3: third", "Comment for a held lead");
+  task.result("Second terminal lead result");
+  fixture.seedPersistedState((db) =>
+    db
+      .prepare("UPDATE domain_assignments SET state='held' WHERE id=?")
+      .run(task.assignmentId),
+  );
+  await review
+    .getByRole("button", { name: /^Send review \(1 comment\)/ })
+    .click();
+  await review
     .getByText(
       /not delivered \(the project lead can no longer receive a review\)/,
     )
     .waitFor();
-  assert.equal(events(), 0);
   await review.getByRole("button", { name: "Return to draft" }).click();
-  await review.getByText("Comment for a stale lead").waitFor();
+  await review.getByText("Comment for a held lead").waitFor();
   assert.equal(
     await review.getByRole("button", { name: /^Send review/ }).count(),
     1,
   );
+  assert.equal(events(), 0);
+  assert.equal(followUps(), 1);
   assert.deepEqual(
     consoleErrors.filter((text) => !/status of 409/.test(text)),
     [],
   );
+  assert.deepEqual(pageErrors, []);
+});
+
+test("phone keyboard review to a completed lead shows the status line and resumes it", async (_t, j) => {
+  const { web, task, page, followUps, pageErrors } = await startReview(j, {
+    width: 390,
+    height: 844,
+  });
+  task.result("Terminal lead result");
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Phone follow-up comment");
+  const nav = page.getByRole("navigation", { name: "Task sections" });
+  await nav.getByRole("link", { name: "Local review" }).focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () => document.activeElement?.id === "local-review-heading",
+  );
+  const review = page.locator("#local-review");
+  await review
+    .getByText(leadResumeNotice("Task lead"), { exact: true })
+    .waitFor();
+  await noHorizontalScroll(page, "phone status line has no horizontal scroll");
+  const send = review.getByRole("button", {
+    name: /^Send review \(1 comment\)/,
+  });
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await review
+    .getByText(/Task lead was resumed with this review as a follow-up/)
+    .waitFor();
+  assert.equal(followUps(), 1);
+  await noHorizontalScroll(page, "phone receipt has no horizontal scroll");
+  assert.deepEqual(pageErrors, []);
+});
+
+// The server's awaitingRecoveryMessage predicate is proved in recovery-continuation.test.ts;
+// this checks the panel renders the flag it is given.
+test("the recovery-continuation copy appears only while the lead awaits an operator message", async (_t, j) => {
+  const { web, task, page, pageErrors } = await startReview(j);
+  let awaiting = true;
+  await page.route(
+    (url) => url.pathname === `/api/operator/tasks/${task.taskId}`,
+    async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        data: { leadFeedback?: { awaitingRecoveryMessage: boolean } };
+      };
+      if (body.data.leadFeedback)
+        body.data.leadFeedback.awaitingRecoveryMessage = awaiting;
+      await route.fulfill({ response, json: body });
+    },
+  );
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Recovery comment");
+  const review = page.locator("#local-review");
+  const copy = review.getByText(leadAwaitingRecoveryNotice("Task lead"), {
+    exact: true,
+  });
+  await copy.waitFor();
+  assert.equal(
+    await review
+      .getByRole("button", { name: /^Send review \(1 comment\)/ })
+      .isEnabled(),
+    true,
+  );
+  awaiting = false;
+  await page.reload();
+  await review.getByText("Recovery comment").waitFor();
+  assert.equal(await copy.count(), 0);
   assert.deepEqual(pageErrors, []);
 });
 
