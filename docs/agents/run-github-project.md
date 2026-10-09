@@ -26,7 +26,6 @@ implementing the retired BB path. This note does not change remote Project state
 - URL: `https://github.com/users/chrisbanes/projects/6`
 - Node ID: `PVT_kwHOAAN4ns4BatgH`
 - Filter: `none`
-- Execution approver logins: `chrisbanes`
 
 ## Status
 
@@ -53,22 +52,6 @@ implementing the retired BB path. This note does not change remote Project state
 - Epic label ID: `LA_kwDORzdwYM8AAAACuWX7NA`
 - Human-work label: `ready-for-human`
 - Human-work label ID: `LA_kwDORzdwYM8AAAACuAxOsQ`
-
-## Agent Setup
-
-- Routing: `typesafe`
-- Default planner profile: `workhorse-owner`
-- Default ticket profile: `fast-worker`
-- TypeSafe judgment model: `jev-1.13.0`
-
-| Profile | Capability | Best suited to | Runtime role | Execution model | Reasoning |
-| --- | --- | --- | --- | --- | --- |
-| `frontier-owner` | `default-owner` | Ambiguous, architectural, or high-risk ownership | `default` | `gpt-6-astra` | `high` |
-| `workhorse-owner` | `default-owner` | Ordinary substantive planning and implementation | `default` | `gpt-6-sol` | `high` |
-| `fast-worker` | `default-owner` | Bounded implementation after an approved plan | `worker` | `gpt-6-luna` | `max` |
-| `evidence-investigator` | `read-only-evidence` | Repeated non-CI failure investigation | `investigator` | `gpt-6-sol` | `high` |
-| `codebase-explorer` | `read-only-discovery` | Targeted repository discovery | `explorer` | `gpt-6-luna` | `high` |
-| `exceptional-investigator` | `exceptional-investigator` | Qualifying unresolved technical questions | `investigator` | `gpt-6-sol` | `high` |
 
 ## Priority
 
