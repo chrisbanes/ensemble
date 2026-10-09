@@ -16,7 +16,7 @@ const commentSchema = z
   .object({
     commentId: uuid,
     body: z.string().trim().min(1).max(4000),
-    anchorGroupIds: z.array(uuid).max(maxReviewItems),
+    anchorGroupIds: z.array(uuid).min(1).max(maxReviewItems),
   })
   .strict();
 const draftSchema = z
