@@ -38,8 +38,11 @@ function requestUrl(
   });
   if (scope.kind === "repository")
     query.set("repositoryId", scope.repositoryId);
-  if (path.length) query.set("path", path.join("/"));
-  return `/api/operator/tasks/${taskId}/${kind}?${query}`;
+  // The service rejects an encoded slash, so only the segments are encoded.
+  const pathQuery = path.length
+    ? `&path=${path.map(encodeURIComponent).join("/")}`
+    : "";
+  return `/api/operator/tasks/${taskId}/${kind}?${query}${pathQuery}`;
 }
 
 function pathLabel(scope: TaskFilesState["scope"], path: readonly string[]) {
@@ -409,7 +412,8 @@ function SourceLines({
   changed: () => void;
 }) {
   const lineButtons = useRef<Array<HTMLButtonElement | null>>([]);
-  const lines = text.split("\n");
+  // Count lines as the service does: a final newline ends the last line.
+  const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
   const shown = lines.slice(0, maxSourceLines);
   const select = (number: number, extend: boolean) => {
     tab.selectLine(number, extend);
@@ -433,6 +437,7 @@ function SourceLines({
         }}
       />
       <div className={`file-source-scroll${wrapLines ? " is-wrapped" : ""}`}>
+        {lines.length === 0 && <p className="muted">Empty file.</p>}
         <ol className="file-source-lines" aria-label="Source lines">
           {shown.map((line, index) => {
             const number = index + 1;

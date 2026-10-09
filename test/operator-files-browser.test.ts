@@ -495,6 +495,18 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   );
   await page.keyboard.press("ArrowRight");
   await guideButton.waitFor();
+  // A nested file opens with literal slash separators, and a final newline
+  // does not add a phantom line.
+  await docsButton.click();
+  await page.getByRole("button", { name: /child\.txt/ }).click();
+  await page
+    .getByRole("button", { name: "Line 1: Arrow key folder child." })
+    .waitFor();
+  assert.equal(await page.getByRole("button", { name: /^Line 2/ }).count(), 0);
+  await page
+    .getByRole("button", { name: "Repository root", exact: true })
+    .click();
+  await guideButton.waitFor();
   assert.equal(
     await page.getByRole("button", { name: /hidden\.log/ }).count(),
     0,
@@ -584,7 +596,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   assert.equal(await page.locator(".file-source-scroll.is-wrapped").count(), 1);
   assert.deepEqual(
     await page.locator(".file-source-lines .file-line-text").allTextContents(),
-    stableGuide.split("\n"),
+    stableGuide.replace(/\n$/, "").split("\n"),
   );
   const stableLine = page.getByRole("button", {
     name: "Line 3: ## Current stable",
@@ -814,7 +826,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   );
   assert.deepEqual(
     await page.locator(".file-source-lines .file-line-text").allTextContents(),
-    refreshedGuide.split("\n"),
+    refreshedGuide.replace(/\n$/, "").split("\n"),
   );
   await page.getByText(new RegExp(refreshedHash)).waitFor();
   const afterFailedRefresh = await inspectReadingArea();
@@ -904,7 +916,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   );
   assert.deepEqual(
     await page.locator(".file-source-lines .file-line-text").allTextContents(),
-    refreshedGuide.split("\n"),
+    refreshedGuide.replace(/\n$/, "").split("\n"),
   );
   assert.equal(
     await page
@@ -958,7 +970,7 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   await page.getByText(new RegExp(codeHash)).waitFor();
   assert.deepEqual(
     await page.locator(".file-source-lines .file-line-text").allTextContents(),
-    codeText.split("\n"),
+    codeText.replace(/\n$/, "").split("\n"),
   );
   assert.equal(await page.locator("pre code, .file-markdown").count(), 0);
 
