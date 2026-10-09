@@ -380,10 +380,10 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
   ).trim();
   const taskWorkspaceLookupMs: number[] = [];
   const originalTaskWorkspace = f.service.taskWorkspace.bind(f.service);
-  f.service.taskWorkspace = async (currentTaskId) => {
+  f.service.taskWorkspace = async (...args) => {
     const startedAt = performance.now();
     try {
-      return await originalTaskWorkspace(currentTaskId);
+      return await originalTaskWorkspace(...args);
     } finally {
       taskWorkspaceLookupMs.push(performance.now() - startedAt);
     }
@@ -588,10 +588,10 @@ test("authenticated repository comparisons require explicit bases, stable IDs an
 
   const refreshValidationMs: number[] = [];
   const refreshTaskWorkspace = f.service.taskWorkspace.bind(f.service);
-  f.service.taskWorkspace = async (currentTaskId) => {
+  f.service.taskWorkspace = async (...args) => {
     const startedAt = performance.now();
     try {
-      return await refreshTaskWorkspace(currentTaskId);
+      return await refreshTaskWorkspace(...args);
     } finally {
       refreshValidationMs.push(performance.now() - startedAt);
     }
@@ -808,8 +808,8 @@ test("stored comparison reads recheck privacy and session after awaited path val
   const entered = deferred();
   const release = deferred();
   let lookups = 0;
-  f.service.taskWorkspace = async (id) => {
-    const value = await originalTaskWorkspace(id);
+  f.service.taskWorkspace = async (...args) => {
+    const value = await originalTaskWorkspace(...args);
     if (++lookups === 3) {
       entered.resolve();
       await release.promise;
@@ -1256,8 +1256,8 @@ test("workspace comparison awaits recheck logout, expiry, binding and changing e
   });
   let pauseNextLookup = true;
   const pauseTaskWorkspaceLookup = () => {
-    f.service.taskWorkspace = async (id) => {
-      const value = await originalTaskWorkspace(id);
+    f.service.taskWorkspace = async (...args) => {
+      const value = await originalTaskWorkspace(...args);
       if (pauseNextLookup) {
         pauseNextLookup = false;
         entered.resolve();
@@ -1355,8 +1355,8 @@ test("workspace comparison awaits recheck logout, expiry, binding and changing e
   process.env.ENSEMBLE_TEST_GIT_REAL = realGit;
   let gateLookups = 0;
   let changeNextBinding = false;
-  f.service.taskWorkspace = async (id) => {
-    const value = await originalTaskWorkspace(id);
+  f.service.taskWorkspace = async (...args) => {
+    const value = await originalTaskWorkspace(...args);
     if (++gateLookups === 4) process.env.ENSEMBLE_TEST_GATE_ARMED = "1";
     if (!changeNextBinding || !value) return value;
     changeNextBinding = false;

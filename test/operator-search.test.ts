@@ -205,10 +205,10 @@ test("actual imported state-only configure keeps GitHub source provenance; place
   const barrier = new Promise<void>((r) => (release = r)),
     entry = new Promise<void>((r) => (entered = r));
   const originalWorkspace = f.service.taskWorkspace.bind(f.service);
-  f.service.taskWorkspace = async (id) => {
+  f.service.taskWorkspace = async (...args) => {
     entered();
     await barrier;
-    return originalWorkspace(id);
+    return originalWorkspace(...args);
   };
   const delayed = api.readSearch(
     new URLSearchParams({ query: "Transferred", projectId: ids[0]! }),

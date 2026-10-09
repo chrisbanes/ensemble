@@ -349,8 +349,8 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
   }
   const originalTaskWorkspace = f.service.taskWorkspace;
   let workspaceReads = 0;
-  f.service.taskWorkspace = async (taskId) => {
-    const binding = await originalTaskWorkspace.call(f.service, taskId);
+  f.service.taskWorkspace = async (...args) => {
+    const binding = await originalTaskWorkspace.call(f.service, ...args);
     workspaceReads++;
     return binding && workspaceReads === 2
       ? { ...binding, workspaceId: randomUUID() }

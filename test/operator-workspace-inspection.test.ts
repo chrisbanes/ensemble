@@ -379,14 +379,14 @@ test("workspace read errors recheck sessions after logout and expiry", async (t)
         failure: unknown;
       }
     | undefined;
-  f.service.taskWorkspace = async (taskId) => {
+  f.service.taskWorkspace = async (...args) => {
     const gate = pendingGate;
     if (gate) {
       gate.started.resolve();
       await gate.release.promise;
       throw gate.failure;
     }
-    return original(taskId);
+    return original(...args);
   };
   t.after(() => {
     pendingGate?.release.resolve();
@@ -572,8 +572,8 @@ test("authenticated HTTP reads discard entries when the task binding changes dur
     f.service.taskWorkspace = original;
   });
   let calls = 0;
-  f.service.taskWorkspace = async (taskId) => {
-    const current = await original(taskId);
+  f.service.taskWorkspace = async (...args) => {
+    const current = await original(...args);
     calls++;
     return calls === 2 && current
       ? { ...current, workspaceId: randomUUID() }
