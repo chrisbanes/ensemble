@@ -291,6 +291,8 @@ const conflicts = new Set([
   "Legacy approval material is unavailable and cannot be approved",
   "Message recipient assignment version conflict",
   "Message recipient must be pending or running",
+  "Follow-up unavailable: task is not open",
+  "Follow-up unavailable: latest result is not the newest unambiguous work",
   "Result destination is already reconciled",
   "Result destination revision conflict",
 ]);
@@ -2423,6 +2425,10 @@ export class OperatorApi {
         ? {}
         : { interactionId: m.interactionId }),
     }));
+    const leadAssignmentId =
+      this.domain()
+        .leadBindings()
+        .find((b) => String(b.taskId) === taskId)?.assignmentId ?? null;
     const data = {
       task: {
         id: taskId,
@@ -2439,10 +2445,22 @@ export class OperatorApi {
             name: this.safe(profile.name, excluded),
           }
         : null,
-      leadAssignmentId:
-        this.domain()
-          .leadBindings()
-          .find((b) => String(b.taskId) === taskId)?.assignmentId ?? null,
+      leadAssignmentId,
+      ...(leadAssignmentId
+        ? {
+            leadFeedback: {
+              mode: this.coordination().leadFeedbackMode(
+                taskId,
+                String(leadAssignmentId),
+              ),
+              awaitingRecoveryMessage:
+                this.coordination().leadAwaitsRecoveryMessage(
+                  taskId,
+                  String(leadAssignmentId),
+                ),
+            },
+          }
+        : {}),
       assignments: assignments.map((a) => {
         const s = this.selection(a),
           request = s.request;
@@ -4219,6 +4237,7 @@ export class OperatorApi {
       state: string;
       eventId?: string | undefined;
       recipientAssignmentId?: string | undefined;
+      resumedLead?: true | undefined;
     },
   ) {
     return commandReceiptSchema.parse({
@@ -4231,6 +4250,7 @@ export class OperatorApi {
       ...(response.recipientAssignmentId
         ? { recipientAssignmentId: response.recipientAssignmentId }
         : {}),
+      ...(response.resumedLead ? { resumedLead: true } : {}),
     });
   }
 
@@ -4594,6 +4614,7 @@ export class OperatorApi {
         recipientAssignmentId: saved.recipientAssignmentId,
         eventType: saved.eventType,
         createdAt: saved.createdAt,
+        ...(saved.resumedLead ? { resumedLead: true } : {}),
       });
     } catch (error) {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)

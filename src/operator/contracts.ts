@@ -1290,6 +1290,13 @@ export const taskSchema = envelope(
         .strict(),
       lead: z.object({ profileId: uuid, name: safeText }).strict().nullable(),
       leadAssignmentId: uuid.nullable().optional(),
+      leadFeedback: z
+        .object({
+          mode: z.enum(["receives", "resumes", "unavailable"]),
+          awaitingRecoveryMessage: z.boolean(),
+        })
+        .strict()
+        .optional(),
       assignments: z.array(assignmentSchema),
       admission: z
         .object({
@@ -1549,6 +1556,7 @@ export const localReviewOperationReadSchema = envelope(
       recipientAssignmentId: uuid.optional(),
       reason: z.string().max(128).optional(),
       recordedAt: time.optional(),
+      resumedLead: z.literal(true).optional(),
       summary: z.string().max(16000).nullable().optional(),
       comments: z
         .array(
@@ -2300,6 +2308,7 @@ export const commandReceiptSchema = z.discriminatedUnion("kind", [
       state: z.enum(["prepared", "recorded", "rejected", "not-recorded"]),
       eventId: uuid.optional(),
       recipientAssignmentId: uuid.optional(),
+      resumedLead: z.literal(true).optional(),
     })
     .strict(),
   z
@@ -2361,6 +2370,7 @@ export const commandReceiptSchema = z.discriminatedUnion("kind", [
       recipientAssignmentId: uuid,
       eventType: z.string(),
       createdAt: time,
+      resumedLead: z.literal(true).optional(),
     })
     .strict(),
   z

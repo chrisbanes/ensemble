@@ -3326,18 +3326,31 @@ export class CoordinationStore {
     return JSON.stringify(material);
   }
 
-  private recordRecoveryContinuation(
-    event: InboxEvent,
-    commandKey: string,
-    commandHash: string,
-  ): void {
-    if (!this.reconciledAssignmentProof) return;
+  /**
+   * True while the next ordinary operator message to this assignment would
+   * record a recovery continuation: a held request has a valid reconciled
+   * proof and no continuation yet. Follow-ups and reviews never record one.
+   */
+  awaitsRecoveryContinuation(taskId: string, assignmentId: string): boolean {
+    return this.recoveryContinuationCandidates(taskId, assignmentId).length > 0;
+  }
+
+  private recoveryContinuationCandidates(
+    taskId: string,
+    assignmentId: string,
+  ): Array<{
+    workId: string;
+    proof: ReconciledAssignmentProof;
+    batch: InboxDelivery | undefined;
+  }> {
+    if (!this.reconciledAssignmentProof) return [];
     const requests = this.db
       .prepare(`SELECT workId FROM turn_requests
       WHERE taskId = ? AND assignmentId = ? AND state = 'held' ORDER BY sequence`)
-      .all(event.taskId, event.recipientAssignmentId) as Array<{
+      .all(taskId, assignmentId) as Array<{
       workId: string;
     }>;
+    const candidates = [];
     for (const { workId } of requests) {
       if (
         this.one(
@@ -3349,8 +3362,8 @@ export class CoordinationStore {
       const proof = this.reconciledAssignmentProof(workId);
       if (
         !proof ||
-        proof.taskId !== event.taskId ||
-        proof.assignmentId !== event.recipientAssignmentId
+        proof.taskId !== taskId ||
+        proof.assignmentId !== assignmentId
       )
         continue;
       const batch = this.deliveryForWork(workId);
@@ -3362,6 +3375,20 @@ export class CoordinationStore {
           batch.assignmentVersion !== proof.assignmentVersion)
       )
         continue;
+      candidates.push({ workId, proof, batch });
+    }
+    return candidates;
+  }
+
+  private recordRecoveryContinuation(
+    event: InboxEvent,
+    commandKey: string,
+    commandHash: string,
+  ): void {
+    for (const { workId, proof, batch } of this.recoveryContinuationCandidates(
+      event.taskId,
+      event.recipientAssignmentId,
+    )) {
       this.db
         .prepare(`INSERT INTO coordination_recovery_continuations
         (workId, receiptId, taskId, assignmentId, proofMaterial, operatorCommandKey, operatorPayloadHash,

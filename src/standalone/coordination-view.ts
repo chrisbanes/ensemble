@@ -221,6 +221,8 @@ export interface CoordinationCommandReceipt {
   recipientAssignmentId: string;
   eventType: string;
   createdAt: number;
+  /** Set when the feedback resumed a completed lead as a follow-up. */
+  resumedLead?: true;
 }
 
 export interface OperatorMessageCommand {
@@ -726,9 +728,31 @@ export class CoordinationView {
       recipientAssignmentId: event.recipientAssignmentId,
       eventType: event.eventType,
       createdAt: event.createdAt,
+      ...(event.eventType === "assignment-follow-up"
+        ? { resumedLead: true as const }
+        : {}),
     };
     await this.onCommand();
     return receipt;
+  }
+
+  /** True while an ordinary operator message would record the lead's recovery continuation. */
+  leadAwaitsRecoveryMessage(taskId: string, leadAssignmentId: string): boolean {
+    return this.coordination.awaitsRecoveryContinuation(
+      taskId,
+      leadAssignmentId,
+    );
+  }
+
+  /** How operator feedback would reach this task's lead now; the server's own acceptance rule. */
+  leadFeedbackMode(
+    taskId: string,
+    leadAssignmentId: string,
+  ): "receives" | "resumes" | "unavailable" {
+    return (
+      this.coordination.feedbackRecipient(taskId, leadAssignmentId)?.mode ??
+      "unavailable"
+    );
   }
 
   private messageView(
@@ -795,6 +819,20 @@ export class CoordinationView {
           routingOperationId: payload.routingOperationId,
           routingReason: payload.reason,
           text: payload.reason,
+        };
+      }
+      case "assignment-follow-up": {
+        // Agent and operator follow-ups share this event; read only the shared fields.
+        const payload = z
+          .object({
+            instructions: z.string(),
+            reference: feedbackReferenceSchema.optional(),
+          })
+          .parse(JSON.parse(event.payload));
+        return {
+          ...base,
+          text: payload.instructions,
+          ...(payload.reference ? { reference: payload.reference } : {}),
         };
       }
       case "assignment-result":

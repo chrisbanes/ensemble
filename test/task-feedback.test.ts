@@ -159,3 +159,57 @@ test("implicit artifact owner rejects partial mismatched source/criterion/work a
     /Duplicate artifact identity/,
   );
 });
+
+test("contextual feedback to a completed lead resumes it as a follow-up carrying the exact reference", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f);
+  const r = task.result("Lead result", { sourceId: task.source.sourceId });
+  assert.equal(
+    f.service.domain().assignment(task.assignmentId).state,
+    "completed",
+  );
+  const api = new OperatorApi(f.service, [f.directory]);
+  const reference = {
+    resultId: r.resultId,
+    sourceId: task.source.sourceId,
+    workId: r.workId,
+  };
+  const command = {
+    type: "message",
+    key: randomUUID(),
+    taskId: task.taskId,
+    recipientAssignmentId: task.assignmentId,
+    expectedAssignmentVersion: Number(
+      f.service.domain().assignment(task.assignmentId).version,
+    ),
+    message: "Please revisit this result",
+    reference,
+  };
+  await assert.rejects(
+    api.execute({
+      ...command,
+      key: randomUUID(),
+      reference: { ...reference, workId: "wrong-work" },
+    }),
+    /conflict/,
+  );
+  assert.equal(
+    f.service.domain().assignment(task.assignmentId).state,
+    "completed",
+  );
+  const receipt = await api.execute(command);
+  assert.equal(
+    (receipt as { eventType: string }).eventType,
+    "assignment-follow-up",
+  );
+  assert.equal((receipt as { resumedLead?: true }).resumedLead, true);
+  assert.deepEqual(await api.execute(command), receipt);
+  const followUps = (await api.readTask(task.taskId)).data.messages.filter(
+    (m) => m.eventType === "assignment-follow-up",
+  );
+  assert.equal(followUps.length, 1);
+  assert.equal(followUps[0]?.text, command.message);
+  assert.deepEqual(followUps[0]?.reference, reference);
+  assert.equal(f.runtime.turns, 0);
+});
