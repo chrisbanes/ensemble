@@ -29,7 +29,6 @@ import {
 import type { WorkspaceInspectionCurrent } from "../src/standalone/workspace-inspection.js";
 import {
   SqliteWorkspaceBindingStore,
-  type TaskWorkspaceBinding,
   WorkspaceManager,
 } from "../src/standalone/workspaces.js";
 

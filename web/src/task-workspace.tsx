@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import type { z } from "zod";
-import type { feedbackReferenceSchema } from "../../src/core/task-review.js";
+import type { feedbackReferenceSchema } from "../../src/core/task-review-contracts.js";
 import {
   assignmentHistorySchema,
   type CommandReceipt,
@@ -2032,7 +2032,6 @@ function Changes({
         session={session}
         taskId={taskId}
         assignments={data.assignments}
-        taskLeadName={data.lead?.name ?? null}
         state={state.changes}
         changed={changed}
       />

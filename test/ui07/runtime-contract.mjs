@@ -168,7 +168,7 @@ export async function runQualification(options = {}) {
       state: "starting",
       startedAt: new Date(start).toISOString(),
     };
-    writeFileSync(grant.ledgerPath, JSON.stringify(ledger, null, 2) + "\n");
+    writeFileSync(grant.ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
   }
   let root;
   try {
@@ -189,7 +189,7 @@ export async function runQualification(options = {}) {
     };
     if (!fixture) {
       const evidencePath = `${grant.consumedMarker}.failure.json`;
-      writeFileSync(evidencePath, JSON.stringify(failure, null, 2) + "\n", {
+      writeFileSync(evidencePath, `${JSON.stringify(failure, null, 2)}\n`, {
         mode: 0o600,
       });
       ledger.live = {
@@ -198,7 +198,7 @@ export async function runQualification(options = {}) {
         evidencePath,
         cleanupVerified: true,
       };
-      writeFileSync(grant.ledgerPath, JSON.stringify(ledger, null, 2) + "\n");
+      writeFileSync(grant.ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
     }
     return failure;
   }
@@ -344,7 +344,7 @@ export async function runQualification(options = {}) {
 
   evidence.projectId = projectId;
   const save = () =>
-    writeFileSync(`${root}.json`, JSON.stringify(evidence, null, 2) + "\n", {
+    writeFileSync(`${root}.json`, `${JSON.stringify(evidence, null, 2)}\n`, {
       mode: 0o600,
     });
   const until = async (predicate, label, end = deadline) => {
@@ -1067,7 +1067,7 @@ export async function runQualification(options = {}) {
         cleanupVerified: evidence.cleanup.verified,
         endedAt: new Date().toISOString(),
       };
-      writeFileSync(grant.ledgerPath, JSON.stringify(ledger, null, 2) + "\n");
+      writeFileSync(grant.ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
     }
   }
   return { ...evidence, evidencePath: `${root}.json`, data, taskId };

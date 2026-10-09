@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { materialDigest } from "./delivery.js";
-import {
+import type {
   RetainedEvidenceStore,
-  type RetainedReviewAnchorCandidate,
+  RetainedReviewAnchorCandidate,
 } from "./retained-evidence.js";
 import { transaction, type Database } from "./store.js";
 import type { InboxEvent } from "./coordination.js";
@@ -11,7 +11,6 @@ import type { InboxEvent } from "./coordination.js";
 const uuid = z.string().uuid();
 const maxReviewItems = 32;
 const maxReviewMessageBytes = 16_000;
-const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const commentSchema = z
   .object({
     commentId: uuid,
@@ -372,7 +371,7 @@ export class LocalReviewStore {
       input.taskId,
       input.ownerKey,
     );
-    if (!group || group.state !== "open")
+    if (group?.state !== "open")
       throw new Error("Local review anchor group is no longer editable");
     return z
       .object({
@@ -400,7 +399,7 @@ export class LocalReviewStore {
     return transaction(this.db, () => {
       const prior = this.replayStage(input);
       if (prior) return prior;
-      let draftRow = this.one(
+      const draftRow = this.one(
         `SELECT version,state,draftJson FROM coordination_local_review_drafts
         WHERE taskId=? AND ownerKey=?`,
         input.taskId,
@@ -520,7 +519,7 @@ export class LocalReviewStore {
       );
       for (const groupId of refs) {
         const group = byId.get(groupId);
-        if (!group || group.state !== "open")
+        if (group?.state !== "open")
           throw new Error("Local review anchor group is unavailable");
         const retained = this.retained.reviewAnchorDraft(
           input.taskId,
@@ -531,8 +530,7 @@ export class LocalReviewStore {
           .max(maxReviewItems)
           .parse(JSON.parse(String(group.anchorIdsJson)));
         if (
-          !retained ||
-          retained.state !== "open" ||
+          retained?.state !== "open" ||
           retained.anchorIds.length !== expected.length ||
           retained.anchorIds.some((id, index) => id !== expected[index])
         )
@@ -708,7 +706,7 @@ export class LocalReviewStore {
       const used = [...new Set(groupIds)];
       const frozenGroups = used.map((groupId) => {
         const group = byId.get(groupId);
-        if (!group || group.state !== "open")
+        if (group?.state !== "open")
           throw new Error("Local review anchor group is unavailable");
         const anchorIds = z
           .array(uuid)
@@ -720,8 +718,7 @@ export class LocalReviewStore {
           String(group.anchorDraftId),
         );
         if (
-          !retainedDraft ||
-          retainedDraft.state !== "open" ||
+          retainedDraft?.state !== "open" ||
           retainedDraft.anchorIds.length !== anchorIds.length ||
           retainedDraft.anchorIds.some((id, index) => id !== anchorIds[index])
         )
@@ -871,8 +868,7 @@ export class LocalReviewStore {
       for (const [position, group] of input.payload.groups.entries()) {
         const stored = byId.get(group.groupId);
         if (
-          !stored ||
-          stored.state !== "open" ||
+          stored?.state !== "open" ||
           stored.ownerKey !== row.ownerKey ||
           stored.anchorDraftId !== group.anchorDraftId
         )
@@ -892,8 +888,7 @@ export class LocalReviewStore {
           group.anchorDraftId,
         );
         if (
-          !anchorDraft ||
-          anchorDraft.state !== "open" ||
+          anchorDraft?.state !== "open" ||
           anchorDraft.anchorIds.length !== ids.length ||
           anchorDraft.anchorIds.some((id, index) => id !== ids[index])
         )

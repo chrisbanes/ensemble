@@ -560,7 +560,7 @@ export async function runService(options = {}) {
       rmSync(root, { recursive: true, force: true });
       evidence.fixture.removed = true;
     }
-    writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + "\n", {
+    writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, {
       mode: 0o600,
     });
   }

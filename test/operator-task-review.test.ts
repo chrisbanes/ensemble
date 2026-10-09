@@ -429,7 +429,7 @@ test("ordinary source retention bounds sanitized representation without clipping
     taskId: a.taskId,
     projectId: a.projectId,
     expectedVersion: Number(f.service.domain().task(a.taskId).version),
-    outcome: body + "x",
+    outcome: `${body}x`,
   });
   const unavailable = f.service.taskReview().sources(a.taskId).at(-1)!;
   assert.equal(unavailable.body, null);

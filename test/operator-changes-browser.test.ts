@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import {
@@ -61,7 +61,7 @@ function sourceRepository(root: string, name: string, baseBranch: string) {
       name +
       "\n",
   );
-  writeFileSync(join(path, name + "-only.md"), name + " repository only\n");
+  writeFileSync(join(path, `${name}-only.md`), `${name} repository only\n`);
   git(path, "add", "-A");
   git(path, "commit", "--quiet", "-m", "topic snapshot");
   const disconnectedTree = git(path, "write-tree");
@@ -80,7 +80,7 @@ async function until(check: () => boolean, description: string) {
     if (check()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail("Timed out waiting for " + description);
+  assert.fail(`Timed out waiting for ${description}`);
 }
 
 class ChangesRuntime extends OperatorFixtureRuntime {
@@ -89,7 +89,7 @@ class ChangesRuntime extends OperatorFixtureRuntime {
     await this.callTool({
       threadId,
       turnId,
-      callId: "changes-report-" + turnId,
+      callId: `changes-report-${turnId}`,
       tool: "ensemble_ask_question",
       arguments: {
         question: "The deterministic Changes fixture finished its observation",
@@ -225,7 +225,7 @@ async function startChangesJourney(
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const changes = page.locator("#changes");
-  const directPath = "/app/tasks/" + task.taskId + "?section=changes";
+  const directPath = `/app/tasks/${task.taskId}?section=changes`;
   await page.goto(web.origin + directPath);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -293,7 +293,7 @@ test("production Changes preserves exact repository baselines and last-good refr
       "/app/tasks/" +
       task.taskId +
       "?section=changes" +
-      (result ? "&result=" + result.resultId : ""),
+      (result ? `&result=${result.resultId}` : ""),
   );
   await changes
     .getByRole("heading", { name: "Changes and delivery", exact: true })
@@ -336,7 +336,7 @@ test("production Changes preserves exact repository baselines and last-good refr
   const alphaBranchStartedAt = Date.now();
   await page.getByLabel("Local base branch").selectOption("base-alpha");
   const alphaResponse = await alphaBranchRead;
-  let alphaBody = (await alphaResponse.json()) as {
+  const alphaBody = (await alphaResponse.json()) as {
     data: {
       state: string;
       reason?: string;
@@ -367,7 +367,7 @@ test("production Changes preserves exact repository baselines and last-good refr
   );
   await changes
     .locator(".changes-observation")
-    .getByText("Comparison " + alphaBody.data.comparisonId, { exact: true })
+    .getByText(`Comparison ${alphaBody.data.comparisonId}`, { exact: true })
     .waitFor();
   const alphaRequestUrl = new URL(alphaResponse.url());
   if (alphaBody.data.state !== "available")
@@ -1246,9 +1246,9 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   );
   writeFileSync(
     join(alpha.workspacePath, "long.txt"),
-    Array.from({ length: 120 }, (_, index) => `long line ${index + 1}`).join(
+    `${Array.from({ length: 120 }, (_, index) => `long line ${index + 1}`).join(
       "\n",
-    ) + "\n",
+    )}\n`,
   );
   assert.equal(
     await list.getByRole("button", { name: /later\.txt/ }).count(),
@@ -1376,7 +1376,7 @@ test("production Changes separates staged and unstaged snapshots and retains exp
   assert.deepEqual(consoleErrors, []);
   assert.deepEqual(pageErrors, []);
 });
-test("production Changes retains pending and latest-finished Last-turn provenance", async (t, j) => {
+test("production Changes retains pending and latest-finished Last-turn provenance", async (_t, j) => {
   const {
     fixture,
     task,
@@ -1417,8 +1417,7 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
       fixture.service
         .list()
         .find(
-          (work) =>
-            work.workId === "assignment:" + task.assignmentId + ":initial",
+          (work) => work.workId === `assignment:${task.assignmentId}:initial`,
         )?.state === "completed",
     "first Last-turn capture completion",
   );
@@ -1494,7 +1493,7 @@ test("production Changes retains pending and latest-finished Last-turn provenanc
   assert.equal(latestFinished.assignmentId, task.assignmentId);
   assert.equal(
     latestFinished.workId,
-    "assignment:" + task.assignmentId + ":initial",
+    `assignment:${task.assignmentId}:initial`,
   );
   assert.ok(latestFinished.turnId);
   assert.notEqual(

@@ -31,7 +31,7 @@ async function until(check: () => boolean, description: string) {
     if (check()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail("Timed out waiting for " + description);
+  assert.fail(`Timed out waiting for ${description}`);
 }
 
 test("production retained result evidence keeps original bytes and opens current files only explicitly", async (_t, j) => {

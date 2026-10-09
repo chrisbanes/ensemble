@@ -898,7 +898,7 @@ test("ordinary GitHub selection capture shares one fresh exclusion snapshot and 
     });
     const changed = issues.map((issue) => ({
       ...issue,
-      body: issue.body + " changed",
+      body: `${issue.body} changed`,
     }));
     discoveries = 0;
     sources.reconcileSelection(f.projectId, "batch", {

@@ -1289,7 +1289,7 @@ test("a rate limit mid-selection leaves the unread issues' imported blockers unk
   const sources = new GitHubSourceStore(db);
   sources.migrate();
   try {
-    const projectId = addGitHubProject(domain);
+    addGitHubProject(domain);
     const issues = [1, 2, 3].map((number) => ({
       ...issue,
       nodeId: `I_${number}`,

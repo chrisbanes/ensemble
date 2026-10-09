@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { deliveryFixture } from "./delivery-fixture.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
-import { DeliveryCoordinator } from "../src/standalone/delivery.js";
 import { runtimeDeliveryCallerSchema } from "../src/core/delivery.js";
 const policy = (
   f: Awaited<ReturnType<typeof deliveryFixture>>,

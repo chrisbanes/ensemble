@@ -345,7 +345,7 @@ test("canonical initial refusal proof rejects altered identity and every admissi
         assert.equal(proof(f.service, f.workId), true);
         const database = db(f.service);
         if (witness === "noncanonical") {
-          assert.equal(proof(f.service, f.workId + ":extra"), false);
+          assert.equal(proof(f.service, `${f.workId}:extra`), false);
           // Retain relational identity while changing all referencing work IDs.
           database.exec("PRAGMA foreign_keys = OFF");
           for (const table of [
@@ -358,9 +358,9 @@ test("canonical initial refusal proof rejects altered identity and every admissi
           ])
             database
               .prepare(`UPDATE ${table} SET workId = ? WHERE workId = ?`)
-              .run(f.workId + ":extra", f.workId);
+              .run(`${f.workId}:extra`, f.workId);
           database.exec("PRAGMA foreign_keys = ON");
-          assert.equal(proof(f.service, f.workId + ":extra"), false);
+          assert.equal(proof(f.service, `${f.workId}:extra`), false);
         } else if (witness === "binding")
           database
             .prepare(

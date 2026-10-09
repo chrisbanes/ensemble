@@ -2420,7 +2420,7 @@ for (const control of ["cancel", "interrupt"] as const)
         const child = (
           f.runtime as unknown as { child: ChildProcessWithoutNullStreams }
         ).child;
-        child.stdin.write(JSON.stringify({ method: "fixture/replay" }) + "\n");
+        child.stdin.write(`${JSON.stringify({ method: "fixture/replay" })}\n`);
       }
       await f.runtime.waitForTurn(
         f.call.identity.threadId,

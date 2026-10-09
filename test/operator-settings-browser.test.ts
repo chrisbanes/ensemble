@@ -33,7 +33,7 @@ test("Settings guides empty workspace through profile and paused project creatio
   });
   journey.observe(page);
   page.setDefaultTimeout(5000);
-  await page.goto(web.origin + "/app/settings");
+  await page.goto(`${web.origin}/app/settings`);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
@@ -833,7 +833,7 @@ for (const layout of [
       );
     }
     await page.goto(
-      web.origin + `/app/assignments/${ids.assignmentId}/recovery`,
+      `${web.origin}/app/assignments/${ids.assignmentId}/recovery`,
     );
     await page
       .getByText("1 older recovery records omitted", { exact: false })

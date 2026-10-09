@@ -418,7 +418,7 @@ export async function workspaceInspectionPathExcluded(
     const initial = await current();
     if (initial.taskId !== taskId) return true;
     const root = currentRoot(initial, scope);
-    if (!root || root.binding.state !== "ready") return true;
+    if (root?.binding.state !== "ready") return true;
     if (scope.kind === "workspace") {
       const repositories = repositoryWorkspaceNames(root.binding);
       if (!repositories) return true;
@@ -515,7 +515,7 @@ export async function workspaceInspectionPathsExcluded(
   >();
 
   try {
-    if (!initial.binding || initial.binding.state !== "ready") return true;
+    if (initial.binding?.state !== "ready") return true;
     for (const reference of references) {
       const segments = safeSegments(reference.path);
       if (privateSegmentsExcluded(segments)) return true;
@@ -526,7 +526,7 @@ export async function workspaceInspectionPathsExcluded(
       let scope = scopes.get(scopeKey);
       if (!scope) {
         const root = currentRoot(initial, reference.scope);
-        if (!root || root.binding.state !== "ready") return true;
+        if (root?.binding.state !== "ready") return true;
         if (reference.scope.kind === "workspace") {
           const repositories = repositoryWorkspaceNames(root.binding);
           if (!repositories) return true;
@@ -987,7 +987,7 @@ export async function workspaceInspectionRootGuard(
 ): Promise<(() => Promise<boolean>) | undefined> {
   if (initial.taskId !== taskId) return undefined;
   const root = currentRoot(initial, scope);
-  if (!root || root.binding.state !== "ready") return undefined;
+  if (root?.binding.state !== "ready") return undefined;
   if (scope.kind === "workspace" && !repositoryWorkspaceNames(root.binding))
     return undefined;
   try {

@@ -39,7 +39,6 @@ function fixture() {
   let state!: ExecutionState;
   let scheduler!: SchedulerStore;
   let coordination!: CoordinationStore;
-  let commandSequence = 0;
   const initialize = () => {
     db.exec("PRAGMA foreign_keys = ON");
     new Store(db).ensureHost("retained-result-test");

@@ -1434,8 +1434,8 @@ function UnsettledPlacement(
     <section>
       <h3 className="section-heading">Placement submission outcome</h3>
       <p className="body">
-        Original project {p.command.projectId}; task {p.command.taskId};
-        submitted task version {p.command.expectedVersion}; chosen project{" "}
+        Original project {p.command.projectId}, task {p.command.taskId},
+        submitted task version {p.command.expectedVersion}, chosen project{" "}
         {p.command.chosenProjectId}. Current conflict observations cannot
         confirm this submission.
       </p>

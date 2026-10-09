@@ -23,7 +23,7 @@
     "s05:routing": "node test/s05/live-routing.mjs",
     "s03b:live": "node test/s03b/live-runtime.mjs --live",
     "s08a:live": "node test/s08a/live-operations.mjs",
-    "lint": "biome lint .",
+    "lint": "biome lint --error-on-warnings .",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",

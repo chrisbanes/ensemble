@@ -11,7 +11,7 @@ import {
 import {
   feedbackReferenceSchema,
   taskReviewReadSchema,
-} from "../core/task-review.js";
+} from "../core/task-review-contracts.js";
 export const uuid = z.string().uuid();
 const revision = z.number().int().positive().safe();
 const time = z.number().int().nonnegative().safe();

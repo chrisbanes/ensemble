@@ -20,11 +20,9 @@ const agentName = (assignments: Assignments, assignmentId: string) =>
 export function FinishedTurn({
   snapshot,
   assignments,
-  taskLeadName,
 }: {
   snapshot: TurnSnapshot;
   assignments: Assignments;
-  taskLeadName: string | null;
 }) {
   return (
     <section
@@ -65,11 +63,9 @@ export function FinishedTurn({
 export function PendingTurn({
   data,
   assignments,
-  taskLeadName,
 }: {
   data: Extract<ComparisonData, { state: "unsettled" }>;
   assignments: Assignments;
-  taskLeadName: string | null;
 }) {
   const pending = data.pending;
   const agent = agentName(assignments, pending.identity.assignmentId);
