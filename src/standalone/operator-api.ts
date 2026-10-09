@@ -3243,6 +3243,7 @@ export class OperatorApi {
         profile: {
           ...this.profiles(excluded).find((p) => p.id === profileId),
           name: this.exact(row.name, excluded),
+          summary: this.exact(row.summary, excluded),
         },
         instructionPresent: Boolean(row.instructions),
         instructionRevision: Number(row.version),
