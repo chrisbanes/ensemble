@@ -122,7 +122,11 @@ export interface TaskWorkspaceLifecycle {
     taskId: string,
     repositories?: TaskWorkspaceRepositoryInput[],
   ): Promise<TaskWorkspaceBinding>;
-  get(taskId: string): Promise<TaskWorkspaceBinding | undefined>;
+  /** `reuseRecentIdentity` is for read-only inspection rechecks, never execution. */
+  get(
+    taskId: string,
+    options?: { reuseRecentIdentity?: boolean },
+  ): Promise<TaskWorkspaceBinding | undefined>;
   forExecution(taskId: string): Promise<TaskWorkspaceBinding>;
   archiveAndCleanup(
     taskId: string,
@@ -309,6 +313,11 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
   private readonly gitTerminationGraceMs: number;
   private readonly gitTerminationObservationMs: number;
   private readonly gitCancellation = new AbortController();
+  /** Recent successful worktree identity checks, keyed by workspace path. */
+  private readonly worktreeChecks = new Map<
+    string,
+    { stamp: string; checkedAt: number }
+  >();
   private cancelled = false;
 
   constructor(
@@ -382,12 +391,15 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
     });
   }
 
-  async get(taskId: string): Promise<TaskWorkspaceBinding | undefined> {
+  async get(
+    taskId: string,
+    options: { reuseRecentIdentity?: boolean } = {},
+  ): Promise<TaskWorkspaceBinding | undefined> {
     const id = z.string().trim().min(1).max(512).parse(taskId);
     return this.withTaskLock(id, async () => {
       const binding = this.store.get(id);
       if (binding?.state !== "ready") return binding;
-      return this.validateReady(binding);
+      return this.validateReady(binding, options.reuseRecentIdentity === true);
     });
   }
 
@@ -604,11 +616,12 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
 
   private async validateReady(
     binding: TaskWorkspaceBinding,
+    reuseRecentIdentity = false,
   ): Promise<TaskWorkspaceBinding> {
     try {
       await this.assertManagedRoot(binding);
       for (const repository of binding.repositories) {
-        if (!(await this.isExistingWorktree(repository)))
+        if (!(await this.isExistingWorktree(repository, reuseRecentIdentity)))
           throw new Error(
             `Missing workspace for repository ${repository.repositoryId}`,
           );
@@ -781,13 +794,39 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
 
   private async isExistingWorktree(
     repository: TaskWorkspaceRepository,
+    reuseRecentIdentity = false,
   ): Promise<boolean> {
     const info = await lstatIfExists(repository.workspacePath);
+    const previous = this.worktreeChecks.get(repository.workspacePath);
+    this.worktreeChecks.delete(repository.workspacePath);
     if (!info) return false;
     if (info.isSymbolicLink() || !info.isDirectory())
       throw new Error(
         `Workspace path for ${repository.repositoryId} is not a real directory`,
       );
+    // Inspection rechecks run many times per read; they may reuse a just-verified
+    // Git identity only while the worktree root and its .git entry are unchanged.
+    const gitEntry = await lstatIfExists(
+      join(repository.workspacePath, ".git"),
+    );
+    const stamp = JSON.stringify([
+      repository.gitCommonDir,
+      ...[info, gitEntry].map((entry) =>
+        entry
+          ? [entry.dev, entry.ino, entry.mode, entry.mtimeMs, entry.ctimeMs]
+          : null,
+      ),
+    ]);
+    const now = Date.now();
+    if (
+      reuseRecentIdentity &&
+      previous?.stamp === stamp &&
+      now - previous.checkedAt >= 0 &&
+      now - previous.checkedAt < worktreeCheckReuseMs
+    ) {
+      this.worktreeChecks.set(repository.workspacePath, previous);
+      return true;
+    }
     try {
       const worktree = await this.gitRepositoryInfo(repository.workspacePath);
       if (
@@ -797,6 +836,10 @@ export class WorkspaceManager implements TaskWorkspaceLifecycle {
         throw new Error(
           `Workspace path for ${repository.repositoryId} belongs to another repository`,
         );
+      this.worktreeChecks.set(repository.workspacePath, {
+        stamp,
+        checkedAt: now,
+      });
       return true;
     } catch (error) {
       if (
@@ -1176,6 +1219,9 @@ function validateTimer(milliseconds: number, label: string): number {
     throw new Error(`${label} must be finite positive milliseconds`);
   return milliseconds;
 }
+
+/** Bounds how long an unchanged worktree may skip its Git identity read. */
+const worktreeCheckReuseMs = 1_000;
 
 async function lstatIfExists(path: string) {
   try {

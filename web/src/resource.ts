@@ -79,6 +79,7 @@ export class ResourceController<T> {
 export function useOperatorResource<T>(
   scope: string | null,
   loader: (signal: AbortSignal) => Promise<T>,
+  autoLoad = true,
 ) {
   const [snapshot, setSnapshot] = useState<{
     scope: string | null;
@@ -98,12 +99,12 @@ export function useOperatorResource<T>(
     [scope],
   );
   useEffect(() => {
-    if (scope) void resource.load(loader);
+    if (scope && autoLoad) void resource.load(loader);
     else resource.clear();
     return () => resource.dispose();
-  }, [resource, loader, scope]);
+  }, [resource, loader, scope, autoLoad]);
   return {
     state: snapshot.scope === scope ? snapshot.state : resource.state,
-    refresh: () => void resource.load(loader),
+    refresh: () => resource.load(loader),
   };
 }

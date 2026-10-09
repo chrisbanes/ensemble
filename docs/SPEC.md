@@ -667,6 +667,82 @@ explicit local feedback actions.
   journeys on desktop, phone and keyboard across file/diff and result entry
   points. Preserve the existing single-message contextual feedback workflow.
 
+#### #782 workspace inspection and local review — implemented behaviour
+
+As of 8 October 2026, the production task workspace provides **Files**,
+**Changes**, **Retained result evidence** and **Local review**. They are
+sections of the existing authenticated task route, so every entry point that
+opens a task reaches them. Section links scroll in place and keep the entry's
+origin for "Back to originating view". Exact links accept `path` with optional
+`repository`, comparison `target`/`repository`/`base`, `result` with `evidence`,
+and a sent `review` operation; missing or unauthorised targets explain their
+state and never substitute other bytes.
+
+- Files reads only the #779 directory and preview routes. Markdown renders
+  inertly with a Source view, rasters fit/zoom/pan, and PDFs render through a
+  pinned `pdfjs-dist` worker onto app-owned canvas. There is no download, export
+  or execute action. Opening current contents from retained evidence is a
+  separate explicit action.
+- Changes reads the #780 exact-ID comparisons. Each repository keeps its own
+  local base and change set. Split and unified diffs share line selection, and
+  phone shows only the unified diff.
+- Retained result evidence shows the #781 capture provenance, item states and
+  original bytes. Gaps are never backfilled from later bytes.
+- Review comments stage exact anchors through `review.anchor.stage`. The
+  sources are a current file (`workspace-file`), a comparison side
+  (`comparison-side`) or a retained file item (`result-evidence`). Shift extends
+  a line range. Anchors are allowed for the repository-free root and for
+  repositories linked in the project's GitHub configuration, which is how
+  production binds task repositories.
+- `GET /api/operator/tasks/{taskId}/review-draft` returns the current
+  session's draft. `review.draft.save` and `review.draft.discard` carry the
+  expected draft version. Limits are 32 comments, 4,000 characters per comment
+  or summary and 16,000 serialized bytes per draft; oversized drafts are
+  rejected before any anchor seal or event. A sent draft stays frozen until
+  discarded, which starts the next review and keeps submitted context.
+- A draft belongs to its authenticated session and to an access fingerprint
+  made of the task, project, workspace binding, exclusions, linked repositories
+  and control paths. Sign-out, expiry and restart remove an editable draft.
+  After an access change the draft's text and anchors are rechecked: it is
+  kept and rebound when still permitted, and removed only when something is
+  now excluded. A "removed unsent draft" notice appears only when the removed
+  draft had text or anchors, and clears on the next draft save. Unrelated task,
+  profile or configuration version changes do not remove a draft.
+- `review.send` freezes one operation for the named project lead, who must be
+  the task's pending or running lead assignment. Any outcome without a receipt
+  is unknown. The draft read exposes the owning session's frozen operation, and
+  the browser keeps only its identity, never comment text. Reconciliation uses
+  `review.send.reconcile` with the same key and material. A rejected or
+  not-recorded receipt returns to the editable draft.
+- The lead's message gives each comment's exact source: repository or task
+  workspace, path, lines, context, side, comparison or result item, turn,
+  source hash and retained anchor ID, plus an original excerpt of up to 12
+  lines or 800 characters. A shortened excerpt is marked as shortened. When
+  excerpts would take the message past 16,000 bytes, all excerpts are omitted
+  and the message says so. If identities alone still exceed the limit, the send
+  is refused with `local-review-batch-too-large` before any operation is
+  recorded, and the draft stays editable.
+  `GET /api/operator/tasks/{taskId}/local-reviews/{operationId}` shows the sent
+  review with original anchor context under current access policy, and a
+  recorded one carries `recordedAt`, the time it was recorded. Text from a
+  rejected or not-recorded operation is shown only to its own session.
+  `GET /api/operator/tasks/{taskId}/local-reviews` (no query parameters) lists
+  up to 50 recorded reviews newest first, each with `operationId`, `reviewId`,
+  `recipientAssignmentId`, `eventId` and `recordedAt`. Unsent operations are
+  never listed. Both reads apply the current session and access policy.
+- Definitive no-delivery outcomes keep the draft editable. A frozen operation
+  whose anchor is unavailable when sent is rejected with `anchor-unavailable`
+  (an excluded anchor with `excluded-anchor`). When the named recipient is no
+  longer the lead's pending or running assignment, the send is refused with
+  `local-review-recipient-unavailable` (409) before any operation exists.
+- Review delivery queues one local operator message and receipt. It never calls
+  GitHub or changes approval, readiness, completion, merge authority or holds.
+  As with ordinary messages, a lead that has completed its assignment cannot
+  receive a review.
+- Read-only inspection rechecks may reuse a successful Git worktree identity
+  read for up to 1 second while the worktree root and its `.git` entry keep the
+  same filesystem identity. Execution admission always rereads Git.
+
 ### Task overview and evidence — design direction, 3 October 2026
 
 Chris approved bringing the task brief, delegation, latest result and supporting

@@ -131,6 +131,7 @@ const turnComparisonSchema = z
     state: z.enum(["available", "gap", "unavailable"]),
     outcome: z.enum(["completed", "failed", "unknown"]),
     startedAt: z.number().int().nonnegative(),
+    beforeObservedAt: z.number().int().nonnegative().optional(),
     observedAt: z.number().int().nonnegative(),
     taskVersion: z.number().int().positive().optional(),
     workId: z.string().min(1),

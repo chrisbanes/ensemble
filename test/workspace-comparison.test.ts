@@ -984,6 +984,8 @@ test("final identity rechecks preserve their bounded Git timeout reason", async 
         `const child = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit" });\n` +
         `process.exitCode = child.status ?? 1;\n`,
     );
+    // Only the delayed final check (1.5s) exceeds the child limit; ordinary
+    // reads keep headroom under full-suite load.
     const result = await compareRepository(
       {
         taskId: f.binding.taskId,
@@ -992,7 +994,7 @@ test("final identity rechecks preserve their bounded Git timeout reason", async 
         baseBranch: "main",
       },
       f.current,
-      { gitExecutable: delayedGit, timeoutMs: 5000, gitTimeoutMs: 500 },
+      { gitExecutable: delayedGit, timeoutMs: 5000, gitTimeoutMs: 1000 },
     );
     assert.equal(result.state, "gap", finalArgument);
     assert.equal(result.reason, "time-limit", finalArgument);
@@ -1044,6 +1046,8 @@ test("turn observations retain exact BOM bytes and emit bound immutable side anc
       sides.set(entryIndex, item);
     },
   );
+  assert.equal(comparison.beforeObservedAt, before.observedAt);
+  assert.equal(comparison.observedAt, after.observedAt);
   const bom = comparison.entries.find((item) => item.path === "bom.md");
   assert.ok(bom?.left?.sha256);
   assert.ok(bom.right?.sha256);

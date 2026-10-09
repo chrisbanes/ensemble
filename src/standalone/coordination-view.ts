@@ -329,6 +329,10 @@ export class CoordinationView {
     },
   ) {}
 
+  async notifyOperatorCommand(): Promise<void> {
+    await this.onCommand();
+  }
+
   /** Assignment identity determines its task; history never authorizes execution. */
   readAssignmentHistory(
     assignmentId: string,

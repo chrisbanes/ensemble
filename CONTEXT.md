@@ -89,3 +89,25 @@ _Avoid_: Approval when referring to submitted review feedback
 The exact task, repository/file content, line range and applicable diff side
 that a review comment addresses. Later file changes do not move the anchor.
 _Avoid_: Current line number when referring to historical reviewed content
+
+**Local review**:
+A code review composed and sent inside Ensemble, with no GitHub involvement.
+It is delivered to the accountable project lead as one operator message.
+_Avoid_: Pull request review
+
+**Review draft**:
+The unsent summary, comments and anchor groups an operator session is composing
+for a task. It belongs to that session and is frozen while sending and once sent.
+_Avoid_: Saved review when referring to unsent text
+
+**Anchor group**:
+The review anchors captured together for one comment, kept or discarded as a
+unit. Sending seals the groups into submitted context.
+_Avoid_: Selection when referring to the retained, sealed anchors
+
+**Review operation**:
+One frozen send of a review draft, identified by the operator's command key. It
+ends as recorded (the message was queued), rejected (definitively not sent) or
+not-recorded (fenced by reconciliation); until then it is prepared and its
+outcome is unknown.
+_Avoid_: Delivery when the outcome is unknown or not recorded

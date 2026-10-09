@@ -28,6 +28,7 @@ export const inspectionLimits = Object.freeze({
   maxTextBytes: 1024 * 1024,
   maxImageOrPdfBytes: 8 * 1024 * 1024,
   maxImagePixels: 16_000_000,
+  maxPdfCanvasPixels: 16_000_000,
   maxPdfDisplayedPages: 10,
 });
 
@@ -151,6 +152,7 @@ export type WorkspacePreviewData =
       width?: number;
       height?: number;
       maxDisplayedPages?: number;
+      maxCanvasPixels?: number;
     };
 
 export interface WorkspaceFilePreview {
@@ -1237,6 +1239,7 @@ export function previewRetainedBytes(
       sha256,
       size: bytes.byteLength,
       maxDisplayedPages: inspectionLimits.maxPdfDisplayedPages,
+      maxCanvasPixels: inspectionLimits.maxPdfCanvasPixels,
     };
   }
   if (expectedMime.startsWith("image/")) {
@@ -1828,6 +1831,7 @@ export async function previewWorkspaceFile(
           sha256,
           size: bytes.length,
           maxDisplayedPages: inspectionLimits.maxPdfDisplayedPages,
+          maxCanvasPixels: inspectionLimits.maxPdfCanvasPixels,
         },
       };
     }

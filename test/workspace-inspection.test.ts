@@ -815,6 +815,10 @@ test("bounded previews return inert UTF-8 or correctly typed raster and PDF data
       pdfPreview.preview.maxDisplayedPages,
       inspectionLimits.maxPdfDisplayedPages,
     );
+    assert.equal(
+      pdfPreview.preview.maxCanvasPixels,
+      inspectionLimits.maxPdfCanvasPixels,
+    );
   }
   assert.equal(JSON.stringify(pdfPreview).includes("file://"), false);
 });

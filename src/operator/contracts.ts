@@ -194,8 +194,37 @@ const workspacePreviewDataSchema = z.discriminatedUnion("kind", [
       width: z.number().int().positive().safe().optional(),
       height: z.number().int().positive().safe().optional(),
       maxDisplayedPages: z.number().int().positive().max(10).safe().optional(),
+      maxCanvasPixels: z
+        .number()
+        .int()
+        .positive()
+        .max(16_000_000)
+        .safe()
+        .optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, context) => {
+      if (value.mime === "application/pdf") {
+        if (value.maxDisplayedPages === undefined)
+          context.addIssue({
+            code: "custom",
+            message: "PDF preview requires a displayed-page limit",
+          });
+        if (value.maxCanvasPixels === undefined)
+          context.addIssue({
+            code: "custom",
+            message: "PDF preview requires a canvas-pixel limit",
+          });
+      } else if (
+        value.maxDisplayedPages !== undefined ||
+        value.maxCanvasPixels !== undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "PDF limits are only valid for PDF previews",
+        });
+      }
+    }),
 ]);
 export const workspacePreviewReadSchema = envelope(
   z
@@ -587,6 +616,7 @@ const workspaceTurnComparisonSchema = z
     state: z.enum(["available", "gap", "unavailable"]),
     outcome: z.enum(["completed", "failed", "unknown"]),
     startedAt: time,
+    beforeObservedAt: time.optional(),
     observedAt: time,
     taskVersion: revision.optional(),
     workId: z.string().min(1).max(512),
@@ -1391,6 +1421,148 @@ export const assignmentHistorySchema = envelope(
 );
 const base = { key: uuid };
 const domainBase = { ...base, projectId: uuid };
+const localReviewCommentSchema = z
+  .object({
+    commentId: uuid,
+    body: z.string().trim().min(1).max(4000),
+    anchorGroupIds: z.array(uuid).max(32),
+  })
+  .strict();
+const localReviewDraftContentSchema = z
+  .object({
+    summary: z.string().trim().max(4000),
+    comments: z.array(localReviewCommentSchema).max(32),
+  })
+  .strict()
+  .superRefine((draft, ctx) => {
+    const ids = draft.comments.flatMap((comment) => comment.anchorGroupIds);
+    if (
+      new Set(draft.comments.map((comment) => comment.commentId)).size !==
+        draft.comments.length ||
+      new Set(ids).size !== ids.length
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "duplicate-local-review-reference",
+      });
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(draft)).byteLength;
+    if (bytes > 16000)
+      ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
+  });
+export const localReviewDraftReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      version: z.number().int().nonnegative().safe(),
+      state: z.enum(["editable", "sending", "sent"]),
+      draft: localReviewDraftContentSchema,
+      accessFingerprint: z.string().max(128).nullable(),
+      updatedAt: time.nullable(),
+      pendingOperation: z
+        .object({
+          key: uuid,
+          recipientAssignmentId: uuid,
+          expectedAssignmentVersion: revision,
+        })
+        .strict()
+        .nullable(),
+      groups: z
+        .array(
+          z
+            .object({
+              groupId: uuid,
+              anchorIds: z.array(uuid).max(32),
+              state: z.enum(["open", "sealed", "discarded"]),
+              submittedContextId: uuid.nullable(),
+              createdAt: time,
+            })
+            .strict(),
+        )
+        .max(1024),
+      unsentDraftLost: z.boolean(),
+    })
+    .strict(),
+);
+const localReviewOperationAnchorSchema = z.union([
+  z
+    .object({
+      anchorId: uuid,
+      state: z.literal("unavailable"),
+      reason: z.enum(["excluded", "unavailable"]),
+    })
+    .strict(),
+  z
+    .object({
+      anchorId: uuid,
+      state: z.enum(["available", "gap"]),
+      status: z.enum(["current", "outdated", "unknown"]).optional(),
+      path: z.string().min(1).max(2048),
+      context: z.enum(["workspace", "branch", "uncommitted", "turn", "result"]),
+      startLine: revision,
+      endLine: revision,
+    })
+    .strict(),
+]);
+/** Recorded reviews for a task, newest first; unsent operations are never listed. */
+export const localReviewListReadSchema = envelope(
+  z
+    .object({
+      taskId: uuid,
+      reviews: z
+        .array(
+          z
+            .object({
+              operationId: uuid,
+              reviewId: uuid,
+              recipientAssignmentId: uuid,
+              eventId: uuid,
+              recordedAt: time,
+            })
+            .strict(),
+        )
+        .max(50),
+    })
+    .strict(),
+);
+export const localReviewOperationReadSchema = envelope(
+  z
+    .object({
+      operationId: uuid,
+      taskId: uuid,
+      reviewId: uuid,
+      state: z.enum(["prepared", "recorded", "rejected", "not-recorded"]),
+      eventId: uuid.optional(),
+      recipientAssignmentId: uuid.optional(),
+      reason: z.string().max(128).optional(),
+      recordedAt: time.optional(),
+      summary: z.string().max(16000).nullable().optional(),
+      comments: z
+        .array(
+          z
+            .object({
+              commentId: uuid,
+              body: z.string().max(4000).nullable(),
+              anchorGroupIds: z.array(uuid).max(32),
+            })
+            .strict(),
+        )
+        .max(32)
+        .optional(),
+      groups: z
+        .array(
+          z
+            .object({
+              groupId: uuid,
+              anchors: z.array(localReviewOperationAnchorSchema).max(32),
+            })
+            .strict(),
+        )
+        .max(32)
+        .optional(),
+    })
+    .strict(),
+);
 export const operatorCommandSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -1457,6 +1629,52 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       expectedAssignmentVersion: revision,
       message: z.string().trim().min(1).max(16000),
       reference: feedbackReferenceSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.anchor.stage"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      anchors: z.array(z.unknown()).min(1).max(32),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.draft.save"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      draft: localReviewDraftContentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.draft.discard"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.send"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      recipientAssignmentId: uuid,
+      expectedAssignmentVersion: revision,
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal("review.send.reconcile"),
+      taskId: uuid,
+      expectedDraftVersion: z.number().int().nonnegative().safe(),
+      recipientAssignmentId: uuid,
+      expectedAssignmentVersion: revision,
     })
     .strict(),
   z
@@ -2040,6 +2258,37 @@ export const questionCommandRawLimit =
 export const commandReceiptSchema = z.discriminatedUnion("kind", [
   z
     .object({
+      kind: z.literal("local-review-draft"),
+      key: uuid,
+      taskId: uuid,
+      version: revision,
+      state: z.enum(["editable", "discarded"]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("local-review-anchor"),
+      key: uuid,
+      taskId: uuid,
+      groupId: uuid,
+      anchorIds: z.array(uuid).max(32),
+      draftVersion: revision,
+      state: z.literal("staged"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("local-review-operation"),
+      key: uuid,
+      taskId: uuid,
+      reviewId: uuid,
+      state: z.enum(["prepared", "recorded", "rejected", "not-recorded"]),
+      eventId: uuid.optional(),
+      recipientAssignmentId: uuid.optional(),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("native-question"),
       key: uuid,
       taskId: uuid,
@@ -2155,6 +2404,8 @@ export const apiErrorSchema = z
           "conflict",
           "unavailable",
           "command-outcome-unknown",
+          "local-review-batch-too-large",
+          "local-review-recipient-unavailable",
         ]),
         message: z.string().max(256),
         fieldPaths: z.array(z.string().max(128)).optional(),

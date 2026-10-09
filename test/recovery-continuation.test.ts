@@ -1367,6 +1367,76 @@ test("nullable receipt migration preserves existing bound-turn receipt and conti
   }
 });
 
+test("local review records a message without releasing held recovery; ordinary message still does", async () => {
+  const f = await heldFixture();
+  try {
+    await f.service.resolveHeldExecution(f.receipt);
+    f.pause(true);
+    const coordination = internals(f.service).coordination;
+    const before = coordination.deliveryForWork(f.old.workId);
+    assert.ok(before);
+    assert.equal(audit(f.service, f.old.workId), undefined);
+
+    const api = new OperatorApi(f.service, [f.directory]);
+    const owner = { ownerKey: randomUUID(), current: () => true };
+    const draft = (await api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: f.taskId,
+        expectedDraftVersion: 0,
+        draft: {
+          summary: "Review feedback must not release the held continuation.",
+          comments: [],
+        },
+      },
+      owner,
+    )) as { version: number };
+    const reviewKey = randomUUID();
+    const assignmentId = required(f.old.assignmentId);
+    const review = (await api.execute(
+      {
+        type: "review.send",
+        key: reviewKey,
+        taskId: f.taskId,
+        expectedDraftVersion: draft.version,
+        recipientAssignmentId: assignmentId,
+        expectedAssignmentVersion: Number(
+          f.service.domain().assignment(assignmentId).version,
+        ),
+      },
+      owner,
+    )) as { state: string; eventId?: string };
+    assert.equal(review.state, "recorded");
+    assert.ok(review.eventId);
+    assert.equal(audit(f.service, f.old.workId), undefined);
+    assert.deepEqual(
+      coordination.deliveryForWork(f.old.workId),
+      before,
+      "local review must leave the held continuation batch untouched",
+    );
+
+    const ordinary = await f.service
+      .coordinationView()
+      .postOperatorMessage(f.message);
+    const retained = audit(f.service, f.old.workId);
+    assert.ok(retained);
+    assert.equal(
+      coordination.deliveryForWork(f.old.workId)?.state,
+      "completed",
+    );
+    assert.equal(
+      (await f.service.coordinationView().postOperatorMessage(f.message))
+        .eventId,
+      ordinary.eventId,
+      "ordinary exact replay retains its existing receipt",
+    );
+    assert.deepEqual(audit(f.service, f.old.workId), retained);
+  } finally {
+    await close(f);
+  }
+});
+
 test("pre-turn witness is exposed safely through operator API and both shared runtime history pages", async () => {
   const f = await heldFixture(true);
   try {

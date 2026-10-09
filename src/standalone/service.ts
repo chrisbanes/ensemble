@@ -407,6 +407,7 @@ export class StandaloneService {
             : undefined,
       );
       coordination.migrate();
+      coordination.localReviews().purgeEditableDrafts();
       this.inboxStartup = new InboxStartupReconciliation(db, domain);
       coordination.invalidateRuntimeQuestions(
         "Service restarted; native endpoints cannot be reconstructed",
@@ -1140,6 +1141,11 @@ export class StandaloneService {
     return this.coordination.taskReview();
   }
 
+  localReviews() {
+    if (!this.coordination) throw Error("Service not started");
+    return this.coordination.localReviews();
+  }
+
   retainedEvidence() {
     if (!this.coordination) throw Error("Service not started");
     return this.coordination.retainedEvidence();
@@ -1147,7 +1153,7 @@ export class StandaloneService {
 
   async stageReviewAnchorDraft(input: RetainedReviewAnchorStageRequest) {
     const request = retainedReviewAnchorStageRequestSchema.parse(input);
-    const task = this.domain().task(request.taskId);
+    this.domain().task(request.taskId);
     const evidence = this.retainedEvidence();
     const materialHash = retainedReviewAnchorMaterialHash(request);
     const prior = evidence.reviewAnchorOperation(
@@ -1162,6 +1168,21 @@ export class StandaloneService {
       return prior;
     }
 
+    const { candidates } = await this.captureReviewAnchors(request);
+    return evidence.stageReviewAnchorDraft(
+      request.taskId,
+      request.operationId,
+      materialHash,
+      candidates,
+    );
+  }
+
+  /** Captures anchors under one policy and workspace binding, rechecked after capture. */
+  private async captureReviewAnchors(
+    request: RetainedReviewAnchorStageRequest,
+  ) {
+    const task = this.domain().task(request.taskId);
+    const evidence = this.retainedEvidence();
     const operatorApi = new OperatorApi(this, [
       this.dataDir,
       process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "",
@@ -1172,6 +1193,7 @@ export class StandaloneService {
         ? {
             taskVersion: policy.taskVersion,
             fingerprint: policy.fingerprint,
+            accessFingerprint: policy.accessFingerprint,
             excluded: policy.excluded,
             authorizedRepositoryIds: policy.authorizedRepositoryIds,
           }
@@ -1217,12 +1239,43 @@ export class StandaloneService {
       throw new Error(
         "Review anchor task or access binding changed during capture",
       );
-    return evidence.stageReviewAnchorDraft(
-      request.taskId,
-      request.operationId,
-      materialHash,
+    return { candidates, accessFingerprint: initialPolicy.accessFingerprint };
+  }
+
+  async stageLocalReviewAnchorGroup(input: {
+    commandKey: string;
+    taskId: string;
+    ownerKey: string;
+    expectedDraftVersion: number;
+    requestHash: string;
+    anchors: RetainedReviewAnchorStageRequest["anchors"];
+  }) {
+    const command = {
+      commandKey: input.commandKey,
+      taskId: input.taskId,
+      ownerKey: input.ownerKey,
+      requestHash: input.requestHash,
+    };
+    const prior = this.localReviews().replayStage(command);
+    if (prior) return prior;
+    const request = retainedReviewAnchorStageRequestSchema.parse({
+      taskId: input.taskId,
+      operationId: randomUUID(),
+      anchors: input.anchors,
+    });
+    const { candidates, accessFingerprint } =
+      await this.captureReviewAnchors(request);
+    return this.localReviews().stageGroup({
+      commandKey: input.commandKey,
+      taskId: request.taskId,
+      ownerKey: input.ownerKey,
+      expectedDraftVersion: input.expectedDraftVersion,
+      requestHash: input.requestHash,
+      stageOperationId: request.operationId,
+      stageMaterialHash: retainedReviewAnchorMaterialHash(request),
       candidates,
-    );
+      accessFingerprint,
+    });
   }
 
   sealReviewAnchorDraft(input: {
@@ -1688,9 +1741,9 @@ export class StandaloneService {
       )
       .digest("hex");
   }
-  taskWorkspace(taskId: string) {
+  taskWorkspace(taskId: string, options?: { reuseRecentIdentity?: boolean }) {
     this.domain().task(taskId);
-    return this.requireWorkspaces().get(taskId);
+    return this.requireWorkspaces().get(taskId, options);
   }
 
   replaceWorkspaceComparison(
@@ -1745,7 +1798,9 @@ export class StandaloneService {
     taskId: string,
   ): Promise<WorkspaceInspectionCurrent> {
     const task = this.domain().task(taskId);
-    const binding = await this.taskWorkspace(taskId);
+    const binding = await this.taskWorkspace(taskId, {
+      reuseRecentIdentity: true,
+    });
     return {
       taskId,
       taskVersion: Number(task.version),

@@ -178,6 +178,7 @@ export interface WorkspaceTurnComparisonSnapshot {
   state: "available" | "gap" | "unavailable";
   outcome: "completed" | "failed" | "unknown";
   startedAt: number;
+  beforeObservedAt?: number;
   observedAt: number;
   taskVersion: number;
   workId: string;
@@ -2217,6 +2218,7 @@ export function compareWorkspaceTurnObservations(
         : "available",
     outcome,
     startedAt,
+    beforeObservedAt: before.observedAt,
     observedAt: after.observedAt,
     taskVersion: identity.taskVersion,
     workId: identity.workId,

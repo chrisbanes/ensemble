@@ -40,6 +40,7 @@ import {
   type RuntimeDeliveryCaller,
 } from "./delivery.js";
 import { transaction, type Database } from "./store.js";
+import { LocalReviewStore } from "./local-review.js";
 
 const uuid = z.string().uuid();
 const summarySchema = z.string().trim().min(1).max(16000);
@@ -457,6 +458,29 @@ export class CoordinationStore {
     return new RetainedEvidenceStore(this.db);
   }
 
+  localReviews(): LocalReviewStore {
+    return new LocalReviewStore(this.db, this.retainedEvidence(), {
+      createMessage: (taskId, recipientAssignmentId, message) =>
+        this.newEvent(
+          taskId,
+          recipientAssignmentId,
+          "operator-message",
+          null,
+          JSON.stringify({ message }),
+        ),
+      saveReceipt: (key, request, eventId) =>
+        this.saveOperatorReceipt("local-review-send", key, request, eventId),
+      readEvent: (eventId) =>
+        this.parseEvent(
+          this.required(
+            `SELECT sequence,eventId,taskId,recipientAssignmentId,eventType,resultId,interactionId,payload,createdAt
+        FROM coordination_inbox_events WHERE eventId=?`,
+            eventId,
+          ),
+        ),
+    });
+  }
+
   hasResultForWork(workId: string, workRevision: number): boolean {
     return Boolean(
       this.db
@@ -675,6 +699,7 @@ export class CoordinationStore {
         WHERE routingOperationId IS NOT NULL;`);
       new TaskReviewStore(this.db).populateMissingWithinTransaction();
       new RetainedEvidenceStore(this.db).migrate();
+      this.localReviews().migrate();
     });
   }
 
