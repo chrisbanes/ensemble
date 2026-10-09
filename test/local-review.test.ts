@@ -1268,3 +1268,34 @@ test("every review comment must carry exact anchor context", async (t) => {
     ),
   );
 });
+
+test("a stored unanchored draft from before the anchor rule stays readable", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Legacy unanchored draft");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: 0,
+      draft: { summary: "legacy", comments: [] },
+    },
+    owner,
+  );
+  const legacy = {
+    summary: "legacy",
+    comments: [
+      { commentId: randomUUID(), body: "Unanchored", anchorGroupIds: [] },
+    ],
+  };
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "UPDATE coordination_local_review_drafts SET draftJson=? WHERE taskId=? AND ownerKey=?",
+    ).run(JSON.stringify(legacy), task.taskId, owner.ownerKey);
+  });
+  const read = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.deepEqual(read.data.draft, legacy);
+});

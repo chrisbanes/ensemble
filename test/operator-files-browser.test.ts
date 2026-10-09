@@ -479,6 +479,10 @@ test("production Files keeps scoped previews stable, inert and navigable across 
   await docsButton.focus();
   await page.keyboard.press("ArrowRight");
   await page.getByRole("button", { name: /child\.txt/ }).waitFor();
+  // Focus moves into the folder a frame later; ArrowLeft before that is lost.
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("aria-label")?.includes("child.txt"),
+  );
   await page.keyboard.press("ArrowLeft");
   await docsButton.waitFor();
   await page.waitForFunction(() =>

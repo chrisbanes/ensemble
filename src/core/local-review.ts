@@ -16,7 +16,8 @@ const commentSchema = z
   .object({
     commentId: uuid,
     body: z.string().trim().min(1).max(4000),
-    anchorGroupIds: z.array(uuid).min(1).max(maxReviewItems),
+    // Stored drafts and payloads stay readable; new writes require an anchor.
+    anchorGroupIds: z.array(uuid).max(maxReviewItems),
   })
   .strict();
 const draftSchema = z
@@ -71,6 +72,12 @@ const frozenPayloadSchema = z
       .max(maxReviewItems),
   })
   .strict();
+/** New drafts bind every comment to exact anchor context. */
+const writableDraftSchema = draftSchema.refine(
+  (draft) =>
+    draft.comments.every((comment) => comment.anchorGroupIds.length > 0),
+  { message: "local-review-comment-anchor-required" },
+);
 type Draft = z.infer<typeof draftSchema>;
 type FrozenPayload = z.infer<typeof frozenPayloadSchema>;
 type Row = Record<string, string | number | null>;
@@ -479,7 +486,7 @@ export class LocalReviewStore {
     requestHash: string;
     accessFingerprint: string;
   }) {
-    const draft = draftSchema.parse(input.draft);
+    const draft = writableDraftSchema.parse(input.draft);
     return transaction(this.db, () => {
       const prior = this.draftOperation("save", input.commandKey);
       if (prior) return this.replayDraftOperation(prior, input);
