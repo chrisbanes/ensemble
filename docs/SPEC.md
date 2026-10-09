@@ -888,8 +888,30 @@ state and reason for any wait after submission; creation does not imply running.
 These controls must preserve existing readiness and admission rules.
 
 Use a short guided project setup: project name, lead profile, instructions and
-optional repository access. Advanced routing and external source configuration
-can follow later. Source selection does not grant repository access.
+optional repository access. Choose each repository and ref from lists discovered
+on GitHub, with the default branch preselected, and choose its local checkout with
+a folder picker. The service verifies that the folder is a checkout of the chosen
+repository and that the ref is available. Setup may link a GitHub Project
+discovered from the chosen repositories or owner; linking adds an inactive
+discovery source, and preview, readiness and activation follow in project
+configuration. When discovery is unavailable, setup accepts typed values and says
+so. Advanced routing and external source configuration can follow later.
+Discovery, source selection and a linked GitHub Project do not grant repository
+access; access is exactly the repositories the operator adds. See
+[ADR-1009](adr/1009-project-setup-discovery.md).
+
+Settings present each project's repository access and GitHub discovery sources
+together, labelled separately, rather than as two unrelated lists.
+
+Configuration forms edit current values in place rather than requiring a complete
+replacement. Private values (instructions, routing guidance, search queries and
+local paths) are never loaded; they show as kept and change only through an
+explicit replacement. Before saving, list every change, including access added or
+removed and sources added inactive. Removing all repository access needs explicit
+confirmation. A save is keyed against the loaded version: a conflict keeps the
+input and shows the newer version, and an unknown outcome blocks further edits
+until the original save is checked. Saving never resumes work, clears holds or
+grants access by implication.
 
 Phone layouts support checking progress, creating tasks, messaging, answering
 questions and reviewing approvals. Complex configuration and recovery are
