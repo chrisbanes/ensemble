@@ -7,7 +7,6 @@ import {
   useMemo,
   useState,
   useRef,
-  type FormEvent,
   type ReactNode,
 } from "react";
 import {
@@ -30,7 +29,6 @@ import { useOperatorResource } from "./resource.js";
 import {
   ActionLink,
   Button,
-  TextField,
   StatusBadge,
   ResourceStatus,
   MobileNavigation,
@@ -52,6 +50,7 @@ import { Search, SearchState } from "./search.js";
 import { TaskWorkspace } from "./task-workspace.js";
 import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
+import { Login, SignInBootstrap } from "./sign-in.js";
 function RouteLink({
   href,
   current,
@@ -270,62 +269,6 @@ function parentRoute(
     return { href: "/app/settings", label: "Settings" };
   return null;
 }
-export function Login({
-  client,
-  session,
-  onSignedIn,
-}: {
-  client: OperatorClient;
-  session: Session;
-  onSignedIn: (s: Session) => void;
-}) {
-  const [password, setPassword] = useState(""),
-    [pending, setPending] = useState(false),
-    [error, setError] = useState(false);
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    setPending(true);
-    setError(false);
-    try {
-      onSignedIn(await client.login(password, session.csrfToken));
-      setPassword("");
-    } catch {
-      setError(true);
-      setPassword("");
-    } finally {
-      setPending(false);
-    }
-  }
-  return (
-    <main className="login">
-      <div className="login-content">
-        <p className="wordmark feature-heading">Ensemble</p>
-        <h1 className="page-heading">Sign in</h1>
-        <p className="introduction muted">Your operator workspace.</p>
-        <form onSubmit={submit}>
-          <TextField
-            label="Password"
-            id="password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            disabled={pending}
-          />
-          {error && (
-            <p className="body error-text" role="alert">
-              Sign in failed. Try again.
-            </p>
-          )}
-          <Button type="submit" disabled={pending}>
-            {pending ? "Signing in…" : "Sign in"}
-          </Button>
-        </form>
-      </div>
-    </main>
-  );
-}
 export function App() {
   const drafts = useRef(new ConfigurationDrafts());
   const acceptedIdentity = useRef<string | null>(null);
@@ -350,7 +293,8 @@ export function App() {
     [navigationVersion, setNavigationVersion] = useState(0),
     [drawer, setDrawer] = useState(false),
     [logoutPending, setLogoutPending] = useState(false),
-    [logoutNotice, setLogoutNotice] = useState<string | null>(null);
+    [logoutNotice, setLogoutNotice] = useState<string | null>(null),
+    [expiredNotice, setExpiredNotice] = useState(false);
   const searchState = useRef(new Map<string, SearchState>());
   const taskStates = useRef(new TaskWorkspaceStates());
   const questionStates = useRef(new QuestionResponseStates());
@@ -368,6 +312,7 @@ export function App() {
     inboxState.current.clear();
     searchState.current.clear();
     setSession(null);
+    setExpiredNotice(true);
     setBootstrap((v) => v + 1);
     setDrawer(false);
   }, []);
@@ -402,6 +347,7 @@ export function App() {
         acceptedIdentity.current = identity;
         setLogoutPending(false);
       }
+      if (next.authenticated) setExpiredNotice(false);
       setSession(next);
     },
     [client],
@@ -576,25 +522,10 @@ export function App() {
   };
   if (!session)
     return (
-      <main className="login">
-        <div className="login-content">
-          <h1 className="page-heading">Ensemble</h1>
-          {bootstrapError ? (
-            <>
-              <p role="alert" className="body">
-                Sign-in service unavailable.
-              </p>
-              <Button onClick={() => setBootstrap((v) => v + 1)}>
-                Try again
-              </Button>
-            </>
-          ) : (
-            <p role="status" className="body">
-              Loading sign-in…
-            </p>
-          )}
-        </div>
-      </main>
+      <SignInBootstrap
+        unavailable={bootstrapError}
+        retry={() => setBootstrap((v) => v + 1)}
+      />
     );
   if (!session.authenticated)
     return (
@@ -603,6 +534,7 @@ export function App() {
           key={session.csrfToken}
           client={client}
           session={session}
+          expired={expiredNotice}
           onSignedIn={(next) => {
             if (pathname === "/login") {
               history.replaceState(null, "", "/app");

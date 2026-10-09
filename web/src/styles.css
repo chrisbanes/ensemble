@@ -87,36 +87,57 @@ p {
 
 .wordmark {
   color: var(--foreground);
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-  margin-bottom: var(--space-24);
+  font-size: var(--type-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-1-25);
 }
 
 .login {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: var(--space-24);
+  padding: var(--space-20);
 }
 
 .login-content {
-  width: min(100%, 400px);
+  width: min(100%, 360px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
 }
 
-.login-content .wordmark {
-  margin-bottom: var(--space-40);
+.login-content > *,
+.login-content h1,
+.login-content p {
+  margin: 0;
+}
+
+.login-heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .login-content form {
-  margin-top: var(--space-32);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.login-content .field {
+  margin-bottom: 0;
 }
 
 .login-content form [data-slot="button"] {
   width: 100%;
+}
+
+.login-error {
+  color: var(--nova-destructive-fg);
+}
+
+.login-notice p + p {
+  margin-top: var(--space-8);
 }
 
 .shell {
