@@ -113,8 +113,11 @@ async function run() {
   const dataDir = join(root, "data");
   const workspace = join(root, "direct-workspace");
   mkdirSync(workspace);
-  const runtime = new CodexRuntime();
-  service = new StandaloneService(dataDir, () => runtime);
+  let runtime;
+  service = new StandaloneService(
+    dataDir,
+    (context) => (runtime = new CodexRuntime("codex", context)),
+  );
 
   stage = "authenticated-runtime-start";
   await service.start();

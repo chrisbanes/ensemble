@@ -11,6 +11,10 @@ import {
 import { join } from "node:path";
 import { CodexRuntime } from "../../dist/src/standalone/index.js";
 import { MacProcessTerminationVerifier } from "../../dist/src/standalone/termination.js";
+import {
+  closeRuntimeSafetyFixtures,
+  runtimeSafetyFixture,
+} from "../../dist/test/fixtures/runtime-safety.js";
 import { CaptureObserver } from "../../dist/test/s05/capture-observer.js";
 import { tmpdir } from "../../dist/test/temp.js";
 
@@ -69,6 +73,7 @@ if (mode !== "capture") {
   };
 
   let runtime;
+  let safetyFixture;
   let root;
   let stage = "source-identity";
 
@@ -141,7 +146,9 @@ if (mode !== "capture") {
     chmodSync(root, 0o700);
 
     stage = "existing-login-runtime";
-    runtime = new CodexRuntime();
+    // Direct runtime use needs the service-owned safety store; a disposable fixture stands in.
+    safetyFixture = runtimeSafetyFixture();
+    runtime = new CodexRuntime("codex", { safety: safetyFixture.safety });
     const capture = new CaptureObserver(marker);
     runtime.onConversationEvent((event) => capture.observe(event));
     await bounded(runtime.start(), 30_000);
@@ -158,6 +165,9 @@ if (mode !== "capture") {
       root,
       `Reply with the exact marker ${marker} and no other text. Do not use tools or modify files.`,
     );
+    const generation = runtime.currentUserInputGeneration();
+    if (!generation) throw new Error("runtime generation unavailable");
+    safetyFixture.bindTurn(expectedThreadId, turnId, generation);
     evidence.runtime.turnId = turnId;
     capture.bindTurn(turnId);
     evidence.terminal = await bounded(
@@ -199,6 +209,7 @@ if (mode !== "capture") {
         evidence.failure ??= "runtime-cleanup";
       }
     }
+    closeRuntimeSafetyFixtures();
     if (evidence.runtime.processIdentity) {
       const exited = await verifyExited({
         processId: evidence.runtime.processIdentity.processId,
