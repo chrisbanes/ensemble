@@ -98,7 +98,7 @@ export class LocalReviewBatchTooLargeError extends Error {
   }
 }
 
-/** Definitive pre-operation rejection: the recipient is no longer the active lead. */
+/** Definitive pre-operation rejection: the recipient is no longer a lead that can receive or resume for this review. */
 export class LocalReviewRecipientUnavailableError extends Error {
   constructor() {
     super("Local review recipient must be the accountable lead");
@@ -158,6 +158,7 @@ export type LocalReviewResponse = {
   recipientAssignmentId?: string | undefined;
   reason?: string | undefined;
   recordedAt?: number | undefined;
+  resumedLead?: true | undefined;
 };
 
 export type LocalReviewRequest = {
@@ -176,11 +177,16 @@ export type LocalReviewSyncIdentity = {
 };
 
 export type LocalReviewEventPort = {
-  createMessage(
+  /** The current lead's version when it can receive or be resumed by feedback. */
+  recipient(
+    taskId: string,
+    assignmentId: string,
+  ): { version: number } | undefined;
+  deliverFeedback(
     taskId: string,
     recipientAssignmentId: string,
     message: string,
-  ): InboxEvent;
+  ): { event: InboxEvent; resumedLead: boolean };
   saveReceipt(key: string, request: LocalReviewRequest, eventId: string): void;
   readEvent(eventId: string): InboxEvent;
 };
@@ -196,6 +202,7 @@ function responseSchema() {
       recipientAssignmentId: uuid.optional(),
       reason: z.string().max(128).optional(),
       recordedAt: z.number().int().nonnegative().optional(),
+      resumedLead: z.literal(true).optional(),
     })
     .strict();
 }
@@ -213,6 +220,7 @@ function asResponse(row: Row): LocalReviewResponse {
     ...(row.reason === null ? {} : { reason: String(row.reason) }),
     // A recorded operation's updatedAt is the moment commitSend recorded it.
     ...(row.state === "recorded" ? { recordedAt: Number(row.updatedAt) } : {}),
+    ...(row.resumedLead === 1 ? { resumedLead: true } : {}),
   });
 }
 
@@ -271,6 +279,13 @@ export class LocalReviewStore {
       ON coordination_local_review_drafts(ownerKey,taskId);
     CREATE INDEX IF NOT EXISTS coordination_local_review_operations_task
       ON coordination_local_review_operations(taskId,createdAt);`);
+    const operationColumns = this.db
+      .prepare("PRAGMA table_info(coordination_local_review_operations)")
+      .all() as Row[];
+    if (!operationColumns.some((column) => column.name === "resumedLead"))
+      this.db.exec(
+        "ALTER TABLE coordination_local_review_operations ADD COLUMN resumedLead INTEGER NOT NULL DEFAULT 0 CHECK(resumedLead IN (0,1))",
+      );
   }
 
   readDraft(taskId: string, ownerKey: string) {
@@ -927,7 +942,7 @@ export class LocalReviewStore {
           .run(seal.submittedContextId, group.groupId);
         sealed.push(group.groupId);
       }
-      const event = this.events.createMessage(
+      const { event, resumedLead } = this.events.deliverFeedback(
         input.request.taskId,
         input.request.recipientAssignmentId,
         input.payload.message,
@@ -936,9 +951,15 @@ export class LocalReviewStore {
       const now = Date.now();
       this.db
         .prepare(`UPDATE coordination_local_review_operations
-        SET state='recorded',eventId=?,accessFingerprint=?,updatedAt=?
+        SET state='recorded',eventId=?,accessFingerprint=?,updatedAt=?,resumedLead=?
         WHERE operationId=? AND state='prepared'`)
-        .run(event.eventId, input.accessFingerprint, now, input.request.key);
+        .run(
+          event.eventId,
+          input.accessFingerprint,
+          now,
+          resumedLead ? 1 : 0,
+          input.request.key,
+        );
       this.db
         .prepare(`UPDATE coordination_local_review_drafts SET state='sent',updatedAt=?
         WHERE taskId=? AND ownerKey=? AND version=? AND state='sending'`)
@@ -1233,22 +1254,13 @@ export class LocalReviewStore {
   }
 
   private leadIdentity(taskId: string, assignmentId: string) {
-    const row = this.one(
-      `SELECT a.id,a.taskId,a.version,a.state,b.projectId
-      FROM domain_assignments a JOIN task_lead_bindings b ON b.taskId=a.taskId AND b.assignmentId=a.id
-      WHERE a.id=? AND a.taskId=?`,
-      assignmentId,
-      taskId,
-    );
-    if (!row || (row.state !== "pending" && row.state !== "running"))
-      return undefined;
-    return { version: Number(row.version), projectId: String(row.projectId) };
+    return this.events.recipient(taskId, assignmentId);
   }
 
   private operation(operationId: string) {
     return this.one(
       `SELECT operationId,taskId,ownerKey,requestHash,requestJson,payloadJson,payloadHash,
-      reviewId,accessFingerprint,recipientAssignmentId,assignmentVersion,draftVersion,eventId,state,reason,updatedAt
+      reviewId,accessFingerprint,recipientAssignmentId,assignmentVersion,draftVersion,eventId,state,reason,updatedAt,resumedLead
       FROM coordination_local_review_operations WHERE operationId=?`,
       operationId,
     );

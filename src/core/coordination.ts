@@ -462,14 +462,10 @@ export class CoordinationStore {
 
   localReviews(): LocalReviewStore {
     return new LocalReviewStore(this.db, this.retainedEvidence(), {
-      createMessage: (taskId, recipientAssignmentId, message) =>
-        this.newEvent(
-          taskId,
-          recipientAssignmentId,
-          "operator-message",
-          null,
-          JSON.stringify({ message }),
-        ),
+      recipient: (taskId, assignmentId) =>
+        this.feedbackRecipient(taskId, assignmentId),
+      deliverFeedback: (taskId, recipientAssignmentId, message) =>
+        this.deliverOperatorFeedback(taskId, recipientAssignmentId, message),
       saveReceipt: (key, request, eventId) =>
         this.saveOperatorReceipt("local-review-send", key, request, eventId),
       readEvent: (eventId) =>
