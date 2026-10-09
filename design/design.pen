@@ -118639,6 +118639,19 @@
                                       "fontFamily": "$font-sans"
                                     }
                                   }
+                                },
+                                {
+                                  "id": "xMTW4",
+                                  "type": "ref",
+                                  "ref": "X:J7Uph",
+                                  "name": "Reviewer · Review (revoked)",
+                                  "opacity": 0.5,
+                                  "descendants": {
+                                    "X:15v9d": {
+                                      "content": "Reviewer · Review (revoked)",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
                                 }
                               ]
                             },
@@ -118665,10 +118678,10 @@
                                   "id": "RZrqW",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Builder",
+                                  "name": "Builder · Implementation",
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Builder",
+                                      "content": "Builder · Implementation",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -118677,23 +118690,10 @@
                                   "id": "I6RVlo",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Worker",
+                                  "name": "Worker · Bounded tasks",
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Worker",
-                                      "fontFamily": "$font-sans"
-                                    }
-                                  }
-                                },
-                                {
-                                  "id": "xMTW4",
-                                  "type": "ref",
-                                  "ref": "X:J7Uph",
-                                  "name": "Reviewer (revoked)",
-                                  "opacity": 0.5,
-                                  "descendants": {
-                                    "X:15v9d": {
-                                      "content": "Reviewer (revoked)",
+                                      "content": "Worker · Bounded tasks",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -119710,6 +119710,19 @@
                                       "fontFamily": "$font-sans"
                                     }
                                   }
+                                },
+                                {
+                                  "id": "dZada",
+                                  "type": "ref",
+                                  "ref": "X:J7Uph",
+                                  "name": "Reviewer · Review (revoked)",
+                                  "opacity": 0.5,
+                                  "descendants": {
+                                    "X:15v9d": {
+                                      "content": "Reviewer · Review (revoked)",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
                                 }
                               ]
                             },
@@ -119737,11 +119750,11 @@
                                   "id": "MnRpl",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Builder",
+                                  "name": "Builder · Implementation",
                                   "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Builder",
+                                      "content": "Builder · Implementation",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -119750,24 +119763,11 @@
                                   "id": "zHAcO",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Worker",
+                                  "name": "Worker · Bounded tasks",
                                   "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Worker",
-                                      "fontFamily": "$font-sans"
-                                    }
-                                  }
-                                },
-                                {
-                                  "id": "dZada",
-                                  "type": "ref",
-                                  "ref": "X:J7Uph",
-                                  "name": "Reviewer (revoked)",
-                                  "opacity": 0.5,
-                                  "descendants": {
-                                    "X:15v9d": {
-                                      "content": "Reviewer (revoked)",
+                                      "content": "Worker · Bounded tasks",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -123782,7 +123782,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Profiles have a name, a summary shown in Settings and routing (Lead, Repairs, Implementation), private instructions and capabilities edited in place. 122 creates a new Tester profile; Reviewer (123) is a revoked role profile and offers Restore profile.",
+              "content": "· Profiles have a name, an optional summary shown with the name in Settings and routing (SPEC, 9 Oct), private instructions and capabilities edited in place. The summary is not stored by the build yet. 122 creates a new Tester profile; Reviewer (123) is a revoked role profile and offers Restore profile.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
