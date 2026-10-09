@@ -9,6 +9,11 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Browsers and their system dependencies are preinstalled. Keep the tag in
+    # step with the playwright version in package.json.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.0-noble
+      options: --user 1001
     steps:
       - name: Prepare writable test directories
         env:
@@ -26,7 +31,6 @@ jobs:
           cache: npm
       - run: npm install --global npm@12.2.0
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:fixture-preflight
       - run: npm run check
       - name: Upload synthetic test evidence
