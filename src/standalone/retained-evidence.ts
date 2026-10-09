@@ -231,7 +231,6 @@ const rootLocation = (
     );
   });
   if (repository) {
-    const mount = relative(binding.path, repository.workspacePath);
     const remainder = segments.slice(1);
     if (remainder.length === 0) return undefined;
     return {
@@ -812,7 +811,7 @@ export async function captureRetainedReviewAnchor(
     const segments = reviewPathSegments(selection.path);
     if (!segments) throw new Error("Unsafe review anchor path");
     let scope: WorkspaceInspectionScope;
-    let previewPath = segments;
+    const previewPath = segments;
     if (selection.repositoryId) {
       scope = { kind: "repository", repositoryId: selection.repositoryId };
     } else {
@@ -1151,8 +1150,7 @@ function comparisonMatches(
   identity: RetainedEvidenceIdentity,
 ) {
   if (
-    !exported ||
-    exported.captureState !== "finished" ||
+    exported?.captureState !== "finished" ||
     capture.captureState !== "finished"
   )
     return false;
@@ -1187,7 +1185,7 @@ export async function captureRetainedResultEvidence(
     (artifact) => artifact.file !== undefined,
   );
   const changeReferences = metadata?.changes?.files ?? [];
-  let capture =
+  const capture =
     changeReferences.length > 0
       ? selectedCapture(input.turnCaptures, identity)
       : undefined;
@@ -1408,7 +1406,7 @@ export async function captureRetainedResultEvidence(
       diffItems.push(gapItem(baseItem, "binding-changed"));
       continue;
     }
-    if (!exactComparison || exactComparison.comparison.target !== "turn") {
+    if (exactComparison?.comparison.target !== "turn") {
       const reason =
         observation.captureState === "pending" ||
         observation.captureState === "unsettled"

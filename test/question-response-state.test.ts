@@ -91,6 +91,7 @@ test("missing prototype-shaped IDs retain own field validation errors", () => {
   state.answers = {};
   assert.equal(state.validate(), false);
   assert.equal(Object.hasOwn(state.errors, "__proto__"), true);
+  // biome-ignore lint/suspicious/noProto: verifies an own "__proto__" answer key.
   assert.ok(state.errors.__proto__?.includes("required"));
   state.setAnswer("__proto__", { optionIds: [], text: "Valid" });
   assert.equal(state.validate(), true);

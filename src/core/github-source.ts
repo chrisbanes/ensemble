@@ -62,7 +62,6 @@ import {
   repositoryLinkSchema,
   readinessSchema,
   selectionSchema,
-  type GitHubSelection,
 } from "./github-source-contracts.js";
 export {
   repositoryLinkSchema,

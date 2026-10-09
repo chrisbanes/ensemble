@@ -285,7 +285,7 @@ test("source search revalidates full retained prose when a later exclusion cross
   t.after(() => f.close());
   const title = `Boundary title marker ${"T".repeat(100)}`,
     privateText = "PRIVATE CROSSING BOUNDARY PHRASE",
-    body = "x".repeat(16000 - title.length - 1 - 10) + privateText + " tail",
+    body = `${"x".repeat(16000 - title.length - 1 - 10) + privateText} tail`,
     a = await seedReviewTask(f, "Boundary source", title, body),
     api = new OperatorApi(f.service, [f.directory]),
     params = new URLSearchParams({ query: "Boundary title marker" });
@@ -335,7 +335,7 @@ test("actual report callback retains long decisions while bounded search validat
   const a = await seedReviewTask(f),
     d = f.service.domain(),
     prefix = "Long decision query marker ",
-    longText = prefix + "x".repeat(16000 - prefix.length - 3) + "ZZZ",
+    longText = `${prefix + "x".repeat(16000 - prefix.length - 3)}ZZZ`,
     attribution = "Boundary attribution",
     privateText = "PRIVATE DECISION BOUNDARY PHRASE",
     boundaryText =
@@ -488,12 +488,11 @@ test("indexed raw batches yield before sparse search completes without losing li
   DatabaseSync.prototype.prepare = function (sql) {
     const statement = originalPrepare.call(this, sql);
     if (!sql.startsWith("WITH raw AS MATERIALIZED")) return statement;
-    const all = statement.all.bind(statement),
-      db = this;
+    const all = statement.all.bind(statement);
     statement.all = ((...args: Parameters<typeof statement.all>) => {
       plans.push(
         ...originalPrepare
-          .call(db, `EXPLAIN QUERY PLAN ${sql}`)
+          .call(this, `EXPLAIN QUERY PLAN ${sql}`)
           .all(...args)
           .map((row) => String(row.detail)),
       );

@@ -441,14 +441,14 @@ try {
   if (process.argv[3])
     writeFileSync(
       process.argv[3],
-      JSON.stringify(
+      `${JSON.stringify(
         { ...record, privateProcessIdentity: identity, privateRoot: root },
         null,
         2,
-      ) + "\n",
+      )}\n`,
       { mode: 0o600 },
     );
-  process.stdout.write(JSON.stringify(record) + "\n");
+  process.stdout.write(`${JSON.stringify(record)}\n`);
   // This finite runner owns itself; unresolved in-process operations cannot run after handoff.
   if (process.exitCode) process.exit(process.exitCode);
 }

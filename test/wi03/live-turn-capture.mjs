@@ -110,7 +110,7 @@ const evidence = {
 
 let harness;
 let web;
-let runtimeInstances = [];
+const runtimeInstances = [];
 let partialFixture;
 let partialGuard;
 let partialCheckpointPath;

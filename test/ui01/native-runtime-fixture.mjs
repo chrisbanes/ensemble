@@ -14,7 +14,7 @@ const twoTurn = transport?.startsWith("two-turn-early");
 let turns = 0;
 let lastNative;
 let firstNative;
-const send = (x) => process.stdout.write(JSON.stringify(x) + "\n");
+const send = (x) => process.stdout.write(`${JSON.stringify(x)}\n`);
 const thread = {
   thread: { id: "native-thread" },
   approvalPolicy: "never",

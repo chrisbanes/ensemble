@@ -402,7 +402,7 @@ function useLocalReviewController({
     },
     async reconcile() {
       const send = state.send;
-      if (!send || send.status !== "unknown") return;
+      if (send?.status !== "unknown") return;
       send.status = "sending";
       changed();
       // Same key and material only: reconciliation never sends an edited review.

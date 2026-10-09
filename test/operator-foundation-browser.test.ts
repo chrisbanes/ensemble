@@ -287,7 +287,7 @@ test("retained HTML routes share the production foundation and native interactio
   assert.equal(approvalFields.materialJson, approvalMaterial);
   assert.match(approvalFields.key ?? "", /^[0-9a-f-]{36}$/i);
   assert.ok(approvalFields.csrfToken);
-  await assertPhonePreContained(phone, approvalPre);
+  await assertPhonePreContained(approvalPre);
   await captureBrowserEvidence(phone, "390-retained-long-approval-material");
 
   await phone.goto(`${web.origin}/coordination/assignment/${assignmentId}`);
@@ -296,17 +296,14 @@ test("retained HTML routes share the production foundation and native interactio
   });
   await historyPre.waitFor();
   assert.equal(await historyPre.textContent(), longHistory);
-  await assertPhonePreContained(phone, historyPre);
+  await assertPhonePreContained(historyPre);
   await captureBrowserEvidence(phone, "390-retained-long-assignment-history");
   await phone.getByRole("link", { name: "New interface", exact: true }).click();
   await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
   assert.equal(new URL(phone.url()).pathname, "/app");
 });
 
-async function assertPhonePreContained(
-  page: import("playwright").Page,
-  pre: import("playwright").Locator,
-) {
+async function assertPhonePreContained(pre: import("playwright").Locator) {
   const dimensions = await pre.evaluate((element) => ({
     preWidth: element.getBoundingClientRect().width,
     preScrollWidth: element.scrollWidth,

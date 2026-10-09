@@ -296,7 +296,7 @@ async function sharedDestinations(
       .getByRole("heading", { name: "Release delivery", exact: true })
       .waitFor();
   }
-  await page.goto(origin + "/app/inbox");
+  await page.goto(`${origin}/app/inbox`);
   // Routine delivery progress never invents an actionable request.
   assert.equal(
     await page.getByText("Repair literal feedback C1", { exact: true }).count(),

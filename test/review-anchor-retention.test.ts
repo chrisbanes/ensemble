@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { retainedEvidenceLimits } from "../src/core/retained-evidence.js";
 import { SqliteWorkspaceComparisonStore } from "../src/standalone/comparison-store.js";
@@ -138,8 +138,7 @@ test("no-result draft captures exact text and comparison sides, seals, discards,
   );
   const workspace = await f.service.taskWorkspace(task.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
 
   const original = Buffer.concat([
     Buffer.from([0xef, 0xbb, 0xbf]),
@@ -447,8 +446,7 @@ test("an unrelated retained result does not become an implicit anchor result bin
   });
   const workspace = await f.service.taskWorkspace(task.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
   const bytes = Buffer.from("anchor from current file\n");
   await writeFile(join(workspace.path, "current.txt"), bytes);
   const staged = await f.service.stageReviewAnchorDraft({
@@ -517,8 +515,7 @@ test("interrupted stage and seal roll back atomically, retry, and leave no orpha
   );
   const workspace = await f.service.taskWorkspace(task.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
   const bytes = Buffer.from("one exact line\n");
   await writeFile(join(workspace.path, "atomic.txt"), bytes);
   const request = {
@@ -624,8 +621,7 @@ test("anchor quota gaps keep no payload and explicit discard removes unreference
   const task = await seedReviewTask(f, "Anchor quota", "Keep bounded context");
   const workspace = await f.service.taskWorkspace(task.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
   const bytes = Buffer.alloc(
     retainedEvidenceLimits.maxReviewAnchorBytes + 1,
     0x61,

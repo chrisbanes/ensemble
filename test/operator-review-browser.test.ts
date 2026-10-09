@@ -455,7 +455,7 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
 for (const [limitCase, sourceBody] of [
   [
     "raw oversized",
-    "Prefix requirement " + "x".repeat(17000) + "\n- [ ] Tail requirement",
+    `Prefix requirement ${"x".repeat(17000)}\n- [ ] Tail requirement`,
   ],
   [
     "redaction expanded",
