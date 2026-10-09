@@ -338,6 +338,11 @@ export function TaskWorkspace({
     invalidateHistory();
     resource.refresh();
   };
+  // Manual re-reads also refresh the shell's workspace and Inbox count; the poll below does not.
+  const refreshAll = () => {
+    refresh();
+    onRefresh?.();
+  };
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   const captureRef = useRef(capture);
@@ -792,7 +797,7 @@ export function TaskWorkspace({
   if (!data)
     return (
       <section>
-        <ResourceStatus state={resource.state} retry={refresh} />
+        <ResourceStatus state={resource.state} retry={refreshAll} />
         <p>
           Task material is unavailable. Exact historical targets are not
           replaced with current records.
@@ -887,13 +892,7 @@ export function TaskWorkspace({
           ) : (
             <ActionLink href={returnPath}>Back to project</ActionLink>
           )}
-          <Button
-            variant="secondary"
-            onClick={() => {
-              refresh();
-              onRefresh?.();
-            }}
-          >
+          <Button variant="secondary" onClick={refreshAll}>
             Refresh task
           </Button>
           <ActionLink href={`/task/${taskId}`}>
@@ -906,7 +905,7 @@ export function TaskWorkspace({
             Requests and coordination
           </ActionLink>
         </div>
-        <ResourceStatus state={resource.state} retry={refresh} />
+        <ResourceStatus state={resource.state} retry={refreshAll} />
         <header>
           <h2 className="section-heading">
             {data.task.title ?? "Title unavailable"}
@@ -944,7 +943,7 @@ export function TaskWorkspace({
               taskId={taskId}
               interactionId={params.get("request")!}
               states={questionStates}
-              onRecorded={refresh}
+              onRecorded={refreshAll}
             />
           )}
           {openRequests

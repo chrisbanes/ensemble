@@ -2033,7 +2033,7 @@ test("new private input survives a detached receipt and old-session 401 after sa
       viewport:
         mode === "receipt-expiry"
           ? { width: 1366, height: 820 }
-          : { width: 1366, height: 844 },
+          : { width: 390, height: 844 },
     });
     journey.observe(page);
     page.setDefaultTimeout(5000);
@@ -2082,12 +2082,27 @@ test("new private input survives a detached receipt and old-session 401 after sa
     if (mode === "receipt-expiry") {
       f.advanceClock(61_000);
       await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    } else
+    } else {
+      // Phone: Sign out is in the drawer of the top-level parent of this nested screen.
+      await page
+        .getByRole("link", { name: "Back to Settings", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
       await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    }
     await page.getByLabel("Password", { exact: true }).waitFor();
-    await capture(page, `1366-${mode}-privacy-purged`);
+    await capture(
+      page,
+      `${mode === "receipt-expiry" ? "1366" : "390"}-${mode}-privacy-purged`,
+    );
     await page.getByLabel("Password", { exact: true }).fill(web.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    if (mode === "401-logout")
+      await page
+        .locator(`a[href="/app/projects/${ids.projectId}/settings"]`)
+        .click();
     await page
       .getByRole("heading", { name: "Project configuration", exact: true })
       .waitFor();
@@ -2113,7 +2128,7 @@ test("new private input survives a detached receipt and old-session 401 after sa
     assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
     assert.equal(
       await page
-        .getByRole("button", { name: "Sign out", exact: true })
+        .locator(".sidebar button", { hasText: "Sign out" })
         .isEnabled(),
       true,
     );

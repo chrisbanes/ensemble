@@ -1,4 +1,4 @@
-import { Inbox, InboxState, loadInbox } from "./inbox.js";
+import { Inbox, InboxState, inboxTotal, loadInbox } from "./inbox.js";
 import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
@@ -444,6 +444,7 @@ export function App() {
         clearPrivateNavigation();
         restoreFocus.current = null;
       } else restoreFocus.current = history.state?.focusedHref ?? null;
+      setDrawer(false);
       setPath(location.pathname + location.search);
       setNavigationVersion((n) => n + 1);
       requestAnimationFrame(() =>
@@ -477,16 +478,18 @@ export function App() {
     (signal: AbortSignal) => loadInbox(client, signal),
     [client],
   );
+  // The Inbox route polls its own full read and reports its total, so the shell reads only elsewhere.
+  const onInboxRoute = path.split(/[?#]/)[0] === "/app/inbox";
+  const [inboxRouteCount, setInboxRouteCount] = useState<number | null>(null);
   const inboxSummary = useOperatorResource(
     session?.authenticated ? session.csrfToken : null,
     inboxLoader,
+    !onInboxRoute,
   );
   const taskRefresh = useRef(tasks.refresh);
   taskRefresh.current = tasks.refresh;
   const workspaceRefresh = useRef(workspace.refresh);
   workspaceRefresh.current = workspace.refresh;
-  const inboxRefresh = useRef(inboxSummary.refresh);
-  inboxRefresh.current = inboxSummary.refresh;
   const inboxScope =
     session?.authenticated && path.split("?")[0] === "/app/inbox"
       ? session.csrfToken
@@ -497,7 +500,6 @@ export function App() {
     const timer = setInterval(() => {
       taskRefresh.current();
       workspaceRefresh.current();
-      inboxRefresh.current();
     }, 15000);
     return () => clearInterval(timer);
   }, [inboxScope]);
@@ -675,16 +677,13 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
-  // A count is a total only when the whole Inbox was read and the last read succeeded.
-  const inboxCount =
-    inboxSummary.state.data?.complete &&
-    !inboxSummary.state.data.unavailable &&
-    !inboxSummary.state.error
-      ? inboxSummary.state.data.items.length
-      : null;
+  const inboxCount = onInboxRoute
+    ? inboxRouteCount
+    : inboxTotal(inboxSummary.state);
+  // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
     workspace.refresh();
-    inboxSummary.refresh();
+    if (!onInboxRoute) inboxSummary.refresh();
   };
   // These pages own a refresh that already re-reads their data.
   const ownsRefresh =
@@ -871,6 +870,7 @@ export function App() {
               state={inboxState.current}
               questions={questionStates.current}
               observation={workspace.state.data}
+              onTotal={setInboxRouteCount}
             />
           ) : pathname === "/app/search" ? (
             <Search

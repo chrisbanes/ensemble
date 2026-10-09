@@ -5,8 +5,6 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 const test = browserSuite("ui08-shell");
-// The all-routes journey visits sixteen routes at two widths.
-const longTest = browserSuite("ui08-shell", { overallMs: 240000 });
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { mixedForm } from "./fixtures/question-data.js";
@@ -219,6 +217,16 @@ test("production shell keeps direct task links usable and the navigation drawer 
   );
   assert.equal(new URL(page.url()).pathname, "/app/tasks");
 
+  // Browser Back from an open drawer to a nested screen closes it; Forward does not reopen it.
+  await trigger.click();
+  await dialog.waitFor({ state: "visible" });
+  await page.goBack();
+  await page.getByRole("link", { name: "Back to Tasks" }).waitFor();
+  assert.equal(await dialog.count(), 0);
+  await page.goForward();
+  await trigger.waitFor();
+  assert.equal(await dialog.count(), 0);
+
   // Sign out through the drawer ends the session at phone width.
   await trigger.click();
   await dialog.getByRole("button", { name: "Sign out", exact: true }).click();
@@ -396,6 +404,26 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
   assert.equal(await page.getByText("Operator workspace").count(), 0);
   assert.equal(await page.locator("main h1").count(), 1);
 
+  // On the Inbox route the shell count is the list's own total, and the header explains it.
+  await page.goto(`${web.origin}/app/inbox`);
+  await page.locator(".inbox-row").first().waitFor();
+  assert.equal(await page.locator(".inbox-row").count(), 2);
+  await sidebar.locator('a[href="/app/inbox"] .nav-count').waitFor();
+  assert.equal(
+    await sidebar.locator('a[href="/app/inbox"] .nav-count').textContent(),
+    "2",
+  );
+  assert.equal(
+    await page
+      .locator("main h1")
+      .evaluate(
+        (h1) =>
+          document.getElementById(h1.getAttribute("aria-describedby") ?? "")
+            ?.textContent,
+      ),
+    "2 unresolved",
+  );
+
   await page.goto(`${web.origin}/app/tasks?view=board`);
   await page.locator("main.page h1").waitFor();
   const current = await sidebar
@@ -518,170 +546,159 @@ test("page-owned refresh replaces the shell Refresh and still re-reads the works
   }
 });
 
-longTest(
-  "every route renders in the shell on desktop and phone without horizontal scroll",
-  async (_t, journey) => {
-    const f = await journey.start("fixture.create", () =>
-      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
-    );
-    let browser: Browser | undefined;
-    journey.cleanup(
-      (primary) => f.close(browser, primary),
-      "fixture.close",
-      () => f.lifecycle.steps,
-    );
-    const domain = f.service.domain(),
-      profileId = randomUUID(),
-      projectId = randomUUID(),
-      taskId = randomUUID(),
-      assignmentId = randomUUID();
-    domain.execute({
-      type: "profile.create",
-      actor: "operator",
-      key: randomUUID(),
-      profileId,
-      name: "Shell lead",
-      instructions: "Fixture only",
-      capabilities: "Coordinate",
-    });
-    domain.execute({
-      type: "project.create",
-      actor: "operator",
-      key: randomUUID(),
-      projectId,
-      name: "Shell project",
-      leadProfileId: profileId,
-    });
-    domain.execute({
-      type: "task.create",
-      actor: "operator",
-      key: randomUUID(),
-      projectId,
-      taskId,
-      title: "Shell task",
-      outcome: "Inspect every route",
-      ready: false,
-    });
-    domain.execute({
-      type: "assignment.create",
-      actor: "operator",
-      key: randomUUID(),
-      projectId,
-      taskId,
-      assignmentId,
-      profileId,
-      brief: "Inspect every route",
-      resultDestination: "operator",
-      requesterAssignmentId: null,
-    });
-    await seedOwnQuestion(f);
-    await seedOwnQuestion(f, mixedForm, "Second task");
-    const web = await journey.start("fixture.web", () => f.startWeb());
-    browser = await journey.start("browser.launch", () => chromium.launch());
-    const page = await browser.newPage({
-      viewport: { width: 1366, height: 900 },
-    });
-    journey.observe(page);
-    page.setDefaultTimeout(5000);
-    await signIn(page, web.origin, web.password, "/app");
-    const notFound = "/app/does-not-exist";
-    // [route, evidence name, top-level on a phone]
-    const routes: [string, string | null, boolean][] = [
-      ["/app", "overview", true],
-      ["/app/inbox", "inbox", true],
-      ["/app/tasks", null, true],
-      ["/app/tasks?view=board", null, true],
-      ["/app/search", null, true],
-      [`/app/projects/${projectId}`, null, true],
-      [`/app/projects/${projectId}/settings`, null, false],
-      ["/app/tasks/new", null, false],
-      [`/app/tasks/${taskId}`, null, false],
-      ["/app/settings", "settings", true],
-      ["/app/settings/runtime", null, false],
-      ["/app/settings/projects/new", null, false],
-      ["/app/settings/profiles/new", null, false],
-      [`/app/profiles/${profileId}/settings`, null, false],
-      [`/app/assignments/${assignmentId}/recovery`, null, false],
-      [notFound, null, true],
-    ];
-    for (const [width, height] of [
-      [1366, 900],
-      [390, 844],
-    ] as const) {
-      await page.setViewportSize({ width, height });
-      for (const [route, evidence, topLevel] of routes) {
-        // The service answers unknown /app paths itself, so the in-app
-        // not-found screen is reached by client-side navigation.
-        if (route === notFound)
-          await page.evaluate((path) => {
-            history.pushState({}, "", path);
-            dispatchEvent(new PopStateEvent("popstate"));
-          }, route);
-        else await page.goto(web.origin + route);
-        await page
-          .locator("main.page h1")
-          .waitFor()
-          .catch(() => assert.fail(`${width} ${route}: no signed-in title`));
-        await page.waitForLoadState("networkidle");
-        const state = await page.evaluate(() => {
-          const visible = (selector: string) => {
-            const element = document.querySelector<HTMLElement>(selector);
-            return (
-              element !== null &&
-              getComputedStyle(element).display !== "none" &&
-              element.getBoundingClientRect().width > 0
-            );
-          };
-          return {
-            h1: document.querySelectorAll("main h1").length,
-            sidebar: visible(".sidebar"),
-            variant: document
-              .querySelector(".page-header")
-              ?.getAttribute("data-variant"),
-            menu: visible(".phone-nav [data-slot=button]"),
-            back: visible(".page-header-back"),
-            overflow:
-              document.documentElement.scrollWidth >
-              document.documentElement.clientWidth,
-          };
-        });
-        assert.equal(state.h1, 1, `${width} ${route}: one h1`);
-        assert.equal(state.overflow, false, `${width} ${route}: no scroll`);
-        if (width === 1366)
-          assert.equal(state.sidebar, true, `${route}: sidebar visible`);
-        else {
-          assert.equal(
-            state.sidebar,
-            false,
-            `${route}: drawer replaces sidebar`,
+test("every route renders in the shell on desktop and phone without horizontal scroll", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const domain = f.service.domain(),
+    profileId = randomUUID(),
+    projectId = randomUUID(),
+    taskId = randomUUID(),
+    assignmentId = randomUUID();
+  domain.execute({
+    type: "profile.create",
+    actor: "operator",
+    key: randomUUID(),
+    profileId,
+    name: "Shell lead",
+    instructions: "Fixture only",
+    capabilities: "Coordinate",
+  });
+  domain.execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Shell project",
+    leadProfileId: profileId,
+  });
+  domain.execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    title: "Shell task",
+    outcome: "Inspect every route",
+    ready: false,
+  });
+  domain.execute({
+    type: "assignment.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    assignmentId,
+    profileId,
+    brief: "Inspect every route",
+    resultDestination: "operator",
+    requesterAssignmentId: null,
+  });
+  await seedOwnQuestion(f);
+  await seedOwnQuestion(f, mixedForm, "Second task");
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await signIn(page, web.origin, web.password, "/app");
+  const notFound = "/app/does-not-exist";
+  // [route, evidence name, top-level on a phone]
+  const routes: [string, string | null, boolean][] = [
+    ["/app", "overview", true],
+    ["/app/inbox", "inbox", true],
+    ["/app/tasks", null, true],
+    ["/app/tasks?view=board", null, true],
+    ["/app/search", null, true],
+    [`/app/projects/${projectId}`, null, true],
+    [`/app/projects/${projectId}/settings`, null, false],
+    ["/app/tasks/new", null, false],
+    [`/app/tasks/${taskId}`, null, false],
+    ["/app/settings", "settings", true],
+    ["/app/settings/runtime", null, false],
+    ["/app/settings/projects/new", null, false],
+    ["/app/settings/profiles/new", null, false],
+    [`/app/profiles/${profileId}/settings`, null, false],
+    [`/app/assignments/${assignmentId}/recovery`, null, false],
+    [notFound, null, true],
+  ];
+  for (const [width, height] of [
+    [1366, 900],
+    [390, 844],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    for (const [route, evidence, topLevel] of routes) {
+      // The service answers unknown /app paths itself, so the in-app
+      // not-found screen is reached by client-side navigation.
+      if (route === notFound)
+        await page.evaluate((path) => {
+          history.pushState({}, "", path);
+          dispatchEvent(new PopStateEvent("popstate"));
+        }, route);
+      else await page.goto(web.origin + route);
+      await page
+        .locator("main.page h1")
+        .waitFor()
+        .catch(() => assert.fail(`${width} ${route}: no signed-in title`));
+      await page.waitForLoadState("networkidle");
+      const state = await page.evaluate(() => {
+        const visible = (selector: string) => {
+          const element = document.querySelector<HTMLElement>(selector);
+          return (
+            element !== null &&
+            getComputedStyle(element).display !== "none" &&
+            element.getBoundingClientRect().width > 0
           );
-          assert.equal(
-            state.variant,
-            topLevel ? "top-level" : "detail",
-            `${route}: phone header variant`,
-          );
-          assert.equal(state.menu, topLevel, `${route}: menu button`);
-          assert.equal(state.back, !topLevel, `${route}: Back link`);
-        }
-        if (evidence) {
-          if (width === 390 && evidence === "overview" && route === "/app")
-            await captureBrowserEvidence(page, `${width}-${evidence}`);
-          else await captureBrowserEvidence(page, `${width}-${evidence}`);
-        }
-        if (width === 390 && route === `/app/tasks/${taskId}`)
-          await captureBrowserEvidence(page, "390-task-detail-header");
+        };
+        return {
+          h1: document.querySelectorAll("main h1").length,
+          sidebar: visible(".sidebar"),
+          variant: document
+            .querySelector(".page-header")
+            ?.getAttribute("data-variant"),
+          menu: visible(".phone-nav [data-slot=button]"),
+          back: visible(".page-header-back"),
+          overflow:
+            document.documentElement.scrollWidth >
+            document.documentElement.clientWidth,
+        };
+      });
+      assert.equal(state.h1, 1, `${width} ${route}: one h1`);
+      assert.equal(state.overflow, false, `${width} ${route}: no scroll`);
+      if (width === 1366)
+        assert.equal(state.sidebar, true, `${route}: sidebar visible`);
+      else {
+        assert.equal(state.sidebar, false, `${route}: drawer replaces sidebar`);
+        assert.equal(
+          state.variant,
+          topLevel ? "top-level" : "detail",
+          `${route}: phone header variant`,
+        );
+        assert.equal(state.menu, topLevel, `${route}: menu button`);
+        assert.equal(state.back, !topLevel, `${route}: Back link`);
       }
-      if (width === 390) {
-        await page.goto(`${web.origin}/app`);
-        await page.locator("main.page h1").waitFor();
-        await page
-          .getByRole("button", { name: "Projects and navigation", exact: true })
-          .click();
-        await page
-          .getByRole("dialog", { name: "Projects and navigation", exact: true })
-          .waitFor();
-        await captureBrowserEvidence(page, "390-drawer");
-      }
+      if (evidence) await captureBrowserEvidence(page, `${width}-${evidence}`);
+      if (width === 390 && route === `/app/tasks/${taskId}`)
+        await captureBrowserEvidence(page, "390-task-detail-header");
     }
-  },
-);
+    if (width === 390) {
+      await page.goto(`${web.origin}/app`);
+      await page.locator("main.page h1").waitFor();
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
+      await page
+        .getByRole("dialog", { name: "Projects and navigation", exact: true })
+        .waitFor();
+      await captureBrowserEvidence(page, "390-drawer");
+    }
+  }
+});

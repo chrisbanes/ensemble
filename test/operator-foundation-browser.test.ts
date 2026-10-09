@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   browserSuite,
   captureBrowserEvidence,
@@ -362,7 +363,20 @@ test("Nova primitives keep 32px controls, the documented radii and tinted destru
   await page.getByLabel("Password", { exact: true }).fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.locator('[data-slot="card"]').first().waitFor();
-  const geometry = await page.evaluate(() => {
+  // No route renders a destructive control until Stop (U5), so measure the classes the
+  // primitives' own destructive variants declare.
+  const destructiveClasses = (primitive: string) =>
+    /destructive:\s*"([^"]+)"/.exec(
+      readFileSync(
+        new URL(`../../web/src/ui/${primitive}.tsx`, import.meta.url),
+        "utf8",
+      ),
+    )?.[1] ?? assert.fail(`${primitive} declares no destructive variant`);
+  const variants = {
+    button: destructiveClasses("button"),
+    badge: destructiveClasses("badge"),
+  };
+  const geometry = await page.evaluate((variants) => {
     const measure = (selector: string) => {
       const element = document.querySelector(selector);
       if (!element) return null;
@@ -371,12 +385,19 @@ test("Nova primitives keep 32px controls, the documented radii and tinted destru
     };
     const primary = document.querySelector('.column-tab[aria-pressed="true"]');
     const outline = document.querySelector('.column-tab[aria-pressed="false"]');
-    const probe = document.createElement("span");
-    probe.className = "bg-(--nova-destructive-bg) text-(--nova-destructive-fg)";
-    document.body.append(probe);
-    const tint = getComputedStyle(probe);
-    const destructive = { background: tint.backgroundColor, color: tint.color };
-    probe.remove();
+    const tinted = (className: string) => {
+      const probe = document.createElement("span");
+      probe.className = className;
+      document.body.append(probe);
+      const style = getComputedStyle(probe);
+      const result = { background: style.backgroundColor, color: style.color };
+      probe.remove();
+      return result;
+    };
+    const destructive = {
+      button: tinted(variants.button),
+      badge: tinted(variants.badge),
+    };
     return {
       primary: primary && {
         height: getComputedStyle(primary).height,
@@ -390,18 +411,19 @@ test("Nova primitives keep 32px controls, the documented radii and tinted destru
       card: measure('[data-slot="card"]'),
       destructive,
     };
-  });
+  }, variants);
   assert.deepEqual(geometry.primary, { height: "32px", radius: "10px" });
   assert.deepEqual(geometry.outline, { height: "32px", radius: "10px" });
   assert.deepEqual(geometry.input, { height: "32px", radius: "10px" });
   assert.equal(geometry.card?.radius, "14px");
   const alpha = (value: string) =>
     Number(/,\s*([\d.]+)\)$/.exec(value)?.[1] ?? "1");
-  assert.ok(
-    alpha(geometry.destructive.background) > 0 &&
-      alpha(geometry.destructive.background) < 1,
-    `destructive background is tinted, not solid: ${geometry.destructive.background}`,
-  );
-  assert.notEqual(geometry.destructive.color, geometry.destructive.background);
+  for (const [name, tint] of Object.entries(geometry.destructive)) {
+    assert.ok(
+      alpha(tint.background) > 0 && alpha(tint.background) < 1,
+      `destructive ${name} background is tinted, not solid: ${tint.background}`,
+    );
+    assert.notEqual(tint.color, tint.background);
+  }
   await captureBrowserEvidence(page, "1366-nova-primitives");
 });

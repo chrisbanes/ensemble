@@ -77,11 +77,11 @@ for (const viewport of [
       await document.fonts.load('400 12px "Geist Mono"');
       await document.fonts.ready;
       return {
-        inter: document.fonts.check('400 14px "Geist"'),
+        sans: document.fonts.check('400 14px "Geist"'),
         mono: document.fonts.check('400 12px "Geist Mono"'),
       };
     });
-    assert.equal(loadedFonts.inter, true);
+    assert.equal(loadedFonts.sans, true);
     assert.equal(loadedFonts.mono, true);
     await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
     assert.equal(

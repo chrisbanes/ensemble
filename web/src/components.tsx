@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useId,
   useRef,
   type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
@@ -237,6 +238,7 @@ export function PageHeader({
   menu?: ReactNode;
   back?: { href: string; label: string };
 }) {
+  const countId = useId();
   return (
     <header
       className="page-header"
@@ -256,11 +258,23 @@ export function PageHeader({
         </PrimitiveButton>
       )}
       <div className="page-header-title">
-        <h1 className="page-heading">{title}</h1>
+        <h1
+          className="page-heading"
+          aria-describedby={count != null ? countId : undefined}
+        >
+          {title}
+        </h1>
         {subtitle && <p className="body muted">{subtitle}</p>}
       </div>
       {count != null && (
-        <StatusBadge className="page-header-count">{count}</StatusBadge>
+        <>
+          <StatusBadge className="page-header-count">
+            <span aria-hidden="true">{count}</span>
+          </StatusBadge>
+          <span id={countId} hidden>
+            {count} unresolved
+          </span>
+        </>
       )}
       {action}
     </header>
