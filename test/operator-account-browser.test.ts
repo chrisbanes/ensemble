@@ -200,3 +200,63 @@ for (const viewport of viewports)
     assert.equal(await page.getByLabel("Task title").inputValue(), "");
     assert.equal(await page.getByText(/session expired/i).count(), 0);
   });
+
+for (const viewport of viewports)
+  test(`unknown addresses render Page not found inside the shell ${viewport.name}`, async (_t, journey) => {
+    const { web, page } = await launch(journey, viewport);
+    // Signed out: sign-in first, then the same address shows Page not found.
+    await page.goto(`${web.origin}/app/no-such-page`);
+    await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+    await submitPassword(page, web.password);
+    const heading = page.getByRole("heading", {
+      name: "Page not found",
+      exact: true,
+    });
+    await heading.waitFor();
+    assert.equal(new URL(page.url()).pathname, "/app/no-such-page");
+
+    const response = await page.goto(`${web.origin}/app/no-such-page`);
+    assert.equal(response?.status(), 404);
+    await heading.waitFor();
+    await page
+      .getByText(
+        "This address doesn't match an Ensemble page. Nothing was changed.",
+        { exact: true },
+      )
+      .waitFor();
+    if (viewport.width === 390)
+      await page
+        .getByRole("button", { name: "Projects and navigation" })
+        .waitFor();
+    else await page.locator(".sidebar").waitFor();
+    assert.equal(await page.locator('[aria-current="page"]').count(), 0);
+    assert.equal(
+      await page.getByRole("button", { name: "Refresh", exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await page.getByRole("link", { name: /Open existing/ }).count(),
+      0,
+    );
+    assert.equal(await page.locator("main h1").count(), 1);
+    assert.ok(
+      (await page.evaluate(() => document.documentElement.scrollWidth)) <=
+        (await page.evaluate(() => document.documentElement.clientWidth)),
+      "no horizontal scroll",
+    );
+    await captureBrowserEvidence(page, `${viewport.name}-not-found`);
+    await page
+      .getByRole("link", { name: "Go to Overview", exact: true })
+      .click();
+    await page
+      .getByRole("heading", { name: "Overview", exact: true })
+      .waitFor();
+    assert.equal(new URL(page.url()).pathname, "/app");
+
+    // Signed in, /login lands on Overview.
+    await page.goto(`${web.origin}/login`);
+    await page
+      .getByRole("heading", { name: "Overview", exact: true })
+      .waitFor();
+    assert.equal(new URL(page.url()).pathname, "/app");
+  });

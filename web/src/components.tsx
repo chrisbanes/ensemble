@@ -229,6 +229,7 @@ export function PageHeader({
   badge,
   menu,
   back,
+  plain,
 }: {
   title: string;
   subtitle?: string | undefined;
@@ -236,11 +237,14 @@ export function PageHeader({
   badge?: string | undefined;
   menu?: ReactNode;
   back?: { href: string; label: string };
+  /** Omit the desktop divider under the header (the Not found frame has none). */
+  plain?: boolean;
 }) {
   return (
     <header
       className="page-header"
       data-variant={back ? "detail" : "top-level"}
+      data-plain={plain || undefined}
     >
       {menu && <div className="phone-nav">{menu}</div>}
       {back && (

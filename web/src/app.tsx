@@ -51,6 +51,7 @@ import { TaskWorkspace } from "./task-workspace.js";
 import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 import { Login, SignInBootstrap } from "./sign-in.js";
+import { NotFound, notFoundSubtitle } from "./not-found.js";
 function RouteLink({
   href,
   current,
@@ -268,6 +269,25 @@ function parentRoute(
   )
     return { href: "/app/settings", label: "Settings" };
   return null;
+}
+/** Whether an `/app` address matches a client route; mirrors the view chosen in `App`. */
+function knownRoute(pathname: string) {
+  return (
+    [
+      "/app",
+      "/app/tasks",
+      "/app/tasks/new",
+      "/app/inbox",
+      "/app/search",
+      "/app/settings",
+      "/app/settings/runtime",
+      "/app/settings/projects/new",
+      "/app/settings/profiles/new",
+    ].includes(pathname) ||
+    /^\/app\/(?:tasks|projects)\/[^/]+$/.test(pathname) ||
+    /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname) ||
+    /^\/app\/(?:projects|profiles)\/[^/]+\/settings$/.test(pathname)
+  );
 }
 export function App() {
   const drafts = useRef(new ConfigurationDrafts());
@@ -495,7 +515,16 @@ export function App() {
     document.addEventListener("click", click);
     return () => document.removeEventListener("click", click);
   }, []);
-  const pathname = path.split(/[?#]/)[0] ?? "/app";
+  const addressPath = path.split(/[?#]/)[0] ?? "/app";
+  // A signed-in visit to /login lands on Overview, like the legacy server's redirect.
+  const pathname =
+    addressPath === "/login" && session?.authenticated ? "/app" : addressPath;
+  useEffect(() => {
+    if (pathname !== addressPath) {
+      history.replaceState({ ...history.state }, "", "/app");
+      setPath("/app");
+    }
+  }, [pathname, addressPath]);
   const navigate = (next: string) => {
     history.replaceState({ ...history.state, scrollY }, "");
     history.pushState(
@@ -560,8 +589,10 @@ export function App() {
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
-  const title =
-    pathname === "/app/search"
+  const unknownRoute = !knownRoute(pathname);
+  const title = unknownRoute
+    ? "Page not found"
+    : pathname === "/app/search"
       ? "Search"
       : pathname === "/app"
         ? "Overview"
@@ -582,20 +613,6 @@ export function App() {
                     : projectId
                       ? (project?.name ?? "Project")
                       : "Page not found";
-  const destination =
-    projectId && project
-      ? `/project/${project.id}`
-      : pathname === "/app/inbox"
-        ? "/coordination"
-        : "/";
-  const description =
-    pathname === "/app/inbox"
-      ? "Questions, approvals and task coordination are available in the existing operator."
-      : pathname === "/app/settings"
-        ? "Project, profile, routing and source settings are available in the existing operator."
-        : projectId
-          ? "Task and project controls are available in the existing operator."
-          : "Choose a project to open its current controls.";
   const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
   const inboxCount =
     (onInboxRoute ? inboxRouteSummary : inboxSummaryOf(inboxSummary.state))
@@ -604,13 +621,15 @@ export function App() {
   const taskRoute =
     pathname === "/app" || pathname === "/app/tasks" || Boolean(projectId);
   const newTaskHref = `/app/tasks/new${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
-  const headerSubtitle = taskRoute
-    ? projectId
-      ? "Tasks in this project. Readiness, source status and execution are separate."
-      : "Tasks across your projects. Action requests and ordinary progress remain distinct."
-    : onInboxRoute && inboxRouteSummary
-      ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
-      : undefined;
+  const headerSubtitle = unknownRoute
+    ? notFoundSubtitle
+    : taskRoute
+      ? projectId
+        ? "Tasks in this project. Readiness, source status and execution are separate."
+        : "Tasks across your projects. Action requests and ordinary progress remain distinct."
+      : onInboxRoute && inboxRouteSummary
+        ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
+        : undefined;
   // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
     workspace.refresh();
@@ -618,6 +637,7 @@ export function App() {
   };
   // These pages own a refresh that already re-reads their data.
   const ownsRefresh =
+    unknownRoute ||
     pathname === "/app" ||
     pathname === "/app/tasks" ||
     Boolean(projectId) ||
@@ -690,6 +710,7 @@ export function App() {
           <PageHeader
             title={title}
             subtitle={headerSubtitle}
+            plain={unknownRoute}
             badge={
               onInboxRoute && inboxCount !== null
                 ? `${inboxCount} unresolved`
@@ -854,23 +875,7 @@ export function App() {
               overview={pathname === "/app"}
             />
           ) : (
-            <>
-              <p className="introduction muted">{description}</p>
-              <ActionLink
-                variant="primary"
-                className="action-link"
-                href={destination}
-              >
-                Open existing{" "}
-                {pathname === "/app/inbox"
-                  ? "coordination controls"
-                  : "operator controls"}
-              </ActionLink>
-              <p className="metadata muted">
-                Task detail, complete Inbox and settings controls remain
-                available in the existing operator.
-              </p>
-            </>
+            <NotFound />
           )}
         </main>
       </div>

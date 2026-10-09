@@ -274,11 +274,27 @@ nav {
     margin-bottom: var(--space-16);
     border-bottom: 1px solid var(--border);
   }
+
+  .page-header[data-plain] {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
 }
 
 .page-header-title {
   min-width: 0;
   flex: 1;
+}
+
+/* Not found draws 12px between title, sentence and action. */
+.page-header[data-plain] {
+  margin-bottom: var(--space-12);
+}
+
+.page-header[data-plain] .page-header-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
 }
 
 .page-header h1,
@@ -750,6 +766,11 @@ nav {
   /* Phone headers: top-level shows menu, title and count; nested shows Back, a 16/500 title and a 12px subtitle. */
   .page-header[data-variant="top-level"] .page-header-title p {
     display: none;
+  }
+
+  /* Not found has no other body copy, so its subtitle stays visible. */
+  .page-header[data-plain][data-variant="top-level"] .page-header-title p {
+    display: block;
   }
 
   .page-header[data-variant="detail"] h1 {
