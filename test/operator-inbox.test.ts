@@ -419,13 +419,13 @@ test("Inbox revalidates earlier workspace and task binding after later row await
           release = r;
         });
       let held = false;
-      f.service.taskWorkspace = async (id: string) => {
+      f.service.taskWorkspace = async (id, ...rest) => {
         if (id === last.id && !held) {
           held = true;
           enter();
           await barrier;
         }
-        return original(id);
+        return original(id, ...rest);
       };
       const read = new OperatorApi(f.service, [f.directory]).readInbox();
       await entered;

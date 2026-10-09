@@ -132,10 +132,10 @@ test("exact review and paginated history fail closed when visibility/material re
     const pending = new Promise<void>((r) => (release = r)),
       entry = new Promise<void>((r) => (entered = r)),
       original = f.service.taskWorkspace.bind(f.service);
-    f.service.taskWorkspace = async (id) => {
+    f.service.taskWorkspace = async (...args) => {
       entered();
       await pending;
-      return original(id);
+      return original(...args);
     };
     const read =
       kind === "review"
