@@ -643,6 +643,8 @@ test("a stored comment without line context can be removed so the review can be 
   await review.getByRole("button", { name: "Save edit" }).click();
   await review.getByText(/Draft change failed \(invalid-input\)/).waitFor();
   await review.getByRole("button", { name: "Cancel edit" }).click();
+  // Leave an editor open on a legacy comment; bulk removal must clear it.
+  await review.getByRole("button", { name: "Edit" }).last().click();
 
   await review
     .getByRole("button", { name: "Remove comments without line context" })

@@ -305,6 +305,11 @@ function useLocalReviewController({
         draft.version,
       );
       state.pending = false;
+      // Open editors of removed comments would otherwise keep Send disabled.
+      if (result.state === "recorded")
+        for (const comment of draft.draft.comments)
+          if (comment.anchorGroupIds.length === 0)
+            delete state.editing[comment.commentId];
       state.notice =
         result.state === "recorded"
           ? ""
