@@ -154,7 +154,7 @@ test("retained HTML routes share the production foundation and native interactio
     assert.equal(style.loaded, true, path);
     assert.equal(style.background, "rgb(10, 10, 10)", path);
     assert.equal(style.foreground, "rgb(250, 250, 250)", path);
-    assert.match(style.family, /Inter/);
+    assert.match(style.family, /Geist/);
     assert.equal(style.scripts, 0, "legacy HTML remains non-hydrated");
     assert.equal(style.overflow, false, path);
     if (path === `/coordination/task/${taskId}`) {
@@ -170,10 +170,10 @@ test("retained HTML routes share the production foundation and native interactio
       );
     }
     const fontFaces = await desktop.evaluate(async () => {
-      const inter = await document.fonts.load('14px "Inter"');
-      const mono = await document.fonts.load('14px "JetBrains Mono"');
+      const sans = await document.fonts.load('14px "Geist"');
+      const mono = await document.fonts.load('14px "Geist Mono"');
       return {
-        inter: inter.map((face) => ({
+        sans: sans.map((face) => ({
           family: face.family,
           status: face.status,
         })),
@@ -181,25 +181,25 @@ test("retained HTML routes share the production foundation and native interactio
           family: face.family,
           status: face.status,
         })),
-        interChecked: document.fonts.check('14px "Inter"'),
-        monoChecked: document.fonts.check('14px "JetBrains Mono"'),
+        sansChecked: document.fonts.check('14px "Geist"'),
+        monoChecked: document.fonts.check('14px "Geist Mono"'),
       };
     });
-    assert.ok(fontFaces.inter.length > 0, `${path}: Inter face loaded`);
-    assert.ok(fontFaces.mono.length > 0, `${path}: JetBrains Mono face loaded`);
+    assert.ok(fontFaces.sans.length > 0, `${path}: Geist face loaded`);
+    assert.ok(fontFaces.mono.length > 0, `${path}: Geist Mono face loaded`);
     assert.ok(
-      fontFaces.inter.every((face) => face.status === "loaded"),
+      fontFaces.sans.every((face) => face.status === "loaded"),
       path,
     );
     assert.ok(
       fontFaces.mono.every((face) => face.status === "loaded"),
       path,
     );
-    assert.equal(fontFaces.interChecked, true, `${path}: Inter is available`);
+    assert.equal(fontFaces.sansChecked, true, `${path}: Geist is available`);
     assert.equal(
       fontFaces.monoChecked,
       true,
-      `${path}: JetBrains Mono is available`,
+      `${path}: Geist Mono is available`,
     );
     if (!verifiedFonts) {
       const response = await desktop.request.get(web.origin + path);
@@ -217,8 +217,8 @@ test("retained HTML routes share the production foundation and native interactio
         height: getComputedStyle(el).height,
         family: getComputedStyle(el).fontFamily,
       }));
-      assert.equal(inputStyle.height, "36px");
-      assert.match(inputStyle.family, /Inter/);
+      assert.equal(inputStyle.height, "32px");
+      assert.match(inputStyle.family, /Geist/);
       await captureBrowserEvidence(desktop, "1366-retained-project-editor");
     }
   }
@@ -319,3 +319,87 @@ async function assertPhonePreContained(
   assert.ok(dimensions.preScrollWidth <= dimensions.preWidth + 1);
   assert.ok(dimensions.documentWidth <= dimensions.viewportWidth);
 }
+
+test("Nova primitives keep 32px controls, the documented radii and tinted destructive tokens", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const projectId = randomUUID();
+  f.service.domain().execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Nova project",
+    leadProfileId: null,
+  });
+  f.service.domain().execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId: randomUUID(),
+    title: "Nova task",
+    outcome: "Inspect primitives",
+    ready: false,
+  });
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(`${web.origin}/app/tasks?view=board`);
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.locator('[data-slot="card"]').first().waitFor();
+  const geometry = await page.evaluate(() => {
+    const measure = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const style = getComputedStyle(element);
+      return { height: style.height, radius: style.borderRadius };
+    };
+    const primary = document.querySelector('.column-tab[aria-pressed="true"]');
+    const outline = document.querySelector('.column-tab[aria-pressed="false"]');
+    const probe = document.createElement("span");
+    probe.className = "bg-(--nova-destructive-bg) text-(--nova-destructive-fg)";
+    document.body.append(probe);
+    const tint = getComputedStyle(probe);
+    const destructive = { background: tint.backgroundColor, color: tint.color };
+    probe.remove();
+    return {
+      primary: primary && {
+        height: getComputedStyle(primary).height,
+        radius: getComputedStyle(primary).borderRadius,
+      },
+      outline: outline && {
+        height: getComputedStyle(outline).height,
+        radius: getComputedStyle(outline).borderRadius,
+      },
+      input: measure('[data-slot="input"]'),
+      card: measure('[data-slot="card"]'),
+      destructive,
+    };
+  });
+  assert.deepEqual(geometry.primary, { height: "32px", radius: "10px" });
+  assert.deepEqual(geometry.outline, { height: "32px", radius: "10px" });
+  assert.deepEqual(geometry.input, { height: "32px", radius: "10px" });
+  assert.equal(geometry.card?.radius, "14px");
+  const alpha = (value: string) =>
+    Number(/,\s*([\d.]+)\)$/.exec(value)?.[1] ?? "1");
+  assert.ok(
+    alpha(geometry.destructive.background) > 0 &&
+      alpha(geometry.destructive.background) < 1,
+    `destructive background is tinted, not solid: ${geometry.destructive.background}`,
+  );
+  assert.notEqual(geometry.destructive.color, geometry.destructive.background);
+  await captureBrowserEvidence(page, "1366-nova-primitives");
+});

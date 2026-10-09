@@ -569,11 +569,11 @@ nav h2 {
 .legacy-operator select,
 .legacy-operator textarea {
   min-width: 0;
-  min-height: 36px;
+  min-height: 32px;
   border: 1px solid var(--input);
-  border-radius: var(--radius-md);
-  padding: var(--space-8) var(--space-12);
-  background: var(--background);
+  border-radius: var(--radius-lg);
+  padding: 6px 10px;
+  background: var(--nova-input-bg);
   color: var(--foreground);
   font:
     var(--weight-medium) var(--type-sm) / var(--leading-1-25) var(--font-sans);
@@ -592,10 +592,10 @@ nav h2 {
 
 .legacy-operator button,
 .legacy-operator input[type="submit"] {
-  min-height: 36px;
+  min-height: 32px;
   border: 1px solid var(--primary);
-  border-radius: var(--radius-md);
-  padding: var(--space-8) var(--space-16);
+  border-radius: var(--radius-lg);
+  padding: 6px 10px;
   background: var(--primary);
   color: var(--primary-foreground);
   font: 500 var(--type-sm) / var(--leading-1-25) var(--font-sans);
@@ -1524,7 +1524,7 @@ nav h2 {
 .task-workspace [data-slot="native-select"],
 .search-workspace [data-slot="native-select"],
 .search-workspace [data-slot="input"] {
-  min-height: 36px;
+  min-height: 32px;
 }
 @media (max-width: 700px) {
   .task-workspace [data-slot="native-select"],

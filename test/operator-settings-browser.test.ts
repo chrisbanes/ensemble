@@ -228,7 +228,7 @@ test("ordinary links stay distinct while styled actions and long controls fit sm
     await observationButton.evaluate(
       (element) => getComputedStyle(element).height,
     ),
-    "36px",
+    "32px",
   );
   for (const width of [320, 360]) {
     await page.setViewportSize({ width, height: 844 });
@@ -925,9 +925,9 @@ test("Runtime Settings records lowered capacity separately from usage and retain
       slot: e.getAttribute("data-slot"),
       family: getComputedStyle(e).fontFamily,
     }));
-  assert.equal(capacityControl.height, "36px");
+  assert.equal(capacityControl.height, "32px");
   assert.equal(capacityControl.slot, "input");
-  assert.match(capacityControl.family, /Inter/);
+  assert.match(capacityControl.family, /Geist/);
   const capacityOverride = await page
     .getByLabel("Set capacity override for Paused configuration project", {
       exact: true,

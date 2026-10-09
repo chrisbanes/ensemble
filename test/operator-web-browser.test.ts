@@ -73,12 +73,12 @@ for (const viewport of [
     });
     await page.goto(`${web.origin}/login`);
     const loadedFonts = await page.evaluate(async () => {
-      await document.fonts.load('400 14px "Inter"');
-      await document.fonts.load('400 12px "JetBrains Mono"');
+      await document.fonts.load('400 14px "Geist"');
+      await document.fonts.load('400 12px "Geist Mono"');
       await document.fonts.ready;
       return {
-        inter: document.fonts.check('400 14px "Inter"'),
-        mono: document.fonts.check('400 12px "JetBrains Mono"'),
+        inter: document.fonts.check('400 14px "Geist"'),
+        mono: document.fonts.check('400 12px "Geist Mono"'),
       };
     });
     assert.equal(loadedFonts.inter, true);
@@ -101,14 +101,16 @@ for (const viewport of [
           family: s.fontFamily,
           size: s.fontSize,
           height: s.height,
+          radius: s.borderRadius,
         };
       });
     assert.equal(loginStyle.background, "rgb(229, 229, 229)");
     assert.equal(loginStyle.foreground, "rgb(23, 23, 23)");
     assert.ok(contrast(loginStyle.foreground, loginStyle.background) >= 4.5);
-    assert.match(loginStyle.family, /Inter/);
+    assert.match(loginStyle.family, /Geist/);
     assert.equal(loginStyle.size, "14px");
-    assert.equal(loginStyle.height, viewport.width < 760 ? "44px" : "36px");
+    assert.equal(loginStyle.height, viewport.width < 760 ? "44px" : "32px");
+    assert.equal(loginStyle.radius, "10px");
     await page.keyboard.press("Tab");
     assert.equal(
       await page
@@ -312,7 +314,7 @@ for (const viewport of [
           line: s.lineHeight,
         };
       });
-    assert.match(typography.family, /Inter/);
+    assert.match(typography.family, /Geist/);
     assert.equal(typography.size, "18px");
     assert.equal(typography.weight, "600");
     const supporting = await page
@@ -329,7 +331,7 @@ for (const viewport of [
         };
       });
     assert.ok(contrast(supporting.foreground, supporting.background) >= 4.5);
-    assert.match(supporting.family, /Inter/);
+    assert.match(supporting.family, /Geist/);
     assert.equal(supporting.size, "14px");
     assert.equal(supporting.weight, "400");
     const badge = await page
