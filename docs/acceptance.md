@@ -328,9 +328,10 @@ Service, read model and operator UI are implemented and covered by the
 deterministic suites below. The bounded real-runtime journey
 (`test/wi828/live-operator-follow-up.mjs`) is described in the
 [#828 evidence record](evidence/issue-828-operator-follow-up-live-2026-10-09.md).
-Its single attempt proved the completed lead, the paused review send and the
-resume receipt on the real runtime; the resumed turn's receipt of the anchors
-is unproved because a harness planning defect stopped the attempt before T2.
+Attempt 1 stopped on a harness planning defect before the resumed turn.
+Attempt 2 (9 October 2026) passed: the lead recorded a result, a paused local
+review resumed it, and the resumed turn on the same thread received the
+review's anchors and reported a result.
 
 | Criteria | Deterministic evidence |
 | --- | --- |
