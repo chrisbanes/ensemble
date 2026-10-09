@@ -185,6 +185,10 @@ function useLocalReviewController({
       // Refused before any operation was recorded.
       send.status = "rejected";
       send.reason = "too large to send; shorten or remove comments";
+    } else if (result.code === "local-review-comment-anchor-required") {
+      // Refused before any operation was recorded.
+      send.status = "rejected";
+      send.reason = "a comment has no exact line context; remove it";
     } else if (result.code === "local-review-recipient-unavailable") {
       // Definitive: the lead can no longer receive the message, nothing was queued.
       send.status = "rejected";
@@ -285,6 +289,32 @@ function useLocalReviewController({
         return;
       }
       this.close();
+    },
+    /** Drafts saved before the anchor rule can only be sent once these are gone. */
+    async removeUnanchoredComments() {
+      if (!draft) return;
+      state.pending = true;
+      changed();
+      const result = await saveDraft(
+        {
+          summary: draft.draft.summary,
+          comments: draft.draft.comments.filter(
+            (comment) => comment.anchorGroupIds.length > 0,
+          ),
+        },
+        draft.version,
+      );
+      state.pending = false;
+      // Open editors of removed comments would otherwise keep Send disabled.
+      if (result.state === "recorded")
+        for (const comment of draft.draft.comments)
+          if (comment.anchorGroupIds.length === 0)
+            delete state.editing[comment.commentId];
+      state.notice =
+        result.state === "recorded"
+          ? ""
+          : `Comments could not be removed (${failure(result)}).`;
+      changed();
     },
     async updateComment(commentId: string, body: string | null) {
       if (!draft) return;
@@ -770,6 +800,9 @@ export function LocalReviewPanel() {
     (draft?.groups ?? []).map((group) => [group.groupId, group.anchorIds]),
   );
   const comments = draft?.draft.comments ?? [];
+  const unanchored = comments.some(
+    (comment) => comment.anchorGroupIds.length === 0,
+  );
   return (
     <section id="local-review" aria-labelledby="local-review-heading">
       <h3 id="local-review-heading" className="section-heading" tabIndex={-1}>
@@ -921,6 +954,7 @@ export function LocalReviewPanel() {
           <Button
             disabled={
               !leadReceives(review.lead) ||
+              unanchored ||
               locked ||
               state.pending ||
               state.summary !== null ||
@@ -936,6 +970,21 @@ export function LocalReviewPanel() {
               The project lead's assignment is {review.lead.state} and cannot
               receive a review. Your comments stay in the draft.
             </p>
+          )}
+          {unanchored && (
+            <div role="status">
+              <p>
+                A comment saved before line context was required has none.
+                Remove it to edit or send this review.
+              </p>
+              <Button
+                variant="secondary"
+                disabled={locked || state.pending}
+                onClick={() => void review.removeUnanchoredComments()}
+              >
+                Remove comments without line context
+              </Button>
+            </div>
           )}
           {(state.summary !== null ||
             Object.keys(state.editing).length > 0) && (

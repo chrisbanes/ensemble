@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { materialDigest } from "../src/core/delivery.js";
 import { localReviewListReadSchema } from "../src/operator/contracts.js";
+import { localReviewDraftReadSchema } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import type { OperatorReviewSessionContext } from "../src/standalone/operator-api.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
@@ -1239,4 +1240,88 @@ test("an anchor excerpt that becomes excluded removes the draft and blocks a sta
     ),
     (error: unknown) => (error as { code?: string }).code === "forbidden",
   );
+});
+
+test("every review comment must carry exact anchor context", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Unanchored comment");
+  const api = new OperatorApi(f.service, []);
+  await assert.rejects(
+    api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: 0,
+        draft: {
+          summary: "",
+          comments: [
+            {
+              commentId: randomUUID(),
+              body: "No anchor",
+              anchorGroupIds: [],
+            },
+          ],
+        },
+      },
+      session(),
+    ),
+  );
+});
+
+test("a stored unanchored draft from before the anchor rule stays readable", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Legacy unanchored draft");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: 0,
+      draft: { summary: "legacy", comments: [] },
+    },
+    owner,
+  );
+  const legacy = {
+    summary: "legacy",
+    comments: [
+      { commentId: randomUUID(), body: "Unanchored", anchorGroupIds: [] },
+    ],
+  };
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "UPDATE coordination_local_review_drafts SET draftJson=? WHERE taskId=? AND ownerKey=?",
+    ).run(JSON.stringify(legacy), task.taskId, owner.ownerKey);
+  });
+  const read = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.deepEqual(read.data.draft, legacy);
+  // The transport read schema accepts it, so the browser can show and fix it.
+  assert.equal(localReviewDraftReadSchema.safeParse(read).success, true);
+  // A new send still refuses the unanchored comment and records nothing.
+  await assert.rejects(
+    api.execute(
+      requestFor(
+        task,
+        randomUUID(),
+        read.data.version,
+        Number(f.service.domain().assignment(task.assignmentId).version),
+      ),
+      owner,
+    ),
+    (error: unknown) =>
+      (error as { code?: string }).code ===
+      "local-review-comment-anchor-required",
+  );
+  const stillEditable = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(stillEditable.data.state, "editable");
+  assert.deepEqual(counts(f, task.taskId), {
+    events: 0,
+    receipts: 0,
+    continuations: 0,
+    submissions: 0,
+  });
 });

@@ -69,6 +69,7 @@ import {
 } from "./retained-evidence.js";
 import { materialDigest } from "../core/delivery.js";
 import {
+  LocalReviewAnchorRequiredError,
   LocalReviewBatchTooLargeError,
   LocalReviewRecipientUnavailableError,
   type LocalReviewRequest,
@@ -254,7 +255,8 @@ export class OperatorApiError extends Error {
       | "unauthenticated"
       | "command-outcome-unknown"
       | "local-review-batch-too-large"
-      | "local-review-recipient-unavailable",
+      | "local-review-recipient-unavailable"
+      | "local-review-comment-anchor-required",
     readonly fieldPaths?: readonly string[],
   ) {
     super(code);
@@ -4594,6 +4596,8 @@ export class OperatorApi {
     } catch (error) {
       if (error instanceof OperatorApiError || error instanceof z.ZodError)
         throw error;
+      if (error instanceof LocalReviewAnchorRequiredError)
+        throw new OperatorApiError(400, "local-review-comment-anchor-required");
       if (error instanceof LocalReviewBatchTooLargeError)
         throw new OperatorApiError(400, "local-review-batch-too-large");
       if (error instanceof LocalReviewRecipientUnavailableError)

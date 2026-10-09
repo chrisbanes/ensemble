@@ -142,7 +142,11 @@ export class OperatorClient {
     input: OperatorCommand,
     csrfToken: string,
   ): Promise<CommandState> {
-    const command = operatorCommandSchema.parse(input);
+    // Locally invalid input was never sent, so it is a definitive rejection.
+    const parsed = operatorCommandSchema.safeParse(input);
+    if (!parsed.success)
+      return { state: "rejected", command: input, code: "invalid-input" };
+    const command = parsed.data;
     try {
       return {
         state: "recorded",

@@ -602,3 +602,56 @@ test("sent reviews stay inspectable after reload and Start a new review", async 
   assert.equal(events(), 1);
   assert.deepEqual(pageErrors, []);
 });
+
+test("a stored comment without line context can be removed so the review can be sent", async (_t, j) => {
+  const { fixture, web, task, page, pageErrors } = await startReview(j);
+  await signIn(
+    page,
+    web.origin,
+    `/app/tasks/${task.taskId}?section=files`,
+    web.password,
+  );
+  await commentOnLine(page, "Line 2: second", "Anchored comment");
+  // Simulate a draft saved before every comment required an anchor.
+  fixture.seedPersistedState((db) => {
+    const row = db
+      .prepare(
+        "SELECT draftJson FROM coordination_local_review_drafts WHERE taskId=?",
+      )
+      .get(task.taskId) as { draftJson: string };
+    const draft = JSON.parse(row.draftJson) as {
+      summary: string;
+      comments: unknown[];
+    };
+    draft.comments.push(
+      { commentId: randomUUID(), body: "Legacy one", anchorGroupIds: [] },
+      { commentId: randomUUID(), body: "Legacy two", anchorGroupIds: [] },
+    );
+    db.prepare(
+      "UPDATE coordination_local_review_drafts SET draftJson=? WHERE taskId=?",
+    ).run(JSON.stringify(draft), task.taskId);
+  });
+  await page.reload();
+  const review = page.locator("#local-review");
+  await review.getByText("Legacy two").waitFor();
+  const send = review.getByRole("button", { name: /^Send review/ });
+  assert.equal(await send.isDisabled(), true);
+
+  // An edit that the save contract refuses settles instead of freezing the panel.
+  await review.getByRole("button", { name: "Edit" }).first().click();
+  await review.getByLabel("Edit comment").fill("Edited while legacy remains");
+  await review.getByRole("button", { name: "Save edit" }).click();
+  await review.getByText(/Draft change failed \(invalid-input\)/).waitFor();
+  await review.getByRole("button", { name: "Cancel edit" }).click();
+  // Leave an editor open on a legacy comment; bulk removal must clear it.
+  await review.getByRole("button", { name: "Edit" }).last().click();
+
+  await review
+    .getByRole("button", { name: "Remove comments without line context" })
+    .click();
+  await review.getByText("Legacy two").waitFor({ state: "detached" });
+  assert.equal(await review.getByText("Legacy one").count(), 0);
+  await review.getByText("Anchored comment").waitFor();
+  assert.equal(await send.isEnabled(), true);
+  assert.deepEqual(pageErrors, []);
+});

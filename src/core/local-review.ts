@@ -16,6 +16,7 @@ const commentSchema = z
   .object({
     commentId: uuid,
     body: z.string().trim().min(1).max(4000),
+    // Stored drafts and payloads stay readable; new writes require an anchor.
     anchorGroupIds: z.array(uuid).max(maxReviewItems),
   })
   .strict();
@@ -71,11 +72,25 @@ const frozenPayloadSchema = z
       .max(maxReviewItems),
   })
   .strict();
+/** New drafts bind every comment to exact anchor context. */
+const writableDraftSchema = draftSchema.refine(
+  (draft) =>
+    draft.comments.every((comment) => comment.anchorGroupIds.length > 0),
+  { message: "local-review-comment-anchor-required" },
+);
 type Draft = z.infer<typeof draftSchema>;
 type FrozenPayload = z.infer<typeof frozenPayloadSchema>;
 type Row = Record<string, string | number | null>;
 
 /** Definitive pre-operation rejection: nothing was recorded or sent. */
+/** Definitive pre-operation rejection: a comment has no exact anchor context. */
+export class LocalReviewAnchorRequiredError extends Error {
+  constructor() {
+    super("Local review comment requires an anchor");
+    this.name = "LocalReviewAnchorRequiredError";
+  }
+}
+
 export class LocalReviewBatchTooLargeError extends Error {
   constructor() {
     super("Local review batch exceeds the message limit");
@@ -479,7 +494,7 @@ export class LocalReviewStore {
     requestHash: string;
     accessFingerprint: string;
   }) {
-    const draft = draftSchema.parse(input.draft);
+    const draft = writableDraftSchema.parse(input.draft);
     return transaction(this.db, () => {
       const prior = this.draftOperation("save", input.commandKey);
       if (prior) return this.replayDraftOperation(prior, input);
@@ -673,7 +688,10 @@ export class LocalReviewStore {
         throw new Error("Local review draft version conflict");
       if (draftRow.state !== "editable")
         throw new Error("Local review draft is frozen");
+      // A new send applies the write rule; frozen operations above stay lenient.
       const draft = draftSchema.parse(JSON.parse(String(draftRow.draftJson)));
+      if (!writableDraftSchema.safeParse(draft).success)
+        throw new LocalReviewAnchorRequiredError();
       if (!draft.summary && draft.comments.length === 0)
         throw new Error("Local review draft is empty");
       this.validateLead(request, true);

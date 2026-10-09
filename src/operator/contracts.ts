@@ -1425,6 +1425,7 @@ const localReviewCommentSchema = z
   .object({
     commentId: uuid,
     body: z.string().trim().min(1).max(4000),
+    // Reads accept stored drafts from before the anchor rule.
     anchorGroupIds: z.array(uuid).max(32),
   })
   .strict();
@@ -1450,6 +1451,12 @@ const localReviewDraftContentSchema = z
     if (bytes > 16000)
       ctx.addIssue({ code: "custom", message: "local-review-batch-too-large" });
   });
+/** Saved drafts bind every comment to exact anchor context. */
+const localReviewDraftWriteSchema = localReviewDraftContentSchema.refine(
+  (draft) =>
+    draft.comments.every((comment) => comment.anchorGroupIds.length > 0),
+  { message: "local-review-comment-anchor-required" },
+);
 export const localReviewDraftReadSchema = envelope(
   z
     .object({
@@ -1646,7 +1653,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       type: z.literal("review.draft.save"),
       taskId: uuid,
       expectedDraftVersion: z.number().int().nonnegative().safe(),
-      draft: localReviewDraftContentSchema,
+      draft: localReviewDraftWriteSchema,
     })
     .strict(),
   z
@@ -2406,6 +2413,7 @@ export const apiErrorSchema = z
           "command-outcome-unknown",
           "local-review-batch-too-large",
           "local-review-recipient-unavailable",
+          "local-review-comment-anchor-required",
         ]),
         message: z.string().max(256),
         fieldPaths: z.array(z.string().max(128)).optional(),

@@ -655,6 +655,8 @@ function publicMessage(code: string): string {
       "The review is too large to send. Shorten or remove comments.",
     "local-review-recipient-unavailable":
       "The project lead cannot receive reviews now.",
+    "local-review-comment-anchor-required":
+      "Every review comment needs exact line context. Remove unanchored comments.",
   };
   return messages[code] ?? "Request unavailable.";
 }
