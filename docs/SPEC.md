@@ -805,6 +805,13 @@ Implemented contract details:
   and `awaitingRecoveryMessage` is true while an ordinary operator message to
   the lead would record a waiting recovery continuation. A follow-up never
   records a recovery continuation.
+- The task Reply composer (including contextual "Ask lead about …" drafts) and
+  the Local review panel show one status line from `web/src/lead-feedback.ts`:
+  "<Lead> has completed its assignment and will resume to address this
+  feedback." A resumed send reports "Receipt recorded. <Lead> resumed with this
+  feedback." in the composer and "<Lead> was resumed with this review as a
+  follow-up." in Local review. Local review shows the recovery-continuation
+  copy while `awaitingRecoveryMessage` is true; Send stays enabled.
 - Remaining gap: the legacy server-rendered `/coordination/...` task and
   assignment pages still offer message forms only for pending or running
   assignments. A direct `POST /coordination/control/message` follows the same

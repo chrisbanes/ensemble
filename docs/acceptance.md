@@ -324,9 +324,10 @@ qualified offline only.
 
 ### #828 operator follow-up to a completed lead
 
-The service, receipts and read model are implemented; the operator UI status
-line and recovery copy and the bounded real-runtime validation are still to
-come and are not yet evidence.
+Service, read model and operator UI are implemented and covered by the
+deterministic suites below. The bounded real-runtime journey
+(`test/wi828/live-operator-follow-up.mjs`) is described in the
+[#828 evidence record](evidence/issue-828-operator-follow-up-live-2026-10-09.md).
 
 | Criteria | Deterministic evidence |
 | --- | --- |
@@ -336,6 +337,8 @@ come and are not yet evidence.
 | Replay returns the original receipt without a second resume; reconciliation fences on the lead's version | `coordination.test.ts`, `local-review.test.ts`, `operator-follow-up.test.ts` |
 | Holds, approval, readiness and merge authority unchanged; a paused project does not dispatch until unpaused; the resumed turn continues the lead's thread at the next work revision | `operator-follow-up.test.ts` |
 | `leadFeedback` read model and recovery-continuation flag; a review never records a continuation | `operator-follow-up.test.ts`, `recovery-continuation.test.ts` |
+| One identical status line before sending in the Reply composer, contextual drafts and Local review (1366 px, 390 px, keyboard); Send label unchanged; resumed receipts; refusals keep the draft | `operator-local-review-browser.test.ts`, `operator-review-browser.test.ts` |
+| Local review shows the recovery-continuation copy only while the flag is set (panel rendering; the flag itself is proved in `recovery-continuation.test.ts`) | `operator-local-review-browser.test.ts` |
 
 ## Implemented service and integration proofs
 
