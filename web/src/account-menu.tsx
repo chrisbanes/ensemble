@@ -66,7 +66,9 @@ export function AccountMenu({
     setOpen(true);
   };
   const onTriggerKey = (event: KeyboardEvent) => {
-    if (event.key === "ArrowDown") {
+    // A pointer-opened menu keeps focus on the trigger; Tab leaves it, so close it.
+    if (event.key === "Tab") setOpen(false);
+    else if (event.key === "ArrowDown") {
       event.preventDefault();
       openWith("first");
     } else if (event.key === "ArrowUp") {

@@ -1583,9 +1583,9 @@ Implementation differences recorded on 9 October 2026 (U2, #836):
 - The expired-session entry is the sign-in screen with a status notice rather
   than a separate screen. It keeps frame `OwZka`'s headline and "Private state
   cleared" card but not its review-recovery paragraph (that belongs to the
-  review flow). The card's detail also says that unfinished task input kept in
-  the tab stays on the device, because the composer keeps it under its own
-  recovery prompt.
+  review flow). The card's detail adds one sentence: unfinished task input is
+  offered for recovery on this device, because the composer keeps it in the
+  tab under its own recovery prompt.
 - Failed sign-in text uses the brighter destructive foreground so it reads at
   4.5:1 against the page; the frame's tint is lower contrast.
 - The phone drawer shows the account group as navigation rows plus a Sign out

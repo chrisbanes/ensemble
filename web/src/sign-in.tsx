@@ -82,9 +82,9 @@ export function Login({
             <p className="body">Your session expired. Sign in to continue.</p>
             <p className="body">Private state cleared</p>
             <p className="metadata muted">
-              Private reading and navigation state were cleared under the
-              existing session rules. Unfinished task input kept in this tab
-              stays on this device.
+              Unsent local drafts and private reading/navigation state were
+              cleared under the existing session rules. Unfinished task input is
+              offered for recovery on this device.
             </p>
           </Alert>
         )}

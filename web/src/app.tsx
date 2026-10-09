@@ -282,8 +282,13 @@ function parentRoute(
     return { href: "/app/settings", label: "Settings" };
   return null;
 }
-/** Whether an `/app` address matches a client route; mirrors the view chosen in `App`. */
+/**
+ * Whether an `/app` address matches a client route; mirrors the view chosen in `App` and the
+ * service's `shell()` routes. Task ids are not checked here: the task workspace owns its own
+ * not-found state for a malformed id.
+ */
 function knownRoute(pathname: string) {
+  const id = "[a-f0-9-]{36}";
   return (
     [
       "/app",
@@ -296,9 +301,10 @@ function knownRoute(pathname: string) {
       "/app/settings/projects/new",
       "/app/settings/profiles/new",
     ].includes(pathname) ||
-    /^\/app\/(?:tasks|projects)\/[^/]+$/.test(pathname) ||
-    /^\/app\/assignments\/[^/]+\/recovery$/.test(pathname) ||
-    /^\/app\/(?:projects|profiles)\/[^/]+\/settings$/.test(pathname)
+    /^\/app\/tasks\/[^/]+$/.test(pathname) ||
+    new RegExp(`^/app/projects/${id}$`).test(pathname) ||
+    new RegExp(`^/app/assignments/${id}/recovery$`).test(pathname) ||
+    new RegExp(`^/app/(?:projects|profiles)/${id}/settings$`).test(pathname)
   );
 }
 export function App() {
@@ -597,7 +603,7 @@ export function App() {
     activeSearch = new SearchState();
     searchState.current.set(entryKey, activeSearch);
   }
-  const projectId = pathname.match(/^\/app\/projects\/([^/]+)$/)?.[1];
+  const projectId = pathname.match(/^\/app\/projects\/([a-f0-9-]{36})$/)?.[1];
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
@@ -622,9 +628,7 @@ export function App() {
                   : pathname.startsWith("/app/settings") ||
                       pathname.endsWith("/settings")
                     ? "Settings"
-                    : projectId
-                      ? (project?.name ?? "Project")
-                      : "Page not found";
+                    : (project?.name ?? "Project");
   const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
   const inboxCount =
     (onInboxRoute ? inboxRouteSummary : inboxSummaryOf(inboxSummary.state))
@@ -656,7 +660,9 @@ export function App() {
     (/^\/app\/tasks\/[^/]+$/.test(pathname) && pathname !== "/app/tasks/new") ||
     (pathname === "/app/search" &&
       Boolean(new URLSearchParams(query).get("query")));
-  const parent = parentRoute(pathname, query, workspace.state.data);
+  const parent = unknownRoute
+    ? null
+    : parentRoute(pathname, query, workspace.state.data);
   async function logout() {
     navigationScope.current = crypto.randomUUID();
     clearPrivateNavigation();
@@ -780,7 +786,9 @@ export function App() {
           {workspace.state.status !== "fresh" && (
             <ResourceStatus state={workspace.state} retry={workspace.refresh} />
           )}
-          {pathname === "/app/settings/runtime" ? (
+          {unknownRoute ? (
+            <NotFound />
+          ) : pathname === "/app/settings/runtime" ? (
             <RuntimeSettings
               client={client}
               session={session}
@@ -884,7 +892,7 @@ export function App() {
                 entryKey,
               )}
             />
-          ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
+          ) : (
             <TaskViews
               state={tasks.state}
               refresh={() => {
@@ -897,8 +905,6 @@ export function App() {
               {...(projectId ? { projectId } : {})}
               overview={pathname === "/app"}
             />
-          ) : (
-            <NotFound />
           )}
         </main>
       </div>
