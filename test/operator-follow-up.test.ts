@@ -251,6 +251,38 @@ test("a review sent to a completed lead while paused resumes it with exact ancho
   assert.equal(Number(lead.version), version + 1);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(f.runtime.turns, 1, "a paused project starts no turn");
+  // The live journey (test/wi828) plans the resumed turn from this queued batch.
+  let batch: { deliveryWorkId: string; eventTypes: string[]; first: string } = {
+    deliveryWorkId: "",
+    eventTypes: [],
+    first: "",
+  };
+  f.seedPersistedState((db) => {
+    const rows = db
+      .prepare(
+        "SELECT batchId, deliveryWorkId FROM coordination_delivery_batches WHERE recipientAssignmentId = ? AND state = 'queued'",
+      )
+      .all(task.assignmentId) as Array<{
+      batchId: string;
+      deliveryWorkId: string;
+    }>;
+    assert.equal(rows.length, 1);
+    const events = db
+      .prepare(
+        "SELECT event.eventId, event.eventType FROM coordination_delivery_events delivery JOIN coordination_inbox_events event ON event.eventId = delivery.eventId WHERE delivery.batchId = ? ORDER BY delivery.ordinal",
+      )
+      .all(rows[0]!.batchId) as Array<{ eventId: string; eventType: string }>;
+    batch = {
+      deliveryWorkId: rows[0]!.deliveryWorkId,
+      eventTypes: events.map((event) => event.eventType),
+      first: events[0]!.eventId,
+    };
+  });
+  assert.ok(batch.eventTypes.includes("assignment-follow-up"));
+  assert.equal(
+    batch.deliveryWorkId,
+    `assignment:${task.assignmentId}:v${version + 1}:inbox:${batch.first}`,
+  );
 
   configure(f, task.projectId, false);
   await until(() => f.runtime.hasPending(2), "resumed review turn");

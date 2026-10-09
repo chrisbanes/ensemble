@@ -430,24 +430,32 @@ try {
   assert.equal(Number(lead.version), evidence.t1.leadVersion + 1);
   assert.equal(harness.guard.snapshot().startTurnCalls, 1);
 
-  // T2 is the resumed lead turn. Its inbox work id derives from the lead's first
-  // pending event, which is the lead's own earlier result event.
+  // T2 is the resumed lead turn. The scheduler binds the lead's inbox into one
+  // queued delivery batch even while paused; its work id derives from the first
+  // bound event, which is the lead's own earlier result event.
   stage = "T2-plan";
-  const pending = readDatabase((database) =>
-    database
-      .prepare(`SELECT event.eventId, event.eventType
-        FROM coordination_inbox_events event
-        LEFT JOIN coordination_delivery_events delivery ON delivery.eventId = event.eventId
-        WHERE event.recipientAssignmentId = ? AND delivery.eventId IS NULL
-        ORDER BY event.sequence`)
-      .all(leadId),
+  const batch = readDatabase((database) => {
+    const batches = database
+      .prepare(`SELECT batchId, deliveryWorkId FROM coordination_delivery_batches
+        WHERE recipientAssignmentId = ? AND state = 'queued'`)
+      .all(leadId);
+    assert.equal(batches.length, 1);
+    const events = database
+      .prepare(`SELECT event.eventId, event.eventType FROM coordination_delivery_events delivery
+        JOIN coordination_inbox_events event ON event.eventId = delivery.eventId
+        WHERE delivery.batchId = ? ORDER BY delivery.ordinal`)
+      .all(batches[0].batchId);
+    return { deliveryWorkId: batches[0].deliveryWorkId, events };
+  });
+  evidence.review.batchEventTypes = batch.events.map((row) => row.eventType);
+  assert.ok(
+    batch.events.some((row) => row.eventType === "assignment-follow-up"),
   );
-  evidence.review.pendingEventTypes = pending.map((row) => row.eventType);
-  assert.ok(pending.some((row) => row.eventType === "assignment-follow-up"));
-  harness.plan.T2 = {
-    assignmentId: leadId,
-    workId: `assignment:${leadId}:v${evidence.t1.leadVersion + 1}:inbox:${pending[0].eventId}`,
-  };
+  assert.equal(
+    batch.deliveryWorkId,
+    `assignment:${leadId}:v${evidence.t1.leadVersion + 1}:inbox:${batch.events[0].eventId}`,
+  );
+  harness.plan.T2 = { assignmentId: leadId, workId: batch.deliveryWorkId };
   const t2 = await plannedTurn("T2");
   assert.equal(prompts.length, 2);
   const t2Prompt = prompts[1].prompt;
