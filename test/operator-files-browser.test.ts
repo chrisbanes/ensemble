@@ -282,6 +282,12 @@ test("production Files reads service PDF bytes and bounds page, canvas and cance
   await page
     .getByRole("button", { name: "Back to file list", exact: true })
     .click();
+  // Back restores focus in a later animation frame; wait for it so it cannot
+  // steal focus from the entry opened next.
+  await page
+    .getByRole("button", { name: /oversized-12-pages\.pdf/ })
+    .and(page.locator(":focus"))
+    .waitFor();
   await page.getByRole("button", { name: /literal\.txt/ }).focus();
   await page.keyboard.press("Space");
   await page
@@ -304,6 +310,10 @@ test("production Files reads service PDF bytes and bounds page, canvas and cance
   await page
     .getByRole("button", { name: "Back to file list", exact: true })
     .click();
+  await page
+    .getByRole("button", { name: /literal\.txt/ })
+    .and(page.locator(":focus"))
+    .waitFor();
   const imageButton = page.getByRole("button", { name: /sample\.png/ });
   await imageButton.focus();
   await page.keyboard.press("Enter");

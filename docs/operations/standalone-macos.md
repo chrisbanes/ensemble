@@ -9,8 +9,11 @@ and private to the operator.
 
 ## Runtime and authentication
 
-Use Node.js `24.21.0` and npm `12.2.0`. Build from a reviewed checkout and keep
-the Node executable and compiled CLI at stable absolute paths that remain
+Use Node.js `24.21.0` and npm `12.2.0`. Node.js `26.9.0` has passed the checks
+and the fixture service/operator journey
+([evidence](../evidence/node-26-compatibility-2026-10-09.md)) but is not the
+deployment baseline; later majors are not qualified. Build from a reviewed
+checkout and keep the Node executable and compiled CLI at stable absolute paths that remain
 available to the logged-in user:
 
 ```sh
@@ -133,9 +136,11 @@ npm run operations -- verify \
 ```
 
 The snapshot is a private directory containing only `standalone.sqlite` and a
-strict `manifest.json` commit marker. Node 24's SQLite backup API captures the
-whole database without table-specific export. Verification checks SQLite
-integrity, schema version/fingerprint, database bytes, and a deterministic
+strict `manifest.json` commit marker. Node's SQLite backup API (qualified on
+Node 24.21.0 and 26.9.0) captures the whole database without table-specific
+export. The manifest records the creating Node version as provenance; snapshots
+from Node 24 or later verify and restore on any supported runtime. Verification
+checks SQLite integrity, schema version/fingerprint, database bytes, and a deterministic
 typed logical-content digest. A database owner lock is required; no process ID
 or timestamp is treated as ownership evidence. The owner must already be a
 regular, non-symlink file: offline backup never creates installation metadata

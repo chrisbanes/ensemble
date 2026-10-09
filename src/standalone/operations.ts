@@ -39,7 +39,9 @@ const snapshotManifestSchema = z
   .object({
     format: z.literal(SNAPSHOT_FORMAT),
     sourceMarker: z.literal(STANDALONE_MARKER_CONTENTS),
-    nodeVersion: z.string().regex(/^v24\./),
+    nodeVersion: z
+      .string()
+      .regex(/^v(?:2[4-9]|[3-9]\d|[1-9]\d{2,})\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
     schemaVersion: z
       .number()
       .int()

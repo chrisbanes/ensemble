@@ -479,6 +479,34 @@ test("snapshot verification rejects malformed, mismatched, unsupported, and link
     );
     await assert.rejects(verifySnapshot(futureSchema));
 
+    for (const [name, nodeVersion, accepted] of [
+      ["node-24", "v24.21.0", true],
+      ["node-26", "v26.9.0", true],
+      ["node-100", "v100.0.0", true],
+      ["node-prerelease", "v26.9.0-nightly20261001abc", true],
+      ["node-trailing-text", "v26.9.0junk", false],
+      ["node-extra-part", "v26.9.0.1", false],
+      ["node-leading-zero", "v024.0.0", false],
+      ["node-23", "v23.9.0", false],
+      ["node-9", "v9.9.9", false],
+      ["node-no-prefix", "24.21.0", false],
+      ["node-partial", "v26", false],
+    ] as const) {
+      const copy = join(root, name);
+      copySnapshot(snapshot, copy);
+      const versionManifest = JSON.parse(
+        readFileSync(join(copy, "manifest.json"), "utf8"),
+      ) as Record<string, unknown>;
+      versionManifest.nodeVersion = nodeVersion;
+      writeFileSync(
+        join(copy, "manifest.json"),
+        `${JSON.stringify(versionManifest)}\n`,
+      );
+      if (accepted) await verifySnapshot(copy);
+      else
+        await assert.rejects(verifySnapshot(copy), /nodeVersion/, nodeVersion);
+    }
+
     const missingManifest = join(root, "missing-manifest");
     copySnapshot(snapshot, missingManifest);
     unlinkSync(join(missingManifest, "manifest.json"));
