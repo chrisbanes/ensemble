@@ -107,6 +107,10 @@ test("fixture preflight proves expected child assertion failure with sanitized l
       await readFile(join(runnerDirectory, "stderr.sanitized.log"), "utf8"),
       /Injected CI browser assertion remains primary/,
     );
+    const runnerManifest = JSON.parse(
+      await readFile(join(runnerDirectory, "manifest.json"), "utf8"),
+    );
+    assert.equal(runnerManifest.nodeVersion, process.version);
     const parent = join(root, `ci-failure-${result.pid}`);
     const entries = await readdir(parent);
     assert.equal(entries.length, 1);

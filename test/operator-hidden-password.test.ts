@@ -62,6 +62,12 @@ test("hidden password reader restores and pauses after input error or close", as
     await t.test(ending, async () => {
       const input = ttyInput();
       const terminal = output();
+      const pause = input.pause.bind(input);
+      let pauseCalls = 0;
+      input.pause = () => {
+        pauseCalls += 1;
+        return pause();
+      };
       const result = readHiddenPassword(input, terminal.stream, "Password: ");
       await new Promise<void>((resolve) => setImmediate(resolve));
       if (ending === "error")
@@ -70,7 +76,9 @@ test("hidden password reader restores and pauses after input error or close", as
 
       await assert.rejects(result, /input (?:failed|closed)/i);
       assert.equal(input.isRaw, false);
-      assert.equal(input.isPaused(), true);
+      assert.ok(pauseCalls > 0, "pause was requested");
+      // A destroyed stream ignores pause() on newer Node releases.
+      if (ending === "error") assert.equal(input.isPaused(), true);
       assert.doesNotMatch(terminal.text(), /secret input detail/);
     });
   }

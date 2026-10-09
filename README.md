@@ -128,7 +128,10 @@ Their requirements and unproved feasibility evidence are retained. See
 ## Development
 
 Use Node **24.21.0** and npm **12.2.0**, pinned in
-[`.node-version`](.node-version) and [`package.json`](package.json):
+[`.node-version`](.node-version) and [`package.json`](package.json). Node
+**26.9.0** is tested for compatibility (CI job `check-node-26`; see the
+[local evidence](docs/evidence/node-26-compatibility-2026-10-09.md)) but is not the deployment baseline. `engines.node` is
+`>=24` as permissive metadata; later majors are not qualified.
 
 ```sh
 npm ci

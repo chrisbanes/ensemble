@@ -387,11 +387,11 @@ bounded proofs and review; no framework or dependency selection is implied here.
 `StandaloneDataDirectory` owns the shared marker and exclusive SQLite owner
 lock used by both `StandaloneService` and offline operations. The separate
 `npm run operations` CLI never starts Codex, the scheduler or the operator HTTP
-server. Backup uses Node 24's SQLite backup API to reserve a new private
-snapshot directory, verify the whole database, and write a strict manifest as
+server. Backup uses Node's SQLite backup API (qualified on Node 24.21.0 and
+26.9.0) to reserve a new private snapshot directory, verify the whole database, and write a strict manifest as
 the final commit marker. The manifest binds the supported schema version and
 fingerprint, SQLite file digest, deterministic typed logical-content digest,
-and source marker. Restore reserves a distinct nonexistent data directory,
+and source marker, and records the creating Node version as provenance. Restore reserves a distinct nonexistent data directory,
 creates `.ensemble-restore-incomplete` immediately, verifies the copied
 database, writes a new empty `.ensemble-owner.sqlite`, and atomically promotes
 the sentinel to `.ensemble-standalone` last. The destination owner file is

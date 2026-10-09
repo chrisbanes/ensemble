@@ -240,6 +240,7 @@ export async function recordRunnerEvidence(result, name, evidenceRoot) {
             {
               ...manifest,
               wrapperStatus: runnerStatus(result),
+              nodeVersion: process.version,
               exitProof: "owned root child only",
             },
             null,
