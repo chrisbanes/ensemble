@@ -521,11 +521,20 @@ and Accent **Default**. Screens now reference the library components directly.
 Domain-specific request, task, evidence and history content occupies component
 slots. These compositions preserve Ensemble's spec-owned behaviour.
 
+Since 9 October the canvas follows shadcn/ui's **Nova** style on the Base UI
+base (the `base-nova` preset: Nova / Lucide / Geist, neutral, default 10px
+radius). The Pen library cannot be edited, so Nova is applied as instance
+overrides on its components plus local tokens. Nova reference:
+[`style-nova.css`](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/styles/style-nova.css)
+and the `base-nova` entry in
+[`registry/config.ts`](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/config.ts).
+
 Keep the compact workspace: 224px desktop sidebar, 20px main content padding,
 12px workspace gaps, 18px screen titles and 14–16px section headings. Task and
-request titles remain 14px semibold. Supporting text remains 12–14px rather than
-shrinking to accommodate the migration. Desktop buttons use the library's compact
-36px treatment; phone actions retain 44px targets. The outcome editor retains
+request titles are 14px medium. Supporting text remains 12–14px. Desktop buttons,
+inputs and selects use Nova's 32px height (36px large); phone actions keep 44px
+targets. The web app's `web/src/tokens.css` still uses Inter and 6/8px radii;
+moving the build to Nova is separate implementation work. The outcome editor retains
 260px height on the representative desktop and 180px on phone.
 
 ## Tokens
@@ -533,9 +542,17 @@ shrinking to accommodate the migration. Desktop buttons use the library's compac
 All active colour references now use installed library tokens directly. The
 former Ensemble colour aliases and custom warning/error/success palette have
 been removed, along with the unused local typography, radius and spacing
-variables. The document's variable registry now contains only imported `X`
-colour tokens. All screen roots select Dark / Neutral / Default; a user-facing
-theme switch is not designed.
+variables. Apart from the editor and diff tokens below, the variable registry
+contains only imported `X` colour tokens. All screen roots select Dark / Neutral /
+Default; a user-facing theme switch is not designed.
+
+The 9 October consistency pass replaced every hard-coded colour in the code,
+diff and evidence views with themed local tokens (Light and Dark values):
+`editor-bg`, `editor-panel`, `editor-line-highlight`, `editor-selection`,
+`editor-selection-border`, `editor-hunk-bg`, `editor-hunk-text`, `editor-text`,
+`diff-added-bg`, `diff-added-text`, `diff-removed-bg`, `diff-removed-text`,
+`diff-marker`, `evidence-accent`, `removed-surface` and `overlay-scrim`. Diff
+colour still pairs with `+`/`−` markers and labels.
 
 | Purpose | Installed token |
 | --- | --- |
@@ -557,13 +574,28 @@ borders. Colour never establishes repair ownership, delivery or operator attenti
 
 ### Typography, spacing and shape
 
-Inter supplies interface text; JetBrains Mono identifies IDs and provenance.
-Use 12px metadata, 14px body/control text, 14px semibold task/request titles,
-14–16px section headings and 18px screen titles. Library controls use their
-500 weight; custom headings retain 600. Larger type sizes are reserved for canvas documentation, not product screen headings.
+Geist (`$font-sans`) supplies interface text; Geist Mono (`$font-mono`)
+identifies IDs and provenance. Use 12px metadata, 14px body/control text, 14px
+medium task/request titles, 14–16px medium section headings and 18px semibold
+screen titles. Badges use 12px medium. Larger type sizes are reserved for canvas
+documentation, not product screen headings.
 
-Use library control geometry, 6px control corners and 8px card corners, with
-local layout overrides only where content or the 44px phone targets require them.
+Nova shape and density, with number tokens `$radius-sm` 6, `$radius-md` 8,
+`$radius-lg` 10 and `$radius-xl` 14:
+
+| Element | Nova treatment |
+| --- | --- |
+| Buttons, inputs, selects, textareas, alerts, tabs list, menus | `$radius-lg`; controls 32px high with 10px side padding |
+| Cards, dialogs and card-like panels | `$radius-xl`, 16px padding, no shadow, 1px border |
+| Tab triggers, sidebar items, menu items | `$radius-md` |
+| Badges | Pill, 20px high |
+| Outline button and field backgrounds (dark) | `$nova-outline-bg`, `$nova-input-bg` (white at 3%) |
+| Destructive button and badge | Tinted `$nova-destructive-bg` with `$nova-destructive-fg` text, not solid red |
+| Switch | 32 × 18 track, 14px thumb |
+| Table cells | 8px padding |
+
+Local layout overrides apply only where content or the 44px phone targets require
+them.
 Composition uses the same 4px spacing rhythm as the installed controls. Custom
 semantic fields and prose are not forced into unnecessary cards.
 
@@ -591,6 +623,22 @@ intentional; the library remains the shared primitive foundation.
 | Input / text field | `tQvAL` | Input/Filled `X:AfQIN` |
 | Navigation / board column link | `Q5GVK` | Tab Item, active/inactive |
 | Navigation / mobile column tab | `kZTPH` | Tab Item with 44px height |
+| Navigation / phone header (top-level screens) | `KthOL` | Menu icon, title, Badge, Button/Outline |
+| Navigation / phone detail header | `p69Od` | Button/Ghost back, title and subtitle, one Button/Outline action |
+| Navigation / row (navigation, not actions) | `mZoXC` | Title, optional summary, chevron |
+
+Rules from the 9 October pass:
+
+- Phone screens use one of the two headers above; nested screens use the detail
+  header with the parent as the back label.
+- Use a navigation row for anything that only opens another view. Keep buttons
+  for actions, with one primary action per screen. Desktop buttons hug their label.
+- The sidebar lists Overview, Inbox, Tasks (List/Board) and Search, then projects.
+  Settings, Runtime and Sign out live in the footer account menu.
+- Stop uses Button/Destructive and confirms first; reversible states show their
+  counterpart (for example Restore profile).
+- Identifier-heavy provenance (R2 · A-105 · 8d31c4a) is 12px muted metadata
+  below the plain-language state, never the headline.
 
 Project and permitted-assignee fields use Select Group/Default `X:w5c1O`.
 Task lists use Table/Row/Cell components; assignments use Accordion. Agent and
@@ -605,8 +653,9 @@ Task lead names and accountability remain visible alongside avatars.
 
 ## Layout and responsive composition
 
-The collapsed laptop composer uses 1366 × 820. Revised task, approval and work
-views use 1366 × 900; other desktop frames use 1440 × 900 or 1440 × 960.
+The collapsed laptop composer uses 1366 × 820. Desktop screens use 1366 × 900;
+full-content references are 1366 wide with their natural height. Overview, Inbox
+06 and imported task 12 were moved from 1440 wide on 9 October.
 Phone references use 390 × 844. These are review viewports, not fixed
 application dimensions. Main desktop content and board workspaces use 20px padding and 12px gaps;
 the Inbox retains 24px padding and 16px gaps.
@@ -742,6 +791,16 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 | Repair, completed and unknown-responsibility task details | 36 `oipj4`, 37 `Q24BPH`, 45 `kiPK9` |
 | Phone repair, capacity, completion, cancellation and closure | 38 `zs53F`, 39 `Z6U3T4`, 40 `Thy1i`, 41 `rn49D`, 42 `ALMfc` |
 | Desktop lifecycle comparison and interaction checklist | 43 `zeoGi`, 44 `BvX5O` |
+| Canvas contents (every section and frame with node IDs) | `H7aUq1` |
+| Settings, sign-in & recovery section | Section `dwLnk`; review notes 130 `DuF5u` |
+| Sign-in desktop and phone | 108 `nQvin`, 109 `MxgGj`, 110 `Wut6u`, 111 `yr1m8`, 112 `W64weN` |
+| Account menu and settings index | 113 `DhtZq`, 114 `vEr15` |
+| Guided project setup, error, first run, discovery unavailable and folder picker | 115 `wk678`, 116 `q6ZqlW`, 117 `bkNmZ`, 117b `T6VX5`, 131 `M6N2BQ` |
+| Project configuration and phone state | 118 `gi83t`, 119 `w0ozf`, 120 `SBB7W`, 121 `Pwzju` |
+| Profiles and routing | 122 `F6d3SQ`, 123 `O96oS`, 124 `Z8uZnh`, 125 `c8af5` |
+| Runtime, assignment recovery and not found | 126 `AqYk0`, 127 `iEF1o`, 128 `ur1mr`, 129 `HCNJ2` |
+| Stop confirmation | 132 `uQrNE` |
+| #800 operator refinement (section 10, renamed 800A–800H) | `qIVmm`; `h23qD`, `FsTwL`, `dUUIS`, `Z8BqXF`, `LBzlj`, `nKHGv`, `Sejey`, `g5wmIu` |
 
 ## Worktree handoff and limits
 

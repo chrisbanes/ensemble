@@ -415,6 +415,7 @@ test("private labels are unavailable for editing and strict public configuration
     key: randomUUID(),
     profileId,
     name: "PRIVATE SECRET PROFILE",
+    summary: "PRIVATE SECRET PROFILE",
     instructions: "PRIVATE SECRET PROFILE",
     capabilities: "Capabilities PRIVATE SECRET PROFILE",
   });
@@ -428,6 +429,7 @@ test("private labels are unavailable for editing and strict public configuration
   const profile = await api.readProfileConfiguration(profileId),
     project = await api.readProjectConfiguration(projectId);
   assert.equal(profile.data.profile.name, null);
+  assert.equal(profile.data.profile.summary, null);
   assert.equal(project.data.project.name, null);
   assert.equal(
     JSON.stringify({ profile, project }).includes("PRIVATE SECRET PROFILE"),

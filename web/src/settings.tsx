@@ -218,6 +218,8 @@ export async function submitDraft(
     );
 }
 const key = () => crypto.randomUUID();
+const profileLabel = (r: { name: string | null; summary: string | null }) =>
+  [r.name ?? "Name unavailable", r.summary].filter(Boolean).join(" · ");
 export function SettingsWorkspace(p: SettingsProps) {
   return (
     <section className="settings-stack">
@@ -251,9 +253,7 @@ export function SettingsWorkspace(p: SettingsProps) {
       <h2 className="section-heading">Profiles</h2>
       {p.workspace?.data.profiles.map((r) => (
         <div className="settings-card" key={r.id}>
-          <a href={`/app/profiles/${r.id}/settings`}>
-            {r.name ?? "Name unavailable"}
-          </a>{" "}
+          <a href={`/app/profiles/${r.id}/settings`}>{profileLabel(r)}</a>{" "}
           <StatusBadge>{r.revoked ? "Revoked" : "Available"}</StatusBadge>
           <p className="metadata">Revision {r.version}</p>
         </div>
@@ -371,6 +371,7 @@ export function ProfileConfiguration(
     if (!profileId)
       d.initialize({
         name: "",
+        summary: "",
         instructions: "",
         capabilities: "",
         profileId: key(),
@@ -379,6 +380,7 @@ export function ProfileConfiguration(
     else if (data)
       d.initialize({
         name: data.profile.name ?? "",
+        summary: data.profile.summary ?? "",
         replaceInstructions: false,
         replaceCapabilities: false,
         instructions: "",
@@ -395,6 +397,9 @@ export function ProfileConfiguration(
     ...(profileId && data?.profile.name === null && d.values.name === ""
       ? {}
       : { name: d.values.name }),
+    ...(profileId && data?.profile.summary === null && d.values.summary === ""
+      ? {}
+      : { summary: d.values.summary }),
     ...(profileId
       ? {
           expectedVersion: Number(d.values.expectedVersion),
@@ -454,6 +459,7 @@ export function ProfileConfiguration(
           }
         >
           <DraftField draft={d} field="name" label="Profile name" />
+          <DraftField draft={d} field="summary" label="Summary" />
           {profileId && (
             <DraftCheck draft={d} field="revoked" label="Revoke profile" />
           )}
@@ -500,6 +506,7 @@ export function ProfileConfiguration(
               onClick={() =>
                 d.startOperation({
                   name: "",
+                  summary: "",
                   instructions: "",
                   capabilities: "",
                   profileId: key(),
@@ -819,7 +826,7 @@ export function RoutingConfiguration(
                   )
                 }
               />
-              {r.name ?? "Name unavailable"}
+              {profileLabel(r)}
               {r.revoked ? " (revoked)" : ""}
             </label>
           ))}

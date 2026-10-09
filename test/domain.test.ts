@@ -267,6 +267,38 @@ test("versioned commands retain revisions and replay matching stale retries", as
   }
 });
 
+test("profile summary is optional, edited in place and added to older databases", () => {
+  const f = fixture();
+  try {
+    f.db.exec("ALTER TABLE profiles DROP COLUMN summary");
+    f.db
+      .prepare(
+        "INSERT INTO profiles (id, version, name, instructions, capabilities, revoked) VALUES (?, 1, 'Eli', 'fix', 'repairs', 0)",
+      )
+      .run(profile);
+    f.reopen();
+    assert.equal(f.domain.profile(profile).summary, "");
+    run(f.domain, {
+      type: "profile.configure",
+      actor: "operator",
+      profileId: profile,
+      expectedVersion: 1,
+      summary: " Repairs ",
+    });
+    assert.equal(f.domain.profiles()[0]?.summary, "Repairs");
+    run(f.domain, {
+      type: "profile.configure",
+      actor: "operator",
+      profileId: profile,
+      expectedVersion: 2,
+      instructions: "fix again",
+    });
+    assert.equal(f.domain.profile(profile).summary, "Repairs");
+  } finally {
+    f.close();
+  }
+});
+
 test("in-flight command duplicates share one promise", async () => {
   const f = fixture();
   try {
