@@ -104,14 +104,16 @@ test("retained HTML routes share the production foundation and native interactio
   await desktop
     .getByRole("button", { name: "Sign out", exact: true })
     .waitFor();
+  // #835: the global fallback link is gone; contextual links reach the retained pages.
+  assert.equal(
+    await desktop
+      .getByRole("link", { name: "Existing operator controls", exact: true })
+      .count(),
+    0,
+  );
+  await desktop.goto(`${web.origin}/app/projects/${projectId}`);
   await desktop
-    .getByRole("link", { name: "Existing operator controls", exact: true })
-    .click();
-  await desktop
-    .getByRole("heading", { name: "Ensemble", exact: true })
-    .waitFor();
-  await desktop
-    .getByRole("link", { name: "Foundation project", exact: true })
+    .getByRole("link", { name: "Open existing project controls", exact: true })
     .click();
   await desktop
     .getByRole("heading", { name: "Foundation project", exact: true })
@@ -238,7 +240,7 @@ test("retained HTML routes share the production foundation and native interactio
   await phone.goto(`${web.origin}/app`);
   await phone.getByLabel("Password", { exact: true }).fill(web.password);
   await phone.getByRole("button", { name: "Sign in", exact: true }).click();
-  await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await phone.locator("main.page h1").waitFor();
   await phone.goto(`${web.origin}/runtime`);
   await phone.locator("body.legacy-operator").waitFor();
   const phoneControl = phone
@@ -299,7 +301,7 @@ test("retained HTML routes share the production foundation and native interactio
   await assertPhonePreContained(phone, historyPre);
   await captureBrowserEvidence(phone, "390-retained-long-assignment-history");
   await phone.getByRole("link", { name: "New interface", exact: true }).click();
-  await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await phone.locator("main.page h1").waitFor();
   assert.equal(new URL(phone.url()).pathname, "/app");
 });
 

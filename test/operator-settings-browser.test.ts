@@ -77,7 +77,7 @@ async function signIn(
   await page.goto(web.origin + path);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page.locator("main.page h1").waitFor();
 }
 function seedSettings(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   const profileId = randomUUID(),
@@ -807,6 +807,8 @@ for (const layout of [
       true,
     );
     if (layout.width < 768) {
+      // Project configuration is a nested screen (Back header); the drawer is on Settings.
+      await page.goto(`${web.origin}/app/settings`);
       await page
         .getByRole("button", { name: "Projects and navigation", exact: true })
         .click();
@@ -2031,7 +2033,7 @@ test("new private input survives a detached receipt and old-session 401 after sa
       viewport:
         mode === "receipt-expiry"
           ? { width: 1366, height: 820 }
-          : { width: 390, height: 844 },
+          : { width: 1366, height: 844 },
     });
     journey.observe(page);
     page.setDefaultTimeout(5000);
@@ -2083,10 +2085,7 @@ test("new private input survives a detached receipt and old-session 401 after sa
     } else
       await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await page.getByLabel("Password", { exact: true }).waitFor();
-    await capture(
-      page,
-      `${mode === "receipt-expiry" ? "1366" : "390"}-${mode}-privacy-purged`,
-    );
+    await capture(page, `1366-${mode}-privacy-purged`);
     await page.getByLabel("Password", { exact: true }).fill(web.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page

@@ -59,7 +59,7 @@ test("shared Search preserves exact historical target, dates, selected focus and
     )
     .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
   assert.ok(
-    desktopBounds.every((h) => h >= 36),
+    desktopBounds.every((h) => h >= 32),
     JSON.stringify(desktopBounds),
   );
   await captureBrowserEvidence(page, "1366-cross-project-search");
@@ -189,7 +189,9 @@ test("shared Search preserves exact historical target, dates, selected focus and
     .click();
   await entry;
   await page.context().clearCookies();
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Refresh results", exact: true })
+    .click();
   await page.getByLabel("Password").waitFor();
   assert.equal(new URL(page.url()).search, "");
   await page.getByLabel("Password").fill(web.password);
@@ -476,7 +478,7 @@ test("same-task historical Search entries preserve manual origin selections and 
   await page.locator(`[data-search-record="${old.resultId}"]`).waitFor();
   await page.goForward();
   await page.getByText("Entry ancient result", { exact: true }).waitFor();
-  await page.getByRole("link", { name: "All tasks", exact: true }).click();
+  await page.getByRole("link", { name: "List", exact: true }).click();
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   await page.getByRole("link", { name: "Entry task", exact: true }).click();
   await page.getByText("Entry latest result", { exact: true }).waitFor();
@@ -564,7 +566,7 @@ test("in-flight exact reply becomes original-key reconciliation across same-task
       .getByRole("button", { name: "Send to task lead", exact: true })
       .click();
     await arrival;
-    await page.getByRole("link", { name: "All tasks", exact: true }).click();
+    await page.getByRole("link", { name: "List", exact: true }).click();
     await page
       .getByRole("heading", { name: "All tasks", exact: true })
       .waitFor();

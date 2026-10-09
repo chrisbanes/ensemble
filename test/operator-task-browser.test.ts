@@ -24,7 +24,7 @@ async function signIn(
   await page.goto(origin + path);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page.locator("main.page h1").waitFor();
 }
 test("List and Board preserve identical filtered task IDs and never submit commands", async (_t, journey) => {
   const f = await journey.start("fixture.create", () =>
@@ -1715,21 +1715,18 @@ for (const viewport of [
     await page.keyboard.press("Tab");
     await page.keyboard.press("Shift+Tab");
     if (viewport.width < 760) {
-      await page
-        .getByRole("button", { name: "Projects and navigation", exact: true })
-        .click();
-      await page
-        .getByRole("button", { name: "Close navigation", exact: true })
-        .waitFor();
-      await page.keyboard.press("Escape");
-      await page.waitForFunction(
-        () => document.activeElement?.textContent === "Projects and navigation",
-      );
+      // The composer is a nested screen: its phone header has Back, not the menu.
       assert.equal(
         await page
           .getByRole("button", { name: "Projects and navigation", exact: true })
-          .evaluate((el) => el === document.activeElement),
-        true,
+          .count(),
+        0,
+      );
+      assert.ok(
+        (await page
+          .getByRole("link", { name: /^Back to / })
+          .first()
+          .evaluate((el) => el.getBoundingClientRect().height)) >= 44,
       );
     }
     f.advanceClock(70000);
@@ -1989,7 +1986,7 @@ test("replacement composer owns recovery before a detached committed receipt or 
     assert.equal(d.assignments(command.taskId).length, 1);
     if (mode === "receipt-navigation") {
       await page
-        .getByRole("link", { name: "All tasks", exact: true })
+        .getByRole("link", { name: "List", exact: true })
         .first()
         .click();
       await page.getByRole("link", { name: "New task", exact: true }).click();

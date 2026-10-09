@@ -28,6 +28,7 @@ export function Search({
   workspace,
   path,
   navigate,
+  onRefresh,
   state,
 }: {
   client: OperatorClient;
@@ -35,6 +36,8 @@ export function Search({
   workspace: Workspace | null;
   path: string;
   navigate: (p: string) => void;
+  /** Also re-reads the shell data (sidebar, runtime alert) that this page's own refresh replaced. */
+  onRefresh?: () => void;
   state: SearchState;
 }) {
   const params = new URLSearchParams(path.split("?")[1] ?? ""),
@@ -201,7 +204,13 @@ export function Search({
         search complete agent transcripts or generate summaries.
       </p>
       {query && (
-        <Button variant="secondary" onClick={resource.refresh}>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            resource.refresh();
+            onRefresh?.();
+          }}
+        >
           Refresh results
         </Button>
       )}

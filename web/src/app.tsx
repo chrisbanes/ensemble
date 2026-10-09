@@ -1,14 +1,27 @@
-import { Inbox, InboxState } from "./inbox.js";
+import { Inbox, InboxState, loadInbox } from "./inbox.js";
 import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useState,
   useRef,
   type FormEvent,
   type ReactNode,
 } from "react";
+import {
+  Columns3,
+  FolderKanban,
+  InboxIcon,
+  LayoutDashboard,
+  List,
+  ListChecks,
+  LogOut,
+  Plus,
+  Search as SearchIcon,
+  Settings,
+} from "lucide-react";
 import {
   workspaceSchema,
   type Session,
@@ -23,6 +36,8 @@ import {
   StatusBadge,
   ResourceStatus,
   MobileNavigation,
+  NavigationRow,
+  PageHeader,
 } from "./components.js";
 import { Alert } from "./ui/alert.js";
 import { loadTaskList } from "./tasks.js";
@@ -41,20 +56,31 @@ import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 function RouteLink({
   href,
-  path,
+  current,
   navigate,
+  icon,
+  row,
+  trailing,
+  className,
+  describedBy,
   children,
 }: {
   href: string;
-  path: string;
+  current: boolean;
   navigate: (path: string) => void;
+  icon: ReactNode;
+  row: boolean;
+  trailing?: ReactNode;
+  className?: string;
+  describedBy?: string;
   children: ReactNode;
 }) {
   return (
     <a
-      className="control nav-link"
+      className={`control nav-link${row ? " nav-row" : ""}${className ? ` ${className}` : ""}`}
       href={href}
-      aria-current={path.split("?")[0] === href ? "page" : undefined}
+      aria-current={current ? "page" : undefined}
+      aria-describedby={describedBy}
       onClick={(e) => {
         if (
           e.button === 0 &&
@@ -68,56 +94,194 @@ function RouteLink({
         }
       }}
     >
-      {children}
+      {row ? (
+        <NavigationRow icon={icon} title={children} trailing={trailing} />
+      ) : (
+        <>
+          {icon}
+          <span className="nav-label">
+            <span>{children}</span>
+          </span>
+          {trailing}
+        </>
+      )}
     </a>
   );
 }
+const navIcon = { "aria-hidden": true, className: "nav-icon" } as const;
 function ProjectNavigation({
   workspace,
   path,
   navigate,
+  inboxCount,
+  row,
 }: {
   workspace: Workspace | null;
   path: string;
   navigate: (path: string) => void;
+  inboxCount: number | null;
+  row: boolean;
 }) {
+  const countId = useId();
+  const pathname = path.split(/[?#]/)[0] ?? "";
+  const board =
+    new URLSearchParams(path.split("?")[1] ?? "").get("view") === "board";
+  const link = (
+    href: string,
+    current: boolean,
+    icon: ReactNode,
+    label: ReactNode,
+    extra: {
+      trailing?: ReactNode;
+      className?: string;
+      describedBy?: string;
+    } = {},
+  ) => (
+    <RouteLink
+      href={href}
+      current={current}
+      navigate={navigate}
+      icon={icon}
+      row={row}
+      {...extra}
+    >
+      {label}
+    </RouteLink>
+  );
   return (
     <nav aria-label="Operator navigation">
-      <RouteLink href="/app" path={path} navigate={navigate}>
-        Overview
-      </RouteLink>
-      <RouteLink href="/app/inbox" path={path} navigate={navigate}>
-        Inbox
-      </RouteLink>
-      <RouteLink href="/app/tasks" path={path} navigate={navigate}>
-        All tasks
-      </RouteLink>
-      <RouteLink href="/app/search" path={path} navigate={navigate}>
-        Search
-      </RouteLink>
+      {link(
+        "/app",
+        pathname === "/app",
+        <LayoutDashboard {...navIcon} />,
+        "Overview",
+      )}
+      {link(
+        "/app/inbox",
+        pathname === "/app/inbox",
+        <InboxIcon {...navIcon} />,
+        "Inbox",
+        inboxCount === null
+          ? {}
+          : {
+              describedBy: countId,
+              trailing: (
+                <>
+                  <StatusBadge className="nav-count">
+                    <span aria-hidden="true">{inboxCount}</span>
+                  </StatusBadge>
+                  <span id={countId} hidden>
+                    {inboxCount} unresolved
+                  </span>
+                </>
+              ),
+            },
+      )}
+      {link("/app/tasks", false, <ListChecks {...navIcon} />, "Tasks")}
+      {link(
+        "/app/tasks",
+        pathname === "/app/tasks" && !board,
+        <List {...navIcon} />,
+        "List",
+        { className: "nav-sub" },
+      )}
+      {link(
+        "/app/tasks?view=board",
+        pathname === "/app/tasks" && board,
+        <Columns3 {...navIcon} />,
+        "Board",
+        { className: "nav-sub" },
+      )}
+      {link(
+        "/app/search",
+        pathname === "/app/search",
+        <SearchIcon {...navIcon} />,
+        "Search",
+      )}
       <h2 className="small-heading">Projects</h2>
       {workspace?.data.projects.length === 0 && (
         <p className="body muted">No projects yet.</p>
       )}
-      {workspace?.data.projects.map((p) => (
-        <RouteLink
-          key={p.id}
-          href={`/app/projects/${p.id}`}
-          path={path}
-          navigate={navigate}
-        >
-          <span>{p.name ?? "Name unavailable"}</span>
-          {p.paused && <StatusBadge tone="warning">Paused</StatusBadge>}
-        </RouteLink>
-      ))}
-      <RouteLink href="/app/settings" path={path} navigate={navigate}>
-        Settings
-      </RouteLink>
-      <a className="control nav-link" href="/">
-        Existing operator controls
-      </a>
+      {workspace?.data.projects.map((p) =>
+        link(
+          `/app/projects/${p.id}`,
+          pathname === `/app/projects/${p.id}`,
+          <FolderKanban {...navIcon} />,
+          p.name ?? "Name unavailable",
+          {
+            trailing: p.paused ? (
+              <StatusBadge tone="warning">Paused</StatusBadge>
+            ) : undefined,
+          },
+        ),
+      )}
+      {link(
+        "/app/settings/projects/new",
+        pathname === "/app/settings/projects/new",
+        <Plus {...navIcon} />,
+        "New project",
+      )}
     </nav>
   );
+}
+function AccountFooter({
+  path,
+  navigate,
+  row,
+  pending,
+  onSignOut,
+}: {
+  path: string;
+  navigate: (path: string) => void;
+  row: boolean;
+  pending: boolean;
+  onSignOut: () => void;
+}) {
+  return (
+    <section className="account-footer" aria-label="Account">
+      <RouteLink
+        href="/app/settings"
+        current={path.split("?")[0] === "/app/settings"}
+        navigate={navigate}
+        icon={<Settings {...navIcon} />}
+        row={row}
+      >
+        Settings
+      </RouteLink>
+      <Button variant="secondary" disabled={pending} onClick={onSignOut}>
+        <LogOut aria-hidden="true" />
+        {pending ? "Signing out…" : "Sign out"}
+      </Button>
+    </section>
+  );
+}
+/** Static parent of a nested route, for the phone Back link. Top-level routes have none. */
+function parentRoute(
+  pathname: string,
+  search: string,
+  workspace: Workspace | null,
+): { href: string; label: string } | null {
+  if (pathname === "/app/tasks/new") {
+    const id = new URLSearchParams(search).get("project");
+    return id
+      ? {
+          href: `/app/projects/${encodeURIComponent(id)}`,
+          label:
+            workspace?.data.projects.find((p) => p.id === id)?.name ??
+            "Project",
+        }
+      : { href: "/app/tasks", label: "Tasks" };
+  }
+  if (/^\/app\/tasks\/[^/]+$/.test(pathname))
+    return { href: "/app/tasks", label: "Tasks" };
+  if (/^\/app\/assignments\/[^/]+\/recovery$/.test(pathname))
+    return { href: "/app/settings/runtime", label: "Runtime" };
+  if (
+    pathname.startsWith("/app/settings/") ||
+    /^\/app\/(projects|profiles)\/[^/]+\/settings$/.test(pathname)
+  )
+    return { href: "/app/settings", label: "Settings" };
+  return null;
 }
 export function Login({
   client,
@@ -309,10 +473,20 @@ export function App() {
     session?.authenticated ? session.csrfToken : null,
     taskLoader,
   );
+  const inboxLoader = useCallback(
+    (signal: AbortSignal) => loadInbox(client, signal),
+    [client],
+  );
+  const inboxSummary = useOperatorResource(
+    session?.authenticated ? session.csrfToken : null,
+    inboxLoader,
+  );
   const taskRefresh = useRef(tasks.refresh);
   taskRefresh.current = tasks.refresh;
   const workspaceRefresh = useRef(workspace.refresh);
   workspaceRefresh.current = workspace.refresh;
+  const inboxRefresh = useRef(inboxSummary.refresh);
+  inboxRefresh.current = inboxSummary.refresh;
   const inboxScope =
     session?.authenticated && path.split("?")[0] === "/app/inbox"
       ? session.csrfToken
@@ -323,6 +497,7 @@ export function App() {
     const timer = setInterval(() => {
       taskRefresh.current();
       workspaceRefresh.current();
+      inboxRefresh.current();
     }, 15000);
     return () => clearInterval(timer);
   }, [inboxScope]);
@@ -499,6 +674,27 @@ export function App() {
         : projectId
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
+  const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
+  // A count is a total only when the whole Inbox was read and the last read succeeded.
+  const inboxCount =
+    inboxSummary.state.data?.complete &&
+    !inboxSummary.state.data.unavailable &&
+    !inboxSummary.state.error
+      ? inboxSummary.state.data.items.length
+      : null;
+  const refreshAll = () => {
+    workspace.refresh();
+    inboxSummary.refresh();
+  };
+  // These pages own a refresh that already re-reads their data.
+  const ownsRefresh =
+    pathname === "/app" ||
+    pathname === "/app/tasks" ||
+    Boolean(projectId) ||
+    (/^\/app\/tasks\/[^/]+$/.test(pathname) && pathname !== "/app/tasks/new") ||
+    (pathname === "/app/search" &&
+      Boolean(new URLSearchParams(query).get("query")));
+  const parent = parentRoute(pathname, query, workspace.state.data);
   async function logout() {
     navigationScope.current = crypto.randomUUID();
     clearPrivateNavigation();
@@ -532,49 +728,59 @@ export function App() {
       }
     }
   }
-  const nav = (
-    <ProjectNavigation
-      workspace={workspace.state.data}
-      path={path}
-      navigate={navigate}
-    />
+  const navigation = (row: boolean) => (
+    <>
+      <ProjectNavigation
+        workspace={workspace.state.data}
+        path={path}
+        navigate={navigate}
+        inboxCount={inboxCount}
+        row={row}
+      />
+      <AccountFooter
+        path={path}
+        navigate={navigate}
+        row={row}
+        pending={logoutPending}
+        onSignOut={() => void logout()}
+      />
+    </>
   );
   return (
     <div className="shell">
       <aside className="sidebar">
         <p className="wordmark feature-heading">Ensemble</p>
-        {nav}
+        {navigation(false)}
       </aside>
       <div className="workspace">
-        <header className="topbar">
-          <div className="phone-nav">
-            <MobileNavigation open={drawer} onOpenChange={setDrawer}>
-              {nav}
-            </MobileNavigation>
-          </div>
-          <p className="body muted desktop-context">Operator workspace</p>
-          <Button
-            variant="secondary"
-            disabled={logoutPending}
-            onClick={() => void logout()}
-          >
-            {logoutPending ? "Signing out…" : "Sign out"}
-          </Button>
-        </header>
         <main className="page">
-          <div className="page-title">
-            <h1 className="page-heading">{title}</h1>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                workspace.refresh();
-                if (pathname === "/app/inbox") tasks.refresh();
-              }}
-              disabled={workspace.state.pending}
-            >
-              Refresh
-            </Button>
-          </div>
+          <PageHeader
+            title={title}
+            count={pathname === "/app/inbox" ? inboxCount : null}
+            {...(parent
+              ? { back: parent }
+              : {
+                  menu: (
+                    <MobileNavigation open={drawer} onOpenChange={setDrawer}>
+                      {navigation(true)}
+                    </MobileNavigation>
+                  ),
+                })}
+            action={
+              ownsRefresh ? undefined : (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    refreshAll();
+                    if (pathname === "/app/inbox") tasks.refresh();
+                  }}
+                  disabled={workspace.state.pending}
+                >
+                  Refresh
+                </Button>
+              )
+            }
+          />
           {logoutNotice && (
             <p className="body error-text" role="alert">
               {logoutNotice}
@@ -674,6 +880,7 @@ export function App() {
               workspace={workspace.state.data}
               path={path}
               navigate={navigate}
+              onRefresh={refreshAll}
               state={activeSearch}
             />
           ) : /^\/app\/tasks\/[^/]+$/.test(pathname) ? (
@@ -683,6 +890,7 @@ export function App() {
               session={session}
               taskId={pathname.split("/")[3] ?? ""}
               path={path}
+              onRefresh={refreshAll}
               questionStates={questionStates.current}
               state={taskStates.current.forTask(
                 pathname.split("/")[3] ?? "",
@@ -692,7 +900,10 @@ export function App() {
           ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
             <TaskViews
               state={tasks.state}
-              refresh={tasks.refresh}
+              refresh={() => {
+                tasks.refresh();
+                refreshAll();
+              }}
               workspace={workspace.state.data}
               path={path}
               navigate={navigate}

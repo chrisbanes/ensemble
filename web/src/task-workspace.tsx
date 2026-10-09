@@ -141,11 +141,14 @@ export function TaskWorkspace({
   path,
   state,
   questionStates,
+  onRefresh,
 }: {
   client: OperatorClient;
   session: Session;
   taskId: string;
   path: string;
+  /** Also re-reads the shell data (sidebar, runtime alert) that this page's own refresh replaced. */
+  onRefresh?: () => void;
   state: TaskWorkspaceState;
   questionStates: QuestionResponseStates;
 }) {
@@ -884,7 +887,13 @@ export function TaskWorkspace({
           ) : (
             <ActionLink href={returnPath}>Back to project</ActionLink>
           )}
-          <Button variant="secondary" onClick={refresh}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              refresh();
+              onRefresh?.();
+            }}
+          >
             Refresh task
           </Button>
           <ActionLink href={`/task/${taskId}`}>

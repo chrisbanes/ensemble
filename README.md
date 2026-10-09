@@ -182,8 +182,9 @@ not establish release or cutover readiness.
 [UI06 configuration and recovery](docs/design/ui06-configuration.md) adds Settings, paused project/profile setup, explicit private replacements, source observations, capacity and curated recovery. Exact private editors and operational controls remain reachable; UI07 visual/usability and release qualification remain outstanding.
 
 [UI08 #765](docs/design/ui08-foundation.md) supplies locally owned shadcn/ui
-components, Dark / Neutral / Default tokens, self-hosted Inter and JetBrains
-Mono, and shared presentation for the retained production HTML forms. Its
+components, Dark / Neutral / Default tokens, self-hosted Geist and Geist Mono
+(shadcn Nova shape and density, moved from Inter and JetBrains Mono by
+[#835](https://github.com/chrisbanes/ensemble/issues/835)), and shared presentation for the retained production HTML forms. Its
 [evidence](docs/evidence/ui08-foundation.md) records fixture-browser behavior
 and the remaining composition gaps; final integrated UI acceptance remains
 with #736.

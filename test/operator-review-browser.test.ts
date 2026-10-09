@@ -275,7 +275,7 @@ test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, compar
     .locator("nav.task-actions a, #brief select, #review select")
     .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
   assert.ok(
-    bounds.every((h) => h >= 36),
+    bounds.every((h) => h >= 32),
     JSON.stringify(bounds),
   );
   await page.locator("#review").scrollIntoViewIfNeeded();

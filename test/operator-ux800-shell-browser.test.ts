@@ -5,8 +5,12 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 const test = browserSuite("ui08-shell");
+// The all-routes journey visits sixteen routes at two widths.
+const longTest = browserSuite("ui08-shell", { overallMs: 240000 });
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { mixedForm } from "./fixtures/question-data.js";
+import { seedOwnQuestion } from "./fixtures/questions.js";
 
 async function signIn(
   page: Page,
@@ -17,7 +21,7 @@ async function signIn(
   await page.goto(origin + path);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page.locator("main.page h1").waitFor();
 }
 
 async function focusByTab(page: Page, target: import("playwright").Locator) {
@@ -78,15 +82,16 @@ test("production shell keeps direct task links usable and the navigation drawer 
   for (const width of [759, 760, 800, 1119, 1120, 1121, 1366]) {
     await page.setViewportSize({ width, height: 768 });
     const geometry = await page.evaluate(() => {
-      const sidebar = document.querySelector<HTMLElement>(".sidebar");
-      const phoneNavigation = document.querySelector<HTMLElement>(".phone-nav");
+      const display = (selector: string) => {
+        const element = document.querySelector<HTMLElement>(selector);
+        return element ? getComputedStyle(element).display : "missing";
+      };
       const workspace = document.querySelector<HTMLElement>(".workspace");
       const page = document.querySelector<HTMLElement>(".page");
       return {
-        sidebar: sidebar ? getComputedStyle(sidebar).display : "missing",
-        phoneNavigation: phoneNavigation
-          ? getComputedStyle(phoneNavigation).display
-          : "missing",
+        sidebar: display(".sidebar"),
+        back: display(".page-header-back"),
+        menu: display(".phone-nav"),
         workspaceWidth: workspace?.getBoundingClientRect().width ?? 0,
         pageContentWidth:
           (page?.getBoundingClientRect().width ?? 0) -
@@ -97,13 +102,18 @@ test("production shell keeps direct task links usable and the navigation drawer 
     });
     assert.equal(
       geometry.sidebar,
-      width <= 1120 ? "none" : "block",
+      width <= 1120 ? "none" : "flex",
       `${width}px shell navigation mode`,
     );
     assert.equal(
-      geometry.phoneNavigation,
-      width <= 1120 ? "block" : "none",
-      `${width}px drawer trigger mode`,
+      geometry.back,
+      width <= 1120 ? "flex" : "none",
+      `${width}px nested-route Back mode`,
+    );
+    assert.equal(
+      geometry.menu,
+      "missing",
+      `${width}px nested route has no menu`,
     );
     assert.ok(
       geometry.documentWidth <= geometry.viewportWidth,
@@ -114,18 +124,26 @@ test("production shell keeps direct task links usable and the navigation drawer 
   }
   await captureBrowserEvidence(page, "1121-shell-sidebar-threshold");
 
+  // Nested screens use the detail header: Back to the static parent, no menu.
   await page.setViewportSize({ width: 390, height: 844 });
+  const back = page.getByRole("link", { name: "Back to Tasks", exact: true });
+  assert.ok(
+    (await back.evaluate((e) => e.getBoundingClientRect().height)) >= 44,
+  );
+  assert.equal(await page.locator("main h1").count(), 1);
+  await back.click();
+  await page.waitForURL("**/app/tasks");
+  await page.locator("main.page h1").waitFor();
+
   const trigger = page.getByRole("button", {
     name: "Projects and navigation",
     exact: true,
   });
-  const phoneTargets = await Promise.all([
-    trigger.evaluate((element) => element.getBoundingClientRect().height),
-    page
-      .getByRole("button", { name: "Sign out", exact: true })
-      .evaluate((element) => element.getBoundingClientRect().height),
-  ]);
-  assert.ok(phoneTargets.every((height) => height >= 44));
+  const phoneTargets = await trigger.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return [rect.width, rect.height];
+  });
+  assert.ok(phoneTargets.every((size) => (size ?? 0) >= 44));
   await trigger.click();
   const dialog = page.getByRole("dialog", {
     name: "Projects and navigation",
@@ -133,10 +151,18 @@ test("production shell keeps direct task links usable and the navigation drawer 
   });
   await dialog.waitFor({ state: "visible" });
   assert.equal(
-    await dialog
-      .getByRole("link", { name: "All tasks", exact: true })
-      .isVisible(),
+    await dialog.getByRole("link", { name: "List", exact: true }).isVisible(),
     true,
+  );
+  const signOutHeight = await dialog
+    .getByRole("button", { name: "Sign out", exact: true })
+    .evaluate((element) => element.getBoundingClientRect().height);
+  assert.ok(signOutHeight >= 44, "drawer Sign out is a phone target");
+  assert.equal(
+    await page
+      .getByRole("link", { name: "Existing operator controls" })
+      .count(),
+    0,
   );
   const longProjectLink = dialog.getByRole("link", {
     name: new RegExp(longProjectName),
@@ -164,10 +190,8 @@ test("production shell keeps direct task links usable and the navigation drawer 
   await dialog.getByRole("link", { name: "Search", exact: true }).click();
   await page.waitForURL("**/app/search");
   await page.goBack();
-  await page
-    .getByRole("heading", { name: "Direct shell task", exact: true })
-    .waitFor();
-  assert.equal(new URL(page.url()).pathname, `/app/tasks/${taskId}`);
+  await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/app/tasks");
 
   await trigger.click();
   await dialog.waitFor({ state: "visible" });
@@ -193,7 +217,12 @@ test("production shell keeps direct task links usable and the navigation drawer 
     true,
     "closing the drawer restores focus to its trigger",
   );
-  assert.equal(new URL(page.url()).pathname, `/app/tasks/${taskId}`);
+  assert.equal(new URL(page.url()).pathname, "/app/tasks");
+
+  // Sign out through the drawer ends the session at phone width.
+  await trigger.click();
+  await dialog.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByLabel("Password", { exact: true }).waitFor();
 });
 
 test("shared controls retain visible focus in forced colours and remove optional motion", async (_t, journey) => {
@@ -285,3 +314,374 @@ test("shared controls retain visible focus in forced colours and remove optional
   assert.equal(await list.textContent(), "List");
   await captureBrowserEvidence(page, "1366-shell-reduced-motion-focus");
 });
+
+const inboxResponse = (response: import("playwright").Response) =>
+  new URL(response.url()).pathname === "/api/operator/inbox";
+
+test("desktop shell lists the designed destinations, an honest Inbox count and a footer account group", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  await seedOwnQuestion(f);
+  await seedOwnQuestion(f, mixedForm, "Second task");
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await signIn(page, web.origin, web.password, "/app");
+  const sidebar = page.locator(".sidebar");
+  await sidebar.locator('a[href="/app/inbox"] .nav-count').waitFor();
+  const labels = await sidebar
+    .locator('nav[aria-label="Operator navigation"] a')
+    .evaluateAll((links) =>
+      links.map((link) => ({
+        label: link.querySelector(".nav-label")?.textContent?.trim(),
+        href: link.getAttribute("href"),
+      })),
+    );
+  assert.deepEqual(labels.slice(0, 6), [
+    { label: "Overview", href: "/app" },
+    { label: "Inbox", href: "/app/inbox" },
+    { label: "Tasks", href: "/app/tasks" },
+    { label: "List", href: "/app/tasks" },
+    { label: "Board", href: "/app/tasks?view=board" },
+    { label: "Search", href: "/app/search" },
+  ]);
+  assert.deepEqual(labels.at(-1), {
+    label: "New project",
+    href: "/app/settings/projects/new",
+  });
+  assert.ok(
+    labels
+      .slice(6, -1)
+      .every((entry) => entry.href?.startsWith("/app/projects/")),
+  );
+  assert.equal(
+    await sidebar.locator('a[href="/app/inbox"] .nav-count').textContent(),
+    "2",
+  );
+  assert.equal(
+    await sidebar
+      .getByRole("link", { name: "Inbox", exact: true })
+      .evaluate(
+        (link) =>
+          document.getElementById(link.getAttribute("aria-describedby") ?? "")
+            ?.textContent,
+      ),
+    "2 unresolved",
+  );
+  assert.equal(
+    await sidebar.locator('nav a svg[aria-hidden="true"]').count(),
+    labels.length,
+    "every sidebar item has a decorative icon",
+  );
+  const footer = sidebar.getByRole("region", { name: "Account", exact: true });
+  await footer.getByRole("link", { name: "Settings", exact: true }).waitFor();
+  await footer.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("link", { name: "Existing operator controls" })
+      .count(),
+    0,
+  );
+  assert.equal(await page.getByText("Operator workspace").count(), 0);
+  assert.equal(await page.locator("main h1").count(), 1);
+
+  await page.goto(`${web.origin}/app/tasks?view=board`);
+  await page.locator("main.page h1").waitFor();
+  const current = await sidebar
+    .locator('a[aria-current="page"]')
+    .evaluateAll((links) => links.map((link) => link.textContent?.trim()));
+  assert.deepEqual(current, ["Board"]);
+  await page.goto(`${web.origin}/app/tasks`);
+  assert.deepEqual(
+    await sidebar
+      .locator('a[aria-current="page"]')
+      .evaluateAll((links) => links.map((link) => link.textContent?.trim())),
+    ["List"],
+  );
+
+  // A failed Inbox read shows no number rather than a stale or partial one.
+  await page.route("**/api/operator/inbox*", (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "unavailable", message: "Unavailable." },
+      }),
+    }),
+  );
+  const failed = page.waitForResponse(inboxResponse);
+  await page.goto(`${web.origin}/app/settings`);
+  await failed;
+  await page.locator("main.page h1").waitFor();
+  assert.equal(await sidebar.locator(".nav-count").count(), 0);
+  await sidebar.getByRole("link", { name: "Inbox", exact: true }).waitFor();
+  await captureBrowserEvidence(page, "1366-shell-inbox-count-unavailable");
+});
+
+test("page-owned refresh replaces the shell Refresh and still re-reads the workspace", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const projectId = randomUUID(),
+    taskId = randomUUID();
+  f.service.domain().execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Refresh project",
+    leadProfileId: null,
+  });
+  f.service.domain().execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId,
+    title: "Refresh task fixture",
+    outcome: "Inspect refresh ownership",
+    ready: false,
+  });
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await signIn(page, web.origin, web.password, "/app");
+  const owned: [string, string][] = [
+    ["/app", "Refresh tasks"],
+    ["/app/tasks", "Refresh tasks"],
+    [`/app/projects/${projectId}`, "Refresh tasks"],
+    [`/app/tasks/${taskId}`, "Refresh task"],
+    ["/app/search?query=Refresh", "Refresh results"],
+  ];
+  for (const [route, name] of owned) {
+    await page.goto(web.origin + route);
+    await page.locator("main.page h1").waitFor();
+    const button = page.getByRole("button", { name, exact: true });
+    await button.waitFor();
+    assert.equal(
+      await page.getByRole("button", { name: "Refresh", exact: true }).count(),
+      0,
+      `${route} has only its page-owned refresh`,
+    );
+    const workspace = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/operator/workspace",
+    );
+    const inbox = page.waitForResponse(inboxResponse);
+    await button.click();
+    await workspace;
+    await inbox;
+  }
+  for (const route of ["/app/inbox", "/app/settings"]) {
+    await page.goto(web.origin + route);
+    await page.locator("main.page h1").waitFor();
+    assert.equal(
+      await page.getByRole("button", { name: "Refresh", exact: true }).count(),
+      1,
+      `${route} keeps one Refresh`,
+    );
+  }
+  for (const route of [
+    ...owned.map(([r]) => r),
+    "/app/inbox",
+    "/app/settings",
+  ]) {
+    await page.goto(web.origin + route);
+    await page.locator("main.page h1").waitFor();
+    await page.waitForLoadState("networkidle");
+    assert.equal(
+      await page.getByText(/^Fetched /).count(),
+      0,
+      `${route} shows no fresh Fetched line`,
+    );
+  }
+});
+
+longTest(
+  "every route renders in the shell on desktop and phone without horizontal scroll",
+  async (_t, journey) => {
+    const f = await journey.start("fixture.create", () =>
+      createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+    );
+    let browser: Browser | undefined;
+    journey.cleanup(
+      (primary) => f.close(browser, primary),
+      "fixture.close",
+      () => f.lifecycle.steps,
+    );
+    const domain = f.service.domain(),
+      profileId = randomUUID(),
+      projectId = randomUUID(),
+      taskId = randomUUID(),
+      assignmentId = randomUUID();
+    domain.execute({
+      type: "profile.create",
+      actor: "operator",
+      key: randomUUID(),
+      profileId,
+      name: "Shell lead",
+      instructions: "Fixture only",
+      capabilities: "Coordinate",
+    });
+    domain.execute({
+      type: "project.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      name: "Shell project",
+      leadProfileId: profileId,
+    });
+    domain.execute({
+      type: "task.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      title: "Shell task",
+      outcome: "Inspect every route",
+      ready: false,
+    });
+    domain.execute({
+      type: "assignment.create",
+      actor: "operator",
+      key: randomUUID(),
+      projectId,
+      taskId,
+      assignmentId,
+      profileId,
+      brief: "Inspect every route",
+      resultDestination: "operator",
+      requesterAssignmentId: null,
+    });
+    await seedOwnQuestion(f);
+    await seedOwnQuestion(f, mixedForm, "Second task");
+    const web = await journey.start("fixture.web", () => f.startWeb());
+    browser = await journey.start("browser.launch", () => chromium.launch());
+    const page = await browser.newPage({
+      viewport: { width: 1366, height: 900 },
+    });
+    journey.observe(page);
+    page.setDefaultTimeout(5000);
+    await signIn(page, web.origin, web.password, "/app");
+    const notFound = "/app/does-not-exist";
+    // [route, evidence name, top-level on a phone]
+    const routes: [string, string | null, boolean][] = [
+      ["/app", "overview", true],
+      ["/app/inbox", "inbox", true],
+      ["/app/tasks", null, true],
+      ["/app/tasks?view=board", null, true],
+      ["/app/search", null, true],
+      [`/app/projects/${projectId}`, null, true],
+      [`/app/projects/${projectId}/settings`, null, false],
+      ["/app/tasks/new", null, false],
+      [`/app/tasks/${taskId}`, null, false],
+      ["/app/settings", "settings", true],
+      ["/app/settings/runtime", null, false],
+      ["/app/settings/projects/new", null, false],
+      ["/app/settings/profiles/new", null, false],
+      [`/app/profiles/${profileId}/settings`, null, false],
+      [`/app/assignments/${assignmentId}/recovery`, null, false],
+      [notFound, null, true],
+    ];
+    for (const [width, height] of [
+      [1366, 900],
+      [390, 844],
+    ] as const) {
+      await page.setViewportSize({ width, height });
+      for (const [route, evidence, topLevel] of routes) {
+        // The service answers unknown /app paths itself, so the in-app
+        // not-found screen is reached by client-side navigation.
+        if (route === notFound)
+          await page.evaluate((path) => {
+            history.pushState({}, "", path);
+            dispatchEvent(new PopStateEvent("popstate"));
+          }, route);
+        else await page.goto(web.origin + route);
+        await page
+          .locator("main.page h1")
+          .waitFor()
+          .catch(() => assert.fail(`${width} ${route}: no signed-in title`));
+        await page.waitForLoadState("networkidle");
+        const state = await page.evaluate(() => {
+          const visible = (selector: string) => {
+            const element = document.querySelector<HTMLElement>(selector);
+            return (
+              element !== null &&
+              getComputedStyle(element).display !== "none" &&
+              element.getBoundingClientRect().width > 0
+            );
+          };
+          return {
+            h1: document.querySelectorAll("main h1").length,
+            sidebar: visible(".sidebar"),
+            variant: document
+              .querySelector(".page-header")
+              ?.getAttribute("data-variant"),
+            menu: visible(".phone-nav [data-slot=button]"),
+            back: visible(".page-header-back"),
+            overflow:
+              document.documentElement.scrollWidth >
+              document.documentElement.clientWidth,
+          };
+        });
+        assert.equal(state.h1, 1, `${width} ${route}: one h1`);
+        assert.equal(state.overflow, false, `${width} ${route}: no scroll`);
+        if (width === 1366)
+          assert.equal(state.sidebar, true, `${route}: sidebar visible`);
+        else {
+          assert.equal(
+            state.sidebar,
+            false,
+            `${route}: drawer replaces sidebar`,
+          );
+          assert.equal(
+            state.variant,
+            topLevel ? "top-level" : "detail",
+            `${route}: phone header variant`,
+          );
+          assert.equal(state.menu, topLevel, `${route}: menu button`);
+          assert.equal(state.back, !topLevel, `${route}: Back link`);
+        }
+        if (evidence) {
+          if (width === 390 && evidence === "overview" && route === "/app")
+            await captureBrowserEvidence(page, `${width}-${evidence}`);
+          else await captureBrowserEvidence(page, `${width}-${evidence}`);
+        }
+        if (width === 390 && route === `/app/tasks/${taskId}`)
+          await captureBrowserEvidence(page, "390-task-detail-header");
+      }
+      if (width === 390) {
+        await page.goto(`${web.origin}/app`);
+        await page.locator("main.page h1").waitFor();
+        await page
+          .getByRole("button", { name: "Projects and navigation", exact: true })
+          .click();
+        await page
+          .getByRole("dialog", { name: "Projects and navigation", exact: true })
+          .waitFor();
+        await captureBrowserEvidence(page, "390-drawer");
+      }
+    }
+  },
+);
