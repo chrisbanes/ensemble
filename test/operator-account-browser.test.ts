@@ -138,24 +138,29 @@ for (const viewport of viewports)
     await page.unroute("**/api/operator/login");
 
     // Pending keeps the value, disables the field and button.
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => (release = resolve));
-    await page.route("**/api/operator/login", async (route) => {
-      await held;
-      await route.continue();
-    });
-    await submitPassword(page, web.password);
-    const pending = page.getByRole("button", { name: "Signing in…" });
-    await pending.waitFor();
-    assert.equal(await pending.isDisabled(), true);
-    assert.equal(await field.isDisabled(), true);
-    assert.equal(await field.inputValue(), web.password);
-    await captureBrowserEvidence(page, `${viewport.name}-signin-pending`);
-    release();
-    await page
-      .getByRole("heading", { name: "Overview", exact: true })
-      .waitFor();
-    assert.equal(new URL(page.url()).pathname, "/app");
+    // A failed assertion must not leave the held request blocking cleanup.
+    let release: () => void = () => {};
+    try {
+      const held = new Promise<void>((resolve) => (release = resolve));
+      await page.route("**/api/operator/login", async (route) => {
+        await held;
+        await route.continue();
+      });
+      await submitPassword(page, web.password);
+      const pending = page.getByRole("button", { name: "Signing in…" });
+      await pending.waitFor();
+      assert.equal(await pending.isDisabled(), true);
+      assert.equal(await field.isDisabled(), true);
+      assert.equal(await field.inputValue(), web.password);
+      await captureBrowserEvidence(page, `${viewport.name}-signin-pending`);
+      release();
+      await page
+        .getByRole("heading", { name: "Overview", exact: true })
+        .waitFor();
+      assert.equal(new URL(page.url()).pathname, "/app");
+    } finally {
+      release();
+    }
   });
 
 for (const viewport of viewports)
@@ -347,7 +352,13 @@ test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-
   await page.keyboard.press("ArrowUp");
   await menu.waitFor();
   assert.equal(await focused(), "Sign out", "ArrowUp opens on the last item");
-  await page.keyboard.press("Escape");
+  await page.keyboard.press("Tab");
+  await menu.waitFor({ state: "detached" });
+  assert.equal(
+    await trigger.evaluate((el) => el === document.activeElement),
+    true,
+    "Tab closes the menu and returns focus to the trigger",
+  );
   await page.keyboard.press("ArrowDown");
   await menu.waitFor();
   await page.keyboard.press("ArrowDown");
@@ -365,45 +376,50 @@ test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-
     .waitFor({ state: "detached" });
 
   // Pending sign-out keeps the menu open and the item disabled.
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => (release = resolve));
-  await page.route("**/api/operator/logout", async (route) => {
-    await held;
-    await route.continue();
-  });
-  await trigger.click();
-  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
-  const pending = menu.getByRole("menuitem", { name: "Signing out…" });
-  await pending.waitFor();
-  assert.equal(await pending.getAttribute("aria-disabled"), "true");
-  await captureBrowserEvidence(page, "desktop-account-menu-signing-out");
-  release();
-  await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
-  await page.unroute("**/api/operator/logout");
+  // A failed assertion must not leave the held request blocking cleanup.
+  let release: () => void = () => {};
+  try {
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route("**/api/operator/logout", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await trigger.click();
+    await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    const pending = menu.getByRole("menuitem", { name: "Signing out…" });
+    await pending.waitFor();
+    assert.equal(await pending.getAttribute("aria-disabled"), "true");
+    await captureBrowserEvidence(page, "desktop-account-menu-signing-out");
+    release();
+    await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+    await page.unroute("**/api/operator/logout");
 
-  // Unknown outcome: the status check keeps the session and Sign out can be retried.
-  await submitPassword(page, web.password);
-  await trigger.waitFor();
-  await page.route("**/api/operator/logout", (route) => route.abort());
-  await trigger.click();
-  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
-  await page
-    .getByRole("alert")
-    .filter({
-      hasText:
-        "Sign-out outcome is unknown. Session status has been checked; review before retrying.",
-    })
-    .waitFor();
-  await page.unroute("**/api/operator/logout");
-  await trigger.click();
-  assert.equal(
-    await menu
-      .getByRole("menuitem", { name: "Sign out", exact: true })
-      .isEnabled(),
-    true,
-  );
-  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
-  await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+    // Unknown outcome: the status check keeps the session and Sign out can be retried.
+    await submitPassword(page, web.password);
+    await trigger.waitFor();
+    await page.route("**/api/operator/logout", (route) => route.abort());
+    await trigger.click();
+    await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    await page
+      .getByRole("alert")
+      .filter({
+        hasText:
+          "Sign-out outcome is unknown. Session status has been checked; review before retrying.",
+      })
+      .waitFor();
+    await page.unroute("**/api/operator/logout");
+    await trigger.click();
+    assert.equal(
+      await menu
+        .getByRole("menuitem", { name: "Sign out", exact: true })
+        .isEnabled(),
+      true,
+    );
+    await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+  } finally {
+    release();
+  }
 });
 
 test("phone drawer shows the account group with Settings, Runtime and Sign out", async (_t, journey) => {

@@ -89,7 +89,11 @@ export function AccountMenu({
       // Space activates links too; buttons already do natively.
       event.preventDefault();
       list[index].click();
-    } else if (event.key === "Tab") setOpen(false);
+    } else if (event.key === "Tab") {
+      // Leave the menu deterministically: back to the trigger, menu closed.
+      event.preventDefault();
+      close(true);
+    }
   };
   const link = (href: string, icon: ReactNode, label: string) => (
     <a
