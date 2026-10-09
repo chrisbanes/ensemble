@@ -795,7 +795,7 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 | Settings, sign-in & recovery section | Section `dwLnk`; review notes 130 `DuF5u` |
 | Sign-in desktop and phone | 108 `nQvin`, 109 `MxgGj`, 110 `Wut6u`, 111 `yr1m8`, 112 `W64weN` |
 | Account menu and settings index | 113 `DhtZq`, 114 `vEr15` |
-| Guided project setup, error, first run and folder picker | 115 `wk678`, 116 `q6ZqlW`, 117 `bkNmZ`, 131 `M6N2BQ` |
+| Guided project setup, error, first run, discovery unavailable and folder picker | 115 `wk678`, 116 `q6ZqlW`, 117 `bkNmZ`, 117b `T6VX5`, 131 `M6N2BQ` |
 | Project configuration and phone state | 118 `gi83t`, 119 `w0ozf`, 120 `SBB7W`, 121 `Pwzju` |
 | Profiles and routing | 122 `F6d3SQ`, 123 `O96oS`, 124 `Z8uZnh`, 125 `c8af5` |
 | Runtime, assignment recovery and not found | 126 `AqYk0`, 127 `iEF1o`, 128 `ur1mr`, 129 `HCNJ2` |

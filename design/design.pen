@@ -3317,30 +3317,30 @@
                   "id": "tMU8X",
                   "name": "Result",
                   "width": "fill_container",
-                  "layout": "vertical",
-                  "gap": 8,
+                  "gap": 20,
                   "children": [
+                    {
+                      "type": "text",
+                      "id": "ll2tX",
+                      "name": "Section label",
+                      "fill": "$X:--muted-foreground",
+                      "textGrowth": "fixed-width",
+                      "width": 140,
+                      "content": "Recent results",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
                     {
                       "type": "frame",
                       "id": "D1FpPa",
                       "name": "Recent result heading",
                       "width": "fill_container",
-                      "gap": 20,
+                      "layout": "vertical",
+                      "gap": 8,
                       "alignItems": "center",
                       "children": [
-                        {
-                          "type": "text",
-                          "id": "ll2tX",
-                          "name": "Section label",
-                          "fill": "$X:--muted-foreground",
-                          "textGrowth": "fixed-width",
-                          "width": 140,
-                          "content": "Recent results",
-                          "lineHeight": 1.25,
-                          "fontFamily": "$font-sans",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        },
                         {
                           "type": "text",
                           "id": "pGsgb",
@@ -3353,21 +3353,21 @@
                           "fontFamily": "$font-sans",
                           "fontSize": 14,
                           "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "vW1j6",
+                          "name": "Result excerpt",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Jonas, result R-88: “12 routes checked.” · report + reproduction logs",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
                         }
                       ]
-                    },
-                    {
-                      "type": "text",
-                      "id": "vW1j6",
-                      "name": "Result excerpt",
-                      "fill": "$X:--foreground",
-                      "textGrowth": "fixed-width",
-                      "width": "fill_container",
-                      "content": "Jonas, result R-88: “12 routes checked.” · report + reproduction logs",
-                      "lineHeight": 1.25,
-                      "fontFamily": "$font-sans",
-                      "fontSize": 14,
-                      "fontWeight": "normal"
                     }
                   ]
                 },
@@ -69053,25 +69053,12 @@
               "content": "Assignment context"
             },
             "muq9X": {
-              "content": "Search kept"
+              "content": "AT-142 · A-105"
             },
             "MHTld": {
               "enabled": false
             }
           }
-        },
-        {
-          "type": "text",
-          "id": "lsxCM",
-          "name": "Assignment context",
-          "fill": "$X:--foreground",
-          "textGrowth": "fixed-width",
-          "width": "fill_container",
-          "content": "Assignment context",
-          "lineHeight": 1.4,
-          "fontFamily": "$font-sans",
-          "fontSize": 18,
-          "fontWeight": "600"
         },
         {
           "type": "text",
@@ -104030,19 +104017,6 @@
                   }
                 }
               ]
-            },
-            {
-              "type": "text",
-              "id": "z4MRIT",
-              "name": "State note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "Entry for /login and for an expired session (103 · OwZka). Unsent local drafts were already cleared; signing in reloads authorised context.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
             }
           ]
         }
@@ -104194,19 +104168,6 @@
                   }
                 }
               ]
-            },
-            {
-              "type": "text",
-              "id": "b8h0MA",
-              "name": "State note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "The password is cleared after a failure; focus returns to the field. No account or lockout detail is shown.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
             }
           ]
         }
@@ -104349,19 +104310,6 @@
                   }
                 }
               ]
-            },
-            {
-              "type": "text",
-              "id": "B6Xba",
-              "name": "State note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "Entry for /login and for an expired session (103 · OwZka). Unsent local drafts were already cleared; signing in reloads authorised context.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
             }
           ]
         }
@@ -104505,19 +104453,6 @@
                   }
                 }
               ]
-            },
-            {
-              "type": "text",
-              "id": "NEYYZ",
-              "name": "State note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "Password field and button are disabled until the request settles.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
             }
           ]
         }
@@ -104674,19 +104609,6 @@
                   }
                 }
               ]
-            },
-            {
-              "type": "text",
-              "id": "oFbX6",
-              "name": "State note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "The password is cleared after a failure; focus returns to the field. No account or lockout detail is shown.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
             }
           ]
         }
@@ -105042,8 +104964,8 @@
         },
         {
           "type": "frame",
-          "id": "PN04o",
-          "name": "Main content",
+          "id": "Dz9Q4",
+          "name": "Main content · Overview 01",
           "width": "fill_container",
           "height": "fill_container",
           "layout": "vertical",
@@ -105052,43 +104974,98 @@
           "children": [
             {
               "type": "frame",
-              "id": "DiSwC",
-              "name": "Page title",
+              "id": "dbnDc",
+              "name": "Page header",
               "width": "fill_container",
-              "gap": 8,
+              "stroke": "$X:--border",
+              "strokeWidth": {
+                "bottom": 1
+              },
+              "padding": [
+                0,
+                0,
+                16,
+                0
+              ],
               "justifyContent": "space_between",
               "alignItems": "center",
               "children": [
                 {
-                  "type": "text",
-                  "id": "SwNOX",
-                  "name": "Title",
-                  "fill": "$X:--foreground",
-                  "content": "Overview",
-                  "lineHeight": 1.45,
-                  "fontFamily": "$font-sans",
-                  "fontSize": 18,
-                  "fontWeight": "600"
+                  "type": "frame",
+                  "id": "sjYYg",
+                  "name": "Heading",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 8,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "P2WEAH",
+                      "x": 0,
+                      "y": 0,
+                      "name": "Eyebrow",
+                      "enabled": false,
+                      "fill": "$X:--muted-foreground",
+                      "content": "Thursday 15 October",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "YOQdM",
+                      "name": "Page title",
+                      "fill": "$X:--muted-foreground",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Your workspace",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 18,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "s7A7dW",
+                      "name": "Introduction",
+                      "fill": "$X:--muted-foreground",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Decisions first. Work and completed results stay separate.",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
                 },
                 {
-                  "id": "TzGf6",
+                  "id": "rKueN",
                   "type": "ref",
-                  "ref": "X:C10zH",
-                  "name": "Refresh",
+                  "ref": "X:VSnC2",
+                  "name": "＋  New task",
+                  "height": 36,
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "width": "fit_content",
                   "cornerRadius": "$radius-lg",
                   "padding": [
                     6,
                     10
                   ],
                   "gap": 6,
-                  "effect": [],
-                  "fill": "$nova-outline-bg",
                   "descendants": {
-                    "X:l8v2I": {
+                    "X:8jVfJ": {
                       "enabled": false
                     },
-                    "X:poRwU": {
-                      "content": "Refresh",
+                    "X:8tnXG": {
+                      "content": "＋  New task",
+                      "textGrowth": "auto",
+                      "fill": "$X:--primary-foreground",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -105096,79 +105073,1246 @@
               ]
             },
             {
-              "type": "text",
-              "id": "wXYSp",
-              "name": "Unchanged overview note",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
+              "type": "frame",
+              "id": "em27H",
+              "name": "Attention inbox",
               "width": "fill_container",
-              "content": "Overview content is unchanged — see 01 · N9G11A. This frame shows only the account menu state.",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 14,
-              "fontWeight": "normal"
+              "fill": "$X:--background",
+              "stroke": "$X:--border",
+              "layout": "vertical",
+              "gap": 12,
+              "padding": [
+                16,
+                0
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "aJg9P",
+                  "name": "Attention title",
+                  "width": "fill_container",
+                  "gap": 12,
+                  "padding": [
+                    0,
+                    0,
+                    12,
+                    0
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "kYyfu",
+                      "name": "Title",
+                      "fill": "$X:--foreground",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Needs your attention",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 16,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "id": "jnfYj",
+                      "type": "ref",
+                      "ref": "X:WuUMk",
+                      "name": "3 items",
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "fill": "$X:--accent",
+                      "height": "fit_content",
+                      "cornerRadius": 9999,
+                      "descendants": {
+                        "X:zHpCv": {
+                          "type": "frame",
+                          "id": "xXQGX",
+                          "name": "Label and status symbol",
+                          "gap": 4,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "wHk6x",
+                              "name": "Status label",
+                              "fill": "$X:--accent-foreground",
+                              "content": "5 unresolved",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "id": "W42AFZ",
+                      "name": "View inbox",
+                      "fill": "$X:--primary",
+                      "content": "View inbox →",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 14,
+                      "fontWeight": "500"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "k0a6yj",
+                  "name": "Execution uncertain row",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 20,
+                  "padding": [
+                    12,
+                    0
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "bYxT0",
+                      "name": "Execution uncertain marker",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "$X:--card",
+                      "cornerRadius": "$radius-xl",
+                      "stroke": "$X:--destructive",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "lif9N",
+                          "name": "Symbol",
+                          "fill": "$X:--foreground",
+                          "content": "!",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 18,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "SUp17",
+                      "name": "Execution uncertain content",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 8,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "COaxq",
+                          "name": "Request context and age",
+                          "width": "fill_container",
+                          "gap": 16,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "V97CD0",
+                              "name": "Context",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Relay / Restore webhook delivery",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "rPKjo",
+                              "name": "Type and age",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 180,
+                              "content": "Intervention · Jonas · 10:59",
+                              "lineHeight": 1.25,
+                              "textAlign": "right",
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "TD9pc",
+                          "name": "Message",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Execution may still be active. Inspect the last observation before recovery.",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 16,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "id": "YXLV9",
+                      "type": "ref",
+                      "ref": "X:C10zH",
+                      "name": "Inspect execution",
+                      "height": 36,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "width": "fit_content",
+                      "cornerRadius": "$radius-lg",
+                      "padding": [
+                        6,
+                        10
+                      ],
+                      "gap": 6,
+                      "effect": [],
+                      "fill": "$nova-outline-bg",
+                      "descendants": {
+                        "X:l8v2I": {
+                          "enabled": false
+                        },
+                        "X:poRwU": {
+                          "content": "Inspect execution",
+                          "textGrowth": "auto",
+                          "fill": "$X:--foreground",
+                          "fontFamily": "$font-sans"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "G8iK3W",
+                  "name": "Question preview row",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 20,
+                  "padding": [
+                    12,
+                    0
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "f4nrp",
+                      "name": "Approval marker",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "$X:--muted",
+                      "cornerRadius": "$radius-xl",
+                      "layout": "vertical",
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "d6TlK",
+                          "name": "Symbol",
+                          "fill": "$X:--foreground",
+                          "content": "?",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 18,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "VVDK5",
+                      "name": "Approval content",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 8,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "U0vKty",
+                          "name": "Request context and age",
+                          "width": "fill_container",
+                          "gap": 16,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "N376bo",
+                              "name": "Context",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Fieldnotes / Refresh onboarding copy",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "ZIFIa",
+                              "name": "Type and age",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 180,
+                              "content": "Question  ·  09:14 · 1h 46m ago",
+                              "lineHeight": 1.25,
+                              "textAlign": "right",
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "A3Secb",
+                          "name": "Message",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Nora needs an audience choice: owner-only steps appear in the guide.",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 16,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "id": "fF61w",
+                      "type": "ref",
+                      "ref": "X:C10zH",
+                      "name": "Answer question",
+                      "height": 36,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "width": "fit_content",
+                      "cornerRadius": "$radius-lg",
+                      "padding": [
+                        6,
+                        10
+                      ],
+                      "gap": 6,
+                      "effect": [],
+                      "fill": "$nova-outline-bg",
+                      "descendants": {
+                        "X:l8v2I": {
+                          "enabled": false
+                        },
+                        "X:poRwU": {
+                          "content": "Choose audience",
+                          "textGrowth": "auto",
+                          "fill": "$X:--foreground",
+                          "fontFamily": "$font-sans"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "ldink",
+                  "name": "Intervention preview row",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 20,
+                  "padding": [
+                    12,
+                    0
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "qTvFD",
+                      "name": "Question marker",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "$X:--muted",
+                      "cornerRadius": "$radius-xl",
+                      "layout": "vertical",
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "BsIqc",
+                          "name": "Symbol",
+                          "fill": "$X:--foreground",
+                          "content": "!",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 18,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "nebYP",
+                      "name": "Question content",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 8,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "auoD0",
+                          "name": "Request context and age",
+                          "width": "fill_container",
+                          "gap": 16,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "Fr2Xe",
+                              "name": "Context",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Atlas / Ship an accessible command menu",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "fnz5D",
+                              "name": "Type and age",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": 180,
+                              "content": "Approval · Mira · 10:52",
+                              "lineHeight": 1.25,
+                              "textAlign": "right",
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "wylnB",
+                          "name": "Message",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Mira requests permission to create this exact PR. A GitHub dependency still holds execution.",
+                          "lineHeight": 1.5,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 16,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "id": "hf6ri",
+                      "type": "ref",
+                      "ref": "X:C10zH",
+                      "name": "Inspect problem",
+                      "height": 36,
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "width": "fit_content",
+                      "cornerRadius": "$radius-lg",
+                      "padding": [
+                        6,
+                        10
+                      ],
+                      "gap": 6,
+                      "effect": [],
+                      "fill": "$nova-outline-bg",
+                      "descendants": {
+                        "X:l8v2I": {
+                          "enabled": false
+                        },
+                        "X:poRwU": {
+                          "content": "Review material & decide",
+                          "textGrowth": "auto",
+                          "fill": "$X:--foreground",
+                          "fontFamily": "$font-sans"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
             },
             {
               "type": "frame",
-              "id": "CGQaf",
-              "name": "Account menu notes",
-              "width": 520,
-              "fill": "$X:--muted",
-              "cornerRadius": "$radius-xl",
+              "id": "RLYFn",
+              "name": "Cross-project work",
+              "width": "fill_container",
+              "fill": "$X:--background",
+              "stroke": "$X:--border",
               "layout": "vertical",
               "gap": 12,
-              "padding": 16,
+              "padding": [
+                16,
+                0
+              ],
               "children": [
                 {
-                  "type": "text",
-                  "id": "gcQ7u",
-                  "name": "Account menu",
-                  "fill": "$X:--foreground",
-                  "textGrowth": "fixed-width",
+                  "type": "frame",
+                  "id": "bw7cf",
+                  "name": "Work controls",
                   "width": "fill_container",
-                  "content": "Account menu",
-                  "lineHeight": 1.45,
+                  "gap": 20,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "qlSCr",
+                      "name": "Work title",
+                      "fill": "$X:--foreground",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Across your projects",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 18,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "j9a4Fg",
+                      "name": "Filter",
+                      "fill": "$X:--foreground",
+                      "content": "All projects ⌄    Active tasks ⌄",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "id": "nly9N",
+                      "type": "ref",
+                      "ref": "X:PbofX",
+                      "name": "List / Board view switch",
+                      "theme": {
+                        "X:Mode": "Dark",
+                        "X:Base": "Neutral",
+                        "X:Accent": "Default"
+                      },
+                      "width": "fit_content",
+                      "height": 32,
+                      "gap": 4,
+                      "cornerRadius": "$radius-lg",
+                      "padding": 3,
+                      "children": [
+                        {
+                          "id": "UubQM",
+                          "type": "ref",
+                          "ref": "X:coMmv",
+                          "name": "List view",
+                          "theme": {
+                            "X:Mode": "Dark",
+                            "X:Base": "Neutral",
+                            "X:Accent": "Default"
+                          },
+                          "height": "fit_content",
+                          "alignItems": "center",
+                          "justifyContent": "center",
+                          "cornerRadius": "$radius-md",
+                          "padding": [
+                            2,
+                            6
+                          ],
+                          "descendants": {
+                            "X:qYQHc": {
+                              "content": "List",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "textAlign": "left",
+                              "fontSize": 14,
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        },
+                        {
+                          "id": "vFkI0",
+                          "type": "ref",
+                          "ref": "X:coMmv",
+                          "name": "Board view",
+                          "theme": {
+                            "X:Mode": "Dark",
+                            "X:Base": "Neutral",
+                            "X:Accent": "Default"
+                          },
+                          "height": "fit_content",
+                          "alignItems": "center",
+                          "justifyContent": "center",
+                          "cornerRadius": "$radius-md",
+                          "padding": [
+                            2,
+                            6
+                          ],
+                          "descendants": {
+                            "X:qYQHc": {
+                              "content": "Board",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "textAlign": "left",
+                              "fontSize": 14,
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "aYx5q",
+                  "name": "Restore webhook delivery",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 16,
+                  "padding": [
+                    10,
+                    4
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "VDUcI",
+                      "name": "Row text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "VXYKA",
+                          "name": "Task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Restore webhook delivery",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "j0w3T",
+                          "name": "Row meta",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "Zxk4P",
+                              "name": "Project",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Relay",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "SYzme",
+                              "name": "State",
+                              "fill": "$X:--foreground",
+                              "content": "!  Uncertain",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "G8UAja",
+                              "name": "Reason",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Inspect runner connection",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "hd78W",
+                      "name": "Lead",
+                      "fill": "$X:--muted-foreground",
+                      "content": "Lead · Jonas",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "I2vXj7",
+                      "name": "Chevron",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "fill": "$X:--muted-foreground"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "fpr3D",
+                  "name": "Ship accessible command menu",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 16,
+                  "padding": [
+                    10,
+                    4
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "s4tNoy",
+                      "name": "Row text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Y5D8wU",
+                          "name": "Task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Ship an accessible command menu",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "cqp5y",
+                          "name": "Row meta",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "f2FQxw",
+                              "name": "Project",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Atlas",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "D4fu0",
+                              "name": "State",
+                              "fill": "$X:--foreground",
+                              "content": "◷  Waiting",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "aoFzo",
+                              "name": "Reason",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: you · review material & decide",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "wWmsL",
+                      "name": "Lead",
+                      "fill": "$X:--muted-foreground",
+                      "content": "Lead · Mira",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "T4jJ5",
+                      "name": "Chevron",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "fill": "$X:--muted-foreground"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "yCjuP",
+                  "name": "Reduce cold-start latency",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 16,
+                  "padding": [
+                    10,
+                    4
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "Gpjm8",
+                      "name": "Row text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "wFaFa",
+                          "name": "Task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Reduce cold-start latency",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "j1T2wj",
+                          "name": "Row meta",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "C5PSC",
+                              "name": "Project",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Atlas",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "VhAry",
+                              "name": "State",
+                              "fill": "$X:--primary",
+                              "content": "Running · check failed",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "VL84e",
+                              "name": "Reason",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: Eli · check repair A-108 recorded",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "T2TZAL",
+                      "name": "Lead",
+                      "fill": "$X:--muted-foreground",
+                      "content": "Lead · Mira",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "XEmWw",
+                      "name": "Chevron",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "fill": "$X:--muted-foreground"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "QNWK8",
+                  "name": "Refresh onboarding copy",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 16,
+                  "padding": [
+                    10,
+                    4
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "KRkAp",
+                      "name": "Row text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "NO0Cl",
+                          "name": "Task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Refresh onboarding copy",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "vjpFr",
+                          "name": "Row meta",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "Ujs0S",
+                              "name": "Project",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Fieldnotes",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "Ko6VH",
+                              "name": "State",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Ⅱ  Paused",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "F3WrN",
+                              "name": "Reason",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Next: you · choose audience; task stays paused",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "smFQO",
+                      "name": "Lead",
+                      "fill": "$X:--muted-foreground",
+                      "content": "Lead · Nora",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "TMpFu",
+                      "name": "Chevron",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "fill": "$X:--muted-foreground"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "DMMYP",
+                  "name": "Publish keyboard guide",
+                  "width": "fill_container",
+                  "stroke": "$X:--border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 16,
+                  "padding": [
+                    10,
+                    4
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "r4TwNN",
+                      "name": "Row text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "qhXUE",
+                          "name": "Task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Reduce image-cache misses",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "J5z2t",
+                          "name": "Row meta",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "TtPQ9",
+                              "name": "Project",
+                              "fill": "$X:--muted-foreground",
+                              "content": "Atlas",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "Vo67y",
+                              "name": "State",
+                              "fill": "$X:--primary",
+                              "content": "Running · check failed",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "RfalL",
+                              "name": "Reason",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Repair owner unknown · no request recorded",
+                              "lineHeight": 1.25,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "NoRoK",
+                      "name": "Lead",
+                      "fill": "$X:--muted-foreground",
+                      "content": "Lead · Mira",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "F1RoH",
+                      "name": "Chevron",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "fill": "$X:--muted-foreground"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "uGJpI",
+              "name": "Recent results",
+              "width": "fill_container",
+              "stroke": "$X:--border",
+              "gap": 24,
+              "padding": [
+                0,
+                4
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "X6wsO",
+                  "name": "Result",
+                  "width": "fill_container",
+                  "gap": 20,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "G1YZ1",
+                      "name": "Section label",
+                      "fill": "$X:--muted-foreground",
+                      "textGrowth": "fixed-width",
+                      "width": 140,
+                      "content": "Recent results",
+                      "lineHeight": 1.25,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "o6m93",
+                      "name": "Recent result heading",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 8,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "q89Lch",
+                          "name": "Completed task",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Completed · Delivery audit · no decision needed",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Y76hAi",
+                          "name": "Result excerpt",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Jonas, result R-88: “12 routes checked.” · report + reproduction logs",
+                          "lineHeight": 1.25,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "MGNo3",
+                  "name": "Open result",
+                  "fill": "$X:--primary",
+                  "content": "View result ↗",
+                  "lineHeight": 1.25,
                   "fontFamily": "$font-sans",
                   "fontSize": 14,
-                  "fontWeight": "500"
-                },
-                {
-                  "type": "text",
-                  "id": "dc91q",
-                  "name": "Menu destinations",
-                  "fill": "$X:--foreground",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
-                  "content": "Opened from the sidebar footer (Chris Bennett ⌄). Settings → /app/settings. Runtime → /app/settings/runtime (capacity and task recovery destinations). Sign out ends the session and clears private local state.",
-                  "lineHeight": 1.45,
-                  "fontFamily": "$font-sans",
-                  "fontSize": 14,
-                  "fontWeight": "normal"
-                },
-                {
-                  "type": "text",
-                  "id": "htUgE",
-                  "name": "Sign-out states",
-                  "fill": "$X:--muted-foreground",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
-                  "content": "Sign out shows “Signing out…” while pending. If the outcome is unknown: “Sign-out outcome is unknown. Session status has been checked; review before retrying.”",
-                  "lineHeight": 1.45,
-                  "fontFamily": "$font-sans",
-                  "fontSize": 12,
-                  "fontWeight": "normal"
-                },
-                {
-                  "type": "text",
-                  "id": "XhX2k",
-                  "name": "Legacy link decision",
-                  "fill": "$X:--muted-foreground",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
-                  "content": "The legacy “Existing operator controls” sidebar link and the build's top bar are removed. Advanced destinations stay as contextual links on the settings and recovery pages that need them. See Review notes.",
-                  "lineHeight": 1.45,
-                  "fontFamily": "$font-sans",
-                  "fontSize": 12,
                   "fontWeight": "normal"
                 }
               ]
@@ -105654,19 +106798,6 @@
           "gap": 12,
           "padding": 20,
           "children": [
-            {
-              "type": "text",
-              "id": "iTGZn",
-              "name": "Breadcrumb",
-              "fill": "$X:--muted-foreground",
-              "textGrowth": "fixed-width",
-              "width": "fill_container",
-              "content": "Chris Bennett ⌄ → Settings",
-              "lineHeight": 1.45,
-              "fontFamily": "$font-sans",
-              "fontSize": 12,
-              "fontWeight": "normal"
-            },
             {
               "type": "frame",
               "id": "o9T08",
@@ -106996,7 +108127,7 @@
                                       "fill": "$X:--muted-foreground",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "Builder · revision 5",
+                                      "content": "Repairs · revision 5",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-sans",
                                       "fontSize": 12,
@@ -108612,6 +109743,7 @@
                           "gap": 6,
                           "effect": [],
                           "fill": "$nova-outline-bg",
+                          "enabled": false,
                           "descendants": {
                             "X:l8v2I": {
                               "enabled": false
@@ -108837,7 +109969,7 @@
                   "type": "ref",
                   "ref": "X:jBcUh",
                   "name": "Atlas",
-                  "width": "fill_container",
+                  "width": "fill_container(208)",
                   "theme": {
                     "X:Mode": "Dark",
                     "X:Base": "Neutral",
@@ -108848,6 +109980,7 @@
                     6,
                     8
                   ],
+                  "enabled": false,
                   "descendants": {
                     "X:r6B2W": {
                       "icon": "folder"
@@ -109011,7 +110144,7 @@
               "id": "p6gQRQ",
               "type": "ref",
               "ref": "X:K53jF",
-              "name": "Submission rejected. Your input is retained.",
+              "name": "Project not created",
               "width": "fill_container",
               "cornerRadius": "$radius-lg",
               "padding": [
@@ -109024,12 +110157,12 @@
                   "width": "fill_container"
                 },
                 "X:nbvca": {
-                  "content": "Submission rejected. Your input is retained.",
+                  "content": "Project not created",
                   "fontSize": 14,
                   "fontFamily": "$font-sans"
                 },
                 "X:W4UBy": {
-                  "content": "Check the highlighted field. Nothing was created; every other value is kept.",
+                  "content": "Fix the highlighted field. Every other value is kept.",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
                   "fontFamily": "$font-sans"
@@ -109122,7 +110255,7 @@
                                       "fill": "$nova-input-bg"
                                     },
                                     "X:SDRKn": {
-                                      "content": "Fieldnotes",
+                                      "content": "Atlas",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -109157,7 +110290,7 @@
                                       "fill": "$nova-input-bg"
                                     },
                                     "X:V1STL": {
-                                      "content": "Nora",
+                                      "content": "Mira",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -109238,7 +110371,7 @@
                               "fill": "$nova-input-bg"
                             },
                             "X:S4qWY": {
-                              "content": "Write user-facing notes and migration guides. Keep recovery guidance beside each step. Ask Chris before changing published guidance.",
+                              "content": "Ship accessible UI changes for the Atlas app. Every change needs a keyboard check.",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
                               "fontFamily": "$font-sans"
@@ -109986,7 +111119,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Overview → New project",
+              "content": "Settings / Projects / Create project",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 12,
@@ -111177,7 +112310,7 @@
                   "id": "BcNVM",
                   "name": "Admission state",
                   "fill": "$X:--muted-foreground",
-                  "content": "Enabled: existing admission rules still apply. Last saved 10:52.",
+                  "content": "Existing admission rules still apply. General saved 10:52.",
                   "lineHeight": 1.45,
                   "fontFamily": "$font-sans",
                   "fontSize": 14,
@@ -111267,7 +112400,7 @@
                   ],
                   "descendants": {
                     "X:qYQHc": {
-                      "content": "Placement",
+                      "content": "Sync & placement",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -112485,7 +113618,7 @@
                   "id": "SCIfh",
                   "name": "Source version",
                   "fill": "$X:--muted-foreground",
-                  "content": "Last saved 10:40 · GitHub credential configured",
+                  "content": "GitHub source saved 10:40 · credential configured",
                   "lineHeight": 1.45,
                   "fontFamily": "$font-sans",
                   "fontSize": 14,
@@ -112575,7 +113708,7 @@
                   ],
                   "descendants": {
                     "X:qYQHc": {
-                      "content": "Placement",
+                      "content": "Sync & placement",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -112647,7 +113780,7 @@
                                   "fill": "$X:--muted-foreground",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "Edit sources in place. Private search queries stay hidden; replace one to change it.",
+                                  "content": "Edit sources in place. Private search queries stay hidden; replace one to change it. New sources are added inactive.",
                                   "lineHeight": 1.45,
                                   "fontFamily": "$font-sans",
                                   "fontSize": 12,
@@ -112663,6 +113796,7 @@
                           "name": "Selection S-1",
                           "width": "fill_container",
                           "gap": 12,
+                          "alignItems": "end",
                           "children": [
                             {
                               "type": "frame",
@@ -112680,7 +113814,7 @@
                                   "width": "fill_container",
                                   "descendants": {
                                     "X:Yd2lV": {
-                                      "content": "Selection kind",
+                                      "content": "S-1 · Selection kind",
                                       "fontFamily": "$font-sans"
                                     },
                                     "X:Ch62V": {
@@ -112693,41 +113827,6 @@
                                     },
                                     "X:V1STL": {
                                       "content": "Repository",
-                                      "fontFamily": "$font-sans"
-                                    }
-                                  }
-                                }
-                              ]
-                            },
-                            {
-                              "type": "frame",
-                              "id": "U4Wc2",
-                              "name": "ID",
-                              "width": 100,
-                              "layout": "vertical",
-                              "gap": 6,
-                              "children": [
-                                {
-                                  "id": "BY4vT",
-                                  "type": "ref",
-                                  "ref": "X:uHFal",
-                                  "name": "Selection ID",
-                                  "width": "fill_container",
-                                  "descendants": {
-                                    "X:BX0XX": {
-                                      "content": "Selection ID",
-                                      "fontFamily": "$font-sans"
-                                    },
-                                    "X:i0Z3E": {
-                                      "cornerRadius": "$radius-lg",
-                                      "padding": [
-                                        6,
-                                        10
-                                      ],
-                                      "fill": "$nova-input-bg"
-                                    },
-                                    "X:SDRKn": {
-                                      "content": "S-1",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -112768,6 +113867,29 @@
                                   }
                                 }
                               ]
+                            },
+                            {
+                              "id": "P6DHql",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Remove",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Remove",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
                             }
                           ]
                         },
@@ -112777,6 +113899,7 @@
                           "name": "Selection S-3",
                           "width": "fill_container",
                           "gap": 12,
+                          "alignItems": "end",
                           "children": [
                             {
                               "type": "frame",
@@ -112794,7 +113917,7 @@
                                   "width": "fill_container",
                                   "descendants": {
                                     "X:Yd2lV": {
-                                      "content": "Selection kind",
+                                      "content": "S-3 · Selection kind",
                                       "fontFamily": "$font-sans"
                                     },
                                     "X:Ch62V": {
@@ -112807,41 +113930,6 @@
                                     },
                                     "X:V1STL": {
                                       "content": "GitHub Project",
-                                      "fontFamily": "$font-sans"
-                                    }
-                                  }
-                                }
-                              ]
-                            },
-                            {
-                              "type": "frame",
-                              "id": "E1wtmM",
-                              "name": "ID",
-                              "width": 100,
-                              "layout": "vertical",
-                              "gap": 6,
-                              "children": [
-                                {
-                                  "id": "LVJG8",
-                                  "type": "ref",
-                                  "ref": "X:uHFal",
-                                  "name": "Selection ID",
-                                  "width": "fill_container",
-                                  "descendants": {
-                                    "X:BX0XX": {
-                                      "content": "Selection ID",
-                                      "fontFamily": "$font-sans"
-                                    },
-                                    "X:i0Z3E": {
-                                      "cornerRadius": "$radius-lg",
-                                      "padding": [
-                                        6,
-                                        10
-                                      ],
-                                      "fill": "$nova-input-bg"
-                                    },
-                                    "X:SDRKn": {
-                                      "content": "S-3",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -112864,7 +113952,7 @@
                                   "width": "fill_container",
                                   "descendants": {
                                     "X:BX0XX": {
-                                      "content": "Complete Project filter",
+                                      "content": "Project filter",
                                       "fontFamily": "$font-sans"
                                     },
                                     "X:i0Z3E": {
@@ -112882,8 +113970,54 @@
                                   }
                                 }
                               ]
+                            },
+                            {
+                              "id": "VsM6s",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Remove",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Remove",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
                             }
                           ]
+                        },
+                        {
+                          "id": "uedfh",
+                          "type": "ref",
+                          "ref": "X:C10zH",
+                          "name": "Add source",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "effect": [],
+                          "fill": "$nova-outline-bg",
+                          "descendants": {
+                            "X:l8v2I": {
+                              "enabled": false
+                            },
+                            "X:poRwU": {
+                              "content": "Add source",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
                         }
                       ]
                     },
@@ -112953,6 +114087,7 @@
                           "name": "Repository acme/atlas",
                           "width": "fill_container",
                           "gap": 12,
+                          "alignItems": "end",
                           "children": [
                             {
                               "type": "frame",
@@ -113058,8 +114193,54 @@
                                   }
                                 }
                               ]
+                            },
+                            {
+                              "id": "z3rdZ0",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Remove",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Remove",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
                             }
                           ]
+                        },
+                        {
+                          "id": "UsOwr",
+                          "type": "ref",
+                          "ref": "X:C10zH",
+                          "name": "Add repository",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "effect": [],
+                          "fill": "$nova-outline-bg",
+                          "descendants": {
+                            "X:l8v2I": {
+                              "enabled": false
+                            },
+                            "X:poRwU": {
+                              "content": "Add repository",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
                         },
                         {
                           "id": "S7IVV2",
@@ -113466,7 +114647,7 @@
                           "fill": "$X:--foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "· Activation is a separate preview step.",
+                          "content": "· Activation is a separate preview step in Sync & placement.",
                           "lineHeight": 1.45,
                           "fontFamily": "$font-sans",
                           "fontSize": 14,
@@ -113858,7 +115039,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Settings / Projects / Atlas / Placement",
+              "content": "Settings / Projects / Atlas / Sync & placement",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 12,
@@ -113936,7 +115117,7 @@
                   "id": "UMeH3",
                   "name": "Source status",
                   "fill": "$X:--muted-foreground",
-                  "content": "Last saved 11:06 · 1 conflicting placement · 1 placement to check",
+                  "content": "1 conflicting placement · 1 placement outcome to check",
                   "lineHeight": 1.45,
                   "fontFamily": "$font-sans",
                   "fontSize": 14,
@@ -114026,7 +115207,7 @@
                   ],
                   "descendants": {
                     "X:qYQHc": {
-                      "content": "Placement",
+                      "content": "Sync & placement",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -114857,7 +116038,7 @@
                   "id": "q5GvQ",
                   "name": "Version",
                   "fill": "$X:--muted-foreground",
-                  "content": "Last saved 10:52",
+                  "content": "General saved 10:52",
                   "lineHeight": 1.45,
                   "fontFamily": "$font-sans",
                   "fontSize": 12,
@@ -115562,7 +116743,32 @@
                               "fill": "$nova-input-bg"
                             },
                             "X:SDRKn": {
-                              "content": "Reviewer",
+                              "content": "Tester",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        },
+                        {
+                          "id": "a68ZNb",
+                          "type": "ref",
+                          "ref": "X:uHFal",
+                          "name": "Summary",
+                          "width": "fill_container",
+                          "descendants": {
+                            "X:BX0XX": {
+                              "content": "Summary",
+                              "fontFamily": "$font-sans"
+                            },
+                            "X:i0Z3E": {
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "fill": "$nova-input-bg"
+                            },
+                            "X:SDRKn": {
+                              "content": "Testing",
                               "fontFamily": "$font-sans"
                             }
                           }
@@ -115588,7 +116794,7 @@
                               "fill": "$nova-input-bg"
                             },
                             "X:S4qWY": {
-                              "content": "Review the exact revision you are given. Cite file and line for each finding. Ask the requester when acceptance criteria are missing.",
+                              "content": "Run the project's checks on the exact revision you are given. Report each failure with the command and its output.",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
                               "fontFamily": "$font-sans"
@@ -115616,7 +116822,7 @@
                               "fill": "$nova-input-bg"
                             },
                             "X:S4qWY": {
-                              "content": "Reviews diffs and screenshots for accessibility and keyboard regressions. Reports findings to the requester. Does not change code.",
+                              "content": "Runs tests and accessibility checks. Reports results to the requester. Does not change code.",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
                               "fontFamily": "$font-sans"
@@ -115630,7 +116836,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Describes suitability for routing and leads. It is not a permission grant.",
+                          "content": "The summary appears in Settings and routing. Capabilities describe suitability for routing and leads; neither is a permission grant.",
                           "lineHeight": 1.45,
                           "fontFamily": "$font-sans",
                           "fontSize": 12,
@@ -115661,6 +116867,29 @@
                                 },
                                 "X:8tnXG": {
                                   "content": "Create profile",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
+                            },
+                            {
+                              "id": "zgOsN",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Cancel",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Cancel",
                                   "fontFamily": "$font-sans"
                                 }
                               }
@@ -116269,7 +117498,7 @@
                                   "fill": "$X:--muted-foreground",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "Instructions and capabilities are private; replace them to change them.",
+                                  "content": "Instructions are private; replace them to change them. Name, summary and capabilities are edited in place.",
                                   "lineHeight": 1.45,
                                   "fontFamily": "$font-sans",
                                   "fontSize": 12,
@@ -116300,6 +117529,31 @@
                             },
                             "X:SDRKn": {
                               "content": "Reviewer",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        },
+                        {
+                          "id": "jPcoM",
+                          "type": "ref",
+                          "ref": "X:uHFal",
+                          "name": "Summary",
+                          "width": "fill_container",
+                          "descendants": {
+                            "X:BX0XX": {
+                              "content": "Summary",
+                              "fontFamily": "$font-sans"
+                            },
+                            "X:i0Z3E": {
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "fill": "$nova-input-bg"
+                            },
+                            "X:SDRKn": {
+                              "content": "Review",
                               "fontFamily": "$font-sans"
                             }
                           }
@@ -116353,29 +117607,45 @@
                           }
                         },
                         {
-                          "id": "vQM1X",
-                          "type": "ref",
-                          "ref": "X:J7Uph",
-                          "name": "Replace capabilities",
-                          "descendants": {
-                            "X:15v9d": {
-                              "content": "Replace capabilities",
-                              "fontFamily": "$font-sans"
-                            }
-                          }
-                        },
-                        {
                           "type": "text",
                           "id": "W9pDQ",
                           "name": "Current capabilities",
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Current instructions are private. Capabilities: Reviews diffs and screenshots for accessibility and keyboard regressions. Reports findings to the requester. Does not change code.",
+                          "content": "Current instructions are private and never loaded into this form.",
                           "lineHeight": 1.45,
                           "fontFamily": "$font-sans",
                           "fontSize": 12,
                           "fontWeight": "normal"
+                        },
+                        {
+                          "id": "R62OIX",
+                          "type": "ref",
+                          "ref": "X:CrS3L",
+                          "name": "Capabilities",
+                          "width": "fill_container",
+                          "descendants": {
+                            "X:a78kl": {
+                              "content": "Capabilities",
+                              "fontFamily": "$font-sans"
+                            },
+                            "X:pzw5I": {
+                              "height": 64,
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                8,
+                                10
+                              ],
+                              "fill": "$nova-input-bg"
+                            },
+                            "X:S4qWY": {
+                              "content": "Reviews diffs and screenshots for accessibility and keyboard regressions. Reports findings to the requester. Does not change code.",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
                         },
                         {
                           "type": "frame",
@@ -117127,7 +118397,7 @@
                   ],
                   "descendants": {
                     "X:qYQHc": {
-                      "content": "Placement",
+                      "content": "Sync & placement",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -117286,7 +118556,7 @@
                               "fill": "$nova-input-bg"
                             },
                             "X:S4qWY": {
-                              "content": "Route webhook delivery and retry work to Worker. Send UI changes to Builder. Eli repairs failing checks on his own assignments. Ask Jonas when scope or ownership is unclear.",
+                              "content": "Route webhook delivery and retry work to Worker. Send UI changes to Builder. Eli repairs failing checks on their own assignments. Ask Jonas when scope or ownership is unclear.",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
                               "fontFamily": "$font-sans"
@@ -117383,10 +118653,10 @@
                                   "id": "hRbvM",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Eli · Builder",
+                                  "name": "Eli · Repairs",
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Eli · Builder",
+                                      "content": "Eli · Repairs",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -118245,7 +119515,7 @@
                   ],
                   "descendants": {
                     "X:qYQHc": {
-                      "content": "Placement",
+                      "content": "Sync & placement",
                       "fontFamily": "$font-sans"
                     }
                   }
@@ -118332,7 +119602,7 @@
                           "type": "ref",
                           "ref": "X:c8fiq",
                           "name": "Enable routing",
-                          "opacity": 0.5,
+                          "opacity": 1,
                           "descendants": {
                             "X:AgS9m": {
                               "width": 32,
@@ -118350,30 +119620,13 @@
                           }
                         },
                         {
-                          "id": "uQU5Z",
+                          "id": "WIsst",
                           "type": "ref",
-                          "ref": "X:CrS3L",
-                          "name": "Complete replacement guidance",
-                          "width": "fill_container",
-                          "opacity": 0.5,
+                          "ref": "X:J7Uph",
+                          "name": "Replace routing guidance",
                           "descendants": {
-                            "X:a78kl": {
-                              "content": "Routing guidance · replaces current",
-                              "fontFamily": "$font-sans"
-                            },
-                            "X:pzw5I": {
-                              "height": 72,
-                              "cornerRadius": "$radius-lg",
-                              "padding": [
-                                8,
-                                10
-                              ],
-                              "fill": "$nova-input-bg"
-                            },
-                            "X:S4qWY": {
-                              "content": "Route webhook delivery and retry work to Worker. Send UI changes to Builder. Eli repairs failing checks on his own assignments. Ask Jonas when scope or ownership is unclear.",
-                              "textGrowth": "fixed-width",
-                              "width": "fill_container",
+                            "X:15v9d": {
+                              "content": "Replace routing guidance",
                               "fontFamily": "$font-sans"
                             }
                           }
@@ -118385,7 +119638,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Replaces the saved guidance in full. Guidance is sent to TypeSafe; credentials and transcripts are not.",
+                          "content": "Current guidance is private and never loaded into this form. Last replaced 11:20. Guidance is sent to TypeSafe; credentials and transcripts are not.",
                           "lineHeight": 1.45,
                           "fontFamily": "$font-sans",
                           "fontSize": 12,
@@ -118424,7 +119677,7 @@
                                   "type": "ref",
                                   "ref": "X:J7Uph",
                                   "name": "Mira · Lead",
-                                  "opacity": 0.5,
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
                                       "content": "Mira · Lead",
@@ -118437,7 +119690,7 @@
                                   "type": "ref",
                                   "ref": "X:J7Uph",
                                   "name": "Jonas · Lead",
-                                  "opacity": 0.5,
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
                                       "content": "Jonas · Lead",
@@ -118450,7 +119703,7 @@
                                   "type": "ref",
                                   "ref": "X:J7Uph",
                                   "name": "Nora · Lead",
-                                  "opacity": 0.5,
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
                                       "content": "Nora · Lead",
@@ -118471,11 +119724,11 @@
                                   "id": "zavKC",
                                   "type": "ref",
                                   "ref": "X:ovuDP",
-                                  "name": "Eli · Builder",
-                                  "opacity": 0.5,
+                                  "name": "Eli · Repairs",
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
-                                      "content": "Eli · Builder",
+                                      "content": "Eli · Repairs",
                                       "fontFamily": "$font-sans"
                                     }
                                   }
@@ -118485,7 +119738,7 @@
                                   "type": "ref",
                                   "ref": "X:ovuDP",
                                   "name": "Builder",
-                                  "opacity": 0.5,
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
                                       "content": "Builder",
@@ -118498,7 +119751,7 @@
                                   "type": "ref",
                                   "ref": "X:ovuDP",
                                   "name": "Worker",
-                                  "opacity": 0.5,
+                                  "opacity": 1,
                                   "descendants": {
                                     "X:15v9d": {
                                       "content": "Worker",
@@ -118529,7 +119782,7 @@
                           "ref": "X:A4VOm",
                           "name": "Credential reference change",
                           "width": "fill_container",
-                          "opacity": 0.5,
+                          "opacity": 1,
                           "descendants": {
                             "X:Yd2lV": {
                               "content": "Credential reference change",
@@ -118556,7 +119809,7 @@
                           "fill": "$X:--muted-foreground",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Only an env:NAME reference is accepted. Its value stays server-side.",
+                          "content": "Only an env:NAME reference is accepted. Its value stays server-side. Save is available once something changes.",
                           "lineHeight": 1.45,
                           "fontFamily": "$font-sans",
                           "fontSize": 12,
@@ -118588,29 +119841,6 @@
                                 },
                                 "X:8tnXG": {
                                   "content": "Save routing",
-                                  "fontFamily": "$font-sans"
-                                }
-                              }
-                            },
-                            {
-                              "id": "zSrtw",
-                              "type": "ref",
-                              "ref": "X:C10zH",
-                              "name": "Review latest routing revision",
-                              "cornerRadius": "$radius-lg",
-                              "padding": [
-                                6,
-                                10
-                              ],
-                              "gap": 6,
-                              "effect": [],
-                              "fill": "$nova-outline-bg",
-                              "descendants": {
-                                "X:l8v2I": {
-                                  "enabled": false
-                                },
-                                "X:poRwU": {
-                                  "content": "Review latest routing revision",
                                   "fontFamily": "$font-sans"
                                 }
                               }
@@ -119220,7 +120450,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Chris Bennett ⌄ → Runtime",
+              "content": "Settings / Runtime",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 12,
@@ -119779,7 +121009,7 @@
                               "id": "rT5Ys",
                               "type": "ref",
                               "ref": "X:C10zH",
-                              "name": "Stop, Resume, dependencies and Apply",
+                              "name": "Task controls",
                               "cornerRadius": "$radius-lg",
                               "padding": [
                                 6,
@@ -119793,7 +121023,7 @@
                                   "enabled": false
                                 },
                                 "X:poRwU": {
-                                  "content": "Stop, Resume, dependencies and Apply",
+                                  "content": "Task controls",
                                   "fontFamily": "$font-sans"
                                 }
                               }
@@ -119903,11 +121133,11 @@
                               "id": "bzeF8",
                               "type": "ref",
                               "ref": "X:3IiAS",
-                              "name": "Review execution evidence badge",
+                              "name": "Repair recorded badge",
                               "cornerRadius": 9999,
                               "descendants": {
                                 "X:zHpCv": {
-                                  "content": "Review execution evidence",
+                                  "content": "Repair recorded",
                                   "fontWeight": "500",
                                   "fontFamily": "$font-sans"
                                 }
@@ -119950,7 +121180,7 @@
                               "id": "L34uOK",
                               "type": "ref",
                               "ref": "X:C10zH",
-                              "name": "Stop, Resume, dependencies and Apply",
+                              "name": "Task controls",
                               "cornerRadius": "$radius-lg",
                               "padding": [
                                 6,
@@ -119964,7 +121194,7 @@
                                   "enabled": false
                                 },
                                 "X:poRwU": {
-                                  "content": "Stop, Resume, dependencies and Apply",
+                                  "content": "Task controls",
                                   "fontFamily": "$font-sans"
                                 }
                               }
@@ -120043,11 +121273,11 @@
                               "id": "N1UEN",
                               "type": "ref",
                               "ref": "X:3IiAS",
-                              "name": "Review execution evidence badge",
+                              "name": "Execution evidence badge",
                               "cornerRadius": 9999,
                               "descendants": {
                                 "X:zHpCv": {
-                                  "content": "Review execution evidence",
+                                  "content": "Execution evidence",
                                   "fontWeight": "500",
                                   "fontFamily": "$font-sans"
                                 }
@@ -120090,7 +121320,7 @@
                               "id": "JX65F",
                               "type": "ref",
                               "ref": "X:C10zH",
-                              "name": "Stop, Resume, dependencies and Apply",
+                              "name": "Task controls",
                               "cornerRadius": "$radius-lg",
                               "padding": [
                                 6,
@@ -120104,7 +121334,7 @@
                                   "enabled": false
                                 },
                                 "X:poRwU": {
-                                  "content": "Stop, Resume, dependencies and Apply",
+                                  "content": "Task controls",
                                   "fontFamily": "$font-sans"
                                 }
                               }
@@ -120515,7 +121745,7 @@
               "fill": "$X:--muted-foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "Runtime / Relay / RL-31 Restore webhook delivery / A-203",
+              "content": "Settings / Runtime / RL-31 Restore webhook delivery / A-203",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 12,
@@ -121224,19 +122454,6 @@
                               "fontFamily": "$font-sans"
                             }
                           }
-                        },
-                        {
-                          "type": "text",
-                          "id": "NrrH6",
-                          "name": "Entry points",
-                          "fill": "$X:--muted-foreground",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "Entered from Inspect execution / Recovery details in 01 · N9G11A, 49 · oJHx1, 53 · F2OKCj and 25b · CTUzI, or from Runtime → Task recovery destinations.",
-                          "lineHeight": 1.45,
-                          "fontFamily": "$font-sans",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -122350,7 +123567,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "2 · Guided project setup (115–117) — needs review",
+              "content": "2 · Guided project setup (115–117b) — needs review",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 16,
@@ -122420,6 +123637,19 @@
               "fontFamily": "$font-sans",
               "fontSize": 14,
               "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "l6s4nM",
+              "name": "Discovery fallback bullet",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 117b: when discovery is unavailable (no credential or a failed read), setup says why, offers Set discovery credential and accepts typed owner/name and ref. Local checkout verification still applies; linking a GitHub Project waits for discovery.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
             }
           ]
         },
@@ -122464,7 +123694,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Project configuration is split into General / Routing / GitHub source / Placement tabs; the build is one long page. Each section still saves separately against its own version.",
+              "content": "· Project configuration is split into General / Routing / GitHub source / Sync & placement tabs; the build is one long page. Each section saves separately against its own version, and the header says when that section was last saved.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
@@ -122508,6 +123738,19 @@
               "fontFamily": "$font-sans",
               "fontSize": 14,
               "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "YfOjL",
+              "name": "Add and remove bullet",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 119: discovery sources and repository access have Add and Remove. New sources are added inactive; removing all access asks for confirmation (not drawn).",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
             }
           ]
         },
@@ -122539,7 +123782,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· “Reviewer” is a role profile added to show revocation; no new person. Restore = clear Revoke profile and save.",
+              "content": "· Profiles have a name, a summary shown in Settings and routing (Lead, Repairs, Implementation), private instructions and capabilities edited in place. 122 creates a new Tester profile; Reviewer (123) is a revoked role profile and offers Restore profile.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
@@ -122552,7 +123795,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Routing lists every profile as a candidate, matching the build; Reviewer is disabled. Saved state locks the form until Review latest routing revision.",
+              "content": "· Routing lists every profile as a candidate, matching the build; Reviewer is disabled. After a save the form reloads the saved revision: guidance returns to replace-only and Save stays disabled until something changes.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
@@ -122627,7 +123870,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Sign-in bootstrap states (Loading sign-in…, Sign-in service unavailable / Try again); sign-out pending and unknown outcome are described in 113, not drawn.",
+              "content": "· Sign-in bootstrap states (Loading sign-in…, Sign-in service unavailable / Try again); sign-out pending and unknown outcome are described in section 7, not drawn.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
@@ -122692,7 +123935,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Discovery unavailable or credential missing (fallback to typed owner/name and ref) and the open ref dropdown are not drawn.",
+              "content": "· The open ref dropdown is not drawn.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
@@ -122787,6 +124030,94 @@
           "fontFamily": "$font-sans",
           "fontSize": 14,
           "fontWeight": "normal"
+        },
+        {
+          "type": "frame",
+          "id": "XSoth",
+          "name": "7 · Behaviour notes moved out of frames",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": 6,
+          "children": [
+            {
+              "type": "text",
+              "id": "CQB6E",
+              "name": "Heading",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "7 · Behaviour notes moved out of frames",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 16,
+              "fontWeight": "500"
+            },
+            {
+              "type": "text",
+              "id": "Y4SZKF",
+              "name": "Note 1",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 108/110: /login is also the expired-session entry (103 · OwZka). Unsent local drafts were already cleared; signing in reloads authorised context.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "F1At3",
+              "name": "Note 2",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 109/112: a failure clears the password and returns focus to the field. No account or lockout detail is shown.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "C3e246",
+              "name": "Note 3",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 111: the password field and button stay disabled until the request settles.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "g7oO48",
+              "name": "Note 4",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 113: the account menu opens from the sidebar footer over unchanged Overview 01 content. Settings → /app/settings; Runtime → /app/settings/runtime. Sign out ends the session and clears private local state; it shows “Signing out…” while pending, and an unknown outcome reads “Sign-out outcome is unknown. Session status has been checked; review before retrying.”",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "text",
+              "id": "Uf728",
+              "name": "Note 5",
+              "fill": "$X:--foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "· 127: entered from Inspect execution / Recovery details in 01, 49, 53 and 25b, or from Runtime → Task recovery destinations.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            }
+          ]
         }
       ]
     },
@@ -127672,6 +129003,19 @@
                     },
                     {
                       "type": "text",
+                      "id": "k5gxl",
+                      "name": "Entry T6VX5",
+                      "fill": "$X:--muted-foreground",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "117b · First-run setup / discovery unavailable, typed values  ·  T6VX5",
+                      "lineHeight": 1.4,
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
                       "id": "iOv67",
                       "name": "Entry gi83t",
                       "fill": "$X:--muted-foreground",
@@ -127990,6 +129334,1056 @@
                       "fontFamily": "$font-sans",
                       "fontSize": 12,
                       "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "T6VX5",
+      "x": 2932,
+      "y": 39700,
+      "name": "117b · First-run setup / discovery unavailable, typed values",
+      "theme": {
+        "X:Mode": "Dark",
+        "X:Base": "Neutral",
+        "X:Accent": "Default"
+      },
+      "clip": true,
+      "width": 1366,
+      "height": 900,
+      "fill": "$X:--background",
+      "children": [
+        {
+          "id": "voMLi",
+          "type": "ref",
+          "ref": "X:PV1ln",
+          "name": "Sidebar · New project",
+          "height": "fill_container",
+          "width": 224,
+          "theme": {
+            "X:Mode": "Dark",
+            "X:Base": "Neutral",
+            "X:Accent": "Default"
+          },
+          "descendants": {
+            "X:6xhgh": {
+              "gap": 8
+            },
+            "X:u7yK2": {
+              "enabled": false,
+              "width": 32,
+              "height": 32,
+              "cornerRadius": 8
+            },
+            "X:xFmFv": {
+              "content": "Ensemble",
+              "fontFamily": "$font-sans"
+            },
+            "X:f9xLx": {
+              "content": "Personal workspace",
+              "fontSize": 12,
+              "fontFamily": "$font-sans"
+            },
+            "X:DEU9D": {
+              "enabled": false
+            },
+            "X:47U5w": {
+              "type": "frame",
+              "id": "b2Wq3",
+              "name": "Ensemble navigation",
+              "width": "fill_container",
+              "height": "fill_container",
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "id": "zj2kH",
+                  "type": "ref",
+                  "ref": "X:jBcUh",
+                  "name": "Overview",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "cornerRadius": "$radius-md",
+                  "padding": [
+                    6,
+                    8
+                  ],
+                  "descendants": {
+                    "X:r6B2W": {
+                      "icon": "layout-dashboard"
+                    },
+                    "X:0Ru22": {
+                      "content": "Overview",
+                      "fontFamily": "$font-sans"
+                    },
+                    "X:ttBco": {
+                      "enabled": false
+                    }
+                  }
+                },
+                {
+                  "id": "kYpJB",
+                  "type": "ref",
+                  "ref": "X:jBcUh",
+                  "name": "Inbox",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "cornerRadius": "$radius-md",
+                  "padding": [
+                    6,
+                    8
+                  ],
+                  "descendants": {
+                    "X:r6B2W": {
+                      "icon": "inbox"
+                    },
+                    "X:0Ru22": {
+                      "content": "Inbox",
+                      "fontFamily": "$font-sans"
+                    },
+                    "X:ttBco": {
+                      "type": "text",
+                      "id": "VLgLf",
+                      "name": "Unresolved request count",
+                      "fill": "$X:--muted-foreground",
+                      "content": "0",
+                      "fontFamily": "$font-sans",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  }
+                },
+                {
+                  "id": "IZwZM",
+                  "type": "ref",
+                  "ref": "X:jBcUh",
+                  "name": "Tasks",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "cornerRadius": "$radius-md",
+                  "padding": [
+                    6,
+                    8
+                  ],
+                  "descendants": {
+                    "X:r6B2W": {
+                      "icon": "list-todo"
+                    },
+                    "X:0Ru22": {
+                      "content": "Tasks",
+                      "fontFamily": "$font-sans"
+                    },
+                    "X:ttBco": {
+                      "enabled": false
+                    }
+                  }
+                },
+                {
+                  "id": "aaH17",
+                  "type": "ref",
+                  "ref": "X:jBcUh",
+                  "name": "Search",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "cornerRadius": "$radius-md",
+                  "padding": [
+                    6,
+                    8
+                  ],
+                  "descendants": {
+                    "X:r6B2W": {
+                      "icon": "search"
+                    },
+                    "X:0Ru22": {
+                      "content": "Search",
+                      "fontFamily": "$font-sans"
+                    },
+                    "X:ttBco": {
+                      "enabled": false
+                    }
+                  }
+                },
+                {
+                  "id": "QV9Em",
+                  "type": "ref",
+                  "ref": "X:24cM4",
+                  "name": "Projects section",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "descendants": {
+                    "X:pWGDv": {
+                      "content": "Projects",
+                      "fontFamily": "$font-sans"
+                    }
+                  }
+                },
+                {
+                  "id": "ZLEoc",
+                  "type": "ref",
+                  "ref": "X:qCCo8",
+                  "name": "New project",
+                  "width": "fill_container",
+                  "theme": {
+                    "X:Mode": "Dark",
+                    "X:Base": "Neutral",
+                    "X:Accent": "Default"
+                  },
+                  "cornerRadius": "$radius-md",
+                  "padding": [
+                    6,
+                    8
+                  ],
+                  "descendants": {
+                    "X:r6B2W": {
+                      "icon": "plus"
+                    },
+                    "X:0Ru22": {
+                      "content": "New project",
+                      "fontFamily": "$font-sans"
+                    },
+                    "X:ttBco": {
+                      "enabled": false
+                    }
+                  }
+                }
+              ]
+            },
+            "X:q9yup": {
+              "width": "fill_container",
+              "gap": 8
+            },
+            "X:sODDz": {
+              "id": "PR28i",
+              "type": "ref",
+              "ref": "X:DpPVg",
+              "name": "Operator avatar",
+              "width": 28,
+              "height": 28,
+              "descendants": {
+                "X:wVlpW": {
+                  "content": "CB",
+                  "fontSize": 12,
+                  "fontFamily": "$font-sans"
+                }
+              }
+            },
+            "X:gJPjN": {
+              "content": "Chris Bennett",
+              "fontFamily": "$font-sans"
+            },
+            "X:9biS6": {
+              "enabled": false
+            }
+          }
+        },
+        {
+          "type": "frame",
+          "id": "pILpe",
+          "name": "Main content",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "gap": 12,
+          "padding": 20,
+          "children": [
+            {
+              "type": "text",
+              "id": "Srz5r",
+              "name": "Breadcrumb",
+              "fill": "$X:--muted-foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Settings / Projects / Create project",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "T5O0n",
+              "name": "Page title",
+              "width": "fill_container",
+              "gap": 8,
+              "justifyContent": "space_between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "vdsdX",
+                  "name": "Title",
+                  "fill": "$X:--foreground",
+                  "content": "Set up your first project",
+                  "lineHeight": 1.45,
+                  "fontFamily": "$font-sans",
+                  "fontSize": 18,
+                  "fontWeight": "600"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "Pop51",
+              "name": "Introduction",
+              "fill": "$X:--muted-foreground",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "No projects yet. A project groups tasks with a lead, instructions and explicit repository access.",
+              "lineHeight": 1.45,
+              "fontFamily": "$font-sans",
+              "fontSize": 14,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "Iwgx0",
+              "name": "Setup columns",
+              "width": "fill_container",
+              "gap": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "gunet",
+                  "name": "Setup form",
+                  "width": 560,
+                  "layout": "vertical",
+                  "gap": 12,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "Hlamz",
+                      "name": "Step 1 · Project and lead",
+                      "width": "fill_container",
+                      "fill": "$X:--card",
+                      "cornerRadius": "$radius-xl",
+                      "stroke": "$X:--border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "gap": 12,
+                      "padding": 16,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "ia8fY",
+                          "name": "Step heading",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "bqQAr",
+                              "name": "Heading",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "1 · Project and lead",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 16,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "DU6hJ",
+                          "name": "Name and lead",
+                          "width": "fill_container",
+                          "gap": 12,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "fPsvz",
+                              "name": "Name field",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "id": "chies",
+                                  "type": "ref",
+                                  "ref": "X:uHFal",
+                                  "name": "Project name",
+                                  "width": "fill_container",
+                                  "descendants": {
+                                    "X:BX0XX": {
+                                      "content": "Project name",
+                                      "fontFamily": "$font-sans"
+                                    },
+                                    "X:i0Z3E": {
+                                      "cornerRadius": "$radius-lg",
+                                      "padding": [
+                                        6,
+                                        10
+                                      ],
+                                      "fill": "$nova-input-bg"
+                                    },
+                                    "X:SDRKn": {
+                                      "content": "Atlas",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "K4xm5",
+                              "name": "Lead field",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "id": "xXsOj",
+                                  "type": "ref",
+                                  "ref": "X:A4VOm",
+                                  "name": "Lead profile",
+                                  "width": "fill_container",
+                                  "descendants": {
+                                    "X:Yd2lV": {
+                                      "content": "Lead profile",
+                                      "fontFamily": "$font-sans"
+                                    },
+                                    "X:Ch62V": {
+                                      "cornerRadius": "$radius-lg",
+                                      "padding": [
+                                        6,
+                                        10
+                                      ],
+                                      "fill": "$nova-input-bg"
+                                    },
+                                    "X:V1STL": {
+                                      "content": "Unconfigured",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "A1qrYw",
+                                  "name": "Lead profile help",
+                                  "fill": "$X:--muted-foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "No lead profiles yet. Leave the lead unconfigured or create one; tasks wait for a lead before starting.",
+                                  "lineHeight": 1.45,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "id": "zpgaU",
+                          "type": "ref",
+                          "ref": "X:C10zH",
+                          "name": "Create a lead profile",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "effect": [],
+                          "fill": "$nova-outline-bg",
+                          "descendants": {
+                            "X:l8v2I": {
+                              "enabled": false
+                            },
+                            "X:poRwU": {
+                              "content": "Create a lead profile",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "m9RO9",
+                      "name": "Step 2 · Instructions",
+                      "width": "fill_container",
+                      "fill": "$X:--card",
+                      "cornerRadius": "$radius-xl",
+                      "stroke": "$X:--border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "gap": 12,
+                      "padding": 16,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "ikX2P",
+                          "name": "Step heading",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "nymDr",
+                              "name": "Heading",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "2 · Instructions",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 16,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "ZHeX0",
+                              "name": "Step description",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Private project instructions. Assignments capture them when they start.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "id": "fLUMa",
+                          "type": "ref",
+                          "ref": "X:CrS3L",
+                          "name": "Instructions",
+                          "width": "fill_container",
+                          "descendants": {
+                            "X:a78kl": {
+                              "content": "Instructions",
+                              "fontFamily": "$font-sans"
+                            },
+                            "X:pzw5I": {
+                              "height": 72,
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                8,
+                                10
+                              ],
+                              "fill": "$nova-input-bg"
+                            },
+                            "X:S4qWY": {
+                              "content": "Ship accessible UI changes for the Atlas app. Every change needs a keyboard check.",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "OFJpZ",
+                      "name": "What creation does",
+                      "width": "fill_container",
+                      "fill": "$X:--muted",
+                      "cornerRadius": "$radius-xl",
+                      "stroke": "$X:--border",
+                      "layout": "vertical",
+                      "gap": 12,
+                      "padding": 16,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Xp5wv",
+                          "name": "Heading",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "What creation does",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "text",
+                          "id": "B7zA1",
+                          "name": "· The project starts Paused. Creating it starts no execution",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "· The project starts Paused. Creating it starts no execution.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "HHCkI",
+                          "name": "· Resume is a separate decision in project configuration.",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "· Resume is a separate decision in project configuration.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "J7H2X",
+                          "name": "· Routing, GitHub discovery, credential references and capac",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "· Routing, GitHub discovery, credential references and capacity overrides are configured after creation.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "b4VUsM",
+                          "name": "· Repository access is exactly the list in step 3.",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "· Repository access is exactly the list in step 3.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "LWs9a",
+                          "name": "· Discovery reads GitHub only. Nothing is imported until a s",
+                          "fill": "$X:--foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "· Discovery reads GitHub only. Nothing is imported until a source is previewed and activated.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 14,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "A9l9D",
+                      "name": "Actions",
+                      "width": "fill_container",
+                      "gap": 8,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "id": "cVPHR",
+                          "type": "ref",
+                          "ref": "X:VSnC2",
+                          "name": "Create paused project",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "descendants": {
+                            "X:8jVfJ": {
+                              "enabled": false
+                            },
+                            "X:8tnXG": {
+                              "content": "Create paused project",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        },
+                        {
+                          "id": "I6HX5Q",
+                          "type": "ref",
+                          "ref": "X:C10zH",
+                          "name": "Cancel",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "effect": [],
+                          "fill": "$nova-outline-bg",
+                          "descendants": {
+                            "X:l8v2I": {
+                              "enabled": false
+                            },
+                            "X:poRwU": {
+                              "content": "Cancel",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "RlDkp",
+                  "name": "After creation",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 12,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "gnaWw",
+                      "name": "Step 3 · Repository access · optional",
+                      "width": "fill_container",
+                      "fill": "$X:--card",
+                      "cornerRadius": "$radius-xl",
+                      "stroke": "$X:--border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "gap": 12,
+                      "padding": 16,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "Thy5T",
+                          "name": "Step heading",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "NC2ZP",
+                              "name": "Heading",
+                              "fill": "$X:--foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "3 · Repository and GitHub · optional",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 16,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "eQ58H",
+                              "name": "Step description",
+                              "fill": "$X:--muted-foreground",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "GitHub discovery is unavailable: no discovery credential is configured, so repositories, refs and GitHub Projects can't be listed. Type the repository and ref; the service still verifies the local checkout. Repository access is exactly what you add here.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "$font-sans",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "id": "bf6G5",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Set discovery credential",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Set discovery credential",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "Yg7QH",
+                          "name": "Repository and ref",
+                          "width": "fill_container",
+                          "gap": 12,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "J7eu1U",
+                              "name": "Repository column",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "id": "j4704",
+                                  "type": "ref",
+                                  "ref": "X:uHFal",
+                                  "name": "Repository (owner/name)",
+                                  "width": "fill_container",
+                                  "descendants": {
+                                    "X:BX0XX": {
+                                      "content": "Repository (owner/name)",
+                                      "fontFamily": "$font-sans"
+                                    },
+                                    "X:i0Z3E": {
+                                      "cornerRadius": "$radius-lg",
+                                      "padding": [
+                                        6,
+                                        10
+                                      ],
+                                      "fill": "$nova-input-bg"
+                                    },
+                                    "X:SDRKn": {
+                                      "content": "acme/atlas",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "WOzrm",
+                                  "name": "Repository help",
+                                  "fill": "$X:--muted-foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Typed · not listed from GitHub",
+                                  "lineHeight": 1.45,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "HBtH1",
+                              "name": "Ref column",
+                              "width": 220,
+                              "layout": "vertical",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "id": "bXW1k",
+                                  "type": "ref",
+                                  "ref": "X:uHFal",
+                                  "name": "Ref",
+                                  "width": "fill_container",
+                                  "descendants": {
+                                    "X:BX0XX": {
+                                      "content": "Ref",
+                                      "fontFamily": "$font-sans"
+                                    },
+                                    "X:i0Z3E": {
+                                      "cornerRadius": "$radius-lg",
+                                      "padding": [
+                                        6,
+                                        10
+                                      ],
+                                      "fill": "$nova-input-bg"
+                                    },
+                                    "X:SDRKn": {
+                                      "content": "main",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "OZK3i",
+                                  "name": "Ref help",
+                                  "fill": "$X:--muted-foreground",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "Typed · checked in the local checkout",
+                                  "lineHeight": 1.45,
+                                  "fontFamily": "$font-sans",
+                                  "fontSize": 12,
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "MV4Tg",
+                          "name": "Local path",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "alignItems": "end",
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "X0XFZ",
+                              "name": "Path column",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 6,
+                              "children": [
+                                {
+                                  "id": "sKbju",
+                                  "type": "ref",
+                                  "ref": "X:uHFal",
+                                  "name": "Local repository path",
+                                  "width": "fill_container",
+                                  "descendants": {
+                                    "X:BX0XX": {
+                                      "content": "Local repository path",
+                                      "fontFamily": "$font-sans"
+                                    },
+                                    "X:i0Z3E": {
+                                      "cornerRadius": "$radius-lg",
+                                      "padding": [
+                                        6,
+                                        10
+                                      ],
+                                      "fill": "$nova-input-bg"
+                                    },
+                                    "X:SDRKn": {
+                                      "content": "~/src/atlas",
+                                      "fontFamily": "$font-sans"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "leJV8",
+                              "type": "ref",
+                              "ref": "X:C10zH",
+                              "name": "Choose folder…",
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "gap": 6,
+                              "effect": [],
+                              "fill": "$nova-outline-bg",
+                              "descendants": {
+                                "X:l8v2I": {
+                                  "enabled": false
+                                },
+                                "X:poRwU": {
+                                  "content": "Choose folder…",
+                                  "fontFamily": "$font-sans"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "XZJvn",
+                          "name": "Local path verification",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Verified on this Mac: git checkout · origin acme/atlas · main available.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "id": "xQd2h",
+                          "type": "ref",
+                          "ref": "X:A4VOm",
+                          "name": "GitHub Project",
+                          "width": "fill_container",
+                          "opacity": 0.5,
+                          "descendants": {
+                            "X:Yd2lV": {
+                              "content": "GitHub Project",
+                              "fontFamily": "$font-sans"
+                            },
+                            "X:Ch62V": {
+                              "cornerRadius": "$radius-lg",
+                              "padding": [
+                                6,
+                                10
+                              ],
+                              "fill": "$nova-input-bg"
+                            },
+                            "X:V1STL": {
+                              "content": "Unavailable without discovery",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        },
+                        {
+                          "type": "text",
+                          "id": "jcPqK",
+                          "name": "GitHub Project help",
+                          "fill": "$X:--muted-foreground",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "GitHub Projects can't be listed without discovery. Set the discovery credential in Settings, then link a Project in project configuration.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "$font-sans",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "id": "ynf1K",
+                          "type": "ref",
+                          "ref": "X:C10zH",
+                          "name": "Add another repository",
+                          "cornerRadius": "$radius-lg",
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "gap": 6,
+                          "effect": [],
+                          "fill": "$nova-outline-bg",
+                          "descendants": {
+                            "X:l8v2I": {
+                              "enabled": false
+                            },
+                            "X:poRwU": {
+                              "content": "Add another repository",
+                              "fontFamily": "$font-sans"
+                            }
+                          }
+                        }
+                      ]
                     }
                   ]
                 }
