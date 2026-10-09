@@ -379,3 +379,301 @@ test("search deduplicates complete pages and rejects truncation, incomplete resu
   assert.equal(missing.complete, false);
   assert.equal(missing.reason, "missing-credential");
 });
+
+const repoSelection = {
+  id: "repo",
+  kind: "repository" as const,
+  repositoryId: "R_1",
+  owner: "org",
+  name: "repo",
+};
+const limitedReader = (response: () => Response) =>
+  new GitHubHttpSourceReader("fixture-token", async () => response());
+
+test("403 with an exhausted limit or 429 with retry-after reports a rate-limited incomplete read that names when to resume", async () => {
+  const reset = Math.ceil(Date.now() / 1000) + 120;
+  const exhausted = await limitedReader(
+    () =>
+      new Response("limit", {
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(reset),
+        },
+      }),
+  ).readSelection(repoSelection);
+  assert.equal(exhausted.complete, false);
+  assert.equal(exhausted.reason, "rate-limited");
+  assert.equal(
+    exhausted.complete === false ? exhausted.resumeAt : undefined,
+    reset * 1000,
+  );
+
+  const before = Date.now();
+  const retry = await limitedReader(
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(retry.reason, "rate-limited");
+  const resumeAt = retry.complete === false ? (retry.resumeAt ?? 0) : 0;
+  assert.ok(resumeAt >= before + 30_000 && resumeAt <= after + 30_000);
+
+  const both = await limitedReader(
+    () =>
+      new Response("limit", {
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "4000",
+          "retry-after": "30",
+        },
+      }),
+  ).readSelection(repoSelection);
+  assert.ok(
+    (both.complete === false ? (both.resumeAt ?? 0) : 0) >= Date.now() + 29_000,
+  );
+});
+
+test("a rate-limit pause from external headers is capped at one hour", async () => {
+  const before = Date.now();
+  const result = await limitedReader(
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "999999999" },
+      }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(result.reason, "rate-limited");
+  const resumeAt = result.complete === false ? (result.resumeAt ?? 0) : 0;
+  assert.ok(resumeAt >= before + 3_600_000 && resumeAt <= after + 3_600_000);
+});
+
+test("a 403 without rate-limit headers stays an http failure", async () => {
+  const denied = await limitedReader(
+    () => new Response("denied", { status: 403 }),
+  ).readSelection(repoSelection);
+  assert.equal(denied.complete, false);
+  assert.equal(denied.reason, "http-403");
+  assert.equal("resumeAt" in denied, false);
+  const remaining = await limitedReader(
+    () =>
+      new Response("denied", {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "42" },
+      }),
+  ).readSelection(repoSelection);
+  assert.equal(remaining.reason, "http-403");
+});
+
+test("empty, negative or past rate-limit deadlines fall back to one minute", async () => {
+  for (const headers of [
+    { "retry-after": "" },
+    { "retry-after": "-5" },
+    { "retry-after": "0" },
+    { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1" },
+  ]) {
+    const before = Date.now();
+    const result = await limitedReader(
+      () => new Response("limited", { status: 429, headers }),
+    ).readSelection(repoSelection);
+    const after = Date.now();
+    const label = JSON.stringify(headers);
+    assert.equal(result.reason, "rate-limited", label);
+    assert.ok(result.resumeAt !== undefined, label);
+    assert.ok(result.resumeAt >= before + 60_000, label);
+    assert.ok(result.resumeAt <= after + 60_000, label);
+  }
+});
+
+test("a 429 without rate-limit headers pauses for GitHub's one-minute minimum", async () => {
+  const before = Date.now();
+  const result = await limitedReader(
+    () => new Response("too many requests", { status: 429 }),
+  ).readSelection(repoSelection);
+  const after = Date.now();
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "rate-limited");
+  assert.ok(result.resumeAt !== undefined);
+  assert.ok(result.resumeAt >= before + 60_000);
+  assert.ok(result.resumeAt <= after + 60_000);
+});
+
+test("a rate limit while checking a blocker is reported as rate-limited, not as an invalid blocker", async () => {
+  const reader = new GitHubHttpSourceReader("fixture-token", async (input) => {
+    const url = String(input);
+    if (url === "https://api.github.com/repos/org/repo")
+      return new Response(
+        JSON.stringify({ node_id: "R_1", full_name: "org/repo" }),
+      );
+    if (url.includes("/dependencies/blocked_by"))
+      return new Response(JSON.stringify([issue(7, "B_7")]));
+    return new Response("slow down", {
+      status: 429,
+      headers: { "retry-after": "30" },
+    });
+  });
+  const result = await reader.readBlockers({
+    nodeId: "I_1",
+    repositoryId: "R_1",
+    repositoryName: "org/repo",
+    number: 1,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "rate-limited");
+  assert.ok((result.resumeAt ?? 0) > Date.now());
+});
+
+test("search items sharing a repository look the repository up once", async () => {
+  const requests: string[] = [];
+  const reader = new GitHubHttpSourceReader("fixture-token", async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url === "https://api.github.com/repos/org/repo")
+      return new Response(
+        JSON.stringify({ node_id: "R_1", full_name: "org/repo" }),
+      );
+    return new Response(
+      JSON.stringify({
+        total_count: 3,
+        incomplete_results: false,
+        items: [issue(1), issue(2), issue(3)],
+      }),
+    );
+  });
+  const snapshot = await reader.readSelection({
+    id: "search",
+    kind: "search",
+    query: "repo:org/repo",
+  });
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.issues.length, 3);
+  assert.equal(
+    requests.filter((url) => url === "https://api.github.com/repos/org/repo")
+      .length,
+    1,
+  );
+});
+
+const redirect = (status: number, location: string) =>
+  new Response(null, { status, headers: { location } });
+
+function redirectingReader(
+  routes: Record<string, () => Response>,
+  calls: Array<{
+    url: string;
+    method?: string;
+    redirect?: RequestRedirect;
+  }> = [],
+) {
+  const reader = new GitHubHttpSourceReader(
+    "fixture-token",
+    async (input, init) => {
+      const url = String(input);
+      calls.push({
+        url,
+        ...(init?.method ? { method: init.method } : {}),
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+      });
+      const route = routes[url];
+      if (!route) throw new Error(`unexpected request ${url}`);
+      return route();
+    },
+  );
+  return { reader, calls };
+}
+
+const repositoryBody = () =>
+  new Response(JSON.stringify({ node_id: "R_1", full_name: "org/repo" }));
+const emptyIssues = () => new Response("[]");
+const issuesUrl =
+  "https://api.github.com/repos/org/repo/issues?state=all&per_page=100";
+
+test("a GET follows up to three same-origin redirects and a fourth fails", async () => {
+  const calls: Array<{ url: string; redirect?: RequestRedirect }> = [];
+  const routes = {
+    "https://api.github.com/repos/org/repo": () =>
+      redirect(301, "/repositories/1"),
+    "https://api.github.com/repositories/1": () =>
+      redirect(302, "https://api.github.com/repositories/2"),
+    "https://api.github.com/repositories/2": () =>
+      redirect(307, "/repositories/3"),
+    "https://api.github.com/repositories/3": repositoryBody,
+    [issuesUrl]: emptyIssues,
+  };
+  const followed = await redirectingReader(routes, calls).reader.readSelection(
+    repoSelection,
+  );
+  assert.equal(followed.complete, true);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      "https://api.github.com/repos/org/repo",
+      "https://api.github.com/repositories/1",
+      "https://api.github.com/repositories/2",
+      "https://api.github.com/repositories/3",
+      issuesUrl,
+    ],
+  );
+  assert.ok(calls.every((call) => call.redirect === "manual"));
+
+  const tooMany = await redirectingReader({
+    ...routes,
+    "https://api.github.com/repositories/3": () =>
+      redirect(301, "/repositories/4"),
+    "https://api.github.com/repositories/4": repositoryBody,
+  }).reader.readSelection(repoSelection);
+  assert.equal(tooMany.complete, false);
+  assert.equal(tooMany.reason, "invalid-provider-origin");
+});
+
+test("a GET refuses a redirect away from the API origin without sending the credential there", async () => {
+  for (const location of [
+    "https://evil.example/repos/org/repo",
+    "http://api.github.com/repos/org/repo",
+    "https://api.github.com.evil.example/repos/org/repo",
+  ]) {
+    const { reader, calls } = redirectingReader({
+      "https://api.github.com/repos/org/repo": () => redirect(302, location),
+    });
+    const result = await reader.readSelection(repoSelection);
+    assert.equal(result.complete, false, location);
+    assert.equal(result.reason, "invalid-provider-origin", location);
+    assert.equal(calls.length, 1, location);
+  }
+});
+
+test("a redirect without a Location is an error, not an empty success", async () => {
+  const { reader } = redirectingReader({
+    "https://api.github.com/repos/org/repo": () =>
+      new Response(null, { status: 301 }),
+  });
+  const result = await reader.readSelection(repoSelection);
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "invalid-provider-origin");
+});
+
+test("a POST refuses redirects instead of replaying the body", async () => {
+  const { reader, calls } = redirectingReader({
+    "https://api.github.com/graphql": () =>
+      redirect(307, "https://api.github.com/graphql"),
+  });
+  const result = await reader.readSelection({
+    id: "project",
+    kind: "project",
+    projectNodeId: "P_1",
+    filter: "status:ready",
+  });
+  assert.equal(result.complete, false);
+  assert.deepEqual(calls, [
+    {
+      url: "https://api.github.com/graphql",
+      method: "POST",
+      redirect: "error",
+    },
+  ]);
+});

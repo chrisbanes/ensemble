@@ -266,6 +266,7 @@ export class StandaloneService {
   private power: ExecutionPower | undefined;
   private powerPollTimer: NodeJS.Timeout | undefined;
   private runtime: Runtime | undefined;
+  private runtimeUnavailableSince: number | undefined;
   private conversationHistory: ConversationHistoryStore | undefined;
   private readonly conversationCaptures = new Map<
     string,
@@ -534,6 +535,11 @@ export class StandaloneService {
       context.spawnEnvironment();
       const runtime = this.runtimeFactory(context);
       this.runtime = runtime;
+      this.runtimeUnavailableSince = undefined;
+      runtime.onFailure?.(() => {
+        if (this.runtime === runtime)
+          this.runtimeUnavailableSince ??= Date.now();
+      });
       this.supervisor = new ExecutionSupervisor(
         state,
         runtime,
@@ -634,7 +640,7 @@ export class StandaloneService {
         (powerOptions?.eventSource !== undefined ||
           runtime instanceof CodexRuntime);
       if (powerEnabled) {
-        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 5000;
+        const pollIntervalMs = powerOptions?.pollIntervalMs ?? 60_000;
         if (
           !Number.isSafeInteger(pollIntervalMs) ||
           pollIntervalMs <= 0 ||
@@ -670,7 +676,7 @@ export class StandaloneService {
       this.scheduler = scheduler;
       scheduler.start();
       await this.wakeScheduler();
-      const githubInterval = this.options.github?.intervalMs ?? 60_000;
+      const githubInterval = this.options.github?.intervalMs ?? 300_000;
       if (
         !Number.isSafeInteger(githubInterval) ||
         githubInterval < 1000 ||
@@ -1066,6 +1072,15 @@ export class StandaloneService {
 
   powerStatus() {
     return this.power?.status() ?? null;
+  }
+
+  /** In-memory only: a manual service restart is the recovery path. */
+  runtimeStatus():
+    | { state: "available" }
+    | { state: "unavailable"; since: number } {
+    return this.runtimeUnavailableSince === undefined
+      ? { state: "available" }
+      : { state: "unavailable", since: this.runtimeUnavailableSince };
   }
 
   resolveHeldExecution(receipt: RecoveryReceipt) {
@@ -3315,16 +3330,12 @@ export class StandaloneService {
           }).reasons;
           if (
             this.requireSchedulerStore()
-              .list()
+              .heldWorkIds(assignmentId, request.workId)
               .some(
-                (older) =>
-                  older.assignmentId === assignmentId &&
-                  older.workId !== request.workId &&
-                  older.state === "held" &&
-                  this.coordination?.recoveryDispositionForWork(
-                    older.workId,
-                  ) === "operator-reconciled" &&
-                  !this.coordination.hasRecoveryContinuation(older.workId),
+                (olderWorkId) =>
+                  this.coordination?.recoveryDispositionForWork(olderWorkId) ===
+                    "operator-reconciled" &&
+                  !this.coordination.hasRecoveryContinuation(olderWorkId),
               )
           )
             reasons.push("recovery-continuation-unresolved");
@@ -3437,6 +3448,23 @@ export class StandaloneService {
         !generation.accepting
       )
         return;
+      if (this.runtimeUnavailableSince !== undefined) {
+        // Queued work stays queued: nothing is admitted or held until restart.
+        const reason = "Codex runtime unavailable; restart the service";
+        state.wait(intent.id, reason);
+        store.wait(request.workId, reason);
+        return;
+      }
+      // A sleep/wake during a turn that ended before now must be observed
+      // first. No await may separate this check from state.begin.
+      const power = this.power;
+      if (power && !power.observedForAdmission()) {
+        const reason = "Waiting for power-event observation";
+        state.wait(intent.id, reason);
+        store.wait(request.workId, reason);
+        this.pollPowerThenWake(power, generation);
+        return;
+      }
       const admitted = state.begin(intent.id, {
         projectId: request.projectId,
         requestSequence: store.sequence(request.workId),
@@ -3467,6 +3495,17 @@ export class StandaloneService {
       return;
     }
     this.startExecution(request, intent, workspaceKey, previous);
+  }
+
+  /** Never awaited by admission: admissionResumed wakes the scheduler drain. */
+  private pollPowerThenWake(
+    power: ExecutionPower,
+    generation: ServiceGeneration,
+  ): void {
+    this.observeBackgroundFailure(generation, "power-poll", async () => {
+      await power.poll();
+      await this.wakeScheduler(0, generation);
+    });
   }
 
   private startExecution(

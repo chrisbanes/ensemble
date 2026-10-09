@@ -65,6 +65,10 @@ export const workspaceSchema = envelope(
     .object({
       projects: z.array(projectSummarySchema),
       profiles: z.array(profileSummarySchema),
+      runtime: z.discriminatedUnion("state", [
+        z.object({ state: z.literal("available") }).strict(),
+        z.object({ state: z.literal("unavailable"), since: time }).strict(),
+      ]),
     })
     .strict(),
 );

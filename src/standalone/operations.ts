@@ -15,7 +15,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join } from "node:path";
 import { backup, DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { z } from "zod";
 import {
@@ -25,6 +25,7 @@ import {
   assertCanonicalDirectoryPath,
   StandaloneDataDirectory,
 } from "./data-directory.js";
+import { isWithin } from "./workspace-inspection.js";
 
 const SNAPSHOT_FORMAT = "ensemble-sqlite-snapshot-v1";
 const DATABASE_NAME = "standalone.sqlite";
@@ -236,11 +237,6 @@ function canonicalTargetPath(
     label,
     allowMissingLeaf ? "leaf" : "none",
   );
-}
-
-function isWithin(parent: string, candidate: string): boolean {
-  const path = relative(parent, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== "..");
 }
 
 function assertDisjoint(left: string, right: string): void {

@@ -1,8 +1,9 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { relative, resolve, isAbsolute } from "node:path";
+import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { ReviewMetadata } from "../core/task-review.js";
+import { isWithin } from "./workspace-inspection.js";
 export class ArtifactUnavailable extends Error {
   constructor(
     readonly reason: "unavailable" | "redacted" | "mismatch" | "unsupported",
@@ -16,10 +17,6 @@ export interface PreviewBinding {
   workspace: string;
   identity: string;
 }
-const within = (root: string, path: string) => {
-  const r = relative(root, path);
-  return r !== "" && !isAbsolute(r) && r !== ".." && !r.startsWith("../");
-};
 const same = (
   a: { ino: number; dev: number; size: number; mtimeMs: number },
   b: { ino: number; dev: number; size: number; mtimeMs: number },
@@ -45,13 +42,14 @@ export async function previewRecordedArtifact(
     rootStat = await lstat(root),
     path = resolve(root, artifact.file.relativePath);
   if (
-    !within(root, path) ||
+    path === root ||
+    !isWithin(root, path) ||
     !rootStat.isDirectory() ||
     rootStat.isSymbolicLink()
   )
     throw new ArtifactUnavailable("unavailable");
   const canonical = await realpath(path);
-  if (canonical !== path || !within(root, canonical))
+  if (canonical !== path || !isWithin(root, canonical))
     throw new ArtifactUnavailable("unavailable");
   const before = await lstat(path);
   if (

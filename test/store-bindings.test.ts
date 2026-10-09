@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { Store } from "../src/core/store.js";
+import { DeliveryStore } from "../src/core/delivery.js";
+import { type Database, Store, transaction } from "../src/core/store.js";
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-bindings-"));
@@ -103,4 +104,41 @@ test("newer database schemas are rejected without changing records", () => {
   } finally {
     db.close();
   }
+});
+
+test("a failed rollback never replaces the original transaction error", () => {
+  const statements: string[] = [];
+  const db: Database = {
+    exec(sql) {
+      statements.push(sql);
+      if (sql === "ROLLBACK")
+        throw new Error("cannot rollback: no transaction");
+    },
+    prepare() {
+      throw new Error("unused");
+    },
+  };
+  const original = new Error("write failed");
+  const failing = () => {
+    throw original;
+  };
+
+  assert.throws(
+    () => transaction(db, failing),
+    (error) => error === original,
+  );
+  assert.deepEqual(statements, ["BEGIN IMMEDIATE", "ROLLBACK"]);
+
+  // The delivery store used to carry its own unguarded copy of this helper.
+  assert.throws(
+    () => new DeliveryStore(db).transaction(failing),
+    (error) => error === original,
+  );
+
+  statements.length = 0;
+  assert.equal(
+    transaction(db, () => 7),
+    7,
+  );
+  assert.deepEqual(statements, ["BEGIN IMMEDIATE", "COMMIT"]);
 });

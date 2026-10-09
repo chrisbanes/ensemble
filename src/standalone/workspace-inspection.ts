@@ -189,7 +189,7 @@ type IgnoreResult =
   | { complete: true; ignored: Set<string> }
   | { complete: false };
 
-const within = (root: string, candidate: string) => {
+export const isWithin = (root: string, candidate: string) => {
   const path = relative(root, candidate);
   return (
     path === "" ||
@@ -270,7 +270,7 @@ const normalizedFilesystemPath = (path: string) =>
     .join(sep);
 
 const withinNormalized = (root: string, candidate: string) =>
-  within(normalizedFilesystemPath(root), normalizedFilesystemPath(candidate));
+  isWithin(normalizedFilesystemPath(root), normalizedFilesystemPath(candidate));
 
 type CanonicalPath = { path: string; complete: boolean };
 
@@ -313,25 +313,25 @@ async function createPathExclusion(
   );
   const controls = allControls.filter(
     (control) =>
-      within(absoluteRoot, control.path) ||
+      isWithin(absoluteRoot, control.path) ||
       withinNormalized(absoluteRoot, control.path) ||
       (canonicalRoot?.complete === true &&
         control.canonical?.complete === true &&
-        within(canonicalRoot.path, control.canonical.path)),
+        isWithin(canonicalRoot.path, control.canonical.path)),
   );
   return async (
     path: string,
     options: { fromDirectoryEntry?: boolean } = {},
   ) => {
     const absolutePath = resolve(path);
-    if (!within(absoluteRoot, absolutePath)) return true;
+    if (!isWithin(absoluteRoot, absolutePath)) return true;
     const local = relative(absoluteRoot, absolutePath);
     if ((local ? local.split(sep) : []).some(privateComponent)) return true;
     if (
       controls.some(
         (control) =>
-          within(absoluteRoot, control.path) &&
-          within(control.path, absolutePath),
+          isWithin(absoluteRoot, control.path) &&
+          isWithin(control.path, absolutePath),
       )
     )
       return true;
@@ -351,7 +351,7 @@ async function createPathExclusion(
       }
       if (
         control.canonical.complete &&
-        within(control.canonical.path, candidate.path)
+        isWithin(control.canonical.path, candidate.path)
       )
         return true;
     }
@@ -374,7 +374,7 @@ async function createPathExclusion(
         }
         if (
           control.canonical.complete &&
-          within(control.canonical.path, candidate.path)
+          isWithin(control.canonical.path, candidate.path)
         )
           return true;
       }
@@ -429,7 +429,7 @@ export async function workspaceInspectionPathExcluded(
     const excluded = await createPathExclusion(root.path, initial.controlPaths);
     if (await excluded(root.path)) return true;
     const target = resolve(root.path, ...segments);
-    if (!within(root.path, target) || (await excluded(target))) return true;
+    if (!isWithin(root.path, target) || (await excluded(target))) return true;
     const parent = await validateDirectory(root, segments.slice(0, -1));
     const repositories =
       scope.kind === "workspace"
@@ -553,7 +553,7 @@ export async function workspaceInspectionPathsExcluded(
       )
         return true;
       const target = resolve(scope.root.path, ...segments);
-      if (!within(scope.root.path, target) || (await scope.excluded(target)))
+      if (!isWithin(scope.root.path, target) || (await scope.excluded(target)))
         return true;
       const pathKey = JSON.stringify([scopeKey, segments]);
       if (!paths.has(pathKey)) paths.set(pathKey, { scope, segments, target });
@@ -868,7 +868,7 @@ async function validateDirectory(root: Root, segments: readonly string[]) {
   let current = root.path;
   for (const segment of segments) {
     current = resolve(current, segment);
-    if (!within(root.path, current)) throw new Error("path");
+    if (!isWithin(root.path, current)) throw new Error("path");
     const stat = await lstat(current, { bigint: false });
     if (stat.isSymbolicLink() || !stat.isDirectory())
       throw new Error("directory");
@@ -1332,7 +1332,7 @@ export async function listWorkspaceDirectory(
     pathExcluded = await createPathExclusion(root.path, initial.controlPaths);
     if (await pathExcluded(root.path)) return blank("excluded", initial);
     const absolutePath = resolve(root.path, ...segments);
-    if (!within(root.path, absolutePath))
+    if (!isWithin(root.path, absolutePath))
       throw new WorkspaceInspectionInputError();
     if (await pathExcluded(absolutePath)) return blank("excluded", initial);
   }
@@ -1346,7 +1346,7 @@ export async function listWorkspaceDirectory(
     return blank("unavailable", initial);
 
   const absolutePath = resolve(root.path, ...segments);
-  if (!within(root.path, absolutePath))
+  if (!isWithin(root.path, absolutePath))
     throw new WorkspaceInspectionInputError();
 
   let repositoryNames: Map<string, string> | undefined;
@@ -1619,7 +1619,7 @@ export async function previewWorkspaceFile(
     pathExcluded = await createPathExclusion(root.path, initial.controlPaths);
     if (await pathExcluded(root.path)) return blank("excluded", initial);
     const targetPath = resolve(root.path, ...segments);
-    if (!within(root.path, targetPath))
+    if (!isWithin(root.path, targetPath))
       throw new WorkspaceInspectionInputError();
     if (await pathExcluded(targetPath)) return blank("excluded", initial);
   }
@@ -1628,7 +1628,8 @@ export async function previewWorkspaceFile(
   if (root?.binding.state !== "ready") return blank("unavailable", initial);
 
   const targetPath = resolve(root.path, ...segments);
-  if (!within(root.path, targetPath)) throw new WorkspaceInspectionInputError();
+  if (!isWithin(root.path, targetPath))
+    throw new WorkspaceInspectionInputError();
 
   let repositoryNames: Map<string, string> | undefined;
   if (request.scope.kind === "workspace") {

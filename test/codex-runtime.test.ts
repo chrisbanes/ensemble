@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import {
   CodexRuntime,
   type RuntimeConversationEvent,
@@ -185,15 +185,20 @@ test("conflicting and identity-free terminal reports are surfaced as anomalies",
     method: "turn/completed",
     params: { threadId: "thread", turn: { id: "turn", status: "failed" } },
   });
+  await assert.rejects(runtime.waitForTurn("thread", "turn"), /uncertain/);
+  bindTestTurn(runtime, "thread", "pending");
+  const pending = runtime.waitForTurn("thread", "pending");
   receive({
     method: "turn/completed",
     params: { turn: { status: "completed" } },
   });
   assert.deepEqual(anomalies, [
     "Conflicting terminal status",
+    "Terminal evidence is incomplete or conflicting",
     "Missing terminal identity or status",
   ]);
-  await assert.rejects(runtime.waitForTurn("thread", "turn"), /uncertain/);
+  // Without a terminal identity no waiting turn can settle, so the runtime fails.
+  await assert.rejects(bounded(pending, 1000), /terminal evidence unavailable/);
 });
 
 test("failure evidence is exact-turn-bound and only classifies the retry allowlist", () => {
@@ -282,6 +287,127 @@ test("failure evidence is exact-turn-bound and only classifies the retry allowli
     "unknown",
   );
   assert.equal(evidence("another-thread", "overloaded"), undefined);
+});
+
+test("a bound turn wait has no fixed deadline and still resolves on its terminal", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread-long", "turn-long");
+  const child = {} as ChildProcessWithoutNullStreams;
+  const internal = runtime as unknown as {
+    child: ChildProcessWithoutNullStreams;
+    receive(child: ChildProcessWithoutNullStreams, line: string): void;
+  };
+  internal.child = child;
+
+  let settled = false;
+  const wait = runtime.waitForTurn("thread-long", "turn-long").then(
+    (status) => {
+      settled = true;
+      return status;
+    },
+    (error: unknown) => {
+      settled = true;
+      throw error;
+    },
+  );
+  mock.timers.tick(181_000);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  internal.receive(
+    child,
+    JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-long",
+        turn: { id: "turn-long", status: "completed" },
+      },
+    }),
+  );
+  assert.equal(await wait, "completed");
+});
+
+test("a throwing unexpected-request listener on a native path fails the runtime instead of escaping", async (t) => {
+  const child = {} as ChildProcessWithoutNullStreams;
+  const throwing = () => {
+    const runtime = newTestRuntime();
+    const internal = runtime as unknown as {
+      child: ChildProcessWithoutNullStreams;
+      receive(child: ChildProcessWithoutNullStreams, line: string): void;
+      qualifyNativeRequest(threadId: string): Promise<void>;
+      request(): Promise<unknown>;
+      nativeTurns: Map<string, string>;
+      nativeReadbacks: Map<string, unknown>;
+    };
+    internal.child = child;
+    const failures: Error[] = [];
+    runtime.onFailure((error) => failures.push(error));
+    runtime.onUnexpectedRequest(() => {
+      throw new Error("hold storage unavailable");
+    });
+    return { internal, failures };
+  };
+  const hold =
+    /^Could not persist unexpected request hold: .*hold storage unavailable/;
+
+  await t.test("notification path", () => {
+    const { internal, failures } = throwing();
+    internal.receive(
+      child,
+      JSON.stringify({
+        method: "serverRequest/resolved",
+        params: { threadId: "thread-n", requestId: "unmatched" },
+      }),
+    );
+    assert.equal(failures.length, 1);
+    assert.match(failures[0]?.message ?? "", hold);
+  });
+
+  await t.test("asynchronous qualification path", async () => {
+    const { internal, failures } = throwing();
+    internal.request = () => Promise.reject(new Error("resume refused"));
+    internal.nativeTurns.set("thread-q", "turn-q");
+    internal.nativeReadbacks.set("thread-q", {
+      input: {
+        threadId: "thread-q",
+        turnId: "turn-q",
+        itemId: "item-q",
+        isBlocking: false,
+        autoResolutionMs: null,
+        questions: [
+          {
+            id: "q",
+            header: "Place",
+            question: "Where?",
+            isOther: true,
+            isSecret: false,
+            options: [{ label: "Local", description: "Here" }],
+          },
+        ],
+      },
+      id: "request-q",
+      child,
+      digest: "digest",
+      requested: false,
+      responded: false,
+      replays: 0,
+      invalid: false,
+    });
+    await assert.doesNotReject(internal.qualifyNativeRequest("thread-q"));
+    assert.equal(failures.length, 1);
+    assert.match(failures[0]?.message ?? "", hold);
+  });
+});
+
+test("a runtime failure rejects a pending turn wait", async () => {
+  const runtime = newTestRuntime();
+  bindTestTurn(runtime, "thread-lost", "turn-lost");
+  const wait = runtime.waitForTurn("thread-lost", "turn-lost");
+  (runtime as unknown as { fail(error: Error): void }).fail(
+    new Error("Runtime lost"),
+  );
+  await assert.rejects(wait, /Runtime lost/);
 });
 
 test("error notifications do not settle an exact turn before its terminal", async () => {
@@ -1376,6 +1502,92 @@ for await (const line of createInterface({input: process.stdin})) {
     processRef.child?.kill("SIGKILL");
     await runtime.stop();
     if (stopping) await Promise.allSettled([stopping]);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stdout closure while the App Server lives fails a pending turn wait", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-stdout-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.id === undefined) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = newTestRuntime(executable);
+  try {
+    await bounded(runtime.start(), 3000);
+    const child = (
+      runtime as unknown as { child?: ChildProcessWithoutNullStreams }
+    ).child;
+    assert.ok(child);
+    bindTestTurn(runtime, "thread-1", "turn-1");
+    const waiting = runtime.waitForTurn("thread-1", "turn-1");
+    child.stdout.emit("close");
+    await assert.rejects(bounded(waiting, 1000), /stdout closed/);
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("child exit notifies failure listeners exactly once", {
+  timeout: 7000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-codex-exit-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    String.raw`#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({input: process.stdin})) {
+  const message = JSON.parse(line);
+  if (message.id === undefined) continue;
+  let result = {};
+  if (message.method === "account/read") result = {account: {type: "chatgpt"}};
+  if (message.method === "config/read") result = {config: {approval_policy: "never", sandbox_mode: "workspace-write"}};
+  process.stdout.write(JSON.stringify({id: message.id, result}) + "\n");
+}
+`,
+  );
+  chmodSync(executable, 0o700);
+  const runtime = newTestRuntime(executable);
+  const processRef = runtime as unknown as {
+    child?: ChildProcessWithoutNullStreams;
+  };
+  const failures: Error[] = [];
+  runtime.onFailure((error) => failures.push(error));
+  try {
+    await bounded(runtime.start(), 3000);
+    assert.deepEqual(failures, []);
+    processRef.child?.kill("SIGKILL");
+    await bounded(
+      new Promise<void>((resolve) => {
+        const poll = setInterval(() => {
+          if (failures.length > 0) {
+            clearInterval(poll);
+            resolve();
+          }
+        }, 5);
+      }),
+      3000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(failures.length, 1);
+  } finally {
+    await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });

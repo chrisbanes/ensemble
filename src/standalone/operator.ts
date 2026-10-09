@@ -29,17 +29,12 @@ import {
   type GitHubSourceStore,
 } from "../core/github-source.js";
 import {
+  containsControlCharacters,
+  decodeSegment,
   OperatorRouteRegistry,
   type OperatorRouteResult,
 } from "./operator-routes.js";
 import { escapeHtml, hidden } from "./operator-html.js";
-
-function containsControlCharacters(value: string): boolean {
-  return value.split("").some((character) => {
-    const code = character.charCodeAt(0);
-    return code < 32 || code === 127;
-  });
-}
 
 function field(
   name: string,
@@ -642,24 +637,6 @@ function clearedCookie(secure: boolean): string {
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`;
 }
 
-function decodePathSegment(value: string): string | undefined {
-  try {
-    const result = decodeURIComponent(value);
-    if (
-      !result ||
-      result === "." ||
-      result === ".." ||
-      result.includes("/") ||
-      result.includes("\\") ||
-      containsControlCharacters(result)
-    )
-      return undefined;
-    return result;
-  } catch {
-    return undefined;
-  }
-}
-
 function publicMessage(code: string): string {
   const messages: Record<string, string> = {
     unauthenticated: "Sign in required.",
@@ -919,7 +896,7 @@ export class LocalOperatorHttp {
           url.pathname
             .split("/")
             .slice(1)
-            .some((part) => part && decodePathSegment(part) === undefined)
+            .some((part) => part && decodeSegment(part) === undefined)
         ) {
           writeHtml(response, 404, "<main><h1>Not found</h1></main>");
           return;
@@ -1069,7 +1046,7 @@ export class LocalOperatorHttp {
             this.writeRouteResult(response, result, authorized);
             return;
           }
-          const value = parts[1] ? decodePathSegment(parts[1]) : undefined;
+          const value = parts[1] ? decodeSegment(parts[1]) : undefined;
           if (parts.length > 2 || (parts.length === 2 && value === undefined)) {
             writeHtml(response, 404, "<main><h1>Not found</h1></main>");
             return;

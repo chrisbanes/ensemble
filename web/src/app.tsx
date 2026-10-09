@@ -24,6 +24,7 @@ import {
   ResourceStatus,
   MobileNavigation,
 } from "./components.js";
+import { Alert } from "./ui/alert.js";
 import { loadTaskList } from "./tasks.js";
 import { TaskComposer } from "./task-composer.js";
 import { RuntimeSettings, AssignmentRecovery } from "./recovery.js";
@@ -310,6 +311,8 @@ export function App() {
   );
   const taskRefresh = useRef(tasks.refresh);
   taskRefresh.current = tasks.refresh;
+  const workspaceRefresh = useRef(workspace.refresh);
+  workspaceRefresh.current = workspace.refresh;
   const inboxScope =
     session?.authenticated && path.split("?")[0] === "/app/inbox"
       ? session.csrfToken
@@ -317,7 +320,10 @@ export function App() {
   useEffect(() => {
     if (!inboxScope) return;
     taskRefresh.current();
-    const timer = setInterval(() => taskRefresh.current(), 15000);
+    const timer = setInterval(() => {
+      taskRefresh.current();
+      workspaceRefresh.current();
+    }, 15000);
     return () => clearInterval(timer);
   }, [inboxScope]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: restore the previous entry focus after its route and asynchronous task content render.
@@ -573,6 +579,11 @@ export function App() {
             <p className="body error-text" role="alert">
               {logoutNotice}
             </p>
+          )}
+          {workspace.state.data?.data.runtime.state === "unavailable" && (
+            <Alert variant="destructive" role="alert">
+              Codex runtime unavailable — restart the service
+            </Alert>
           )}
           {workspace.state.status !== "fresh" && (
             <ResourceStatus state={workspace.state} retry={workspace.refresh} />

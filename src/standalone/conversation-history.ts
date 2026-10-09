@@ -456,29 +456,25 @@ export class ConversationHistoryCapture {
     event: RuntimeConversationEvent,
     binding: ConversationHistoryBinding,
   ) {
-    const start = this.options.captureStartExclusions;
-    let current: readonly string[] | undefined;
     try {
-      current = this.options.currentExclusions();
-    } catch {
-      current = undefined;
-    }
-    if (!start || !current) {
-      try {
-        if (event.kind === "completed")
-          this.options.store.omitItem(
-            binding,
-            event.itemId,
-            "redaction-unavailable",
-          );
-        else this.options.store.record(binding, event, []);
-      } catch {
-        // A diagnostic storage failure cannot change execution control.
+      if (event.kind !== "completed") {
+        this.options.store.record(binding, event, []);
+        return;
       }
-      return;
-    }
-    try {
-      this.options.store.record(binding, event, [...start, ...current]);
+      const start = this.options.captureStartExclusions;
+      let current: readonly string[] | undefined;
+      try {
+        current = this.options.currentExclusions();
+      } catch {
+        current = undefined;
+      }
+      if (!start || !current)
+        this.options.store.omitItem(
+          binding,
+          event.itemId,
+          "redaction-unavailable",
+        );
+      else this.options.store.record(binding, event, [...start, ...current]);
     } catch {
       // A diagnostic storage failure cannot change execution control.
     }

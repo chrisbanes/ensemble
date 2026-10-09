@@ -1,7 +1,7 @@
 import { TaskReviewStore } from "./task-review.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { Database } from "./store.js";
+import { transaction, type Database } from "./store.js";
 import { DeliveryStore, deliveryPolicySchema } from "./delivery.js";
 import {
   GitHubSourceStore,
@@ -302,8 +302,7 @@ export class DomainStore {
   migrate(): void {
     new TaskReviewStore(this.db).migrate();
     new DeliveryStore(this.db).migrate();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db.exec(`CREATE TABLE IF NOT EXISTS domain_schema (version INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS domain_projects (
           id TEXT PRIMARY KEY REFERENCES projects(id), name TEXT NOT NULL,
@@ -486,11 +485,7 @@ export class DomainStore {
             conditions: [{ kind: "label", name: "ready" }],
           }),
         );
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   execute(input: DomainCommand): unknown {
@@ -846,8 +841,7 @@ export class DomainStore {
     const leadProfileId = present(project, "leadProfileId");
     if (!leadProfileId) return undefined;
     const profile = this.activeProfile(String(leadProfileId));
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db
         .prepare(`INSERT OR IGNORE INTO task_lead_bindings
           (taskId, projectId, profileId, profileRevision, instructionsRevision, assignmentId)
@@ -860,28 +854,19 @@ export class DomainStore {
           present(project, "instructionsRevision"),
           randomUUID(),
         );
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     return this.db
       .prepare("SELECT * FROM task_lead_bindings WHERE taskId = ?")
       .get(key) as Row;
   }
 
   ensureLeadAssignment(taskId: string): Row | undefined {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const assignment = this.ensureLeadAssignmentWithinTransaction(
         id.parse(taskId),
       );
-      this.db.exec("COMMIT");
       return assignment;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   task(taskId: string): Row {

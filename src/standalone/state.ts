@@ -13,7 +13,7 @@ import {
 import { recoveryReceiptSchema } from "./pre-turn-recovery.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { Database } from "../core/store.js";
+import { transaction, type Database } from "../core/store.js";
 import type { ReconciledAssignmentProof } from "../core/coordination.js";
 import type {
   RecoveryRecord,
@@ -710,8 +710,7 @@ export class ExecutionState {
 
   stopTask(taskId: string): StopTarget[] {
     const id = z.string().uuid().parse(taskId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db
         .prepare(
           "INSERT OR IGNORE INTO task_writer_holds (taskId, reason) VALUES (?, 'Task stopped')",
@@ -768,12 +767,8 @@ export class ExecutionState {
             AND state = 'queued'`)
           .run(id);
       }
-      this.db.exec("COMMIT");
-      return this.stopTargets(id);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
+    return this.stopTargets(id);
   }
 
   stopTargets(taskId: string): StopTarget[] {
@@ -881,8 +876,7 @@ export class ExecutionState {
 
   resumeTask(taskId: string): void {
     const id = z.string().uuid().parse(taskId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db
         .prepare(
           "DELETE FROM task_writer_holds WHERE taskId = ? AND reason = 'Task stopped'",
@@ -899,11 +893,7 @@ export class ExecutionState {
             AND workId IN (SELECT workId FROM task_execution_bindings WHERE taskId = ?)
             AND reason = 'Task stopped'`)
           .run(id);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   taskHold(taskId: string): string | undefined {
@@ -917,8 +907,7 @@ export class ExecutionState {
 
   beginArchive(taskId: string): boolean {
     const id = z.string().uuid().parse(taskId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const acquired =
         this.db
           .prepare(`INSERT INTO task_archival_holds (taskId, reason)
@@ -939,12 +928,8 @@ export class ExecutionState {
             )
           ) RETURNING taskId`)
           .get(id, id, id, id, id) !== undefined;
-      this.db.exec("COMMIT");
       return acquired;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   isArchiveHeld(taskId: string): boolean {
@@ -957,8 +942,7 @@ export class ExecutionState {
 
   confirmArchive(taskId: string): boolean {
     const id = z.string().uuid().parse(taskId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const confirmed =
         this.db
           .prepare(`SELECT 1 FROM task_archival_holds archival
@@ -977,12 +961,8 @@ export class ExecutionState {
             )
           )`)
           .get(id, id, id, id) !== undefined;
-      this.db.exec("COMMIT");
       return confirmed;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   endArchive(taskId: string): void {
@@ -1223,15 +1203,13 @@ export class ExecutionState {
     };
   }
   prebindNativeTurn(input: NativeTurnPrebinding): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const current = this.nativeTurnPrebinding(
         input.threadId,
         input.turnId,
         input.runtimeGeneration,
       );
       if (!current || JSON.stringify(current) !== JSON.stringify(input)) {
-        this.db.exec("COMMIT");
         return false;
       }
       const bound = this.bindTurn(
@@ -1243,12 +1221,8 @@ export class ExecutionState {
         throw new Error("Native prebinding revisions changed");
       if (bound)
         this.nativePrebindings.set(input.workId, Object.freeze({ ...input }));
-      this.db.exec("COMMIT");
       return bound;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
   reconcileNativeTurnStartResponse(input: {
     intentId: string;
@@ -1544,8 +1518,7 @@ export class ExecutionState {
       this.migrateRuntimeFailureEvidence();
       return;
     }
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       if (
         !this.db
           .prepare(
@@ -1570,17 +1543,12 @@ export class ExecutionState {
           INSERT INTO runtime_retention_migrations (migrationId)
           VALUES ('runtime-retention-v1')`);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     this.migrateRuntimeFailureEvidence();
   }
 
   private migrateRuntimeFailureEvidence(): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       const columns = this.db
         .prepare("PRAGMA table_info(runtime_terminal_evidence)")
         .all() as Array<{ name: string }>;
@@ -1593,11 +1561,7 @@ export class ExecutionState {
           "INSERT OR IGNORE INTO runtime_retention_migrations (migrationId) VALUES (?)",
         )
         .run("runtime-retention-v2-failure-evidence");
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   private noteBoundRuntimeTurn(id: string, turnId: string): void {
@@ -1771,8 +1735,7 @@ export class ExecutionState {
     const observedAt = Date.now();
     if (!Number.isSafeInteger(observedAt) || observedAt < 0)
       throw new Error("Runtime terminal evidence timestamp unavailable");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       const matches = this.db
         .prepare(
           `SELECT intent.workId, identity.runtimeGeneration,
@@ -1863,11 +1826,7 @@ export class ExecutionState {
               WHERE workId = ? AND threadId = ? AND turnId = ?`)
             .run(workId, value.threadId, value.turnId);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     const record = this.db
       .prepare(
         "SELECT * FROM runtime_terminal_evidence WHERE threadId = ? AND turnId = ?",
@@ -2246,8 +2205,7 @@ export class ExecutionState {
         .object({ witnessId: z.string().uuid(), workId: z.string().min(1) })
         .strict()
         .parse(replay);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const context = this.noTurnContext(value.workId);
       const intent = this.db
         .prepare("SELECT state,reason FROM execution_intents WHERE workId=?")
@@ -2292,12 +2250,8 @@ export class ExecutionState {
           canonicalMaterial(value),
         );
       this.recordPreTurnCommand("adopt-no-turn", value, result);
-      this.db.exec("COMMIT");
       return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   private witnessForWork(workId: string):
@@ -2409,8 +2363,7 @@ export class ExecutionState {
         .object({ witnessId: z.string().uuid(), workId: z.string().min(1) })
         .strict()
         .parse(replay);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const context = this.preTurnContext(value.workId);
       const intent = this.db
         .prepare("SELECT state,reason FROM execution_intents WHERE workId=?")
@@ -2454,12 +2407,8 @@ export class ExecutionState {
           canonicalMaterial(value),
         );
       this.recordPreTurnCommand("adopt", value, result);
-      this.db.exec("COMMIT");
       return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
   replaceConversationCommand(command: ReplaceConversationCommand): {
     revision: number;
@@ -2471,8 +2420,7 @@ export class ExecutionState {
         .object({ revision: z.number().int().positive() })
         .strict()
         .parse(replay);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const assignment = this.db
         .prepare("SELECT version,taskId FROM domain_assignments WHERE id=?")
         .get(value.assignmentId) as
@@ -2499,12 +2447,8 @@ export class ExecutionState {
         throw new Error("Task remains held for recovery");
       const result = { revision: this.replaceConversation(value.assignmentId) };
       this.recordPreTurnCommand("replace-conversation", value, result);
-      this.db.exec("COMMIT");
       return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   /** Recheck the distinct bound-turn or pre-turn proof on every use. */
@@ -2805,8 +2749,7 @@ export class ExecutionState {
       return existing;
     }
     const id = randomUUID();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       this.db
         .prepare(
           "INSERT INTO execution_intents (id, workId, prompt, workspace, state, reason, threadId, turnId, accountType, sandbox, approval) VALUES (?, ?, ?, ?, 'ready', NULL, NULL, NULL, 'chatgpt', 'workspaceWrite', 'never')",
@@ -2816,11 +2759,7 @@ export class ExecutionState {
         .prepare(`INSERT INTO execution_request_predecessors
         (workId, previousWorkId, predecessorKnown) VALUES (?, ?, 1)`)
         .run(input.workId, input.previousWorkId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     return this.get(id);
   }
 
@@ -3090,8 +3029,7 @@ export class ExecutionState {
 
   holdPowerAdmission(reason: string): number {
     const safeReason = z.string().trim().min(1).max(200).parse(reason);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const revision =
         (
           this.db
@@ -3110,18 +3048,13 @@ export class ExecutionState {
         WHERE intent.state IN ('held','submitting','running')
         ON CONFLICT(workId) DO UPDATE SET revision = excluded.revision`)
         .run(revision);
-      this.db.exec("COMMIT");
       return revision;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   setPowerCursorBaseline(cursor: PowerEventCursor): boolean {
     const value = powerEventCursorSchema.parse(cursor);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const state = this.db
         .prepare(`SELECT wakeHeld FROM execution_power_supervision
         WHERE singleton = 1`)
@@ -3137,12 +3070,8 @@ export class ExecutionState {
           .prepare(`UPDATE execution_power_supervision
         SET cursor = ?, reason = NULL WHERE singleton = 1`)
           .run(JSON.stringify(value));
-      this.db.exec("COMMIT");
       return accepted;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   completePowerReconciliation(
@@ -3151,8 +3080,7 @@ export class ExecutionState {
   ): boolean {
     const value = powerEventCursorSchema.parse(cursor);
     const revision = z.number().int().positive().parse(expectedRevision);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const state = this.db
         .prepare(`SELECT wakeHeld, revision FROM execution_power_supervision
         WHERE singleton = 1`)
@@ -3169,12 +3097,8 @@ export class ExecutionState {
           .prepare(`UPDATE execution_power_supervision
         SET cursor = ?, wakeHeld = 0, reason = NULL WHERE singleton = 1 AND revision = ?`)
           .run(JSON.stringify(value), revision);
-      this.db.exec("COMMIT");
       return accepted;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   powerReconciliationPending(): number {
@@ -3207,8 +3131,7 @@ export class ExecutionState {
         "retry-enqueued",
       ])
       .parse(kind);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       const identity = this.db
         .prepare("SELECT 1 FROM execution_recovery_identities WHERE workId = ?")
         .get(z.string().min(1).parse(workId));
@@ -3248,11 +3171,7 @@ export class ExecutionState {
         .prepare(`DELETE FROM execution_power_reconciliation_pending
         WHERE workId = ?`)
         .run(workId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   recoveryView(): RecoveryRecord[] {
@@ -3446,8 +3365,7 @@ export class ExecutionState {
   ): { id: string; workId: string; state: "reconciled" } {
     const value = recoveryReceiptSchema.parse(receipt);
     const proof = verifiedTerminationSchema.parse(verification);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       if (command) {
         const replay = this.preTurnCommandReplay(
           value.kind === "no-turn-submission" ? "recover-no-turn" : "recover",
@@ -3462,7 +3380,6 @@ export class ExecutionState {
             })
             .strict()
             .parse(replay);
-          this.db.exec("COMMIT");
           return result;
         }
       }
@@ -3657,12 +3574,8 @@ export class ExecutionState {
             state: "reconciled",
           },
         );
-      this.db.exec("COMMIT");
       return { id: receiptId, workId: value.workId, state: "reconciled" };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   writerAndSuccessors(workId: string): ExecutionIntent[] {
@@ -3725,8 +3638,7 @@ export class ExecutionState {
       projectId: null,
     },
   ): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const reasons = options.validate?.() ?? [];
       if (reasons.length > 0) {
         const refused = options.refuse?.(reasons) ?? false;
@@ -3767,7 +3679,6 @@ export class ExecutionState {
               )
               .run(reason, intent.workId);
         }
-        this.db.exec("COMMIT");
         return false;
       }
       const pending = this.db
@@ -3777,7 +3688,6 @@ export class ExecutionState {
         !pending ||
         (pending.state !== "ready" && pending.state !== "capacity-waiting")
       ) {
-        this.db.exec("COMMIT");
         return false;
       }
       const powerGate = this.db
@@ -3796,7 +3706,6 @@ export class ExecutionState {
             .prepare(`UPDATE turn_requests SET reason = ?
             WHERE workId = ? AND state = 'queued'`)
             .run(reason, pending.workId);
-        this.db.exec("COMMIT");
         return false;
       }
       const configuredGlobalLimit = this.db
@@ -3848,7 +3757,6 @@ export class ExecutionState {
               "UPDATE turn_requests SET reason = ? WHERE workId = ? AND state = 'queued'",
             )
             .run(capacityReason, pending.workId);
-        this.db.exec("COMMIT");
         return false;
       }
       const admitted =
@@ -4035,12 +3943,8 @@ export class ExecutionState {
               .run(reason, intent.workId);
         }
       }
-      this.db.exec("COMMIT");
       return admitted;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   bindThread(id: string, threadId: string): boolean {
@@ -4209,8 +4113,7 @@ export class ExecutionState {
     const value = failureResolutionSchema.parse(input);
     if (!this.hasTurnRequests)
       throw new Error("Retry resolution requires durable turn requests");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return transaction(this.db, () => {
       const committed = this.db
         .prepare(`SELECT * FROM execution_retry_resolutions
         WHERE failedWorkId = ?`)
@@ -4244,7 +4147,6 @@ export class ExecutionState {
           throw new Error(
             "Retry resolution proof does not match the committed generation",
           );
-        this.db.exec("COMMIT");
         return {
           failedWorkId: committed.failedWorkId,
           retryWorkId: committed.retryWorkId,
@@ -4392,7 +4294,6 @@ export class ExecutionState {
         independentlyHeld.otherTaskWriter ||
         independentlyHeld.otherWorkspaceWriter
       ) {
-        this.db.exec("COMMIT");
         return undefined;
       }
 
@@ -4450,7 +4351,6 @@ export class ExecutionState {
           throw new Error(
             "Retry attempt evidence conflicts with the recorded terminal failure",
           );
-        this.db.exec("COMMIT");
         return undefined;
       }
 
@@ -4478,7 +4378,6 @@ export class ExecutionState {
             value.codexRetries,
             Date.now(),
           );
-        this.db.exec("COMMIT");
         return undefined;
       }
 
@@ -4608,7 +4507,6 @@ export class ExecutionState {
           recoveryReason("retry-enqueued"),
           Date.now(),
         );
-      this.db.exec("COMMIT");
       return {
         failedWorkId: value.workId,
         retryWorkId,
@@ -4617,15 +4515,11 @@ export class ExecutionState {
         codexRetriesUsed,
         nextEligibleAt: value.nextEligibleAt,
       };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   complete(id: string, threadId: string, turnId: string): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    transaction(this.db, () => {
       const row = this.db
         .prepare(
           "UPDATE execution_intents SET state = 'completed', reason = NULL WHERE id = ? AND state = 'running' AND threadId = ? AND turnId = ? RETURNING workId",
@@ -4644,11 +4538,7 @@ export class ExecutionState {
             "UPDATE turn_requests SET state = 'completed', reason = NULL WHERE workId = ?",
           )
           .run(row.workId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 }
 
