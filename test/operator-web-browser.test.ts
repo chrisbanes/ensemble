@@ -12,6 +12,7 @@ import {
 const test = browserSuite("ui02");
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { signOutFromSidebar } from "./fixtures/operator-account.js";
 async function screenshot(page: Page, name: string) {
   return captureBrowserEvidence(page, name);
 }
@@ -382,11 +383,12 @@ for (const viewport of [
       .waitFor();
     await page.route("**/api/operator/logout", (route) => route.abort());
     // Sign out lives in the sidebar footer, or in the drawer below 1121px.
-    if (viewport.width <= 1120)
+    if (viewport.width <= 1120) {
       await page
         .getByRole("button", { name: "Projects and navigation" })
         .click();
-    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    } else await signOutFromSidebar(page);
     await page
       .getByRole("alert")
       .filter({ hasText: "Sign-out outcome is unknown" })
@@ -488,7 +490,7 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
   await page.getByLabel("Password", { exact: true }).fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOutFromSidebar(page);
   await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
   assert.equal(
     (

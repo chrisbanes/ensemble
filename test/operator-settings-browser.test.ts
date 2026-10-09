@@ -10,6 +10,10 @@ import {
 } from "./fixtures/browser-diagnostics.js";
 const test = browserSuite("ui06");
 import { actionKinds } from "../src/core/delivery.js";
+import {
+  openAccountMenu,
+  signOutFromSidebar,
+} from "./fixtures/operator-account.js";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   seedOperatorRecovery,
@@ -2130,8 +2134,8 @@ test("new private input survives a detached receipt and old-session 401 after sa
     // drawer is only reachable after Back, so that check runs at the end of the journey.
     if (mode === "receipt-expiry")
       assert.equal(
-        await page
-          .getByRole("button", { name: "Sign out", exact: true })
+        await (await openAccountMenu(page))
+          .getByRole("menuitem", { name: "Sign out", exact: true })
           .isEnabled(),
         true,
       );
@@ -2273,7 +2277,7 @@ test("aborted old configuration read preserves new input and a current logout 40
   const oldReadFailure = page.waitForEvent("requestfailed", (request) =>
     request.url().endsWith(`/projects/${ids.projectId}/configuration`),
   );
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOutFromSidebar(page);
   await page.getByLabel("Password", { exact: true }).fill(web.password);
   // Let only subsequent reads through while retaining the original handler's gate.
   await page.unroute(configurationPath);
@@ -2282,8 +2286,8 @@ test("aborted old configuration read preserves new input and a current logout 40
     .getByRole("heading", { name: "Project configuration", exact: true })
     .waitFor();
   assert.equal(
-    await page
-      .getByRole("button", { name: "Sign out", exact: true })
+    await (await openAccountMenu(page))
+      .getByRole("menuitem", { name: "Sign out", exact: true })
       .isEnabled(),
     true,
   );

@@ -390,9 +390,14 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
     labels.length,
     "every sidebar item has a decorative icon",
   );
-  const footer = sidebar.getByRole("region", { name: "Account", exact: true });
-  await footer.getByRole("link", { name: "Settings", exact: true }).waitFor();
-  await footer.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  // The account menu replaces the footer's Settings link and Sign out button.
+  assert.equal(
+    await sidebar.getByRole("link", { name: "Settings", exact: true }).count(),
+    0,
+  );
+  await sidebar
+    .getByRole("button", { name: "Operator account", exact: true })
+    .waitFor();
   assert.equal(
     await page
       .getByRole("link", { name: "Existing operator controls" })

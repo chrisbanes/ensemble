@@ -260,3 +260,187 @@ for (const viewport of viewports)
       .waitFor();
     assert.equal(new URL(page.url()).pathname, "/app");
   });
+
+test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-out", async (_t, journey) => {
+  const { web, page } = await launch(journey, viewports[0]);
+  await page.goto(`${web.origin}/app`);
+  await submitPassword(page, web.password);
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  const sidebar = page.locator(".sidebar");
+  const trigger = page.getByRole("button", {
+    name: "Operator account",
+    exact: true,
+  });
+
+  // Closed: only the trigger, with avatar, name and a decorative chevron.
+  assert.equal(await trigger.locator(".account-avatar").innerText(), "OP");
+  assert.match(await trigger.innerText(), /Operator/);
+  assert.equal(await trigger.locator("svg[aria-hidden='true']").count(), 1);
+  assert.equal(await trigger.getAttribute("aria-haspopup"), "menu");
+  assert.equal(await trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    await sidebar.getByRole("link", { name: "Settings" }).count(),
+    0,
+  );
+  assert.equal(
+    await sidebar.getByRole("button", { name: "Sign out" }).count(),
+    0,
+  );
+
+  // Pointer: opens with the label and three items; an outside press closes it.
+  await trigger.click();
+  const menu = page.getByRole("menu");
+  await menu.waitFor();
+  await menu.getByText("Signed in as Operator", { exact: true }).waitFor();
+  assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await menu
+      .getByRole("menuitem", { name: "Settings", exact: true })
+      .getAttribute("href"),
+    "/app/settings",
+  );
+  assert.equal(
+    await menu
+      .getByRole("menuitem", { name: "Runtime", exact: true })
+      .getAttribute("href"),
+    "/app/settings/runtime",
+  );
+  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).waitFor();
+  assert.equal(await menu.getByRole("menuitem").count(), 3);
+  await captureBrowserEvidence(page, "desktop-account-menu");
+  await page.locator("main h1").click();
+  await menu.waitFor({ state: "detached" });
+
+  // Keyboard.
+  await page.getByRole("link", { name: "New project", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  assert.equal(
+    await trigger.evaluate((el) => el === document.activeElement),
+    true,
+  );
+  const focused = () =>
+    page.evaluate(() => document.activeElement?.textContent?.trim());
+  await page.keyboard.press("Enter");
+  await menu.waitFor();
+  assert.equal(await focused(), "Settings");
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focused(), "Runtime");
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focused(), "Sign out");
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focused(), "Settings", "wraps to the first item");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), "Sign out", "wraps to the last item");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focused(), "Runtime");
+  await page.keyboard.press("Home");
+  assert.equal(await focused(), "Settings");
+  await page.keyboard.press("End");
+  assert.equal(await focused(), "Sign out");
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  assert.equal(
+    await trigger.evaluate((el) => el === document.activeElement),
+    true,
+  );
+  assert.equal(await trigger.getAttribute("aria-expanded"), "false");
+  await page.keyboard.press("ArrowUp");
+  await menu.waitFor();
+  assert.equal(await focused(), "Sign out", "ArrowUp opens on the last item");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ArrowDown");
+  await menu.waitFor();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForURL("**/app/settings/runtime");
+  await menu.waitFor({ state: "detached" });
+  await page.keyboard.press("Tab");
+  assert.equal(
+    await menu.count(),
+    0,
+    "history navigation leaves the menu closed",
+  );
+  await page
+    .getByRole("menuitem", { name: "Runtime" })
+    .waitFor({ state: "detached" });
+
+  // Pending sign-out keeps the menu open and the item disabled.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/api/operator/logout", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await trigger.click();
+  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+  const pending = menu.getByRole("menuitem", { name: "Signing out…" });
+  await pending.waitFor();
+  assert.equal(await pending.getAttribute("aria-disabled"), "true");
+  await captureBrowserEvidence(page, "desktop-account-menu-signing-out");
+  release();
+  await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+  await page.unroute("**/api/operator/logout");
+
+  // Unknown outcome: the status check keeps the session and Sign out can be retried.
+  await submitPassword(page, web.password);
+  await trigger.waitFor();
+  await page.route("**/api/operator/logout", (route) => route.abort());
+  await trigger.click();
+  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+  await page
+    .getByRole("alert")
+    .filter({
+      hasText:
+        "Sign-out outcome is unknown. Session status has been checked; review before retrying.",
+    })
+    .waitFor();
+  await page.unroute("**/api/operator/logout");
+  await trigger.click();
+  assert.equal(
+    await menu
+      .getByRole("menuitem", { name: "Sign out", exact: true })
+      .isEnabled(),
+    true,
+  );
+  await menu.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+  await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+});
+
+test("phone drawer shows the account group with Settings, Runtime and Sign out", async (_t, journey) => {
+  const { web, page } = await launch(journey, viewports[1]);
+  await page.goto(`${web.origin}/app`);
+  await submitPassword(page, web.password);
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  const open = () =>
+    page.getByRole("button", { name: "Projects and navigation" }).click();
+  await open();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByText("Signed in as Operator", { exact: true }).waitFor();
+  for (const name of ["Settings", "Runtime"]) {
+    const row = dialog.getByRole("link", { name, exact: true });
+    assert.ok(
+      (await row.evaluate((el) => el.getBoundingClientRect().height)) >= 44,
+      `${name} row is a phone target`,
+    );
+  }
+  assert.ok(
+    (await dialog
+      .getByRole("button", { name: "Sign out", exact: true })
+      .evaluate((el) => el.getBoundingClientRect().height)) >= 44,
+  );
+  await captureBrowserEvidence(page, "phone-account-drawer");
+  await dialog.getByRole("link", { name: "Runtime", exact: true }).click();
+  await page.waitForURL("**/app/settings/runtime");
+  const back = page.getByRole("link", {
+    name: "Back to Settings",
+    exact: true,
+  });
+  await back.click();
+  await page.waitForURL("**/app/settings");
+  await open();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Sign out", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+});

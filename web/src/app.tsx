@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   Folder,
+  Gauge,
   InboxIcon,
   LayoutDashboard,
   ListChecks,
@@ -52,6 +53,7 @@ import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
 import { Login, SignInBootstrap } from "./sign-in.js";
 import { NotFound, notFoundSubtitle } from "./not-found.js";
+import { AccountMenu, OPERATOR_LABEL } from "./account-menu.js";
 function RouteLink({
   href,
   current,
@@ -211,29 +213,39 @@ function ProjectNavigation({
     </nav>
   );
 }
-function AccountFooter({
+/** Phone drawer account group: always visible rows, since no popup is nested in the Sheet. */
+function AccountRows({
   path,
   navigate,
-  row,
   pending,
   onSignOut,
 }: {
   path: string;
   navigate: (path: string) => void;
-  row: boolean;
   pending: boolean;
   onSignOut: () => void;
 }) {
+  const pathname = path.split(/[?#]/)[0];
   return (
-    <section className="account-footer" aria-label="Account">
+    <section className="account-rows" aria-label="Account">
+      <p className="metadata muted">Signed in as {OPERATOR_LABEL}</p>
       <RouteLink
         href="/app/settings"
-        current={path.split("?")[0] === "/app/settings"}
+        current={pathname === "/app/settings"}
         navigate={navigate}
         icon={<Settings {...navIcon} />}
-        row={row}
+        row
       >
         Settings
+      </RouteLink>
+      <RouteLink
+        href="/app/settings/runtime"
+        current={pathname === "/app/settings/runtime"}
+        navigate={navigate}
+        icon={<Gauge {...navIcon} />}
+        row
+      >
+        Runtime
       </RouteLink>
       <Button variant="secondary" disabled={pending} onClick={onSignOut}>
         <LogOut aria-hidden="true" />
@@ -687,13 +699,24 @@ export function App() {
         inboxCount={inboxCount}
         row={row}
       />
-      <AccountFooter
-        path={path}
-        navigate={navigate}
-        row={row}
-        pending={logoutPending}
-        onSignOut={() => void logout()}
-      />
+      {row ? (
+        <AccountRows
+          path={path}
+          navigate={navigate}
+          pending={logoutPending}
+          onSignOut={() => void logout()}
+        />
+      ) : (
+        <div className="account-footer">
+          <AccountMenu
+            key={navigationVersion}
+            path={path}
+            navigate={navigate}
+            pending={logoutPending}
+            onSignOut={() => void logout()}
+          />
+        </div>
+      )}
     </>
   );
   return (

@@ -235,14 +235,130 @@ nav {
 
 .account-footer {
   margin-top: auto;
+}
+
+.account-menu {
+  position: relative;
+}
+
+.account-trigger {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-8);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font:
+    var(--weight-medium) var(--type-sm) / var(--leading-1-25) var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-trigger:hover,
+.account-trigger[aria-expanded="true"] {
+  background: var(--sidebar-accent);
+}
+
+.account-avatar {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--muted);
+  font-size: var(--type-xs);
+}
+
+.account-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-popup {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--space-4));
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
+
+.account-popup hr {
+  width: 100%;
+  margin: var(--space-4) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.account-menu-label {
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  text-align: center;
+}
+
+.account-menu-item {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-4) 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font:
+    var(--weight-regular) var(--type-sm) / var(--leading-1-25) var(--font-sans);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.account-menu-item svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.account-menu-item:hover,
+.account-menu-item:focus-visible,
+.account-menu-item[aria-current="page"] {
+  background: var(--sidebar-accent);
+}
+
+.account-menu-item[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.account-rows {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  margin-top: auto;
   padding-top: var(--space-8);
   border-top: 1px solid var(--border);
 }
 
-.account-footer [data-slot="button"] {
+.account-rows p {
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+}
+
+.account-rows [data-slot="button"] {
   justify-content: flex-start;
 }
 
@@ -800,7 +916,7 @@ nav {
     gap: var(--space-8);
   }
 
-  .drawer .account-footer {
+  .drawer .account-rows {
     margin-top: var(--space-8);
   }
 }
