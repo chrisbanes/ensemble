@@ -1369,7 +1369,7 @@ test("reconciling a prepared review fences against the completed lead's version"
   assert.equal(followUpState(f, task.taskId).followUps.length, 1);
 });
 
-test("held, done, non-lead and newer-work recipients refuse a review before any operation", async (t) => {
+test("held, done, non-lead and newer-work recipients refuse a review before any operation", async () => {
   const cases: Array<{
     name: string;
     arrange: (
