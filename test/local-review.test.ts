@@ -1147,3 +1147,96 @@ test("a lead that can no longer receive reviews is a definitive rejection before
   assert.equal(after.data.state, "editable");
   assert.deepEqual(after.data.draft, draft.draft);
 });
+
+test("an anchor excerpt that becomes excluded removes the draft and blocks a stale save", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Excerpt exclusion");
+  const workspace = await f.service.taskWorkspace(task.taskId);
+  assert.ok(workspace);
+  const api = new OperatorApi(f.service, []);
+  const bytes = "contains EXCERPTSECRET value\n";
+  await writeFile(join(workspace.path, "excerpt.txt"), bytes);
+  const stage = async (owner: OperatorReviewSessionContext) =>
+    (await api.execute(
+      {
+        type: "review.anchor.stage",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: 0,
+        anchors: [
+          {
+            taskId: task.taskId,
+            repositoryId: null,
+            path: "excerpt.txt",
+            sourceKind: "workspace-file",
+            context: "workspace",
+            side: "file",
+            startLine: 1,
+            endLine: 1,
+            contentSha256: createHash("sha256").update(bytes).digest("hex"),
+          },
+        ],
+      },
+      owner,
+    )) as { groupId: string; draftVersion: number };
+  const reader = session();
+  const readerGroup = await stage(reader);
+  await api.execute(
+    {
+      type: "review.draft.save",
+      key: randomUUID(),
+      taskId: task.taskId,
+      expectedDraftVersion: readerGroup.draftVersion,
+      draft: {
+        summary: "",
+        comments: [
+          {
+            commentId: randomUUID(),
+            body: "Safe comment text",
+            anchorGroupIds: [readerGroup.groupId],
+          },
+        ],
+      },
+    },
+    reader,
+  );
+  const staleTab = session();
+  const staleGroup = await stage(staleTab);
+  const domain = f.service.domain();
+  domain.execute({
+    type: "profile.configure",
+    actor: "operator",
+    key: randomUUID(),
+    profileId: task.profileId,
+    expectedVersion: Number(domain.profile(task.profileId).version),
+    instructions: "EXCERPTSECRET",
+  });
+
+  const read = await api.readLocalReviewDraft(task.taskId, reader);
+  assert.deepEqual(read.data.draft.comments, []);
+  assert.equal(read.data.unsentDraftLost, true);
+
+  await assert.rejects(
+    api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: staleGroup.draftVersion,
+        draft: {
+          summary: "",
+          comments: [
+            {
+              commentId: randomUUID(),
+              body: "Stale tab comment",
+              anchorGroupIds: [staleGroup.groupId],
+            },
+          ],
+        },
+      },
+      staleTab,
+    ),
+    (error: unknown) => (error as { code?: string }).code === "forbidden",
+  );
+});

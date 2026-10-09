@@ -1097,6 +1097,29 @@ export class LocalReviewStore {
     };
   }
 
+  /** Anchor IDs of the owner's named groups; unknown groups contribute none. */
+  groupAnchorIds(
+    taskId: string,
+    ownerKey: string,
+    groupIds: readonly string[],
+  ) {
+    if (groupIds.length === 0) return [];
+    const wanted = new Set(groupIds);
+    return (
+      this.db
+        .prepare(`SELECT groupId,anchorIdsJson FROM coordination_local_review_groups
+        WHERE taskId=? AND ownerKey=?`)
+        .all(taskId, ownerKey) as Row[]
+    )
+      .filter((row) => wanted.has(String(row.groupId)))
+      .flatMap((row) =>
+        z
+          .array(uuid)
+          .max(maxReviewItems)
+          .parse(JSON.parse(String(row.anchorIdsJson))),
+      );
+  }
+
   /** Re-binds an editable draft whose content was rechecked under current access. */
   refreshAccessFingerprint(
     taskId: string,

@@ -91,6 +91,11 @@ test("inspection sections are reached from task origins and exact direct links w
   const base = `${web.origin}/app/tasks/${task.taskId}`;
   await page.goto(`${base}?section=files&path=notes.md`);
   await files.getByText("navigation notes", { exact: true }).waitFor();
+  await page.goto(`${base}?section=files&path=/notes.md`);
+  await files
+    .getByText("The linked file path is not valid, so no file was opened.")
+    .waitFor();
+  assert.equal(await files.getByText("navigation notes").count(), 0);
   await page.goto(`${base}?section=files&path=missing.md`);
   await files.getByText(/Preview is (missing|unavailable)/).waitFor();
   assert.equal(await files.getByText("navigation notes").count(), 0);

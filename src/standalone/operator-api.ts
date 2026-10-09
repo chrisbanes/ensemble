@@ -3684,6 +3684,36 @@ export class OperatorApi {
       throw new OperatorApiError(409, "conflict");
   }
 
+  /** Each anchor still exists and its repository, path and excerpt are permitted. */
+  private reviewAnchorsPermitted(
+    taskId: string,
+    anchorIds: readonly string[],
+    policy: {
+      excluded: readonly string[];
+      authorizedRepositoryIds: readonly string[];
+    },
+  ) {
+    const retained = this.service.retainedEvidence();
+    return anchorIds.every((anchorId) => {
+      let content: ReturnType<typeof retained.reviewAnchor>;
+      try {
+        content = retained.reviewAnchor(taskId, anchorId);
+      } catch {
+        return false; // An unreadable anchor is not permitted.
+      }
+      if (!content) return false;
+      const { anchor, bytes } = content;
+      const excerpt = bytes?.toString("utf8");
+      return (
+        (anchor.repositoryId === null ||
+          policy.authorizedRepositoryIds.includes(anchor.repositoryId)) &&
+        this.safe(anchor.path, policy.excluded) === anchor.path &&
+        (excerpt === undefined ||
+          this.safe(excerpt, policy.excluded) === excerpt)
+      );
+    });
+  }
+
   async readLocalReviewDraft(
     taskId: string,
     context?: OperatorReviewSessionContext,
@@ -3697,28 +3727,16 @@ export class OperatorApi {
       draft.accessFingerprint !== policy.accessFingerprint
     ) {
       // Keep the draft unless its text or anchors are now actually excluded.
-      const retained = this.service.retainedEvidence();
-      const anchors = draft.groups.flatMap((group) =>
-        group.anchorIds.map((anchorId) => {
-          try {
-            return retained.reviewAnchor(taskId, anchorId)?.anchor;
-          } catch {
-            return undefined; // An unreadable anchor is not permitted.
-          }
-        }),
-      );
       const allowed =
         draft.state === "editable" &&
         [
           draft.draft.summary,
           ...draft.draft.comments.map((comment) => comment.body),
         ].every((value) => this.safe(value, policy.excluded) === value) &&
-        anchors.every(
-          (anchor) =>
-            anchor !== undefined &&
-            (anchor.repositoryId === null ||
-              policy.authorizedRepositoryIds.includes(anchor.repositoryId)) &&
-            this.safe(anchor.path, policy.excluded) === anchor.path,
+        this.reviewAnchorsPermitted(
+          taskId,
+          draft.groups.flatMap((group) => group.anchorIds),
+          policy,
         );
       if (allowed)
         store.refreshAccessFingerprint(
@@ -3910,6 +3928,18 @@ export class OperatorApi {
         ...c.draft.comments.map((comment) => comment.body),
       ];
       if (values.some((value) => this.safe(value, policy.excluded) !== value))
+        throw new OperatorApiError(403, "forbidden");
+      // A stale tab must not stamp the current policy onto now-excluded anchors.
+      const groupIds = c.draft.comments.flatMap(
+        (comment) => comment.anchorGroupIds,
+      );
+      if (
+        !this.reviewAnchorsPermitted(
+          c.taskId,
+          store.groupAnchorIds(c.taskId, session.ownerKey, groupIds),
+          policy,
+        )
+      )
         throw new OperatorApiError(403, "forbidden");
       const requestHash = materialDigest({
         taskId: c.taskId,

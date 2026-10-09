@@ -1035,6 +1035,7 @@ export function TaskFiles({
         Read workspace and repository files from the selected task. Content is
         shown as text or a bounded, read-only preview.
       </p>
+      {state.linkNotice && <p role="alert">{state.linkNotice}</p>}
       <div className="task-actions file-toolbar">
         <Button
           variant="secondary"

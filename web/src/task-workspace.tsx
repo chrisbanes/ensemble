@@ -189,9 +189,14 @@ export function TaskWorkspace({
       if (params.has("assignment"))
         state.expanded.add(params.get("assignment") ?? "");
       // Exact inspection links; the service still enforces scope and exclusions.
-      const filePath = params.get("path")?.split("/").filter(Boolean) ?? [];
+      const rawPath = params.get("path");
+      // An exact link is never normalized into a different path.
+      const filePath = rawPath === null ? [] : rawPath.split("/");
       const repository = params.get("repository");
-      if (filePath.length)
+      if (rawPath !== null && filePath.some((segment) => segment === ""))
+        state.files.linkNotice =
+          "The linked file path is not valid, so no file was opened.";
+      else if (filePath.length)
         state.files.openCurrentFile(
           repository
             ? { kind: "repository", repositoryId: repository }

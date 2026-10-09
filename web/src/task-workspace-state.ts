@@ -104,6 +104,8 @@ export class TaskFilesState {
   directory: WorkspaceDirectory | null = null;
   directoryKey: string | null = null;
   directoryObservedAt: number | null = null;
+  /** Why a direct file link was not opened. */
+  linkNotice = "";
   /** Explicitly opens current bytes, e.g. from retained evidence; never implied. */
   openCurrentFile(scope: WorkspaceDirectory["scope"], path: string[]) {
     const key = JSON.stringify([scope, path]);
