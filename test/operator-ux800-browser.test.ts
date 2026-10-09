@@ -109,6 +109,8 @@ test("finite Chromium and WebKit matrix keeps operator routes usable without cli
     ["chromium", chromium],
     ["webkit", webkit],
   ] as const) {
+    // Each engine pass is its own bounded startup; Chromium's pass must not spend WebKit's launch window.
+    journey.restart();
     browser = await journey.start(`browser.launch.${name}`, () =>
       type.launch(),
     );
