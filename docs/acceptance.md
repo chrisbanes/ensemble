@@ -322,6 +322,21 @@ qualified offline only.
 | WI09 Board and Search origins, section links and exact direct links | `operator-inspection-navigation-browser.test.ts` |
 | WI10–WI13 multi-origin anchors, draft edits, reload continuity, lost-response reconciliation, sent inspection, next review and sign-out privacy | `operator-local-review-browser.test.ts`, `local-review.test.ts` |
 
+### #828 operator follow-up to a completed lead
+
+The service, receipts and read model are implemented; the operator UI status
+line and recovery copy and the bounded real-runtime validation are still to
+come and are not yet evidence.
+
+| Criteria | Deterministic evidence |
+| --- | --- |
+| Message, contextual feedback or review to a completed lead on an open task resumes it once, linked to its latest result, with exact anchors and a `resumedLead` receipt | `coordination.test.ts`, `local-review.test.ts`, `task-feedback.test.ts`, `operator-follow-up.test.ts` |
+| Send composed while the lead ran becomes a follow-up after it completes | `coordination.test.ts`, `local-review.test.ts` |
+| Definitive refusals with the draft kept: done or cancelled task, held lead, non-lead, newer or ambiguous lead work, stale version | `coordination.test.ts`, `local-review.test.ts`, `operator-follow-up.test.ts` |
+| Replay returns the original receipt without a second resume; reconciliation fences on the lead's version | `coordination.test.ts`, `local-review.test.ts`, `operator-follow-up.test.ts` |
+| Holds, approval, readiness and merge authority unchanged; a paused project does not dispatch until unpaused; the resumed turn continues the lead's thread at the next work revision | `operator-follow-up.test.ts` |
+| `leadFeedback` read model and recovery-continuation flag; a review never records a continuation | `operator-follow-up.test.ts`, `recovery-continuation.test.ts` |
+
 ## Implemented service and integration proofs
 
 These are later S02–S07 integration obligations (GitHub coverage starts in S06).
