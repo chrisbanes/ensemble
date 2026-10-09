@@ -2413,6 +2413,7 @@ export const apiErrorSchema = z
           "command-outcome-unknown",
           "local-review-batch-too-large",
           "local-review-recipient-unavailable",
+          "local-review-comment-anchor-required",
         ]),
         message: z.string().max(256),
         fieldPaths: z.array(z.string().max(128)).optional(),

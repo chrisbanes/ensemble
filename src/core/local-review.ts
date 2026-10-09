@@ -83,6 +83,14 @@ type FrozenPayload = z.infer<typeof frozenPayloadSchema>;
 type Row = Record<string, string | number | null>;
 
 /** Definitive pre-operation rejection: nothing was recorded or sent. */
+/** Definitive pre-operation rejection: a comment has no exact anchor context. */
+export class LocalReviewAnchorRequiredError extends Error {
+  constructor() {
+    super("Local review comment requires an anchor");
+    this.name = "LocalReviewAnchorRequiredError";
+  }
+}
+
 export class LocalReviewBatchTooLargeError extends Error {
   constructor() {
     super("Local review batch exceeds the message limit");
@@ -681,9 +689,9 @@ export class LocalReviewStore {
       if (draftRow.state !== "editable")
         throw new Error("Local review draft is frozen");
       // A new send applies the write rule; frozen operations above stay lenient.
-      const draft = writableDraftSchema.parse(
-        JSON.parse(String(draftRow.draftJson)),
-      );
+      const draft = draftSchema.parse(JSON.parse(String(draftRow.draftJson)));
+      if (!writableDraftSchema.safeParse(draft).success)
+        throw new LocalReviewAnchorRequiredError();
       if (!draft.summary && draft.comments.length === 0)
         throw new Error("Local review draft is empty");
       this.validateLead(request, true);

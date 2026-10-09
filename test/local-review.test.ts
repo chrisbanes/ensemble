@@ -1312,7 +1312,12 @@ test("a stored unanchored draft from before the anchor rule stays readable", asy
       ),
       owner,
     ),
+    (error: unknown) =>
+      (error as { code?: string }).code ===
+      "local-review-comment-anchor-required",
   );
+  const stillEditable = await api.readLocalReviewDraft(task.taskId, owner);
+  assert.equal(stillEditable.data.state, "editable");
   assert.deepEqual(counts(f, task.taskId), {
     events: 0,
     receipts: 0,
