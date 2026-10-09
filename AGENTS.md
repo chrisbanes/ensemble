@@ -53,6 +53,9 @@ unproved. Prior plans and scope decisions do not authorise dispatch while paused
 ## Working conventions
 
 - Use `rg --files` for discovery and `rg` for text searches.
+- UX designs live in `design/design.pen`; read and edit it only through the Pen MCP
+  server, never by parsing the file. `design/DESIGN.md` is the portable snapshot with
+  node references; refresh it through MCP after design changes.
 - Keep implementation and validation proportional to the current task.
 - Keep architectural decisions with the lead and use delegation only when useful.
 - Keep development methods in agent instructions; do not recreate configured step

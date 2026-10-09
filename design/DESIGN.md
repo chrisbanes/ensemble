@@ -804,10 +804,9 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 
 ## Worktree handoff and limits
 
-Keep the editable Pen document in the main design checkout. Worktrees can use this
-Markdown reference without opening or creating competing copies of the canvas.
-When the design changes, refresh this snapshot through MCP; do not parse the `.pen`
-file directly. Review the proposal in Pen using the node references above.
+Worktrees may edit `design.pen` through Pen MCP, or use this Markdown reference
+when Pen is unavailable. When the design changes, refresh this snapshot through
+MCP; do not parse the `.pen` file directly. Review the proposal in Pen using the node references above.
 Screen preview exports are omitted; comparison image assets remain in
 `design/assets/` for use by the canvas.
 
