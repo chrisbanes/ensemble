@@ -680,7 +680,10 @@ export class LocalReviewStore {
         throw new Error("Local review draft version conflict");
       if (draftRow.state !== "editable")
         throw new Error("Local review draft is frozen");
-      const draft = draftSchema.parse(JSON.parse(String(draftRow.draftJson)));
+      // A new send applies the write rule; frozen operations above stay lenient.
+      const draft = writableDraftSchema.parse(
+        JSON.parse(String(draftRow.draftJson)),
+      );
       if (!draft.summary && draft.comments.length === 0)
         throw new Error("Local review draft is empty");
       this.validateLead(request, true);

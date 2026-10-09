@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { materialDigest } from "../src/core/delivery.js";
 import { localReviewListReadSchema } from "../src/operator/contracts.js";
+import { localReviewDraftReadSchema } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import type { OperatorReviewSessionContext } from "../src/standalone/operator-api.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
@@ -1298,4 +1299,24 @@ test("a stored unanchored draft from before the anchor rule stays readable", asy
   });
   const read = await api.readLocalReviewDraft(task.taskId, owner);
   assert.deepEqual(read.data.draft, legacy);
+  // The transport read schema accepts it, so the browser can show and fix it.
+  assert.equal(localReviewDraftReadSchema.safeParse(read).success, true);
+  // A new send still refuses the unanchored comment and records nothing.
+  await assert.rejects(
+    api.execute(
+      requestFor(
+        task,
+        randomUUID(),
+        read.data.version,
+        Number(f.service.domain().assignment(task.assignmentId).version),
+      ),
+      owner,
+    ),
+  );
+  assert.deepEqual(counts(f, task.taskId), {
+    events: 0,
+    receipts: 0,
+    continuations: 0,
+    submissions: 0,
+  });
 });
