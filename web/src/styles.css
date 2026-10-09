@@ -92,6 +92,13 @@ p {
   line-height: var(--leading-1-25);
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin-bottom: var(--space-24);
+}
+
 .login {
   min-height: 100dvh;
   display: grid;

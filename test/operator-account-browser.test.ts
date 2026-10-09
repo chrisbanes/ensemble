@@ -68,10 +68,14 @@ for (const viewport of viewports)
         heading: box(".login-content h1"),
         form: box(".login-content form"),
         button: box(".login-content form button"),
+        fieldGap: getComputedStyle(
+          document.querySelector(".login-content .field") as Element,
+        ).rowGap,
         viewportHeight: innerHeight,
         viewportWidth: innerWidth,
       };
     });
+    assert.equal(layout.fieldGap, "8px", "label sits 8px above its field");
     assert.equal(layout.wordmark.size, "16px");
     assert.equal(layout.wordmark.weight, "500");
     assert.equal(layout.heading.size, "18px");
