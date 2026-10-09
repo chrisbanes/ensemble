@@ -903,6 +903,11 @@ access; access is exactly the repositories the operator adds. See
 Settings present each project's repository access and GitHub discovery sources
 together, labelled separately, rather than as two unrelated lists.
 
+An agent profile has a name, an optional short summary, private instructions and
+capabilities. Settings and routing candidate lists show the name with its summary
+(for example "Eli · Repairs"). Like capabilities, the summary describes
+suitability; it grants no permission or repository access.
+
 Configuration forms edit current values in place rather than requiring a complete
 replacement. Private values (instructions, routing guidance, search queries and
 local paths) are never loaded; they show as kept and change only through an

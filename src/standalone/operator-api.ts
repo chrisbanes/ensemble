@@ -1634,6 +1634,7 @@ export class OperatorApi {
       .map((p) => ({
         id: String(p.id),
         name: this.safe(p.name, excluded),
+        summary: this.safe(p.summary, excluded),
         version: Number(p.version),
         revoked: Boolean(p.revoked),
       }));

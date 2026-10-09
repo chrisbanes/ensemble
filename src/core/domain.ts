@@ -16,6 +16,7 @@ import {
 const id = z.string().uuid();
 const label = z.string().trim().min(1).max(512);
 const prose = z.string().max(16000);
+const summary = z.string().trim().max(120);
 const actor = z.enum(["operator", "agent"]);
 const defaultProjectLimit = 2 as const;
 const commandBase = { key: id, actor };
@@ -93,6 +94,7 @@ const commandSchema = z.discriminatedUnion("type", [
       type: z.literal("profile.create"),
       profileId: id,
       name: label,
+      summary: summary.optional(),
       instructions: prose,
       capabilities: prose,
     })
@@ -104,6 +106,7 @@ const commandSchema = z.discriminatedUnion("type", [
       profileId: id,
       expectedVersion: z.number().int().positive(),
       name: label.optional(),
+      summary: summary.optional(),
       instructions: prose.optional(),
       capabilities: prose.optional(),
       revoked: z.boolean().optional(),
@@ -322,7 +325,8 @@ export class DomainStore {
         CREATE TABLE IF NOT EXISTS profiles (
           id TEXT PRIMARY KEY, version INTEGER NOT NULL, name TEXT NOT NULL,
           instructions TEXT NOT NULL, capabilities TEXT NOT NULL,
-          revoked INTEGER NOT NULL CHECK(revoked IN (0,1))
+          revoked INTEGER NOT NULL CHECK(revoked IN (0,1)),
+          summary TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS profile_revisions (
           profileId TEXT NOT NULL REFERENCES profiles(id), revision INTEGER NOT NULL,
@@ -422,6 +426,13 @@ export class DomainStore {
       const routingColumns = this.db
         .prepare("PRAGMA table_info(routing_operations)")
         .all() as Row[];
+      const profileColumns = this.db
+        .prepare("PRAGMA table_info(profiles)")
+        .all() as Row[];
+      if (!profileColumns.some((column) => column.name === "summary"))
+        this.db.exec(
+          "ALTER TABLE profiles ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
+        );
       if (!routingColumns.some((column) => column.name === "brief"))
         this.db.exec(
           "ALTER TABLE routing_operations ADD COLUMN brief TEXT NOT NULL DEFAULT ''",
@@ -790,7 +801,7 @@ export class DomainStore {
   profiles(): Row[] {
     return this.db
       .prepare(
-        "SELECT id, version, name, capabilities, revoked FROM profiles ORDER BY name",
+        "SELECT id, version, name, summary, capabilities, revoked FROM profiles ORDER BY name",
       )
       .all() as Row[];
   }
@@ -878,7 +889,7 @@ export class DomainStore {
 
   profile(profileId: string): Row {
     return this.required(
-      "SELECT id, version, name, instructions, capabilities, revoked FROM profiles WHERE id = ?",
+      "SELECT id, version, name, summary, instructions, capabilities, revoked FROM profiles WHERE id = ?",
       id.parse(profileId),
     );
   }
@@ -1491,11 +1502,12 @@ export class DomainStore {
         this.operator(command);
         this.db
           .prepare(
-            "INSERT INTO profiles (id, version, name, instructions, capabilities, revoked) VALUES (?, 1, ?, ?, ?, 0)",
+            "INSERT INTO profiles (id, version, name, summary, instructions, capabilities, revoked) VALUES (?, 1, ?, ?, ?, ?, 0)",
           )
           .run(
             command.profileId,
             command.name,
+            command.summary ?? "",
             command.instructions,
             command.capabilities,
           );
@@ -1508,10 +1520,11 @@ export class DomainStore {
         this.version(current, command.expectedVersion);
         this.db
           .prepare(
-            "UPDATE profiles SET version = version + 1, name = ?, instructions = ?, capabilities = ?, revoked = ? WHERE id = ?",
+            "UPDATE profiles SET version = version + 1, name = ?, summary = ?, instructions = ?, capabilities = ?, revoked = ? WHERE id = ?",
           )
           .run(
             command.name ?? present(current, "name"),
+            command.summary ?? present(current, "summary"),
             command.instructions ?? present(current, "instructions"),
             command.capabilities ?? present(current, "capabilities"),
             command.revoked === undefined

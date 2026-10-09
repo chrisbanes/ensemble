@@ -56,7 +56,13 @@ export const projectSummarySchema = z
   })
   .strict();
 export const profileSummarySchema = z
-  .object({ id: uuid, name: safeText, version: revision, revoked: z.boolean() })
+  .object({
+    id: uuid,
+    name: safeText,
+    summary: safeText,
+    version: revision,
+    revoked: z.boolean(),
+  })
   .strict();
 const envelope = <T extends z.ZodType>(schema: T) =>
   z.object({ data: schema, observedAt: time }).strict();
@@ -1780,6 +1786,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       type: z.literal("profile.create"),
       profileId: uuid,
       name: z.string().trim().min(1).max(512),
+      summary: z.string().trim().max(120).optional(),
       instructions: text,
       capabilities: text,
     })
@@ -1791,6 +1798,7 @@ export const operatorCommandSchema = z.discriminatedUnion("type", [
       profileId: uuid,
       expectedVersion: revision,
       name: z.string().trim().min(1).max(512).optional(),
+      summary: z.string().trim().max(120).optional(),
       instructions: text.optional(),
       capabilities: text.optional(),
       revoked: z.boolean().optional(),
