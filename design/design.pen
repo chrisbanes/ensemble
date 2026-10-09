@@ -123782,7 +123782,7 @@
               "fill": "$X:--foreground",
               "textGrowth": "fixed-width",
               "width": "fill_container",
-              "content": "· Profiles have a name, an optional summary shown with the name in Settings and routing (SPEC, 9 Oct), private instructions and capabilities edited in place. The summary is not stored by the build yet. 122 creates a new Tester profile; Reviewer (123) is a revoked role profile and offers Restore profile.",
+              "content": "· Profiles have a name, an optional summary shown with the name in Settings and routing (SPEC, 9 Oct), private instructions and capabilities edited in place. 122 creates a new Tester profile; Reviewer (123) is a revoked role profile and offers Restore profile.",
               "lineHeight": 1.45,
               "fontFamily": "$font-sans",
               "fontSize": 14,
