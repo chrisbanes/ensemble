@@ -1240,3 +1240,31 @@ test("an anchor excerpt that becomes excluded removes the draft and blocks a sta
     (error: unknown) => (error as { code?: string }).code === "forbidden",
   );
 });
+
+test("every review comment must carry exact anchor context", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Unanchored comment");
+  const api = new OperatorApi(f.service, []);
+  await assert.rejects(
+    api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: 0,
+        draft: {
+          summary: "",
+          comments: [
+            {
+              commentId: randomUUID(),
+              body: "No anchor",
+              anchorGroupIds: [],
+            },
+          ],
+        },
+      },
+      session(),
+    ),
+  );
+});
