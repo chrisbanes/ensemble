@@ -30,7 +30,7 @@ function layoutProblems(page: Page) {
         `page scrolls horizontally: ${document.documentElement.scrollWidth} > ${innerWidth}`,
       );
     for (const element of document.querySelectorAll(
-      "main a, main button, main input, main select, main textarea, .topbar button",
+      "main a, main button, main input, main select, main textarea",
     )) {
       const rect = element.getBoundingClientRect();
       if (rect.width === 0 || inScroller(element)) continue;
@@ -131,7 +131,7 @@ test("finite Chromium and WebKit matrix keeps operator routes usable without cli
     assert.deepEqual(await layoutProblems(page), [], `${name} phone login`);
     await page.getByLabel("Password", { exact: true }).fill(web.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+    await page.locator("main.page h1").waitFor();
     const failures: string[] = [];
     let checked = 0;
     for (const [width, height, names] of matrix) {
@@ -165,10 +165,9 @@ test("finite Chromium and WebKit matrix keeps operator routes usable without cli
 
     // Drawer keyboard journey at phone width in each engine.
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(web.origin + routes.question);
-    await page
-      .getByRole("region", { name: "Exact question response" })
-      .waitFor();
+    // The task route is a nested screen with a Back header; the drawer lives on top-level routes.
+    await page.goto(web.origin + routes.inbox);
+    await page.locator(".inbox-row").first().waitFor();
     const trigger = page.getByRole("button", {
       name: "Projects and navigation",
       exact: true,

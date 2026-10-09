@@ -73,15 +73,15 @@ for (const viewport of [
     });
     await page.goto(`${web.origin}/login`);
     const loadedFonts = await page.evaluate(async () => {
-      await document.fonts.load('400 14px "Inter"');
-      await document.fonts.load('400 12px "JetBrains Mono"');
+      await document.fonts.load('400 14px "Geist"');
+      await document.fonts.load('400 12px "Geist Mono"');
       await document.fonts.ready;
       return {
-        inter: document.fonts.check('400 14px "Inter"'),
-        mono: document.fonts.check('400 12px "JetBrains Mono"'),
+        sans: document.fonts.check('400 14px "Geist"'),
+        mono: document.fonts.check('400 12px "Geist Mono"'),
       };
     });
-    assert.equal(loadedFonts.inter, true);
+    assert.equal(loadedFonts.sans, true);
     assert.equal(loadedFonts.mono, true);
     await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
     assert.equal(
@@ -101,14 +101,16 @@ for (const viewport of [
           family: s.fontFamily,
           size: s.fontSize,
           height: s.height,
+          radius: s.borderRadius,
         };
       });
     assert.equal(loginStyle.background, "rgb(229, 229, 229)");
     assert.equal(loginStyle.foreground, "rgb(23, 23, 23)");
     assert.ok(contrast(loginStyle.foreground, loginStyle.background) >= 4.5);
-    assert.match(loginStyle.family, /Inter/);
+    assert.match(loginStyle.family, /Geist/);
     assert.equal(loginStyle.size, "14px");
-    assert.equal(loginStyle.height, viewport.width < 760 ? "44px" : "36px");
+    assert.equal(loginStyle.height, viewport.width < 760 ? "44px" : "32px");
+    assert.equal(loginStyle.radius, "10px");
     await page.keyboard.press("Tab");
     assert.equal(
       await page
@@ -182,7 +184,9 @@ for (const viewport of [
       name,
       leadProfileId: null,
     });
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
     await page
       .locator(`a[href="/app/projects/${projectId}"]`)
       .first()
@@ -192,7 +196,7 @@ for (const viewport of [
         .locator('.sidebar nav[aria-label="Operator navigation"] .nav-link')
         .first()
         .evaluate((el) => el.getBoundingClientRect().height);
-      assert.equal(desktopNavLinkHeight, 33.5);
+      assert.equal(desktopNavLinkHeight, 32);
       console.log(
         `UI08 navigation geometry ${viewport.width}px desktop: first sidebar target ${desktopNavLinkHeight}px`,
       );
@@ -223,8 +227,7 @@ for (const viewport of [
           "/app/tasks",
           "/app/search",
           `/app/projects/${projectId}`,
-          "/app/settings",
-          "/",
+          "/app/settings/projects/new",
         ],
       );
       assert.ok(
@@ -284,7 +287,9 @@ for (const viewport of [
         }),
       }),
     );
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
     await page
       .getByText("Refresh failed. Showing the last fetched data.", {
         exact: true,
@@ -294,7 +299,9 @@ for (const viewport of [
     await screenshot(page, `${viewport.width}-stale`);
     await page.unroute("**/api/operator/workspace");
     await page.getByRole("button", { name: "Try again", exact: true }).click();
-    await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .waitFor();
     assert.equal(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -312,7 +319,7 @@ for (const viewport of [
           line: s.lineHeight,
         };
       });
-    assert.match(typography.family, /Inter/);
+    assert.match(typography.family, /Geist/);
     assert.equal(typography.size, "18px");
     assert.equal(typography.weight, "600");
     const supporting = await page
@@ -329,7 +336,7 @@ for (const viewport of [
         };
       });
     assert.ok(contrast(supporting.foreground, supporting.background) >= 4.5);
-    assert.match(supporting.family, /Inter/);
+    assert.match(supporting.family, /Geist/);
     assert.equal(supporting.size, "14px");
     assert.equal(supporting.weight, "400");
     const badge = await page
@@ -374,6 +381,11 @@ for (const viewport of [
       .getByRole("heading", { name: "Overview", exact: true })
       .waitFor();
     await page.route("**/api/operator/logout", (route) => route.abort());
+    // Sign out lives in the sidebar footer, or in the drawer below 1121px.
+    if (viewport.width <= 1120)
+      await page
+        .getByRole("button", { name: "Projects and navigation" })
+        .click();
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await page
       .getByRole("alert")
@@ -381,7 +393,9 @@ for (const viewport of [
       .waitFor();
     await page.unroute("**/api/operator/logout");
     f.advanceClock(60001);
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
     await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name }).count(), 0);
     assert.deepEqual(external, []);
@@ -443,12 +457,18 @@ test("browser API guards, absolute expiry, successful logout and restart reject 
     const response = page.waitForResponse((r) =>
       r.url().endsWith("/api/operator/workspace"),
     );
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .click();
     assert.equal((await response).status(), 200);
-    await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
+    await page
+      .getByRole("button", { name: "Refresh tasks", exact: true })
+      .waitFor();
   }
   f.advanceClock(50001);
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Refresh tasks", exact: true })
+    .click();
   await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
   assert.equal(
     (
@@ -557,7 +577,9 @@ test("React shell announces an unavailable Codex runtime without a reload", asyn
   await page.getByText("No projects yet.", { exact: true }).first().waitFor();
   assert.equal(await banner.count(), 0);
   f.runtime.crash();
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Refresh tasks", exact: true })
+    .click();
   await banner.waitFor();
   assert.equal(await banner.count(), 1);
 });

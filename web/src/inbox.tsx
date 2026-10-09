@@ -18,7 +18,7 @@ import {
   ResourceStatus,
   StatusBadge,
 } from "./components.js";
-import { useOperatorResource } from "./resource.js";
+import { useOperatorResource, type ResourceState } from "./resource.js";
 import { QuestionResponse } from "./question-response.js";
 import type { QuestionResponseStates } from "./question-response-state.js";
 export class InboxState {
@@ -56,6 +56,16 @@ export async function loadInbox(client: OperatorClient, signal: AbortSignal) {
     cursor = page.data.nextCursor;
   }
 }
+/** A count is a total only when the whole Inbox was read and the last read succeeded. */
+export function inboxSummaryOf(state: ResourceState<InboxRead>) {
+  return state.data?.complete && !state.data.unavailable && !state.error
+    ? {
+        count: state.data.items.length,
+        projects: new Set(state.data.items.map((item) => item.projectId)).size,
+      }
+    : null;
+}
+type InboxRead = Awaited<ReturnType<typeof loadInbox>>;
 export function Inbox({
   client,
   session,
@@ -64,6 +74,7 @@ export function Inbox({
   state,
   questions,
   observation,
+  onSummary,
 }: {
   client: OperatorClient;
   session: Session;
@@ -72,6 +83,8 @@ export function Inbox({
   state: InboxState;
   questions: QuestionResponseStates;
   observation: object | null;
+  /** Reports the unresolved total and project count (or null) so the shell matches this list. */
+  onSummary?: (summary: ReturnType<typeof inboxSummaryOf>) => void;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) => loadInbox(client, signal),
@@ -87,6 +100,16 @@ export function Inbox({
     const timer = setInterval(() => refresh.current(), 15000);
     return () => clearInterval(timer);
   }, []);
+  const count = inboxSummaryOf(resource.state)?.count,
+    projectCount = inboxSummaryOf(resource.state)?.projects;
+  useEffect(() => {
+    onSummary?.(
+      count === undefined || projectCount === undefined
+        ? null
+        : { count, projects: projectCount },
+    );
+    return () => onSummary?.(null);
+  }, [count, projectCount, onSummary]);
   const seen = useRef(observation);
   useEffect(() => {
     if (seen.current !== observation) {

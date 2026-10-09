@@ -211,11 +211,6 @@ export function TaskViews({
   const project = workspace?.data.projects.find((p) => p.id === projectId);
   return (
     <>
-      <p className="introduction muted">
-        {projectId
-          ? "Tasks in this project. Readiness, source status and execution are separate."
-          : "Tasks across your projects. Action requests and ordinary progress remain distinct."}
-      </p>
       {project?.paused && (
         <p className="body">
           <StatusBadge tone="warning">Project paused</StatusBadge> New turns are
@@ -236,16 +231,6 @@ export function TaskViews({
             Open existing project controls
           </ActionLink>
         )}
-        <ActionLink
-          variant="primary"
-          href={`/app/tasks/new${projectId ? `?project=${projectId}` : ""}`}
-          onClick={(e) => {
-            e.preventDefault();
-            navigate(e.currentTarget.getAttribute("href") ?? "/app/tasks/new");
-          }}
-        >
-          New task
-        </ActionLink>
         <Button variant="secondary" onClick={refresh} disabled={state.pending}>
           Refresh tasks
         </Button>

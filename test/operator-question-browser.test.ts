@@ -255,6 +255,8 @@ test("production mixed form preserves literal schema, keyboard input, field erro
       fullPage: false,
     });
   }
+  // Sign out is in the sidebar footer; a nested phone screen reaches it only via its parent.
+  await page.setViewportSize({ width: 1366, height: 900 });
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   assert.equal(

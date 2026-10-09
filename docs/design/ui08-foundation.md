@@ -15,7 +15,7 @@ tailwind-merge. Tailwind v4 is integrated through its Vite plugin. The owned
 sources adapt shadcn/ui's Radix button, native select, badge, alert, card, and
 sheet patterns; no shadcn runtime package or init CLI is used. Installed exact versions are `class-variance-authority` 0.7.1, `clsx` 2.1.1,
 `tailwind-merge` 3.7.0, `@radix-ui/react-slot` 1.3.3,
-`@fontsource/inter` 5.3.0, `@fontsource/jetbrains-mono` 5.3.0,
+`@fontsource/geist-sans` 5.3.0, `@fontsource/geist-mono` 5.3.0,
 `lucide-react` 1.51.0, and `tailwindcss` / `@tailwindcss/vite` 4.3.3.
 The component source follows the official [shadcn/ui Vite setup](https://ui.shadcn.com/docs/installation/vite),
 [Button](https://ui.shadcn.com/docs/components/radix/button),
@@ -26,11 +26,16 @@ The component source follows the official [shadcn/ui Vite setup](https://ui.shad
 [Sheet](https://ui.shadcn.com/docs/components/radix/sheet) source patterns,
 adapted to repository imports and existing Radix Dialog usage.
 
-One semantic token set supplies Dark / Neutral / Default. Inter 400/500/600 is
-interface text; JetBrains Mono 400 is for identifiers and provenance. Desktop
-controls are 36px; phone actions and labelled touch targets are at least 44px.
+One semantic token set supplies Dark / Neutral / Default. Since
+[#835](https://github.com/chrisbanes/ensemble/issues/835) the primitives follow
+shadcn Nova: Geist 400/500/600 is interface text and Geist Mono 400 is for
+identifiers and provenance. Desktop controls are 32px (`--radius-lg` 10px);
+cards use `--radius-xl` 14px and 16px padding; badges are 20px pills; outline
+and field backgrounds use `--nova-outline-bg` / `--nova-input-bg`; destructive
+buttons and badges are tinted (`--nova-destructive-bg` / `-fg`), not solid. Phone
+actions and labelled touch targets are at least 44px.
 The shell uses a 224px sidebar, 20px main padding and 12px composition gaps.
-The 760px breakpoint is retained and tested against real content. The outcome
+The 760px phone breakpoint and the 1120px sidebar-to-drawer threshold are retained and tested against real content. The outcome
 textarea is 260px on desktop and 180px on phone. Waiting, success and dependency
 panels remain neutral with explicit labels. Errors use foreground text and a
 destructive border.
@@ -50,7 +55,7 @@ collapsing those individual dispositions.
 | Existing surface / entry paths | Presentation owner and retained behaviour | Counterpart / coverage |
 | --- | --- | --- |
 | `/login`, unauthenticated `/app*`, first-use bootstrap and expired session; diagnostic login with web disabled | React uses Input/Button/Alert; password is intentionally cleared on failed login. Session expiry and retry remain server-owned. Web-disabled login remains minimal functional HTML. | `eIXDM`, `DOuyS` controls; no login composition frame. T4 records diagnostic fallback. |
-| `/app` shell on direct load, reload, history navigation and modified links | React shell owns desktop project navigation, selected route, account/sign-out and route links. Existing controlled Radix dialog becomes Sheet with focus trap, Escape and trigger restoration. | Sidebar `eifyp`, Overview `N9G11A`; no full drawer frame. |
+| `/app` shell on direct load, reload, history navigation and modified links | React shell owns the 224px sidebar (Overview, Inbox with its unresolved count, one Tasks item that is current for both views, Search, projects, New project; the List/Board switch stays in the task page) and its footer account group (Settings, Sign out); route links and `aria-current`. Existing controlled Radix dialog becomes Sheet with focus trap, Escape and trigger restoration. #835 removed the "Operator workspace" top bar and the global "Existing operator controls" link (agreed fallback, option (a)): the retained HTML stays reachable through the contextual "Advanced …" / "Open existing …" links, and `/` plus every service-served route is unchanged. At ≤1120px a top-level route shows a menu header (menu, title, Inbox count) and a nested route shows a detail header (Back to its static parent, title); one page header per route holds the single `h1`, an optional subtitle (the task views' intro, the Inbox "N unresolved across M projects") and at most one action (New task on the task views, Refresh elsewhere). A page-owned refresh ("Refresh tasks", "Refresh task", "Refresh results") replaces the shell Refresh and also re-reads the workspace and Inbox count; the fresh "Fetched" line is removed. The Inbox count is shown only when the whole Inbox was read and the last read succeeded. | Sidebar `eifyp`, Overview `N9G11A`, phone headers `KthOL` / `p69Od`; navigation rows `mZoXC`. Deferred to U2 (#836): the account menu trigger (avatar, name, chevrons) in the footer. Sign out on a phone is reached from a top-level route's drawer; U2 (#836) replaces the footer group with the account menu. |
 | `/app`, `/app/tasks`, `/app/projects/:id` and query/filter URLs | React owns work row/card composition, source identity, lead/next actor, List/Board pressed state, URL filters, selected phone column and named columns. No drag/drop or status mutation. | List `nD0nh`; boards `E7qC9`, `MUFPD`, `x9cPnW`; phone `GWXOi`, `CTUzI`; Overview `N9G11A`. |
 | `/app/tasks/new`, project-scoped creation, local draft and receipt/reconciliation state | React owns controlled project/title/outcome/context/reference/assignee/dependency fields and current disclosure behavior; preserves local drafts, unknown outcome reconciliation and confirmed receipt. Existing optional inputs are not redesigned into new progressive disclosure. | `Z315o`, `MhM7z`, `i3glx`, `Z6U3T4`, `JX4dm`, `wXiWx`; absence of future composer disclosure is an explicit feature gap. |
 | `/app/settings`, `/app/settings/projects/new`, `/app/settings/profiles/new`, `/app/profiles/:id/settings`, `/app/projects/:id/settings` | React owns public configuration drafts, native checkboxes/selects, validation/focus, private write-only replacement, dirty/reload/revision-adoption and unknown/recorded outcomes. Exact private values and advanced editors remain linked in retained HTML. | Shared controls `eIXDM`, `DOuyS`; no complete setup/configuration frame. |
