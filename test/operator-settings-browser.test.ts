@@ -2126,12 +2126,15 @@ test("new private input survives a detached receipt and old-session 401 after sa
       .getByRole("button", { name: "Save project", exact: true })
       .waitFor();
     assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
-    assert.equal(
-      await page
-        .locator(".sidebar button", { hasText: "Sign out" })
-        .isEnabled(),
-      true,
-    );
+    // Desktop: the sidebar Sign out is visible and released. On a nested phone screen the
+    // drawer is only reachable after Back, so that check runs at the end of the journey.
+    if (mode === "receipt-expiry")
+      assert.equal(
+        await page
+          .getByRole("button", { name: "Sign out", exact: true })
+          .isEnabled(),
+        true,
+      );
     assert.equal(
       await page.getByLabel("New instructions", { exact: true }).inputValue(),
       "PRIVATE NEW SESSION INPUT",
@@ -2187,6 +2190,19 @@ test("new private input survives a detached receipt and old-session 401 after sa
     assert.equal(posts.length, 1);
     assert.equal(f.runtime.turns, 0);
     assert.deepEqual(errors, []);
+    if (mode === "401-logout") {
+      await page
+        .getByRole("link", { name: "Back to Settings", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
+      const signOut = page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Sign out", exact: true });
+      await signOut.waitFor({ state: "visible" });
+      assert.equal(await signOut.isEnabled(), true);
+    }
   }
 });
 test("aborted old configuration read preserves new input and a current logout 401 releases its pending control", async (_t, journey) => {
