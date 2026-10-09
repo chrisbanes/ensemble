@@ -290,6 +290,27 @@ function useLocalReviewController({
       }
       this.close();
     },
+    /** Drafts saved before the anchor rule can only be sent once these are gone. */
+    async removeUnanchoredComments() {
+      if (!draft) return;
+      state.pending = true;
+      changed();
+      const result = await saveDraft(
+        {
+          summary: draft.draft.summary,
+          comments: draft.draft.comments.filter(
+            (comment) => comment.anchorGroupIds.length > 0,
+          ),
+        },
+        draft.version,
+      );
+      state.pending = false;
+      state.notice =
+        result.state === "recorded"
+          ? ""
+          : `Comments could not be removed (${failure(result)}).`;
+      changed();
+    },
     async updateComment(commentId: string, body: string | null) {
       if (!draft) return;
       const comments = draft.draft.comments;
@@ -946,10 +967,19 @@ export function LocalReviewPanel() {
             </p>
           )}
           {unanchored && (
-            <p role="status">
-              A comment saved before line context was required has none. Remove
-              it to send this review.
-            </p>
+            <div role="status">
+              <p>
+                A comment saved before line context was required has none.
+                Remove it to edit or send this review.
+              </p>
+              <Button
+                variant="secondary"
+                disabled={locked || state.pending}
+                onClick={() => void review.removeUnanchoredComments()}
+              >
+                Remove comments without line context
+              </Button>
+            </div>
           )}
           {(state.summary !== null ||
             Object.keys(state.editing).length > 0) && (
