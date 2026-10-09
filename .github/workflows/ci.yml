@@ -26,7 +26,18 @@ jobs:
           cache: npm
       - run: npm install --global npm@12.2.0
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
+      - name: Resolve Playwright version
+        id: playwright
+        run: echo "version=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      # Skip man-db's index rebuild during apt installs of browser dependencies.
+      - run: sudo rm -f /var/lib/man-db/auto-update
+      # Tests launch headless only, so the full Chrome binary is not needed.
+      # Cached browsers skip downloads; system dependencies are still installed.
+      - run: npx playwright install --with-deps --only-shell chromium webkit
       - run: npm run test:fixture-preflight
       - run: npm run check
       - name: Upload synthetic test evidence
