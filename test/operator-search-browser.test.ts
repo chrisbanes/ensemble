@@ -478,7 +478,7 @@ test("same-task historical Search entries preserve manual origin selections and 
   await page.locator(`[data-search-record="${old.resultId}"]`).waitFor();
   await page.goForward();
   await page.getByText("Entry ancient result", { exact: true }).waitFor();
-  await page.getByRole("link", { name: "List", exact: true }).click();
+  await page.getByRole("link", { name: "Tasks", exact: true }).click();
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   await page.getByRole("link", { name: "Entry task", exact: true }).click();
   await page.getByText("Entry latest result", { exact: true }).waitFor();
@@ -566,7 +566,7 @@ test("in-flight exact reply becomes original-key reconciliation across same-task
       .getByRole("button", { name: "Send to task lead", exact: true })
       .click();
     await arrival;
-    await page.getByRole("link", { name: "List", exact: true }).click();
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
     await page
       .getByRole("heading", { name: "All tasks", exact: true })
       .waitFor();

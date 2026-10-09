@@ -1,4 +1,4 @@
-import { Inbox, InboxState, inboxTotal, loadInbox } from "./inbox.js";
+import { Inbox, InboxState, inboxSummaryOf, loadInbox } from "./inbox.js";
 import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
@@ -11,11 +11,9 @@ import {
   type ReactNode,
 } from "react";
 import {
-  Columns3,
-  FolderKanban,
+  Folder,
   InboxIcon,
   LayoutDashboard,
-  List,
   ListChecks,
   LogOut,
   Plus,
@@ -77,7 +75,7 @@ function RouteLink({
 }) {
   return (
     <a
-      className={`control nav-link${row ? " nav-row" : ""}${className ? ` ${className}` : ""}`}
+      className={`nav-link${row ? " nav-row" : ""}${className ? ` ${className}` : ""}`}
       href={href}
       aria-current={current ? "page" : undefined}
       aria-describedby={describedBy}
@@ -124,8 +122,6 @@ function ProjectNavigation({
 }) {
   const countId = useId();
   const pathname = path.split(/[?#]/)[0] ?? "";
-  const board =
-    new URLSearchParams(path.split("?")[1] ?? "").get("view") === "board";
   const link = (
     href: string,
     current: boolean,
@@ -167,9 +163,9 @@ function ProjectNavigation({
               describedBy: countId,
               trailing: (
                 <>
-                  <StatusBadge className="nav-count">
-                    <span aria-hidden="true">{inboxCount}</span>
-                  </StatusBadge>
+                  <span className="nav-count metadata" aria-hidden="true">
+                    {inboxCount}
+                  </span>
                   <span id={countId} hidden>
                     {inboxCount} unresolved
                   </span>
@@ -177,20 +173,11 @@ function ProjectNavigation({
               ),
             },
       )}
-      {link("/app/tasks", false, <ListChecks {...navIcon} />, "Tasks")}
       {link(
         "/app/tasks",
-        pathname === "/app/tasks" && !board,
-        <List {...navIcon} />,
-        "List",
-        { className: "nav-sub" },
-      )}
-      {link(
-        "/app/tasks?view=board",
-        pathname === "/app/tasks" && board,
-        <Columns3 {...navIcon} />,
-        "Board",
-        { className: "nav-sub" },
+        pathname === "/app/tasks",
+        <ListChecks {...navIcon} />,
+        "Tasks",
       )}
       {link(
         "/app/search",
@@ -198,7 +185,7 @@ function ProjectNavigation({
         <SearchIcon {...navIcon} />,
         "Search",
       )}
-      <h2 className="small-heading">Projects</h2>
+      <h2 className="nav-heading">Projects</h2>
       {workspace?.data.projects.length === 0 && (
         <p className="body muted">No projects yet.</p>
       )}
@@ -206,7 +193,7 @@ function ProjectNavigation({
         link(
           `/app/projects/${p.id}`,
           pathname === `/app/projects/${p.id}`,
-          <FolderKanban {...navIcon} />,
+          <Folder {...navIcon} />,
           p.name ?? "Name unavailable",
           {
             trailing: p.paused ? (
@@ -480,7 +467,8 @@ export function App() {
   );
   // The Inbox route polls its own full read and reports its total, so the shell reads only elsewhere.
   const onInboxRoute = path.split(/[?#]/)[0] === "/app/inbox";
-  const [inboxRouteCount, setInboxRouteCount] = useState<number | null>(null);
+  const [inboxRouteSummary, setInboxRouteSummary] =
+    useState<ReturnType<typeof inboxSummaryOf>>(null);
   const inboxSummary = useOperatorResource(
     session?.authenticated ? session.csrfToken : null,
     inboxLoader,
@@ -677,9 +665,20 @@ export function App() {
           ? "Task and project controls are available in the existing operator."
           : "Choose a project to open its current controls.";
   const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
-  const inboxCount = onInboxRoute
-    ? inboxRouteCount
-    : inboxTotal(inboxSummary.state);
+  const inboxCount =
+    (onInboxRoute ? inboxRouteSummary : inboxSummaryOf(inboxSummary.state))
+      ?.count ?? null;
+  // The task views put their intro and the one primary action in the page header.
+  const taskRoute =
+    pathname === "/app" || pathname === "/app/tasks" || Boolean(projectId);
+  const newTaskHref = `/app/tasks/new${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
+  const headerSubtitle = taskRoute
+    ? projectId
+      ? "Tasks in this project. Readiness, source status and execution are separate."
+      : "Tasks across your projects. Action requests and ordinary progress remain distinct."
+    : onInboxRoute && inboxRouteSummary
+      ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
+      : undefined;
   // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
     workspace.refresh();
@@ -748,14 +747,22 @@ export function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <p className="wordmark feature-heading">Ensemble</p>
+        <div className="workspace-header">
+          <p className="body">Ensemble</p>
+          <p className="metadata muted">Personal workspace</p>
+        </div>
         {navigation(false)}
       </aside>
       <div className="workspace">
-        <main className="page">
+        <main className={onInboxRoute ? "page page-inbox" : "page"}>
           <PageHeader
             title={title}
-            count={pathname === "/app/inbox" ? inboxCount : null}
+            subtitle={headerSubtitle}
+            badge={
+              onInboxRoute && inboxCount !== null
+                ? `${inboxCount} unresolved`
+                : undefined
+            }
             {...(parent
               ? { back: parent }
               : {
@@ -766,7 +773,11 @@ export function App() {
                   ),
                 })}
             action={
-              ownsRefresh ? undefined : (
+              taskRoute ? (
+                <ActionLink variant="primary" href={newTaskHref}>
+                  New task
+                </ActionLink>
+              ) : ownsRefresh ? undefined : (
                 <Button
                   variant="secondary"
                   onClick={() => {
@@ -870,7 +881,7 @@ export function App() {
               state={inboxState.current}
               questions={questionStates.current}
               observation={workspace.state.data}
-              onTotal={setInboxRouteCount}
+              onSummary={setInboxRouteSummary}
             />
           ) : pathname === "/app/search" ? (
             <Search

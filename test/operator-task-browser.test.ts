@@ -1986,7 +1986,7 @@ test("replacement composer owns recovery before a detached committed receipt or 
     assert.equal(d.assignments(command.taskId).length, 1);
     if (mode === "receipt-navigation") {
       await page
-        .getByRole("link", { name: "List", exact: true })
+        .getByRole("link", { name: "Tasks", exact: true })
         .first()
         .click();
       await page.getByRole("link", { name: "New task", exact: true }).click();

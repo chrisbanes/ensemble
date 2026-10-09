@@ -149,7 +149,7 @@ test("production shell keeps direct task links usable and the navigation drawer 
   });
   await dialog.waitFor({ state: "visible" });
   assert.equal(
-    await dialog.getByRole("link", { name: "List", exact: true }).isVisible(),
+    await dialog.getByRole("link", { name: "Tasks", exact: true }).isVisible(),
     true,
   );
   const signOutHeight = await dialog
@@ -356,12 +356,10 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
         href: link.getAttribute("href"),
       })),
     );
-  assert.deepEqual(labels.slice(0, 6), [
+  assert.deepEqual(labels.slice(0, 4), [
     { label: "Overview", href: "/app" },
     { label: "Inbox", href: "/app/inbox" },
     { label: "Tasks", href: "/app/tasks" },
-    { label: "List", href: "/app/tasks" },
-    { label: "Board", href: "/app/tasks?view=board" },
     { label: "Search", href: "/app/search" },
   ]);
   assert.deepEqual(labels.at(-1), {
@@ -370,7 +368,7 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
   });
   assert.ok(
     labels
-      .slice(6, -1)
+      .slice(4, -1)
       .every((entry) => entry.href?.startsWith("/app/projects/")),
   );
   assert.equal(
@@ -414,13 +412,11 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
     "2",
   );
   assert.equal(
-    await page
-      .locator("main h1")
-      .evaluate(
-        (h1) =>
-          document.getElementById(h1.getAttribute("aria-describedby") ?? "")
-            ?.textContent,
-      ),
+    await page.locator(".page-header-title p").textContent(),
+    "2 unresolved across 2 projects",
+  );
+  assert.equal(
+    await page.locator(".page-header-count").textContent(),
     "2 unresolved",
   );
 
@@ -429,13 +425,31 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
   const current = await sidebar
     .locator('a[aria-current="page"]')
     .evaluateAll((links) => links.map((link) => link.textContent?.trim()));
-  assert.deepEqual(current, ["Board"]);
+  assert.deepEqual(current, ["Tasks"]);
   await page.goto(`${web.origin}/app/tasks`);
   assert.deepEqual(
     await sidebar
       .locator('a[aria-current="page"]')
       .evaluateAll((links) => links.map((link) => link.textContent?.trim())),
-    ["List"],
+    ["Tasks"],
+  );
+  // Overview and the task views carry their subtitle and the one primary action in the header.
+  await page.goto(`${web.origin}/app`);
+  await page.locator("main.page h1").waitFor();
+  assert.equal(
+    await page.locator(".page-header-title p").textContent(),
+    "Tasks across your projects. Action requests and ordinary progress remain distinct.",
+  );
+  assert.equal(
+    await page
+      .locator(".page-header")
+      .getByRole("link", { name: "New task", exact: true })
+      .count(),
+    1,
+  );
+  assert.equal(
+    await page.getByRole("link", { name: "New task", exact: true }).count(),
+    1,
   );
 
   // A failed Inbox read shows no number rather than a stale or partial one.
@@ -685,6 +699,12 @@ test("every route renders in the shell on desktop and phone without horizontal s
         assert.equal(state.menu, topLevel, `${route}: menu button`);
         assert.equal(state.back, !topLevel, `${route}: Back link`);
       }
+      if (width === 390 && route === "/app/inbox")
+        assert.equal(
+          await page.locator(".page-header-count").textContent(),
+          "2 unresolved",
+          "phone header count reads as text",
+        );
       if (evidence) await captureBrowserEvidence(page, `${width}-${evidence}`);
       if (width === 390 && route === `/app/tasks/${taskId}`)
         await captureBrowserEvidence(page, "390-task-detail-header");

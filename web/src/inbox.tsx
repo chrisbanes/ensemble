@@ -57,9 +57,12 @@ export async function loadInbox(client: OperatorClient, signal: AbortSignal) {
   }
 }
 /** A count is a total only when the whole Inbox was read and the last read succeeded. */
-export function inboxTotal(state: ResourceState<InboxRead>) {
+export function inboxSummaryOf(state: ResourceState<InboxRead>) {
   return state.data?.complete && !state.data.unavailable && !state.error
-    ? state.data.items.length
+    ? {
+        count: state.data.items.length,
+        projects: new Set(state.data.items.map((item) => item.projectId)).size,
+      }
     : null;
 }
 type InboxRead = Awaited<ReturnType<typeof loadInbox>>;
@@ -71,7 +74,7 @@ export function Inbox({
   state,
   questions,
   observation,
-  onTotal,
+  onSummary,
 }: {
   client: OperatorClient;
   session: Session;
@@ -80,8 +83,8 @@ export function Inbox({
   state: InboxState;
   questions: QuestionResponseStates;
   observation: object | null;
-  /** Reports the unresolved total (or null) so the shell count matches this list. */
-  onTotal?: (total: number | null) => void;
+  /** Reports the unresolved total and project count (or null) so the shell matches this list. */
+  onSummary?: (summary: ReturnType<typeof inboxSummaryOf>) => void;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) => loadInbox(client, signal),
@@ -97,11 +100,16 @@ export function Inbox({
     const timer = setInterval(() => refresh.current(), 15000);
     return () => clearInterval(timer);
   }, []);
-  const total = inboxTotal(resource.state);
+  const count = inboxSummaryOf(resource.state)?.count,
+    projectCount = inboxSummaryOf(resource.state)?.projects;
   useEffect(() => {
-    onTotal?.(total);
-    return () => onTotal?.(null);
-  }, [total, onTotal]);
+    onSummary?.(
+      count === undefined || projectCount === undefined
+        ? null
+        : { count, projects: projectCount },
+    );
+    return () => onSummary?.(null);
+  }, [count, projectCount, onSummary]);
   const seen = useRef(observation);
   useEffect(() => {
     if (seen.current !== observation) {
