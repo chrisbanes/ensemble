@@ -50,6 +50,13 @@ _Avoid_: Step when referring to delegated work
 The agent tasked with carrying out an assignment and returning its result.
 _Avoid_: Task owner when referring to the agent executing an assignment
 
+**Follow-up**:
+An explicit request that continues a completed assignment with new instructions,
+keeping its identity and history as newer work. An operator follow-up sends
+feedback to a task's completed project lead while the task is still open; it
+never reopens a done task.
+_Avoid_: Reassignment or a new assignment when the same assignment continues
+
 **Agent conversation**:
 The interaction history used by an agent to carry out work. An assignment can continue across replacement conversations.
 _Avoid_: Assignment when referring only to its conversation history
