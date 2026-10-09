@@ -3482,8 +3482,7 @@ export class CoordinationStore {
           }
         | undefined;
       if (
-        !batch ||
-        batch.state !== "queued" ||
+        batch?.state !== "queued" ||
         batch.kind !== "assignment" ||
         batch.taskId !== batch.requestTaskId ||
         batch.projectId !== batch.requestProjectId ||

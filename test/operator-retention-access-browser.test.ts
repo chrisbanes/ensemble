@@ -494,14 +494,12 @@ async function retainedJourney(j: BrowserJourney, counterpart: boolean) {
     } finally {
       releaseTask();
     }
-    {
-      try {
-        await historyEntered;
-        await readingDiagnostic("overlap-history-pending");
-        await page.clock.fastForward(15000);
-      } finally {
-        releaseHistory();
-      }
+    try {
+      await historyEntered;
+      await readingDiagnostic("overlap-history-pending");
+      await page.clock.fastForward(15000);
+    } finally {
+      releaseHistory();
     }
     snapshot = await waitReading("timer-settled");
     stage("timer-settled");

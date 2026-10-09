@@ -2273,8 +2273,7 @@ test("startup does not continue after workspace recovery returns to a cancelled 
     );
     releaseRecovery.resolve();
 
-    let startupResult: PromiseSettledResult<void>;
-    startupResult = await withTimeout(
+    const startupResult: PromiseSettledResult<void> = await withTimeout(
       startupPromise.then(
         () => ({ status: "fulfilled" as const, value: undefined }),
         (reason: unknown) => ({ status: "rejected" as const, reason }),

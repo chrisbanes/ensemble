@@ -40,11 +40,11 @@ for (const mode of ["reviewable-pr", "through-merge"] as const) {
         await new OperatorApi(f.service, [f.directory]).readTask(f.taskId)
       ).data;
       assert.match(
-        await page.locator("main header").innerText(),
+        await page.locator("main .task-workspace header").innerText(),
         new RegExp(data.task.state),
       );
       assert.match(
-        await page.locator("main header").innerText(),
+        await page.locator("main .task-workspace header").innerText(),
         new RegExp(`execution ${data.execution.state}`),
       );
     };
@@ -242,7 +242,10 @@ for (const mode of ["reviewable-pr", "through-merge"] as const) {
     await reopened
       .getByRole("heading", { name: "Release delivery", exact: true })
       .waitFor();
-    assert.match(await reopened.locator("main header").innerText(), /done/);
+    assert.match(
+      await reopened.locator("main .task-workspace header").innerText(),
+      /done/,
+    );
     assert.equal(f.scripted.state.writes, writes);
     assert.equal(f.runtime.turns, 0);
   });
@@ -296,7 +299,7 @@ async function sharedDestinations(
       .getByRole("heading", { name: "Release delivery", exact: true })
       .waitFor();
   }
-  await page.goto(origin + "/app/inbox");
+  await page.goto(`${origin}/app/inbox`);
   // Routine delivery progress never invents an actionable request.
   assert.equal(
     await page.getByText("Repair literal feedback C1", { exact: true }).count(),

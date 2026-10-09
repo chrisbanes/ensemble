@@ -423,7 +423,7 @@ export class OneTurnAttemptGuard {
   }
 
   recordCapture(capture: WorkspaceTurnCaptureRecord | undefined) {
-    if (!capture || capture.captureState !== "finished")
+    if (capture?.captureState !== "finished")
       return this.update({
         status: "uncertain",
         captureObservedAt: Date.now(),

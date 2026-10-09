@@ -165,8 +165,6 @@ export function DiffHunk({
   const effective: Layout = useNarrowViewport() ? "unified" : layout;
   const root = useRef<HTMLElement>(null);
   const [focused, setFocused] = useState<Record<string, string>>({});
-  const selection = select?.selection;
-
   const slots: Slot[] =
     effective === "split"
       ? pairLines(lines).flatMap((pair, row) => [

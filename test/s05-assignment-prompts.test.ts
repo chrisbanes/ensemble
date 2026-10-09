@@ -600,7 +600,7 @@ test("routed candidate result materializes and wakes the task lead at capacity o
   }
 });
 
-test("instruction apply rebinds only a never-admitted stale inbox batch", async (t) => {
+test("instruction apply rebinds only a never-admitted stale inbox batch", async () => {
   const root = mkdtempSync(
     join(tmpdir(), "ensemble-s05-rebind-refused-inbox-"),
   );
@@ -1229,7 +1229,7 @@ test("stale inbox withdrawal preserves independent stop and admission holds", as
         expectedRevision: question.revision,
         answer: `S05_${witness.toUpperCase()}_ANSWER`,
       });
-      const message = await service.coordinationView().postOperatorMessage({
+      await service.coordinationView().postOperatorMessage({
         key: randomUUID(),
         taskId,
         recipientAssignmentId: assignmentId,

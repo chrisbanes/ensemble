@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute } from "node:path";
 import { setImmediate as yieldTraversal } from "node:timers/promises";
 import { z } from "zod";
 import type {
@@ -63,10 +63,7 @@ import {
   type GitHubSourceReader,
 } from "./github-source.js";
 import type { StandaloneService } from "./service.js";
-import {
-  retainedReviewAnchorStageRequestSchema,
-  type RetainedReviewAnchorStageRequest,
-} from "./retained-evidence.js";
+import { retainedReviewAnchorStageRequestSchema } from "./retained-evidence.js";
 import { materialDigest } from "../core/delivery.js";
 import {
   LocalReviewAnchorRequiredError,
@@ -1027,7 +1024,7 @@ export class OperatorApi {
     });
     if (matches.length !== 1) return "unknown";
     const entry = matches[0];
-    if (!entry || entry.state !== "text") return "unknown";
+    if (entry?.state !== "text") return "unknown";
     for (const path of [
       entry.path,
       ...(entry.previousPath ? [entry.previousPath] : []),
@@ -1521,8 +1518,7 @@ export class OperatorApi {
 
     const current = initial.binding;
     if (
-      !current ||
-      current.state !== "ready" ||
+      current?.state !== "ready" ||
       !current.repositories.some(
         (repository) => repository.repositoryId === request.repositoryId,
       )
@@ -3028,11 +3024,9 @@ export class OperatorApi {
           t = this.requireTask(taskId),
           p = this.requireProject(String(t.projectId)),
           workspaceVisibility = this.service.taskWorkspaceVisibility(taskId),
-          snapshot = workspaceVisibilities.has(taskId)
-            ? workspaceVisibilities.get(taskId)!
-            : (workspaceVisibilities.set(taskId, workspaceVisibility),
-              workspaceVisibility),
-          excluded = await this.exclusions(String(t.projectId), taskId),
+          snapshot = workspaceVisibilities.get(taskId) ?? workspaceVisibility;
+        workspaceVisibilities.set(taskId, snapshot);
+        const excluded = await this.exclusions(String(t.projectId), taskId),
           view = this.coordination().readTask(taskId),
           resultId = row.resultId === null ? null : String(row.resultId),
           sourceId = row.sourceId === null ? null : String(row.sourceId),
@@ -3165,11 +3159,7 @@ export class OperatorApi {
         const item = manifest.items.find(
           (candidate) => candidate.artifactId === artifactId,
         );
-        if (
-          !item ||
-          item.state !== "available" ||
-          item.source !== "artifact-file"
-        )
+        if (item?.state !== "available" || item.source !== "artifact-file")
           throw new OperatorApiError(503, "unavailable");
         const response = await this.readRetainedEvidenceItem(
           taskId,
@@ -3563,7 +3553,7 @@ export class OperatorApi {
                         : "partial"
                       : "never",
                 lastAttemptAt: at,
-                lastSuccessfulAt: sync && sync.complete ? at : null,
+                lastSuccessfulAt: sync?.complete ? at : null,
               };
             }),
           };
@@ -3650,8 +3640,7 @@ export class OperatorApi {
   private requireReviewSession(
     context: OperatorReviewSessionContext | undefined,
   ): OperatorReviewSessionContext {
-    if (!context || !context.current())
-      throw new OperatorApiError(401, "unauthenticated");
+    if (!context?.current()) throw new OperatorApiError(401, "unauthenticated");
     if (context.ownerKey.length < 32 || context.ownerKey.length > 128)
       throw new OperatorApiError(403, "forbidden");
     return context;

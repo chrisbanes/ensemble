@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   browserSuite,
   captureBrowserEvidence,
@@ -104,14 +105,16 @@ test("retained HTML routes share the production foundation and native interactio
   await desktop
     .getByRole("button", { name: "Sign out", exact: true })
     .waitFor();
+  // #835: the global fallback link is gone; contextual links reach the retained pages.
+  assert.equal(
+    await desktop
+      .getByRole("link", { name: "Existing operator controls", exact: true })
+      .count(),
+    0,
+  );
+  await desktop.goto(`${web.origin}/app/projects/${projectId}`);
   await desktop
-    .getByRole("link", { name: "Existing operator controls", exact: true })
-    .click();
-  await desktop
-    .getByRole("heading", { name: "Ensemble", exact: true })
-    .waitFor();
-  await desktop
-    .getByRole("link", { name: "Foundation project", exact: true })
+    .getByRole("link", { name: "Open existing project controls", exact: true })
     .click();
   await desktop
     .getByRole("heading", { name: "Foundation project", exact: true })
@@ -154,7 +157,7 @@ test("retained HTML routes share the production foundation and native interactio
     assert.equal(style.loaded, true, path);
     assert.equal(style.background, "rgb(10, 10, 10)", path);
     assert.equal(style.foreground, "rgb(250, 250, 250)", path);
-    assert.match(style.family, /Inter/);
+    assert.match(style.family, /Geist/);
     assert.equal(style.scripts, 0, "legacy HTML remains non-hydrated");
     assert.equal(style.overflow, false, path);
     if (path === `/coordination/task/${taskId}`) {
@@ -170,10 +173,10 @@ test("retained HTML routes share the production foundation and native interactio
       );
     }
     const fontFaces = await desktop.evaluate(async () => {
-      const inter = await document.fonts.load('14px "Inter"');
-      const mono = await document.fonts.load('14px "JetBrains Mono"');
+      const sans = await document.fonts.load('14px "Geist"');
+      const mono = await document.fonts.load('14px "Geist Mono"');
       return {
-        inter: inter.map((face) => ({
+        sans: sans.map((face) => ({
           family: face.family,
           status: face.status,
         })),
@@ -181,25 +184,25 @@ test("retained HTML routes share the production foundation and native interactio
           family: face.family,
           status: face.status,
         })),
-        interChecked: document.fonts.check('14px "Inter"'),
-        monoChecked: document.fonts.check('14px "JetBrains Mono"'),
+        sansChecked: document.fonts.check('14px "Geist"'),
+        monoChecked: document.fonts.check('14px "Geist Mono"'),
       };
     });
-    assert.ok(fontFaces.inter.length > 0, `${path}: Inter face loaded`);
-    assert.ok(fontFaces.mono.length > 0, `${path}: JetBrains Mono face loaded`);
+    assert.ok(fontFaces.sans.length > 0, `${path}: Geist face loaded`);
+    assert.ok(fontFaces.mono.length > 0, `${path}: Geist Mono face loaded`);
     assert.ok(
-      fontFaces.inter.every((face) => face.status === "loaded"),
+      fontFaces.sans.every((face) => face.status === "loaded"),
       path,
     );
     assert.ok(
       fontFaces.mono.every((face) => face.status === "loaded"),
       path,
     );
-    assert.equal(fontFaces.interChecked, true, `${path}: Inter is available`);
+    assert.equal(fontFaces.sansChecked, true, `${path}: Geist is available`);
     assert.equal(
       fontFaces.monoChecked,
       true,
-      `${path}: JetBrains Mono is available`,
+      `${path}: Geist Mono is available`,
     );
     if (!verifiedFonts) {
       const response = await desktop.request.get(web.origin + path);
@@ -217,8 +220,8 @@ test("retained HTML routes share the production foundation and native interactio
         height: getComputedStyle(el).height,
         family: getComputedStyle(el).fontFamily,
       }));
-      assert.equal(inputStyle.height, "36px");
-      assert.match(inputStyle.family, /Inter/);
+      assert.equal(inputStyle.height, "32px");
+      assert.match(inputStyle.family, /Geist/);
       await captureBrowserEvidence(desktop, "1366-retained-project-editor");
     }
   }
@@ -238,7 +241,7 @@ test("retained HTML routes share the production foundation and native interactio
   await phone.goto(`${web.origin}/app`);
   await phone.getByLabel("Password", { exact: true }).fill(web.password);
   await phone.getByRole("button", { name: "Sign in", exact: true }).click();
-  await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await phone.locator("main.page h1").waitFor();
   await phone.goto(`${web.origin}/runtime`);
   await phone.locator("body.legacy-operator").waitFor();
   const phoneControl = phone
@@ -287,7 +290,7 @@ test("retained HTML routes share the production foundation and native interactio
   assert.equal(approvalFields.materialJson, approvalMaterial);
   assert.match(approvalFields.key ?? "", /^[0-9a-f-]{36}$/i);
   assert.ok(approvalFields.csrfToken);
-  await assertPhonePreContained(phone, approvalPre);
+  await assertPhonePreContained(approvalPre);
   await captureBrowserEvidence(phone, "390-retained-long-approval-material");
 
   await phone.goto(`${web.origin}/coordination/assignment/${assignmentId}`);
@@ -296,17 +299,14 @@ test("retained HTML routes share the production foundation and native interactio
   });
   await historyPre.waitFor();
   assert.equal(await historyPre.textContent(), longHistory);
-  await assertPhonePreContained(phone, historyPre);
+  await assertPhonePreContained(historyPre);
   await captureBrowserEvidence(phone, "390-retained-long-assignment-history");
   await phone.getByRole("link", { name: "New interface", exact: true }).click();
-  await phone.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await phone.locator("main.page h1").waitFor();
   assert.equal(new URL(phone.url()).pathname, "/app");
 });
 
-async function assertPhonePreContained(
-  page: import("playwright").Page,
-  pre: import("playwright").Locator,
-) {
+async function assertPhonePreContained(pre: import("playwright").Locator) {
   const dimensions = await pre.evaluate((element) => ({
     preWidth: element.getBoundingClientRect().width,
     preScrollWidth: element.scrollWidth,
@@ -319,3 +319,108 @@ async function assertPhonePreContained(
   assert.ok(dimensions.preScrollWidth <= dimensions.preWidth + 1);
   assert.ok(dimensions.documentWidth <= dimensions.viewportWidth);
 }
+
+test("Nova primitives keep 32px controls, the documented radii and tinted destructive tokens", async (_t, journey) => {
+  const f = await journey.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  journey.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const projectId = randomUUID();
+  f.service.domain().execute({
+    type: "project.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    name: "Nova project",
+    leadProfileId: null,
+  });
+  f.service.domain().execute({
+    type: "task.create",
+    actor: "operator",
+    key: randomUUID(),
+    projectId,
+    taskId: randomUUID(),
+    title: "Nova task",
+    outcome: "Inspect primitives",
+    ready: false,
+  });
+  const web = await journey.start("fixture.web", () => f.startWeb());
+  browser = await journey.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  journey.observe(page);
+  page.setDefaultTimeout(5000);
+  await page.goto(`${web.origin}/app/tasks?view=board`);
+  await page.getByLabel("Password", { exact: true }).fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.locator('[data-slot="card"]').first().waitFor();
+  // No route renders a destructive control until Stop (U5), so measure the classes the
+  // primitives' own destructive variants declare.
+  const destructiveClasses = (primitive: string) =>
+    /destructive:\s*"([^"]+)"/.exec(
+      readFileSync(
+        new URL(`../../web/src/ui/${primitive}.tsx`, import.meta.url),
+        "utf8",
+      ),
+    )?.[1] ?? assert.fail(`${primitive} declares no destructive variant`);
+  const variants = {
+    button: destructiveClasses("button"),
+    badge: destructiveClasses("badge"),
+  };
+  const geometry = await page.evaluate((variants) => {
+    const measure = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const style = getComputedStyle(element);
+      return { height: style.height, radius: style.borderRadius };
+    };
+    const primary = document.querySelector('.column-tab[aria-pressed="true"]');
+    const outline = document.querySelector('.column-tab[aria-pressed="false"]');
+    const tinted = (className: string) => {
+      const probe = document.createElement("span");
+      probe.className = className;
+      document.body.append(probe);
+      const style = getComputedStyle(probe);
+      const result = { background: style.backgroundColor, color: style.color };
+      probe.remove();
+      return result;
+    };
+    const destructive = {
+      button: tinted(variants.button),
+      badge: tinted(variants.badge),
+    };
+    return {
+      primary: primary && {
+        height: getComputedStyle(primary).height,
+        radius: getComputedStyle(primary).borderRadius,
+      },
+      outline: outline && {
+        height: getComputedStyle(outline).height,
+        radius: getComputedStyle(outline).borderRadius,
+      },
+      input: measure('[data-slot="input"]'),
+      card: measure('[data-slot="card"]'),
+      destructive,
+    };
+  }, variants);
+  assert.deepEqual(geometry.primary, { height: "32px", radius: "10px" });
+  assert.deepEqual(geometry.outline, { height: "32px", radius: "10px" });
+  assert.deepEqual(geometry.input, { height: "32px", radius: "10px" });
+  assert.equal(geometry.card?.radius, "14px");
+  const alpha = (value: string) =>
+    Number(/,\s*([\d.]+)\)$/.exec(value)?.[1] ?? "1");
+  for (const [name, tint] of Object.entries(geometry.destructive)) {
+    assert.ok(
+      alpha(tint.background) > 0 && alpha(tint.background) < 1,
+      `destructive ${name} background is tinted, not solid: ${tint.background}`,
+    );
+    assert.notEqual(tint.color, tint.background);
+  }
+  await captureBrowserEvidence(page, "1366-nova-primitives");
+});

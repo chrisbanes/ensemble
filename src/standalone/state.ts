@@ -1442,8 +1442,7 @@ export class ExecutionState {
         }
       | undefined;
     if (
-      !row ||
-      row.kind !== "assignment" ||
+      row?.kind !== "assignment" ||
       !row.taskId ||
       !row.projectId ||
       !row.assignmentId ||

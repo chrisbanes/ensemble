@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "./temp.js";
 import { test } from "node:test";
-import {
+import type {
   CoordinationStore,
-  type RuntimeQuestionRecord,
+  RuntimeQuestionRecord,
 } from "../src/core/coordination.js";
 import { ExecutionState } from "../src/standalone/state.js";
 import { StandaloneService } from "../src/standalone/service.js";

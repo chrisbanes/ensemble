@@ -34,9 +34,9 @@ async function waitFor(predicate: () => boolean) {
 }
 
 async function login(web: { origin: string; password: string }) {
-  const anonymous = await fetch(web.origin + "/api/operator/session");
+  const anonymous = await fetch(`${web.origin}/api/operator/session`);
   const anon = (await anonymous.json()) as { csrfToken: string };
-  const response = await fetch(web.origin + "/api/operator/login", {
+  const response = await fetch(`${web.origin}/api/operator/login`, {
     method: "POST",
     headers: {
       cookie: anonymous.headers.get("set-cookie")!.split(";")[0]!,
@@ -136,8 +136,7 @@ test("retained evidence and submitted comparison context survive replacement, cl
   );
   const workspace = await f.service.taskWorkspace(seeded.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
 
   const beforeBytes = Buffer.concat([
     Buffer.from([0xef, 0xbb, 0xbf]),
@@ -569,7 +568,7 @@ test("retained evidence and submitted comparison context survive replacement, cl
         item.reason === "comparison-unsettled",
     ),
   );
-  const textResponse = await fetch(api + "/" + textItem.itemId, {
+  const textResponse = await fetch(`${api}/${textItem.itemId}`, {
     headers: { cookie },
   });
   assert.equal(textResponse.status, 200);

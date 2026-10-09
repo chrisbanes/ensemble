@@ -155,7 +155,7 @@ test("curated command stream accepts exactly 256KiB answer plus strict envelope 
     };
     const a = await seedOwnQuestion(f, form),
       web = await f.startWeb();
-    let response = await fetch(web.origin + "/api/operator/session"),
+    let response = await fetch(`${web.origin}/api/operator/session`),
       cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "",
       session = (await response.json()) as { csrfToken: string };
     const agent = new Agent({ keepAlive: true, maxSockets: 1 });
@@ -295,7 +295,7 @@ test("curated command stream accepts exactly 256KiB answer plus strict envelope 
         1,
       );
       assert.equal(
-        (await send("/api/operator/source-refresh", "{}" + " ".repeat(65536)))
+        (await send("/api/operator/source-refresh", `{}${" ".repeat(65536)}`))
           .status,
         413,
       );
@@ -313,7 +313,7 @@ test("logout during an authenticated held upload rejects before answer persisten
   try {
     const a = await seedOwnQuestion(f),
       web = await f.startWeb();
-    let response = await fetch(web.origin + "/api/operator/session"),
+    let response = await fetch(`${web.origin}/api/operator/session`),
       cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "",
       session = (await response.json()) as { csrfToken: string };
     const headers = () => ({
@@ -322,7 +322,7 @@ test("logout during an authenticated held upload rejects before answer persisten
       "x-csrf-token": session.csrfToken,
       "content-type": "application/json",
     });
-    response = await fetch(web.origin + "/api/operator/login", {
+    response = await fetch(`${web.origin}/api/operator/login`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ password: web.password }),
@@ -346,7 +346,7 @@ test("logout during an authenticated held upload rejects before answer persisten
     });
     const completed = new Promise<number>((resolve, reject) => {
       upload = httpRequest(
-        web.origin + "/api/operator/commands",
+        `${web.origin}/api/operator/commands`,
         {
           method: "POST",
           headers: {
@@ -367,7 +367,7 @@ test("logout during an authenticated held upload rejects before answer persisten
     });
     await initial;
     upload.write(bytes.slice(0, 40));
-    response = await fetch(web.origin + "/api/operator/logout", {
+    response = await fetch(`${web.origin}/api/operator/logout`, {
       method: "POST",
       headers: headers(),
       body: "{}",

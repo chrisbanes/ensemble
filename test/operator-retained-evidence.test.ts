@@ -61,8 +61,7 @@ async function captureNativeResult(
   assert.ok(work?.threadId && work.turnId);
   const workspace = await f.service.taskWorkspace(seeded.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
-    throw new Error("Workspace missing");
+  if (workspace?.state !== "ready") throw new Error("Workspace missing");
   const textPath = join(workspace.path, "retained-proof.txt");
   const originalText = Buffer.concat([
     Buffer.from([0xef, 0xbb, 0xbf]),
@@ -145,9 +144,9 @@ async function captureNativeResult(
 }
 
 async function login(web: { origin: string; password: string }) {
-  const anonymous = await fetch(web.origin + "/api/operator/session");
+  const anonymous = await fetch(`${web.origin}/api/operator/session`);
   const anon = (await anonymous.json()) as { csrfToken: string };
-  const response = await fetch(web.origin + "/api/operator/login", {
+  const response = await fetch(`${web.origin}/api/operator/login`, {
     method: "POST",
     headers: {
       cookie: anonymous.headers.get("set-cookie")!.split(";")[0]!,
@@ -257,7 +256,7 @@ test("authenticated retained reads preserve exact bytes through edits, cleanup a
     captured.resultId +
     "/evidence";
   const manifestPath = base.slice(web.origin.length);
-  const itemPath = manifestPath + "/" + captured.textItem.itemId;
+  const itemPath = `${manifestPath}/${captured.textItem.itemId}`;
   const artifactPathRoute =
     "/api/operator/tasks/" +
     captured.seeded.taskId +
@@ -470,7 +469,7 @@ test("a retained artifact gap stays a gap after a matching live file appears", a
     ),
   );
   const artifactItem = captured.artifactItem!;
-  const contentResponse = await fetch(base + "/" + artifactItem.itemId, {
+  const contentResponse = await fetch(`${base}/${artifactItem.itemId}`, {
     headers: { cookie: session.cookie },
   });
   assert.equal(contentResponse.status, 200);
@@ -613,7 +612,7 @@ test("current exclusions cover every retained diff and rename path without metad
     "/results/" +
     legacy.resultId +
     "/evidence";
-  const url = base + "/" + itemId;
+  const url = `${base}/${itemId}`;
   const manifestResponse = await fetch(base, {
     headers: { cookie: session.cookie },
   });
@@ -796,7 +795,7 @@ test("the authenticated boundary withholds retained bytes after logout during th
       headers: { cookie: session.cookie },
     });
     await arrival;
-    const logout = await fetch(web.origin + "/api/operator/logout", {
+    const logout = await fetch(`${web.origin}/api/operator/logout`, {
       method: "POST",
       headers: {
         cookie: session.cookie,

@@ -37,7 +37,6 @@ import {
   archivedResumeRejectionSchema,
 } from "./pre-turn-recovery.js";
 import type {
-  RuntimeNativeEndpointHistory,
   RuntimeSafetyPort,
   RuntimeTerminalEvidence,
   RuntimeTerminalFailureEvidence,
@@ -1709,8 +1708,7 @@ export class CodexRuntime implements Runtime {
         generation,
       );
       if (
-        !evidence ||
-        evidence.firstStatus !== "failed" ||
+        evidence?.firstStatus !== "failed" ||
         evidence.conflicted ||
         !evidence.workId ||
         !evidence.failure

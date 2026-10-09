@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { ResourceState } from "./resource.js";
 import * as Dialog from "@radix-ui/react-dialog";
+import { ChevronLeft, ChevronRight, Menu } from "lucide-react";
 import { cn } from "./lib/utils.js";
 import { Alert, AlertDescription } from "./ui/alert.js";
 import { Badge } from "./ui/badge.js";
@@ -104,13 +105,7 @@ export function ResourceStatus<T>({
   retry: () => void;
   label?: string;
 }) {
-  if (state.status === "fresh")
-    return (
-      <p className="metadata muted">
-        Fetched{" "}
-        {state.fetchedAt ? new Date(state.fetchedAt).toLocaleTimeString() : ""}
-      </p>
-    );
+  if (state.status === "fresh") return null;
   const message =
     state.error === "not-found"
       ? `${label} not found.`
@@ -159,9 +154,15 @@ export function MobileNavigation({
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetTrigger asChild>
-        <Button ref={trigger} variant="secondary">
-          Projects and navigation
-        </Button>
+        <PrimitiveButton
+          ref={trigger}
+          variant="ghost"
+          size="icon"
+          className="control"
+        >
+          <Menu aria-hidden="true" />
+          <span className="sr-only">Projects and navigation</span>
+        </PrimitiveButton>
       </SheetTrigger>
       <SheetContent
         className="drawer"
@@ -183,8 +184,85 @@ export function MobileNavigation({
         <SheetClose asChild>
           <Button variant="secondary">Close navigation</Button>
         </SheetClose>
-        <Dialog.Close asChild>{children}</Dialog.Close>
+        <Dialog.Close asChild>
+          <div className="drawer-body">{children}</div>
+        </Dialog.Close>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** Content of a link that only opens another view: title, optional summary and a chevron. */
+export function NavigationRow({
+  icon,
+  title,
+  summary,
+  trailing,
+}: {
+  icon?: ReactNode;
+  title: ReactNode;
+  summary?: ReactNode;
+  trailing?: ReactNode;
+}) {
+  return (
+    <>
+      {icon}
+      <span className="nav-label">
+        <span>{title}</span>
+        {summary && <span className="metadata muted">{summary}</span>}
+      </span>
+      {trailing}
+      <ChevronRight aria-hidden="true" className="nav-chevron" />
+    </>
+  );
+}
+
+/**
+ * The one title (h1) of a route. Desktop shows title, optional subtitle and one action.
+ * At phone widths a top-level route adds the menu button and a count; a nested route
+ * adds a Back link to its static parent instead.
+ */
+export function PageHeader({
+  title,
+  subtitle,
+  action,
+  badge,
+  menu,
+  back,
+}: {
+  title: string;
+  subtitle?: string | undefined;
+  action?: ReactNode;
+  badge?: string | undefined;
+  menu?: ReactNode;
+  back?: { href: string; label: string };
+}) {
+  return (
+    <header
+      className="page-header"
+      data-variant={back ? "detail" : "top-level"}
+    >
+      {menu && <div className="phone-nav">{menu}</div>}
+      {back && (
+        <PrimitiveButton
+          asChild
+          variant="ghost"
+          className="control page-header-back"
+        >
+          <a href={back.href} aria-label={`Back to ${back.label}`}>
+            <ChevronLeft aria-hidden="true" />
+            <span>{back.label}</span>
+          </a>
+        </PrimitiveButton>
+      )}
+      <div className="page-header-title">
+        <h1 className="page-heading">{title}</h1>
+        {subtitle && <p className="introduction muted">{subtitle}</p>}
+      </div>
+      {badge && (
+        <StatusBadge className="page-header-count">{badge}</StatusBadge>
+      )}
+      {action}
+    </header>
   );
 }

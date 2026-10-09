@@ -5,7 +5,7 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 const mode = process.env.UI07_FIXTURE_MODE;
-const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const terminal = () =>
   send({
     method: "turn/completed",

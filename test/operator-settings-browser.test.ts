@@ -33,7 +33,7 @@ test("Settings guides empty workspace through profile and paused project creatio
   });
   journey.observe(page);
   page.setDefaultTimeout(5000);
-  await page.goto(web.origin + "/app/settings");
+  await page.goto(`${web.origin}/app/settings`);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
@@ -77,7 +77,7 @@ async function signIn(
   await page.goto(web.origin + path);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page.locator("main.page h1").waitFor();
 }
 function seedSettings(f: Awaited<ReturnType<typeof createOperatorFixture>>) {
   const profileId = randomUUID(),
@@ -228,7 +228,7 @@ test("ordinary links stay distinct while styled actions and long controls fit sm
     await observationButton.evaluate(
       (element) => getComputedStyle(element).height,
     ),
-    "36px",
+    "32px",
   );
   for (const width of [320, 360]) {
     await page.setViewportSize({ width, height: 844 });
@@ -807,6 +807,8 @@ for (const layout of [
       true,
     );
     if (layout.width < 768) {
+      // Project configuration is a nested screen (Back header); the drawer is on Settings.
+      await page.goto(`${web.origin}/app/settings`);
       await page
         .getByRole("button", { name: "Projects and navigation", exact: true })
         .click();
@@ -833,7 +835,7 @@ for (const layout of [
       );
     }
     await page.goto(
-      web.origin + `/app/assignments/${ids.assignmentId}/recovery`,
+      `${web.origin}/app/assignments/${ids.assignmentId}/recovery`,
     );
     await page
       .getByText("1 older recovery records omitted", { exact: false })
@@ -925,9 +927,9 @@ test("Runtime Settings records lowered capacity separately from usage and retain
       slot: e.getAttribute("data-slot"),
       family: getComputedStyle(e).fontFamily,
     }));
-  assert.equal(capacityControl.height, "36px");
+  assert.equal(capacityControl.height, "32px");
   assert.equal(capacityControl.slot, "input");
-  assert.match(capacityControl.family, /Inter/);
+  assert.match(capacityControl.family, /Geist/);
   const capacityOverride = await page
     .getByLabel("Set capacity override for Paused configuration project", {
       exact: true,
@@ -2080,8 +2082,16 @@ test("new private input survives a detached receipt and old-session 401 after sa
     if (mode === "receipt-expiry") {
       f.advanceClock(61_000);
       await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    } else
+    } else {
+      // Phone: Sign out is in the drawer of the top-level parent of this nested screen.
+      await page
+        .getByRole("link", { name: "Back to Settings", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
       await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    }
     await page.getByLabel("Password", { exact: true }).waitFor();
     await capture(
       page,
@@ -2089,6 +2099,10 @@ test("new private input survives a detached receipt and old-session 401 after sa
     );
     await page.getByLabel("Password", { exact: true }).fill(web.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    if (mode === "401-logout")
+      await page
+        .locator(`a[href="/app/projects/${ids.projectId}/settings"]`)
+        .click();
     await page
       .getByRole("heading", { name: "Project configuration", exact: true })
       .waitFor();
@@ -2112,12 +2126,15 @@ test("new private input survives a detached receipt and old-session 401 after sa
       .getByRole("button", { name: "Save project", exact: true })
       .waitFor();
     assert.equal(await page.getByLabel("Password", { exact: true }).count(), 0);
-    assert.equal(
-      await page
-        .getByRole("button", { name: "Sign out", exact: true })
-        .isEnabled(),
-      true,
-    );
+    // Desktop: the sidebar Sign out is visible and released. On a nested phone screen the
+    // drawer is only reachable after Back, so that check runs at the end of the journey.
+    if (mode === "receipt-expiry")
+      assert.equal(
+        await page
+          .getByRole("button", { name: "Sign out", exact: true })
+          .isEnabled(),
+        true,
+      );
     assert.equal(
       await page.getByLabel("New instructions", { exact: true }).inputValue(),
       "PRIVATE NEW SESSION INPUT",
@@ -2173,6 +2190,19 @@ test("new private input survives a detached receipt and old-session 401 after sa
     assert.equal(posts.length, 1);
     assert.equal(f.runtime.turns, 0);
     assert.deepEqual(errors, []);
+    if (mode === "401-logout") {
+      await page
+        .getByRole("link", { name: "Back to Settings", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Projects and navigation", exact: true })
+        .click();
+      const signOut = page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Sign out", exact: true });
+      await signOut.waitFor({ state: "visible" });
+      assert.equal(await signOut.isEnabled(), true);
+    }
   }
 });
 test("aborted old configuration read preserves new input and a current logout 401 releases its pending control", async (_t, journey) => {

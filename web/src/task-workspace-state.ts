@@ -3,7 +3,7 @@ import type {
   OperatorCommand,
 } from "../../src/operator/contracts.js";
 import type { z } from "zod";
-import type { feedbackReferenceSchema } from "../../src/core/task-review.js";
+import type { feedbackReferenceSchema } from "../../src/core/task-review-contracts.js";
 import type {
   workspaceDirectoryReadSchema,
   workspacePreviewReadSchema,

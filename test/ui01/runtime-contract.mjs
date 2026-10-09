@@ -1051,13 +1051,13 @@ export function consumeServiceGrant(
   });
   writeFileSync(
     `${path}.consumed`,
-    JSON.stringify({
+    `${JSON.stringify({
       grantId: grant.grantId,
       resource: grant.resource,
       holder: grant.holder,
       head: grant.head,
       consumedAt: new Date().toISOString(),
-    }) + "\n",
+    })}\n`,
     { flag: "wx", mode: 0o600 },
   );
   return grant;

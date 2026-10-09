@@ -30,7 +30,7 @@ async function stageDraft(
 ) {
   const workspace = await f.service.taskWorkspace(task.taskId);
   assert.equal(workspace?.state, "ready");
-  if (!workspace || workspace.state !== "ready")
+  if (workspace?.state !== "ready")
     throw new Error("Task workspace unavailable");
   let version = 0;
   const groups: string[] = [];

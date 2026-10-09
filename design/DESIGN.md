@@ -533,8 +533,10 @@ Keep the compact workspace: 224px desktop sidebar, 20px main content padding,
 12px workspace gaps, 18px screen titles and 14–16px section headings. Task and
 request titles are 14px medium. Supporting text remains 12–14px. Desktop buttons,
 inputs and selects use Nova's 32px height (36px large); phone actions keep 44px
-targets. The web app's `web/src/tokens.css` still uses Inter and 6/8px radii;
-moving the build to Nova is separate implementation work. The outcome editor retains
+targets. Since #835 the web app's `web/src/tokens.css` and UI primitives use
+Geist, Geist Mono and the Nova radii and control heights; the 3 October-era notes
+elsewhere in this file that name Inter, JetBrains Mono or 6/8px radii are
+historical. The outcome editor retains
 260px height on the representative desktop and 180px on phone.
 
 ## Tokens
@@ -804,10 +806,9 @@ and disclosure detail; do not shrink their entire height into a laptop viewport.
 
 ## Worktree handoff and limits
 
-Keep the editable Pen document in the main design checkout. Worktrees can use this
-Markdown reference without opening or creating competing copies of the canvas.
-When the design changes, refresh this snapshot through MCP; do not parse the `.pen`
-file directly. Review the proposal in Pen using the node references above.
+Worktrees may edit `design.pen` through Pen MCP, or use this Markdown reference
+when Pen is unavailable. When the design changes, refresh this snapshot through
+MCP; do not parse the `.pen` file directly. Review the proposal in Pen using the node references above.
 Screen preview exports are omitted; comparison image assets remain in
 `design/assets/` for use by the canvas.
 

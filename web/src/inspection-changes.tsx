@@ -232,7 +232,6 @@ export function TaskWorkspaceChanges({
   session,
   taskId,
   assignments,
-  taskLeadName,
   state,
   changed,
 }: {
@@ -240,7 +239,6 @@ export function TaskWorkspaceChanges({
   session: Session;
   taskId: string;
   assignments: Array<{ assignmentId: string; name: string | null }>;
-  taskLeadName: string | null;
   state: TaskChangesState;
   changed: () => void;
 }) {
@@ -736,18 +734,10 @@ export function TaskWorkspaceChanges({
       )}
       {state.notice && <p role="status">{state.notice}</p>}
       {snapshot?.target === "turn" && current?.state !== "unsettled" && (
-        <FinishedTurn
-          snapshot={snapshot}
-          assignments={assignments}
-          taskLeadName={taskLeadName}
-        />
+        <FinishedTurn snapshot={snapshot} assignments={assignments} />
       )}
       {current?.state === "unsettled" && (
-        <PendingTurn
-          data={current}
-          assignments={assignments}
-          taskLeadName={taskLeadName}
-        />
+        <PendingTurn data={current} assignments={assignments} />
       )}
       {!current && !currentRequest?.pending && (
         <p role="status">Choose a repository or select Last turn.</p>

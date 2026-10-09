@@ -15,9 +15,9 @@ import {
   LocalOperatorUi,
 } from "../src/standalone/operator.js";
 import { OperatorWebBundle } from "../src/standalone/operator-web.js";
-import {
+import type {
   TurnScheduler,
-  type SchedulerStore,
+  SchedulerStore,
 } from "../src/standalone/scheduler.js";
 import {
   StandaloneService,

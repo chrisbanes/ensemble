@@ -224,7 +224,7 @@ test("one anonymous session has one in-flight login and one successful rotation"
 
     state.deriver.release(0);
     const authenticated = await pending;
-    assert.ok(authenticated && authenticated.authenticated);
+    assert.ok(authenticated?.authenticated);
     assert.notEqual(authenticated.id, anonymous.id);
     assert.notEqual(authenticated.csrfToken, anonymous.csrfToken);
     assert.equal(state.auth.getSession(anonymous.id), undefined);
