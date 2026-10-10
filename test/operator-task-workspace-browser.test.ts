@@ -786,7 +786,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   );
   assert.equal(
     await page
-      .getByRole("link", { name: "Open exact approval", exact: true })
+      .getByRole("link", { name: "Review material & decide", exact: true })
       .getAttribute("href"),
     `/coordination/task/${b.taskId}#${approval.interactionId}`,
   );

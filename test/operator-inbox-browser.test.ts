@@ -6,18 +6,24 @@ import {
   type BrowserJourney,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
-import { seedOwnQuestion } from "./fixtures/questions.js";
+import { taskSchema, type TaskRead } from "../src/operator/contracts.js";
+import {
+  seedOwnApproval,
+  seedOwnIntervention,
+  seedOwnQuestion,
+} from "./fixtures/questions.js";
 const test = browserSuite("ui08-inbox");
 
 type Fixture = Awaited<ReturnType<typeof createOperatorFixture>>;
 const projects = ["Atlas", "Relay", "Fieldnotes"];
 
 /** Starts a fixture with `count` own questions across distinct projects and signs in at `path`. */
-async function openInbox(
+async function openInbox<T = undefined>(
   j: BrowserJourney,
   count: number,
   viewport: { width: number; height: number },
   path = "/app/inbox",
+  extra?: (f: Fixture) => Promise<T>,
 ) {
   const f = await j.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
@@ -38,6 +44,7 @@ async function openInbox(
         projects[i % projects.length],
       ),
     );
+  const more = (await extra?.(f)) as T;
   const web = await j.start("fixture.web", () => f.startWeb());
   browser = await j.start("browser.launch", () => chromium.launch());
   const page = await browser.newPage({ viewport });
@@ -46,7 +53,7 @@ async function openInbox(
   await page.goto(`${web.origin}${path}`);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  return { f: f as Fixture, page, web, seeded };
+  return { f: f as Fixture, page, web, seeded, more };
 }
 
 async function createdAtOf(page: Page, origin: string, title: string) {
@@ -486,4 +493,163 @@ test("sign-out clears the Inbox filters and in-memory selection; the header is n
     await page.locator(".page-header-title p").textContent(),
     "3 unresolved across 3 projects",
   );
+});
+
+test("an approval shows its exact action, target and independent holds, and decides only at the retained destination", async (_t, j) => {
+  const { page, more: approval } = await openInbox(
+    j,
+    0,
+    { width: 1366, height: 900 },
+    "/app/inbox",
+    (f) => seedOwnApproval(f),
+  );
+  const commands: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/operator/commands"
+    )
+      commands.push(request.url());
+  });
+  const detail = page.getByRole("region", { name: "Selected request" });
+  await page.locator(".inbox-row").click();
+  await detail
+    .getByText("Create a pull request. No merge or deployment.")
+    .waitFor();
+  await detail.getByText("acme/atlas · main ← command-menu").waitFor();
+  await detail.getByText(/^revision \d+$/).waitFor();
+  await detail.getByText("Task lead", { exact: true }).waitFor();
+  assert.equal(await detail.getByText("Approval", { exact: true }).count(), 1);
+  await detail
+    .getByText(
+      "Your decision is bound to the action, target and revisions in the exact approval. Changed material requires a new review.",
+      { exact: true },
+    )
+    .waitFor();
+  const decide = detail.getByRole("link", {
+    name: "Review material & decide",
+    exact: true,
+  });
+  assert.equal(
+    await decide.getAttribute("href"),
+    `/coordination/task/${approval.taskId}#${approval.interactionId}`,
+  );
+  assert.equal(
+    await detail.getByRole("button", { name: /approve|deny/i }).count(),
+    0,
+  );
+  assert.equal(
+    await detail.getByText("Execution blocked by dependency").count(),
+    0,
+  );
+  await captureBrowserEvidence(page, "1366-inbox-approval", {
+    fullPage: false,
+  });
+
+  // A source-owned hold, served as a contract-valid task read, shows beside the decision.
+  const taskUrl = `**/api/operator/tasks/${approval.taskId}`;
+  await page.route(taskUrl, async (route) => {
+    const response = await route.fetch(),
+      body = (await response.json()) as TaskRead;
+    body.data.source = {
+      identity: { provider: "github.com", nodeId: "I_1", repositoryId: "R_1" },
+      repositoryName: "acme/atlas",
+      number: 12,
+      url: "https://github.com/acme/atlas/issues/12",
+      title: "Imported task",
+      body: "",
+      state: "open",
+      memberships: [],
+      nativeBlockers: [
+        {
+          nodeId: "B_1",
+          repositoryId: "R_2",
+          repositoryName: "acme/design-system",
+          number: 87,
+          state: "open",
+        },
+      ],
+      review: null,
+      hold: null,
+    };
+    body.data.admission.eligible = false;
+    body.data.admission.reasons = ["imported-blockers-blocked"];
+    taskSchema.parse(body);
+    await route.fulfill({ response, json: body });
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.reload();
+  await page.locator(".inbox-row").click();
+  await detail
+    .getByText("Execution blocked by dependency", { exact: true })
+    .waitFor();
+  await detail.getByText("acme/design-system#87", { exact: true }).waitFor();
+  await detail
+    .getByText(
+      "Source-owned hold. Approval does not clear it; execution still waits for the GitHub blocker.",
+      { exact: true },
+    )
+    .waitFor();
+  await captureBrowserEvidence(page, "1366-inbox-approval-hold", {
+    fullPage: false,
+  });
+  await page.unroute(taskUrl);
+
+  // When the task cannot be read the holds are unknown and stay in effect.
+  await page.route(taskUrl, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    }),
+  );
+  try {
+    await page.reload();
+    await page.locator(".inbox-row").click();
+    await detail
+      .getByText(
+        "Independent holds could not be read; they remain in effect.",
+        { exact: true },
+      )
+      .waitFor();
+    assert.equal(await decide.count(), 1);
+  } finally {
+    await page.unroute(taskUrl);
+  }
+  await detail.getByRole("button", { name: "Retry", exact: true }).click();
+  await detail
+    .getByText("Independent holds could not be read")
+    .waitFor({ state: "detached" });
+  assert.equal(
+    commands.length,
+    0,
+    "no command is sent from the Inbox approval view",
+  );
+});
+
+test("an intervention shows its recorded reason and links to the execution", async (_t, j) => {
+  const { page, more: held } = await openInbox(
+    j,
+    0,
+    { width: 1366, height: 900 },
+    "/app/inbox",
+    (f) => seedOwnIntervention(f),
+  );
+  const detail = page.getByRole("region", { name: "Selected request" });
+  await page.locator(".inbox-row").click();
+  await detail.getByText("Intervention", { exact: true }).waitFor();
+  await detail
+    .getByText(
+      "Recorded intervention requires exact recovery or review; responsibility unknown",
+    )
+    .waitFor();
+  assert.equal(
+    await detail
+      .getByRole("link", { name: "Inspect execution", exact: true })
+      .getAttribute("href"),
+    `/app/tasks/${held.taskId}`,
+  );
+  await captureBrowserEvidence(page, "1366-inbox-intervention", {
+    fullPage: false,
+  });
 });

@@ -30,6 +30,7 @@ import {
   requestKindLabel,
 } from "./inbox-presentation.js";
 import { useOperatorResource, type ResourceState } from "./resource.js";
+import { ApprovalDetail, InterventionDetail } from "./inbox-detail.js";
 import { QuestionResponse } from "./question-response.js";
 import type { QuestionResponseStates } from "./question-response-state.js";
 export class InboxState {
@@ -465,16 +466,14 @@ export function Inbox({
                   states={questions}
                   onRecorded={resource.refresh}
                 />
+              ) : selected?.kind === "approval" ? (
+                <ApprovalDetail
+                  client={client}
+                  session={session}
+                  item={selected}
+                />
               ) : selected ? (
-                <>
-                  <p>
-                    Review the exact recorded material and recovery state before
-                    acting.
-                  </p>
-                  <ActionLink href={selected.destination}>
-                    Open exact {selected.kind}
-                  </ActionLink>
-                </>
+                <InterventionDetail item={selected} />
               ) : (
                 <p>Selected request is unavailable.</p>
               )}

@@ -1840,6 +1840,51 @@ textarea[data-auto-grow="true"] {
 .inbox-detail-links a {
   margin: 0;
 }
+.inbox-approval {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-approval-body {
+  flex: 1 0 auto;
+}
+.inbox-approval-facts {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-12);
+}
+.inbox-approval-facts dt {
+  margin-top: var(--space-8);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.inbox-approval-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* The decision area keeps the independent holds and the way to decide in view. */
+.inbox-decision {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  padding: var(--space-12) 0
+    calc(
+      var(--space-12) +
+      var(--operator-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))
+    );
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+.inbox-decision p {
+  margin: 0;
+}
 /* Short forms keep the submit area at the foot of the pane; long ones scroll under it. */
 .inbox-detail-body > .question-response {
   display: flex;
