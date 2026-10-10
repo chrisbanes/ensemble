@@ -4,24 +4,17 @@ status: accepted
 
 # Add optional ChatGPT operations and native Codex tasks after the MVP
 
-Chris confirmed this scope on 30 September 2026 after reviewing the operator
-experience, execution ownership, deployment and release consequences.
-
-## Scope amendments — 1 October 2026
-
-Chris made saved ChatGPT/Codex project placement optional, then agreed to defer
-X01–X05 until after the standalone MVP. The latter decision supersedes the original
-first-release requirement and earlier retention of X01/X02 as release gates.
-Planning, feasibility probes and implementation are paused under
-[epic #734](https://github.com/chrisbanes/ensemble/issues/734) until Chris explicitly
-reopens the work and current APIs, requirements and dependencies are revalidated.
+Both integrations are deferred until after the standalone MVP. Planning,
+feasibility probes and implementation are paused under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734) until Chris
+explicitly reopens the work and current APIs, requirements and dependencies are
+revalidated. Saved ChatGPT/Codex project placement is optional.
 
 The standalone MVP retains its web UI, Codex App Server execution, GitHub delivery,
 A01–A30/R01–R10 acceptance and operational recovery/reviewed cutover. X01–X08
-remain deferred acceptance; #698 no longer depends on #728. Neither integration
-blocks MVP release or cutover. No unproved evidence is relabelled as passing.
-The contracts below describe the retained future capability, not MVP obligations
-or implemented behaviour.
+remain deferred acceptance and do not block MVP release or cutover. No unproved
+evidence is relabelled as passing. The contracts below describe the retained future
+capability, not MVP obligations or implemented behaviour.
 
 ## Retained integration requirements
 

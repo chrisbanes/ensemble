@@ -3,7 +3,6 @@
 For the product overview, see the [README](../README.md). For macOS service
 operations and backup/restore, see the [operations procedure](operations/standalone-macos.md).
 
-
 Use the Node version in [`.node-version`](../.node-version) and the npm version in
 `packageManager` (`package.json`).
 Node 26 is tested for compatibility (CI job `check-node-26` runs the latest 26.x;
@@ -17,14 +16,15 @@ npm run check
 ```
 
 `check` runs strict type checking, lint, formatting, compilation and tests,
-including deterministic S03b scheduler, supervision, recovery, power and
-service-integration fixtures, S04b coordination, routing, inbox, interaction and
+including deterministic scheduler, supervision, recovery, power and
+service-integration fixtures, coordination, routing, inbox, interaction and
 completion tests, and the operator auth, HTTP and Chromium browser tests. CI
 installs the pinned Chromium engine used by those browser tests. Real App Server
-qualification is separate and must be run explicitly with `npm run s03b:live`
-and `npm run s04b:live`; each harness requires its `--live` opt-in. These checks
-do not prove physical sleep/wake behavior, operational host-restart recovery or
-private remote Tailscale access.
+qualification is separate and runs only when requested explicitly, for example
+`npm run s03b:live` and `npm run s04b:live`, which require their `--live` opt-in
+(see the other `*:live` scripts in `package.json`). These checks do not prove
+physical sleep/wake behavior, operational host-restart recovery or private remote
+Tailscale access.
 
 The command surface is `npm run service -- <serve|operator|run|list> ABSOLUTE_DATA_DIR`.
 `run` also takes `workId`, `prompt`, an existing absolute workspace directory,
@@ -55,9 +55,9 @@ Initialize a separate operator password with
 access or an HTTPS origin for a separately managed private transport. Use a
 canonical origin without a trailing slash. The server still binds only to
 `127.0.0.1`; it does not configure Tailscale Serve.
-Sessions are in-memory and reset on restart. The [S04a boundary](design/s04a-command-boundary.md)
-describes domain commands and admission records; [S04c](design/s04c-operator-ui.md)
-describes the authenticated web boundary and current UI limits.
+Sessions are in-memory and reset on restart. The [command boundary](design/s04a-command-boundary.md)
+describes domain commands and admission records; the [operator UI design](design/s04c-operator-ui.md)
+describes the authenticated web boundary and its UI limits.
 
 `StandaloneService.provisionTask` durably binds a domain task to one retained
 workspace, including repository-free and multiple-repository tasks.
@@ -75,17 +75,13 @@ requires delivery and preservation evidence and refuses unresolved task work.
 These service contracts do not provide physical process containment. An untracked
 detached child may overlap a later writer after qualified normal success.
 
-## Historical implementations
+## Previous implementation
 
-
-The Rust pipeline implementation remains on `cb/pipeline-implementation` at `272adb7`.
-Its configuration and persisted runs are not compatibility requirements. Finish or
-explicitly retire existing work before operational cutover; retained records do not
-prove safe resumption on another runtime.
-
-The earlier BB documents remain historical references: [specification](SPEC-bb.md),
-[design](design/bb-plugin.md), [acceptance](acceptance-bb.md),
-[delivery](delivery-bb.md), [capability evidence](bb-capabilities.md), and
-[prototype guide](bb-prototype.md). They do not authorize new BB feature development.
-Earlier ADRs retain product policy except where superseded by
+The previous Rust pipeline implementation is preserved on the
+`cb/pipeline-implementation` branch, and the BB prototype's documents remain in git
+history. The pipeline implementation's configuration and persisted runs are not
+compatibility requirements, and the BB prototype receives no new feature
+development. Finish or explicitly retire existing work before operational cutover;
+retained records do not prove safe resumption on another runtime. Earlier ADRs
+retain product policy except where superseded by
 [ADR-1004](adr/1004-standalone-service.md).

@@ -112,8 +112,8 @@ owner lock, so offline backup refuses rather than racing it.
 After a host restart, the per-user LaunchAgent is available when that user logs
 into the GUI session. Inspect the exact label; if it is absent, review the same
 plist and manually bootstrap it, then verify the loopback operator page and
-service state. This is the documented fallback only: this procedure did not
-reboot the host and does not claim unattended pre-login service startup.
+service state. This is the documented fallback only; the procedure does not claim
+unattended pre-login service startup or recovery after a host reboot.
 
 If the Codex App Server process exits while the service runs, the operator
 workspace and `/runtime` page show "Codex runtime unavailable — restart the
@@ -131,9 +131,9 @@ directory and verify it before relying on it:
 ```sh
 npm run operations -- backup \
   /absolute/private/ensemble-data \
-  /absolute/private/snapshots/ensemble-2026-09-30
+  /absolute/private/snapshots/ensemble-snapshot
 npm run operations -- verify \
-  /absolute/private/snapshots/ensemble-2026-09-30
+  /absolute/private/snapshots/ensemble-snapshot
 ```
 
 The snapshot is a private directory containing only `standalone.sqlite` and a
@@ -153,10 +153,10 @@ already private:
 
 ```sh
 npm run operations -- restore \
-  /absolute/private/snapshots/ensemble-2026-09-30 \
+  /absolute/private/snapshots/ensemble-snapshot \
   /absolute/private/ensemble-data-restored
 npm run operations -- verify \
-  /absolute/private/snapshots/ensemble-2026-09-30
+  /absolute/private/snapshots/ensemble-snapshot
 ```
 
 The restore command verifies the snapshot and restored database, creates a
@@ -187,11 +187,10 @@ workspace paths remain evidence. A managed workspace restored under a different
 installation root is rejected by identity before access to the old path and
 remains held for operator recovery; external workspace contents are not copied.
 Recovery receipts still need to match the persisted execution generation and
-independent Stop, writer and capacity holds. The deterministic S08a fixture
-proves exact receipt reconciliation and one post-restore admission. The
-disposable launchd proof instead preserves a paused project and unready task
-across restore/restart and admits no work; it does not claim to inject a live
-recovery receipt because #704 does not own the later operator recovery surface.
+independent Stop, writer and capacity holds. A deterministic fixture proves exact
+receipt reconciliation and one post-restore admission. The disposable launchd
+proof instead preserves a paused project and unready task across restore/restart
+and admits no work; it does not inject a live recovery receipt.
 
 If backup fails, the source is not changed; a missing owner file is rejected
 before it can be created. An operation-created snapshot path may remain
@@ -206,12 +205,17 @@ restore can leave an empty directory indistinguishable from a deliberately
 created fresh installation. Track the intended path out-of-band and never
 start it until restore succeeds and the snapshot is verified.
 
-S08a remains backup/restore preparation. [S08b final recovery evidence](../evidence/s08b-final-recovery.md) supplements it with complete macOS identity under the rendered environment, an exact owned-child recovery receipt, and current-schema CLI restore checks. See the [named Haze cutover proposal](standalone-cutover-proposal.md) for the separate execution gates. These checks do not establish deployment or cutover.
-S08b (#698) retains final-schema and external-effect recovery qualification,
-including a separately authorised host-restart test if needed, and a reviewed,
-executable cutover proposal. It may complete before deployment. S08c (#761) owns
-the separately authorised production deployment and actual cutover, including
+[Final recovery evidence](../evidence/s08b-final-recovery.md) covers complete macOS
+identity under the rendered environment, an exact owned-child recovery receipt,
+and current-schema CLI restore checks. See the [named Haze cutover
+proposal](standalone-cutover-proposal.md) for the separate execution gates. These
+checks do not establish deployment or cutover.
+
+Production deployment and actual cutover need separate authorisation, including
 safe disposition of old work, preservation/rollback and verification that no
-competing scheduler or writer remains. Physical sleep/wake proof (#732) remains
-required before operational use on the Mac. Do not migrate old work or enable
-competing production work based only on this snapshot or completion of S08b.
+competing scheduler or writer remains ([#761](https://github.com/chrisbanes/ensemble/issues/761)).
+Physical sleep/wake proof ([#732](https://github.com/chrisbanes/ensemble/issues/732))
+remains required before operational use on the Mac. Do not migrate old work or
+enable competing production work based only on this snapshot or on recovery
+qualification. A separately authorised host-restart test may be needed for final
+recovery qualification.

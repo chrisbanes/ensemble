@@ -1,49 +1,47 @@
 # Standalone service design
 
-**Product decisions reviewed and confirmed by Chris on 27 September 2026.**
-The ownership decision is accepted in [ADR-1004](../adr/1004-standalone-service.md).
-Runtime-specific contracts below require bounded evidence before dependent
-implementation. The service now implements the S03b scheduler/supervisor slice:
-durable request admission, shared writer/capacity limits, bounded Stop, exact
-restart-recovery receipts, constrained retries and macOS power-event admission
-quarantine. S04b adds durable task-scoped coordination, results/inboxes,
-operator-attention interactions, follow-up revisions, lead-gated completion,
-bounded routing provenance, and a typed task coordination view. Its deterministic
-service contract does not establish the production operator UI. The separate
-[disposable Codex probe](../evidence/s04b-live-runtime-2026-09-29.md) qualifies
-resumed-thread coordination callbacks for its bounded tested journey only. The
-#694 operator scheduling/capacity controls and recovery presentation remain
-separate work. #703 implements the authenticated operator UI foundation;
-production runtime, coordination, history and recovery views remain unavailable,
-and private Tailscale access is unproved. Physical sleep/wake and operational
-host-restart qualification also remain separate work. See the
-[S04b coordination boundary](s04b-coordination-boundary.md).
-[ADR-1005](../adr/1005-service-assignment-routing.md) adds the confirmed 28 September
-assignment-routing and project-lead accountability decisions.
+The service ownership decision is [ADR-1004](../adr/1004-standalone-service.md);
+assignment routing and project-lead accountability follow
+[ADR-1005](../adr/1005-service-assignment-routing.md). Runtime-specific contracts
+below require bounded evidence before dependent implementation. GitHub issues under
+[epic #649](https://github.com/chrisbanes/ensemble/issues/649) own delivery scope
+and status.
 
-## Deferred integration amendment — 1 October 2026
+The service implements durable request admission, shared writer/capacity limits,
+bounded Stop, exact restart-recovery receipts, constrained retries and macOS
+power-event admission quarantine. It also implements durable task-scoped
+coordination, results/inboxes, operator-attention interactions, follow-up
+revisions, lead-gated completion, bounded routing provenance and a typed task
+coordination view; see the [coordination boundary](s04b-coordination-boundary.md).
+A [disposable Codex probe](../evidence/s04b-live-runtime-2026-09-29.md) qualifies
+resumed-thread coordination callbacks for its bounded tested journey only. Private
+HTTPS over Tailscale has passed from the fixture host only; independent-device
+reachability, physical sleep/wake and operational host-restart qualification are
+unproved.
+
+## Deferred ChatGPT and native Codex integration
 
 [ADR-1006](../adr/1006-chatgpt-and-native-codex.md) retains optional ChatGPT daily
-operations/events and native Codex visibility/handover as post-MVP requirements.
-Chris paused X01–X05 on 1 October under
-[epic #734](https://github.com/chrisbanes/ensemble/issues/734); explicit reopening
-is required before further planning, probes or implementation. The MVP uses the
-private web UI and Codex App Server and does not wait for X01–X08. The future plugin
-would add a narrow authenticated HTTPS MCP endpoint; runtime access, existing
-holds and reviewed cutover remain unchanged. The
+operations/events and native Codex visibility/handover as post-MVP requirements,
+paused under [epic #734](https://github.com/chrisbanes/ensemble/issues/734) until
+explicitly reopened. The MVP uses the private web UI and Codex App Server and does
+not wait for X01–X08. The future plugin would add a narrow authenticated HTTPS MCP
+endpoint; runtime access, existing holds and reviewed cutover remain unchanged. The
 [integration design](chatgpt-and-native-codex.md) preserves the feasibility gaps.
 
 ## Confirmed review decisions
 
-- Use Codex first, with the existing operator login; Claude and API-key billing
-  for agent execution are deferred. Separately configured TypeSafe API access is
-  permitted for projects that explicitly enable assignment routing. Qualify Codex App Server as the integration surface.
+- Use Codex first, with the existing operator login, and qualify Codex App Server
+  as the integration surface. [ADR-1008](../adr/1008-claude-code-execution-harness.md)
+  adds Claude Code as a second harness (not implemented); API-key billing for agent
+  execution is deferred. Separately configured TypeSafe API access is permitted for
+  projects that explicitly enable assignment routing.
 - Do not silently switch authentication or add API billing if unattended use fails.
 - Deliver the first deployment on Chris's Mac; Linux qualification follows later.
 - Serve a web operator interface with private remote access from Chris's own devices
   over Tailscale, with a separate authenticated Ensemble operator session.
-- The 28 September amendment permits admitted execution to survive crashes and
-  makes Stop best-effort. Uncertain ownership remains held until independently resolved.
+- Admitted execution may survive crashes and Stop is best-effort. Uncertain
+  ownership remains held until independently resolved.
 - Normal successful final turns permit cooperative handoff under the specification;
   detached-child overlap is an accepted limit, not physical writer exclusion.
 - Use the explicit default execution policy below. Strict outside-read denial and
@@ -58,7 +56,7 @@ holds and reviewed cutover remain unchanged. The
 - Start with a fresh standalone database. Preserve the prototype separately;
   no historical import or automatic old-assignment resumption is required.
 
-The S03b service applies global and per-project caps when admitting direct,
+The scheduler applies global and per-project caps when admitting direct,
 command-line and managed task turns through the same transaction. Capacity waits
 do not retain writer ownership. A lower configured limit blocks new admission
 without interrupting active work. Retry is narrower than ordinary failure
@@ -95,8 +93,8 @@ The project lead is accountable for task outcomes, with separate per-task
 conversations using the same lead profile. Assignees perform assignments; there
 is no separate task-owner role. Lead task conversations need durable, task-scoped
 execution identities, recipients and control bindings without an operator-managed
-owner record. Establish the concrete schema after S01, including lead turns in
-normal capacity, stop, recovery and writer protocols.
+owner record. Lead turns must take part in normal capacity, stop, recovery and writer
+protocols.
 
 The service may create the initial assignment from an eligible task's requested
 outcome and route it without waking the lead. Explicit permitted assignees bypass
@@ -162,9 +160,6 @@ network access. No new project security sandbox is implied by service ownership.
 
 ## Runtime trust boundary
 
-Chris approved this boundary on 28 September 2026 after the S01 investigation
-expanded from bounded integration into exhaustive execution-observation proof.
-
 Ensemble trusts Codex's successful terminal turn status for its bound thread/turn
 as the runtime's normal-completion report. Ensemble persists that report, waits
 for its own registered callbacks to end, checks other holds and known unfinished
@@ -190,9 +185,9 @@ does not establish the policy or audit trail of an unobserved action.
 S01 does not require a general model-tool allowlist or qualification of every
 tool class. An untested surface is a recorded coverage gap; a demonstrated breach
 of the selected policy blocks the affected capability. Ordinary file-edit and
-broader enabled-tool policy checks belong to S02–S05 integration. Keep the earlier
-unexplained file effect as a diagnostic finding, without relabelling it a pass or
-making its explanation a prerequisite for all implementation.
+broader enabled-tool policy checks belong to service/runtime integration testing.
+An unexplained file effect observed during S01 remains a diagnostic finding; it is
+not a pass, and its explanation is not a prerequisite for all implementation.
 
 ## Runtime retention and durable safety evidence
 
@@ -290,12 +285,11 @@ broader command access rather than auto-approving escalation. A policy change ne
 separate operator approval and fresh admission. Do not inherit `dangerFullAccess`
 as a fallback or change shared configuration/login to make a probe pass.
 
-The [approved S01 evidence amendment](https://github.com/chrisbanes/ensemble/issues/688)
-accepts unproved model-originated escalation rejection for feasibility only. S02
-must implement and deterministically test the runtime adapter's rejection of any
-unexpected approval callback without granting permissions or broadening policy.
-S05 qualifies the integrated approval flow before release. These checks preserve
-the denial requirement; an adapter fixture cannot prove Codex's internal rejection.
+Model-originated escalation rejection is an unproved limitation. The runtime
+adapter rejects any unexpected approval callback without granting permissions or
+broadening policy, under deterministic tests, and the integrated approval flow is
+qualified before release. These checks preserve the denial requirement; an adapter
+fixture cannot prove Codex's internal rejection.
 
 This limits command writes, not reads outside the workspace. Inventory effective
 temporary write roots and protected paths; do not advertise task-root-only writes
@@ -329,7 +323,7 @@ not evidence that the installed authenticated configuration applied a policy.
    process cleanup cannot establish that boundary, the fallback is an operator host
    restart with dispatch held: verify a new host boot and that old execution is not
    restarted before reconciliation. This is a recovery procedure to qualify, not
-   authorization to reboot during S01 or this documentation change.
+   authorization to reboot the host.
 4. Reconcile partial workspace changes and uncertain external effects separately;
    host restart does not undo or settle remote actions. Persist the resolution
    evidence and reconcile writer/capacity ownership atomically. Explicit resume
@@ -337,52 +331,39 @@ not evidence that the installed authenticated configuration applied a policy.
 
 If resolution cannot be established, ownership and capacity remain held indefinitely.
 There is no force unlock, timer-only release or operator-acknowledgement waiver.
-S01 records this route and probes durable holds; S03/S05 qualify the implemented
-recovery controls. Any different release guarantee requires a concrete new decision.
+The implemented recovery controls require qualification before release. Any
+different release guarantee requires a concrete new decision.
 
 ## Reuse and transition
 
-Reuse `src/core` behavior and real-SQLite tests where it fits. The current service
-still authorizes through external host project/conversation bindings, and the
-coordinator models only spawn/find. Those seams require deliberate replacement;
-compiling without BB is not standalone product delivery. Preserve task/assignment
-identity, captured instructions, results and conservative uncertainty handling.
-
-The BB adapter, manifest, dependencies, scripts and CI jobs have been removed.
-S02 still needs the standalone bootstrap and runtime integration. Retain historical
-documentation and Git history rather than relabeling BB tests as standalone proof. Reconcile against the
-latest main, including CB-19's local-refusal repair if it lands; do not overwrite
-concurrent work from this planning checkout.
+Reuse `src/core` behavior and real-SQLite tests where it fits. Preserve
+task/assignment identity, captured instructions, results and conservative
+uncertainty handling. The BB adapter, manifest, dependencies, scripts and CI jobs
+are removed; BB tests are not standalone proof.
 
 Use a fresh standalone database; historical import is outside the first release.
 Do not attach its scheduler to the prototype database. Preserve the installed Haze
 prototype separately and explicitly settle or retire old active work before the
 reviewed cutover; never run competing writers against the same task workspace.
 
-## Decisions needed before dependent implementation
+## Open technical contracts
 
-- Codex App Server launch/tool identity, transcript, resume and stop contracts;
-  existing-login behavior under the macOS service account and restart.
-- macOS service lifecycle, effective execution policy and operator recovery controls;
-  stronger process/read isolation only if separately selected.
-- Effective-admission transaction/supervisor protocol and restart reconciliation.
-- Runtime/release qualification of the separate authenticated operator session
-  and private Tailscale transport. S04d adds the production runtime and
-  coordination operator routes on top of the [S04c](s04c-operator-ui.md)
-  login/CSRF/Origin boundary. The bounded operator journey is recorded in
-  [S04d evidence](../evidence/s04d-operator-2026-09-30.md); private Serve proof
-  remains unproved and is not deployment or cutover authorization.
+- Independent-device qualification of the separate authenticated operator session
+  over private Tailscale transport; see the
+  [operator integration evidence](../evidence/s04d-operator-2026-09-30.md). Private
+  Serve proof is not deployment or cutover authorization.
+- Stronger process/read isolation, only if separately selected.
 - Fairness under the selected caps, retry classification and inactivity thresholds.
-- Routing persistence, task-scoped lead execution identities, candidate validation,
-  confidence criteria and separate API timeout/retry budgets; see the routing design.
-- Final schema qualification and old-work retirement/cutover; S08a backup/restore
-  is bounded to the currently supported standalone database schema.
+- Routing confidence criteria and separate API timeout/retry budgets, established
+  from representative evidence; see the routing design.
+- Final schema qualification and old-work retirement/cutover; backup/restore is
+  bounded to the currently supported standalone database schema.
 
 Codex on macOS is the selected first combination. Additional platforms are separate
 qualification work, not an assumed first-release matrix. Resolve these through
 bounded proofs and review; no framework or dependency selection is implied here.
 
-## S08a operations and backup/restore boundary
+## Operations and backup/restore boundary
 
 `StandaloneDataDirectory` owns the shared marker and exclusive SQLite owner
 lock used by both `StandaloneService` and offline operations. The separate
@@ -414,18 +395,18 @@ operator origin and the reviewed fixed PATH needed to resolve the installed
 Codex CLI and native host commands. Passwords and shell wrappers are absent
 from the plist.
 
-S08a's deterministic restored-service fixture proves wrong/exact recovery
+A deterministic restored-service fixture proves wrong/exact recovery
 receipt handling, independent Stop/Resume behavior and exactly one admitted
-turn after reconciliation. Its bounded macOS launchd evidence proves the
+turn after reconciliation. The bounded
+[macOS launchd evidence](../evidence/s08a-operations-2026-09-30.md) proves the
 per-user service lifecycle and backup/restore of populated paused/unready
 public records; that live fixture admits no work and does not inject an exact
-recovery receipt because #704 owns no recovery-control surface. Neither proof
-qualifies final-schema/external-effect recovery, managed workspace relocation,
-host reboot, production deployment, old-work disposition or Haze cutover;
-those remain explicit later operational gates.
+recovery receipt because the operations CLI has no recovery-control surface.
+Neither proof qualifies final-schema/external-effect recovery, managed workspace
+relocation, host reboot, production deployment, old-work disposition or Haze
+cutover; those remain separate operational gates.
 
-
-## S07a scoped GitHub delivery boundary
+## Scoped GitHub delivery boundary
 
 `DeliveryStore` owns additive SQLite policy, immutable action material, attempts,
 confirmed receipts, approval consumption, PR observations and head-bound local
@@ -467,8 +448,9 @@ reference already inherited by the runtime cannot activate until a safe restart.
 No credential value is placed in policy, provider receipts or operator projections.
 
 The existing coordination operator slot shows separate issue/Project, PR and task
-facts and guarded policy/refresh/settlement controls. The strict S07a harness guard
-requires a frozen resource manifest and matching named grant before provider or
-runtime activity. Required live journeys are pending, as recorded in
-[the evidence inventory](../evidence/s07a-github-delivery.md); deterministic coverage
-and harness preparation do not complete S07a or qualify S07b/cutover.
+facts and guarded policy/refresh/settlement controls. The strict live-delivery
+harness guard requires a frozen resource manifest and matching named grant before
+provider or runtime activity. Bounded real handback, through-merge and cleanup
+journeys are recorded in [the evidence inventory](../evidence/s07a-github-delivery.md);
+they do not establish production merge authority, deployed operation, release or
+cutover.

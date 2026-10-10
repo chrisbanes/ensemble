@@ -1,10 +1,7 @@
 # Assignment routing
 
-**Direction reviewed and confirmed by Chris on 28 September 2026.**
 [ADR-1005](../adr/1005-service-assignment-routing.md) records the accountability and
-allocation change. This is target design, not implemented capability. S01 runtime
-qualification still gates dependent execution contracts. The
-[specification](../SPEC.md) owns behavior; R07–R10 in the
+allocation decision. The [specification](../SPEC.md) owns behavior; R07–R10 in the
 [acceptance plan](../acceptance.md) define required routing evidence.
 
 ## Accountability and execution
@@ -14,7 +11,6 @@ separate conversations for each task; project-wide coordination uses project
 context. There is no independently configurable task-owner role. Task-scoped lead
 turns need durable execution identities and inbox destinations and obey the same
 admission, capacity, stop, writer and recovery controls as other task execution.
-The concrete schema and runtime binding follow S01 evidence.
 
 Assignments name the work to carry out and its assignee. Assignees may investigate
 and delegate further within authority. Initial results return to the task-scoped
@@ -89,11 +85,10 @@ do not allow retries to multiply work or create an unbounded failure loop. Thres
 model/version choice and SDK details require implementation evidence, not assumptions
 from this design discussion.
 
-## Delivery and evidence
+## Evidence
 
-S04 implements routing and lead/result integration on S03 admission controls;
-S05 qualifies enabled and disabled local-task journeys, explicit bypass, fallback,
-nested result return, retained repair assignees, busy-profile queuing, lead completion,
+Qualification covers enabled and disabled local-task journeys, explicit bypass,
+fallback, nested result return, retained repair assignees, busy-profile queuing, lead completion,
 revision races and crash recovery. Include separate histories for simultaneous tasks
 using the lead profile and capacity-one delegation/return behavior.
 

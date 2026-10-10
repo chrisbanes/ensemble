@@ -1,10 +1,10 @@
 # Haze standalone cutover proposal
 
-This is the executable proposal required by [#698](https://github.com/chrisbanes/ensemble/issues/698), not approval to execute it. [#761](https://github.com/chrisbanes/ensemble/issues/761) owns deployment and cutover. Nothing in this proposal authorizes touching the prototype database, enabling a competing scheduler, or resuming old work. Physical sleep/wake evidence [#732](https://github.com/chrisbanes/ensemble/issues/732) remains required before operational use.
+This is an executable proposal, not approval to execute it. [#761](https://github.com/chrisbanes/ensemble/issues/761) owns deployment and cutover. Nothing in this proposal authorizes touching the prototype database, enabling a competing scheduler, or resuming old work. Physical sleep/wake evidence [#732](https://github.com/chrisbanes/ensemble/issues/732) remains required before operational use.
 
 ## Named target and approval packet
 
-The proposed target is GitHub repository `chrisbanes/haze` (`R_kgDOKlhejw`, default branch `main`), Haze Project 7 (`PVT_kwHOAAN4ns4Beqrm`, [Project](https://github.com/users/chrisbanes/projects/7)), and `Chris’s MacBook Pro`, GUI UID `501`, checkout `/Users/chris/dev/haze`. Root read-only discovery was complete by 2026-10-05T14:05:03Z. These are discovery facts, not execution approval or a selected production task.
+The proposed target is GitHub repository `chrisbanes/haze` (`R_kgDOKlhejw`, default branch `main`), Haze Project 7 (`PVT_kwHOAAN4ns4Beqrm`, [Project](https://github.com/users/chrisbanes/projects/7)), and `Chris’s MacBook Pro`, GUI UID `501`, checkout `/Users/chris/dev/haze`. These are discovery facts, not execution approval or a selected production task.
 
 Before executing any stage, #761 must attach a dated, reviewed packet binding every value below. An unset, ambiguous or changed value refuses the affected stage; do not substitute fixture paths or guess process identity.
 
@@ -20,7 +20,7 @@ Before executing any stage, #761 must attach a dated, reviewed packet binding ev
 | Finite witness | One named small task and reviewed expected outcome, maximum concurrency 1, reviewable-PR authority with no merge, at most one submitted PR, proposed cap 3 model turns and 30 minutes; refusal if it cannot fit, changes require a reviewed packet |
 | Rollback | Exact new job/data owner and stop controls; old controller restart seam and preserved configuration/data identity; approved disposition of any new effects |
 
-Current BB discovery is incomplete: `bb status` supplied no context, and project/machine/plugin API queries failed with connection errors after a bounded retry. This is not evidence that old controllers or writers are absent. No server was autostarted and no prototype database was accessed. The lack of a matching filename in a LaunchAgents listing does not prove absence. **Refuse enablement until the actual old controller metadata and supported stop/readback seams are established.** Do not invent a BB command to fill this gap.
+Old-controller discovery must succeed before enablement. An empty `bb status` result or a failed project/machine/plugin API query (for example a connection error) is not evidence that old controllers or writers are absent, and neither is the lack of a matching filename in a LaunchAgents listing. Do not autostart a server or access the prototype database to fill the gap. **Refuse enablement until the actual old controller metadata and supported stop/readback seams are established.** Do not invent a BB command to fill this gap.
 
 ## Read-only revalidation and shell preflight
 
@@ -91,6 +91,6 @@ After a new admission or uncertain effect, pause/Stop through supported controls
 
 Require successful restore with the same manifest identity before startup; preserve an incomplete destination for diagnosis and never enable it. Render a separately reviewed destination plist. Relocated managed workspaces retain their old identity and refuse access rather than silently migrating. Provisioning/recovery and new admissions require explicit supported controls. Never run old and new jobs concurrently during rollback, and never use name-based process termination.
 
-## Present outcome
+## Scope of the proposal
 
-The proposal supplies ordered executable stages and refusal gates. Production paths, old-controller metadata/work disposition, a selected task, execution approval, physical #732 proof and actual cutover remain unset or unproved. #698 technical completion does not establish deployment or R06's actual cutover limb; #761 must record those independently.
+The proposal supplies ordered executable stages and refusal gates. Production paths, old-controller metadata/work disposition, a selected task, execution approval, physical #732 proof and actual cutover are unset or unproved; completing the proposal does not establish deployment or R06's actual cutover limb. #761 records those independently.

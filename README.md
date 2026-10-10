@@ -60,78 +60,82 @@ what's happening and step in when needed.
 
 ## Where it stands
 
-The current implementation uses **TypeScript, Node.js and SQLite**, with
-**Codex App Server** executing agent turns. The first release targets macOS and
-a private web interface, using a separate Ensemble login.
+Ensemble is a **TypeScript, Node.js and SQLite** service with **Codex App Server**
+executing agent turns. The first release targets macOS and a private web interface,
+using a separate Ensemble login. [Epic #649](https://github.com/chrisbanes/ensemble/issues/649)
+owns delivery scope and status.
 
-The repository already has durable scheduling, task coordination, results and
-inboxes, plus authenticated operator pages for inspecting work and responding
-to questions and approvals. It also includes offline database backup/restore
-commands and macOS service tooling. Automated tests and bounded live Codex and
-browser journeys exercise these foundations.
+**Implemented**
 
-Assignment pages now show captured assistant messages for the exact task,
-assignment and runtime turn. Only completed, sanitized text is retained;
-unfinished messages show progress metadata, and omitted text is labelled.
-Known private instructions, credential values and control paths are redacted
-before storage, with current exclusions reapplied when reading history. This is
-a bounded diagnostic view, not a complete transcript or ownership-release proof.
-Missing history does not change admission or completion gates.
+- **Coordination.** Durable scheduling with shared writer and capacity limits,
+  supervised turns, best-effort Stop and conservative restart recovery. Task
+  coordination covers assignments, results, inboxes, questions, approvals,
+  lead-gated completion and assignment routing.
+- **Operator UI.** An authenticated React interface at `/app` with an attention
+  overview, cross-project and per-project List and Board views, a local task
+  composer, the Inbox, retained search and Settings. The original HTML forms remain
+  reachable at `/`.
+- **Inbox and questions.** The action Inbox lists cross-project questions, approvals
+  and recorded interventions by urgency and age. Exact own-tool forms support grouped
+  text, single-choice and multiple-choice answers, with preserved drafts and durable
+  submission receipts shared with task detail. Qualified native single-choice and
+  custom requests use their existing runtime delivery path.
+- **Task workspace.** Exact source and result revisions, scoped supplied evidence,
+  captured context and separate local and GitHub replies. Search covers permitted
+  retained tasks, decisions and results, with historical navigation and preserved
+  return state.
+- **Assignment history.** Assignment pages show captured assistant messages for the
+  exact task, assignment and runtime turn. Only completed, sanitized text is
+  retained; unfinished messages show progress metadata and omitted text is labelled.
+  Known private instructions, credential values and control paths are redacted before
+  storage, with current exclusions reapplied when history is read. This is a bounded
+  diagnostic view, not a complete transcript or ownership-release proof, and missing
+  history does not change admission or completion gates.
+- **Settings.** Paused project and profile setup, explicit private replacements,
+  source observations, installation capacity and curated recovery.
+- **GitHub.** Local discovery of selected repository issues, searches and Projects,
+  with provider-owned readiness and dependency holds; operators can inspect and
+  refresh source state. Scoped delivery records durable intents, confirmed readback,
+  retained PR feedback and operator settlement controls.
+- **Operations.** Offline database backup, verification and restore commands, and a
+  generated per-user macOS LaunchAgent.
 
-The shared task workspace now retains exact source and result revisions, scoped
-supplied evidence, captured context and separate local/GitHub replies. Search
-covers permitted retained tasks, decisions and results with historical navigation
-and preserved return state. Legacy advanced controls remain reachable.
-[UI04 evidence](docs/evidence/ui04-task-workspace.md) records the deterministic
-browser checks, one bounded live callback and remaining qualification limits.
+Automated tests with real SQLite and Chromium, plus bounded live Codex and browser
+journeys, exercise these surfaces. Dated run records and their limits are in
+[`docs/evidence`](docs/evidence/); the
+[release-candidate inventory](docs/evidence/release-candidate-inventory.json) maps
+each acceptance scenario to its evidence and disposition.
 
-The action Inbox now lists cross-project questions, approvals and recorded
-interventions by urgency and age. Exact own-tool forms support grouped text,
-single-choice and multiple-choice answers, with preserved drafts and durable
-submission receipts shared with task detail. Qualified native single-choice/custom
-requests use their existing runtime delivery path. [UI05 evidence](docs/evidence/ui05-inbox-questions.md)
-records deterministic browser, SQLite, recovery and transport checks and the
-reused native runtime qualification.
+**Not yet qualified**
 
-The service now includes local GitHub discovery for selected repository issues,
-searches and Projects, with provider-owned readiness and dependency holds.
-Operators can inspect source state and refresh it in the authenticated UI.
-Scoped GitHub delivery now has durable intents, confirmed readback, retained PR
-feedback and operator settlement controls. Its deterministic tests and the
-bounded live handback and through-merge journeys pass.
-[S07a evidence](docs/evidence/s07a-github-delivery.md) records that qualification
-and its limits. Release and cutover remain ahead.
-In particular, physical sleep/wake behaviour and
-access from an independent device still need qualification. Follow the
-[delivery backlog](https://github.com/chrisbanes/ensemble/issues/649) for progress.
-The [S05 report](docs/evidence/s05-local-qualification.md) distinguishes completed
-bounded routing and journey checks from remaining milestone evidence.
-The [S06 report](docs/evidence/s06-github-discovery.md) records passing
-deterministic discovery tests and the bounded live fixture qualification.
-
-Ensemble relies on the execution runtime and host for isolation. Broad
-host-permitted reads remain enabled, and Stop is best-effort: unresolved work
-can remain held for reconciliation. See the
-[execution policy](docs/design/standalone.md#default-execution-policy) and
-[acceptance plan](docs/acceptance.md) for the boundaries and required evidence.
-The existing Haze prototype stays in place until a reviewed cutover.
-
-On 1 October Chris deferred optional ChatGPT daily operations/events and native
-Codex task visibility/handover until after the standalone MVP. Planning, probes and
-implementation are paused under [epic #734](https://github.com/chrisbanes/ensemble/issues/734)
-until Chris explicitly reopens the work. Ensemble's web UI and Codex App Server
-execution remain the MVP path; these deferred integrations do not gate release.
-Their requirements and unproved feasibility evidence are retained. See
-[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md) and the
-[integration design](docs/design/chatgpt-and-native-codex.md).
+- **Release and cutover.** Operational release is not qualified. Physical
+  sleep/wake behaviour ([#732](https://github.com/chrisbanes/ensemble/issues/732))
+  and access from an independent device are unproved. The Haze cutover
+  ([#761](https://github.com/chrisbanes/ensemble/issues/761)) is a separate, reviewed
+  step ([proposal](docs/operations/standalone-cutover-proposal.md)); the installed
+  Haze prototype stays in place until then.
+- **Isolation.** Ensemble relies on the execution runtime and host for isolation.
+  Broad host-permitted reads remain enabled, and Stop is best-effort: unresolved work
+  can remain held for reconciliation. See the
+  [execution policy](docs/design/standalone.md#default-execution-policy) and
+  [acceptance plan](docs/acceptance.md) for the boundaries and required evidence.
+- **Deferred integrations.** Optional ChatGPT daily operations/events and native Codex
+  task visibility/handover are deferred until after the standalone MVP. Planning,
+  probes and implementation are paused under
+  [epic #734](https://github.com/chrisbanes/ensemble/issues/734) until Chris explicitly
+  reopens the work; they do not gate release. Their requirements and unproved
+  feasibility evidence are retained in
+  [ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md) and the
+  [integration design](docs/design/chatgpt-and-native-codex.md).
 
 ## Development
 
 Use the Node and npm versions pinned in [`.node-version`](.node-version) and
-`packageManager` in [`package.json`](package.json). Node
-26 is tested for compatibility (CI job `check-node-26` runs the latest 26.x;
-26.9.0 has [local evidence](docs/evidence/node-26-compatibility-2026-10-09.md)) but is not the deployment baseline. `engines.node` is
-`>=24` as permissive metadata; later majors are not qualified.
+`packageManager` in [`package.json`](package.json). Node 26 is tested for
+compatibility (CI job `check-node-26` runs the latest 26.x; 26.9.0 has
+[local evidence](docs/evidence/node-26-compatibility-2026-10-09.md)) but is not the
+deployment baseline. `engines.node` is `>=24` as permissive metadata; later majors
+are not qualified.
 
 ```sh
 npm ci
@@ -144,17 +148,28 @@ storage, real listeners, browser cleanup and evidence from an expected assertion
 failure. Set `ENSEMBLE_TEST_EVIDENCE_DIR` to an absolute, dedicated directory to
 retain bounded synthetic screenshots, phase manifests and allowlisted diagnostic
 logs. Test deadlines end waiting; they do not prove execution termination or
-complete cleanup. Live runtime qualification is a separate, explicit
-step. See the [development reference](docs/development.md) for commands and
-service contracts, or the [macOS operations guide](docs/operations/standalone-macos.md)
-for authentication, service management and backups.
+complete cleanup. Live runtime qualification is a separate, explicit step.
+
+`npm run build` compiles the service and the self-contained React operator assets
+into `dist/operator`. The production `operator` command serves `/app` and the
+same-origin `/api/operator` JSON from its existing listener; no frontend server is
+needed. The interface uses locally owned shadcn/ui components, Dark / Neutral /
+Default tokens and self-hosted Geist and Geist Mono. The
+[foundation contract](docs/design/ui02-foundation.md) records its projection and
+receipt boundary.
+
+See the [development reference](docs/development.md) for commands and service
+contracts, or the [macOS operations guide](docs/operations/standalone-macos.md) for
+authentication, service management and backups.
 
 ## Read further
 
 - [Behavioural specification](docs/SPEC.md): the intended product experience.
 - [Standalone design](docs/design/standalone.md): how the service fits together.
 - [Architecture decisions](docs/adr/): the choices behind the design.
-- [Operator UI and evidence](docs/design/s04d-operator-integration.md): what the current interface supports and what's been tested.
+- [Operator integration](docs/design/s04d-operator-integration.md): runtime and
+  coordination controls in the operator interface, and how they are tested.
+- [Acceptance plan](docs/acceptance.md): the evidence required for release.
 - [Glossary](CONTEXT.md): projects, tasks, assignments and conversations.
 - [Agent workflows](docs/agents/): repository contribution conventions.
 
@@ -162,29 +177,3 @@ for authentication, service management and backups.
 
 [Apache-2.0](LICENSE). Taskboard informs the UI design. Dependencies retain their
 own licences.
-
-## React operator foundation
-
-`npm run build` compiles the service and self-contained React assets into
-`dist/operator`. The production `operator` command serves `/app` and same-origin
-`/api/operator` JSON from its existing listener; no frontend server is needed.
-The shell implements sign-in/out, project navigation and truthful loading,
-stale, error and session states. [UI03](docs/design/ui03-tasks.md) delivers attention
-overview, cross-project/project List/Board and a substantial local task composer.
-Cards retain existing task detail; Inbox and settings link existing controls.
-All existing form routes remain available at `/`.
-
-The [foundation contract](docs/design/ui02-foundation.md) records the strict
-projection/receipt boundary and retained-control owners. UI01 native structured
-input and UI04–UI07 screen/acceptance work remain separate. This foundation does
-not establish release or cutover readiness.
-
-[UI06 configuration and recovery](docs/design/ui06-configuration.md) adds Settings, paused project/profile setup, explicit private replacements, source observations, capacity and curated recovery. Exact private editors and operational controls remain reachable; UI07 visual/usability and release qualification remain outstanding.
-
-[UI08 #765](docs/design/ui08-foundation.md) supplies locally owned shadcn/ui
-components, Dark / Neutral / Default tokens, self-hosted Geist and Geist Mono
-(shadcn Nova shape and density, moved from Inter and JetBrains Mono by
-[#835](https://github.com/chrisbanes/ensemble/issues/835)), and shared presentation for the retained production HTML forms. Its
-[evidence](docs/evidence/ui08-foundation.md) records fixture-browser behavior
-and the remaining composition gaps; final integrated UI acceptance remains
-with #736.

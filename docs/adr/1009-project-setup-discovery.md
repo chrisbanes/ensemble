@@ -4,11 +4,11 @@ status: accepted
 
 # Discover repositories and pick checkouts during project setup
 
-Chris asked for these decisions on 9 October 2026 while reviewing the settings and
-setup designs (`design/design.pen`, frames 114–117 and 131). They amend the
-guided project setup in [SPEC.md](../SPEC.md#task-creation-and-project-setup).
-This records target contracts, not implemented behaviour. The current build asks
-for typed repository IDs, refs and local paths.
+These decisions follow the settings and setup designs (`design/design.pen`, frames
+114–117 and 131) and amend the guided project setup in
+[SPEC.md](../SPEC.md#task-creation-and-project-setup). They are target contracts,
+not implemented behaviour: the current build asks for typed repository IDs, refs
+and local paths.
 
 ## Discovery
 

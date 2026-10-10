@@ -5,9 +5,8 @@ partially_superseded_by: ADR-1004
 
 # Treat task dependencies as a separate execution gate
 
-BB ownership and integration choices below are superseded by
-[ADR-1004](1004-standalone-service.md). Other product policies remain in force.
-The following text records the earlier decision.
+Superseded in part: [ADR-1004](1004-standalone-service.md) removes the BB
+Send-now exception. The dependency authority rules remain in force.
 
 Task dependencies gate Ensemble-managed execution independently of readiness
 or assignment waits. Ensemble owns edges from local tasks, while imported GitHub

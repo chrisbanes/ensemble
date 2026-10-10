@@ -1,7 +1,7 @@
 # Ensemble
 
-Ensemble is moving to a standalone TypeScript service without BB (ADR-1004).
-The current code contains a reusable core; the standalone service is not implemented.
+Ensemble is a standalone TypeScript service without BB (ADR-1004): `src/core` holds the
+host-independent domain core and `src/standalone` the service.
 Read `CONTEXT.md` and `docs/adr/` before making architectural changes. `README.md`
 distinguishes current implementation from the accepted target design.
 Read `docs/SPEC.md` for the reviewed operating behaviour and `docs/acceptance.md`
@@ -14,41 +14,41 @@ configuration schema, and persisted runs are not compatibility requirements.
 
 ## Planning gate
 
-The current code is a feasibility prototype. Chris reviewed and confirmed the
-standalone specification, design choices, acceptance scope and delivery sequence
-on 27 September 2026. Do not request that product review again for unchanged scope.
+Product scope is confirmed: the standalone specification, design choices, acceptance
+scope and delivery sequence. Do not request product review again for unchanged scope;
+return material scope or guarantee changes for review.
 GitHub issues are authoritative for delivery scope, sequencing, native dependencies,
 status and slice completion criteria; start from [epic #649](https://github.com/chrisbanes/ensemble/issues/649).
 Keep product contracts, ADRs and evidence in the repo, without a parallel delivery plan.
-Chris approved the minimum S01 integration reset on 28 September 2026.
-[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) remains the next capability gate; qualify its bounded protocol
-and coordination probes before dependent implementation. Do not restore strict
-outside-read denial, complete descendant containment or universal live reattachment
-as inherent S01 gates. Chris also approved the runtime trust boundary: normal
-handoff trusts the bound successful Codex terminal status, ended Ensemble callbacks
-and no other hold/known unfinished execution. Tool-history completeness and a
-general model-tool allowlist are not S01 gates. Use the finite completion rule in
-#688; distinguish demonstrated failures, untested surfaces and accepted
-limits instead of expanding the gate after each probe. The approved S01-only
-approval-evidence amendment retains model-originated escalation rejection as an
-unproved limitation; S02 #689 owns deterministic unexpected-approval callback
-rejection and S05 #695 owns integrated approval-flow testing. Preserve unresolved
-ownership
-holds and the documented recovery boundary. Settle detailed contracts using evidence,
-and return material scope or guarantee changes for review. Delivery includes
-automated service/runtime/UI integration and bounded live validation run by the
-implementation agent; do not hand incremental testing to the user. Preserve the
-installed Haze prototype until a reviewed cutover.
 
-Chris deferred X01–X05 after the standalone MVP on 1 October 2026 under
-[epic #734](https://github.com/chrisbanes/ensemble/issues/734) and the amendment to
-[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md). Optional ChatGPT daily
-operations/events and native Codex visibility/handover are paused; do not plan,
-probe or implement them until Chris explicitly reopens the work. X01–X08 do not
-gate MVP release or cutover. Codex App Server remains the execution runtime.
-Preserve existing native feasibility evidence, recovery holds and runtime limits.
-Saved host project placement is optional; native visibility/control remains
-unproved. Prior plans and scope decisions do not authorise dispatch while paused.
+[S01 #688](https://github.com/chrisbanes/ensemble/issues/688) is the capability gate,
+scoped to the approved minimum integration contract: qualify its bounded protocol and
+coordination probes before dependent implementation. Use its finite completion rule;
+distinguish demonstrated failures, untested surfaces and accepted limits instead of
+expanding the gate after each probe. Do not restore strict outside-read denial,
+complete descendant containment or universal live reattachment as inherent S01 gates.
+
+The approved runtime trust boundary: normal handoff trusts the bound successful Codex
+terminal status, ended Ensemble callbacks and no other hold/known unfinished
+execution. Tool-history completeness and a general model-tool allowlist are not S01
+gates. The approved S01 approval-evidence limit: model-originated escalation rejection
+remains an unproved limitation; S02 #689 owns deterministic unexpected-approval
+callback rejection and S05 #695 owns integrated approval-flow testing. Preserve
+unresolved ownership holds and the documented recovery boundary. Settle detailed
+contracts using evidence.
+
+Delivery includes automated service/runtime/UI integration and bounded live validation
+run by the implementation agent; do not hand incremental testing to the user. Preserve
+the installed Haze prototype until a reviewed cutover.
+
+Optional ChatGPT daily operations/events and native Codex visibility/handover (X01–X08)
+are paused under [epic #734](https://github.com/chrisbanes/ensemble/issues/734) and
+[ADR-1006](docs/adr/1006-chatgpt-and-native-codex.md). Do not plan, probe or implement
+them until Chris explicitly reopens the work; they do not gate MVP release or cutover.
+Codex App Server remains the execution runtime. Preserve existing native feasibility
+evidence, recovery holds and runtime limits. Saved host project placement is optional;
+native visibility/control remains unproved. Prior plans and scope decisions do not
+authorise dispatch while paused.
 
 ## Working conventions
 
@@ -83,6 +83,9 @@ unproved. Prior plans and scope decisions do not authorise dispatch while paused
 - Keep domain terms in `CONTEXT.md` and durable architectural decisions in `docs/adr/`.
 - Update documentation when changing user-visible behaviour or contracts. Clearly
   distinguish planned capabilities from implemented ones.
+- Revise docs in place to describe the current contract and state. Do not add dated
+  sections, amendment logs, approval narration or follow-up lists; Git history and
+  GitHub issues hold that. Only `docs/evidence/` records are dated.
 
 ## Validation
 
