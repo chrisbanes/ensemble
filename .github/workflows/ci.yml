@@ -35,6 +35,8 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           node-version-file: .node-version
+          # Resolve the newest 26.x rather than a stale runner-cached one.
+          check-latest: true
           cache: npm
       - run: npm install --global "$(node -p 'require("./package.json").packageManager')"
       - run: node --version && npm --version
