@@ -1614,3 +1614,35 @@ Inbox and structured questions: implementation differences recorded on 10 Octobe
   - Any other reason (`task-unready`, `task-not-open`, `project-lead-unconfigured`, `project-lead-revoked`, `admission-blocked`): "Execution held (<reason label>)". An ineligible task with no known reason reads "Execution held".
 - The question-level hold line drawn in frames 06, 19, 10 and 21 ("Task paused. Recording answers does not resume execution…") is not built: the question response does not read the task. It is a remaining gap; the approval pane shows holds.
 - "· confirmation retained" in the Inbox subtitle appears only when this session recorded the answer; a request answered elsewhere that has left the queue keeps the neutral count.
+
+Implementation differences recorded on 10 October 2026 (U3, #837):
+
+- Route titles stay "Overview", "All tasks" and the project name. Frames 01, 24,
+  18 and 18b title these screens "Your workspace"; the frame's second line is
+  the subtitle ("Decisions first. Work and completed results stay separate.",
+  "8 active tasks · 3 projects", "5 active tasks · accountable lead Mira Chen").
+  The phone Tasks header keeps one New task action, not the drawn Search.
+- There is no Recent results strip. A result excerpt, time and counter are not in
+  the task-list read model and no endpoint lists results across tasks. Overview
+  ends with a "Completed work" line (count, no recency claim) linking to
+  `/app/tasks?state=Done`. A real strip needs a read-model slice.
+- No short identifiers (AT-142, A-104, Q-204, R2) are shown: no read model
+  carries them. Imported tasks show `repository#number`, local tasks "Local task",
+  and no raw UUID appears on Overview, List or Board.
+- Task titles stay underlined links (an established shared-foundation contract);
+  the frames draw them plain. The Project dropdown is not drawn on project routes,
+  where the project is already the route.
+- Active tasks is the default State, so Done and Cancelled are reached through
+  "All tasks", a column name or the Completed work link.
+- Board: only the selected column tab is emphasised (the frames embolden the
+  columns in view); the footer reads "Scroll horizontally or choose a column
+  above. Empty columns are collapsed." rather than "Columns 1–3 of 6"; "task 1 of
+  3", "N more waiting tasks" and the per-card phone readiness note are not built;
+  the phone attention summary reflows the desktop bar instead of the shorter
+  two-line variant; relative age ("1h 46m ago") is omitted. Items "Check failed",
+  "repair assignment A-108" and "Repair owner unknown" need assignment and check
+  records the list summary lacks.
+- "Refresh tasks" and "More filters" (Search, Source, Readiness) are existing
+  capabilities the frames do not draw.
+- There is no phone Overview or phone List frame; both phone layouts are
+  composed from the shell and desktop frames.

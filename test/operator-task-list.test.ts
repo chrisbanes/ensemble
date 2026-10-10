@@ -363,6 +363,7 @@ test("a complete task aggregate rejects changing membership and repeated page cu
     parseTaskFilters("?project=bad&source=bad&state=bad&ready=bad&view=bad"),
     { project: "", state: "", source: "", ready: "", q: "", view: "list" },
   );
+  assert.equal(parseTaskFilters("?state=all").state, "all");
 });
 
 test("composer options expose only active permitted profiles and same-project dependencies", async (t) => {
