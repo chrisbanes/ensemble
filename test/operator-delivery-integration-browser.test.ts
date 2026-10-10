@@ -266,14 +266,14 @@ async function sharedDestinations(
     await task
       .getByRole("link", { name: "Release delivery", exact: true })
       .waitFor();
-    assert.match(await task.innerText(), /GitHub org\/repo #1/);
+    assert.match(await task.innerText(), /org\/repo#1/);
     if (done) assert.match(await task.innerText(), /Done/);
     if (route !== "/app") {
       await page.getByRole("button", { name: "Board", exact: true }).click();
       const status = await page
         .getByRole("toolbar", { name: "Board columns" })
         .getByRole("button")
-        .filter({ hasText: /\(1\)/ })
+        .filter({ hasText: /· 1$/ })
         .first()
         .innerText();
       await page
@@ -290,7 +290,7 @@ async function sharedDestinations(
           { cause: error },
         );
       }
-      assert.match(await task.innerText(), /GitHub source:/);
+      assert.match(await task.innerText(), /org\/repo#1/);
     }
     await task
       .getByRole("link", { name: "Release delivery", exact: true })

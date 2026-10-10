@@ -43,7 +43,7 @@ import {
   PageHeader,
 } from "./components.js";
 import { Alert } from "./ui/alert.js";
-import { loadTaskList } from "./tasks.js";
+import { loadTaskList, taskRouteSubtitle } from "./tasks.js";
 import { TaskComposer } from "./task-composer.js";
 import { RuntimeSettings, AssignmentRecovery } from "./recovery.js";
 import { ConfigurationDrafts } from "./settings-state.js";
@@ -647,9 +647,12 @@ export function App() {
   const headerSubtitle = unknownRoute
     ? notFoundSubtitle
     : taskRoute
-      ? projectId
-        ? "Tasks in this project. Readiness, source status and execution are separate."
-        : "Tasks across your projects. Action requests and ordinary progress remain distinct."
+      ? taskRouteSubtitle(
+          projectId ? "project" : pathname === "/app" ? "overview" : "tasks",
+          tasks.state.data?.tasks,
+          workspace.state.data?.data ?? null,
+          projectId,
+        )
       : undefined;
   // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
@@ -917,6 +920,7 @@ export function App() {
           ) : (
             <TaskViews
               state={tasks.state}
+              requests={inboxSummary.state}
               refresh={() => {
                 tasks.refresh();
                 refreshAll();

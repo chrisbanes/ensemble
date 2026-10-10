@@ -1,104 +1,212 @@
+import {
+  ArrowUpRight,
+  CircleCheck,
+  CircleDot,
+  CircleQuestionMark,
+  CircleX,
+  Clock,
+  FilePen,
+  LoaderCircle,
+  Pause,
+  Square,
+  ChevronRight,
+  type LucideIcon,
+} from "lucide-react";
 import { useState, useRef, useLayoutEffect } from "react";
 import type {
+  InboxItem,
   Workspace,
   TaskListSummary,
 } from "../../src/operator/contracts.js";
-import {
-  ActionLink,
-  Button,
-  ResourceStatus,
-  StatusBadge,
-} from "./components.js";
+import { ResourceStatus, StatusBadge } from "./components.js";
+import { Button } from "./ui/button.js";
 import { Card } from "./ui/card.js";
-import { Input } from "./ui/input.js";
-import { NativeSelect } from "./ui/native-select.js";
 import type { ResourceState } from "./resource.js";
+import { requestActionLabel, requestHref } from "./request-presentation.js";
 import {
-  columns,
+  AttentionBar,
+  AttentionSection,
+  CompletedWork,
+  type Requests,
+} from "./task-attention.js";
+import { TaskToolbar } from "./task-filters.js";
+import {
+  columnCounts,
   filterTasks,
   parseTaskFilters,
+  safeSourceUrl,
   taskColumn,
   taskDetailHref,
   taskFiltersUrl,
+  taskNext,
   taskReasons,
+  visibleColumns,
   type TaskAggregate,
+  type TaskColumn,
   type TaskFilters,
 } from "./tasks.js";
-function TaskContents({ task }: { task: TaskListSummary }) {
+import "./work.css";
+
+const stateIcons: Record<TaskColumn, LucideIcon> = {
+  Ready: CircleDot,
+  Running: LoaderCircle,
+  Waiting: Clock,
+  Paused: Pause,
+  Stopping: Square,
+  Uncertain: CircleQuestionMark,
+  Draft: FilePen,
+  Done: CircleCheck,
+  Cancelled: CircleX,
+};
+function TaskStateMark({ task }: { task: TaskListSummary }) {
+  const column = taskColumn(task),
+    Icon = stateIcons[column];
+  return (
+    <span className="task-state" data-column={column}>
+      <Icon aria-hidden="true" />
+      {column}
+    </span>
+  );
+}
+const identity = (task: TaskListSummary) =>
+  task.source
+    ? `${task.source.repositoryName ?? "repository unavailable"}#${task.source.number ?? "?"}`
+    : "Local task";
+const leadName = (task: TaskListSummary) =>
+  task.lead?.name ?? (task.lead ? "Name unavailable" : null);
+function TaskFacts({ task }: { task: TaskListSummary }) {
   return (
     <>
-      <a className="small-heading task-title" href={taskDetailHref(task)}>
-        {task.title ?? "Title unavailable"}
-      </a>
-      <p className="body task-status">
-        <StatusBadge tone={task.attention.count ? "warning" : "neutral"}>
-          {taskColumn(task)}
-        </StatusBadge>{" "}
-        <span>
-          {task.ready ? "Ready" : "Not Ready"} · {task.execution.state}
-        </span>
-      </p>
       {taskReasons(task).map((reason) => (
         <p key={reason} className="body muted task-reason">
           {reason}
         </p>
       ))}
-      <p className="metadata task-lead">
-        Task lead:{" "}
-        {task.lead?.name ?? (task.lead ? "Name unavailable" : "Unconfigured")}
-      </p>
-      <p className="metadata muted task-project-metadata">
-        {task.project.name ?? "Project name unavailable"} ·{" "}
-        {task.source
-          ? `GitHub ${task.source.repositoryName ?? "repository unavailable"} #${task.source.number ?? "?"}`
-          : "Local task"}
-      </p>
-      {task.source && (
-        <p className="metadata muted task-source-state">
-          GitHub source: {task.source.state ?? "state unavailable"}
-        </p>
-      )}
+      <p className="body task-next">{taskNext(task)}</p>
     </>
   );
 }
 export function TaskRow({ task }: { task: TaskListSummary }) {
   return (
     <article className="task-row" data-task-id={task.id}>
-      <TaskContents task={task} />
+      <a className="small-heading task-title" href={taskDetailHref(task)}>
+        {task.title ?? "Title unavailable"}
+      </a>
+      <p className="metadata muted task-project-metadata">
+        {task.project.name ?? "Project name unavailable"} · {identity(task)}
+      </p>
+      <p className="body task-status">
+        <TaskStateMark task={task} />
+      </p>
+      <div className="task-detail">
+        <TaskFacts task={task} />
+        {task.source && task.source.state !== "open" && (
+          <p className="metadata muted task-source-state">
+            GitHub source: {task.source.state ?? "state unavailable"}
+          </p>
+        )}
+      </div>
+      <p className="metadata muted task-lead">
+        {leadName(task) ? `${leadName(task)} · lead` : "No lead configured"}
+      </p>
+      <ChevronRight aria-hidden="true" className="task-chevron" />
     </article>
   );
 }
-export function TaskCard({ task }: { task: TaskListSummary }) {
+export function TaskCard({
+  task,
+  request,
+}: {
+  task: TaskListSummary;
+  request?: InboxItem | undefined;
+}) {
+  const url = safeSourceUrl(task.source?.url),
+    lead = leadName(task);
   return (
     <article data-task-id={task.id}>
       <Card className="task-card">
-        <TaskContents task={task} />
+        <a className="small-heading task-title" href={taskDetailHref(task)}>
+          {task.title ?? "Title unavailable"}
+        </a>
+        <p className="metadata muted task-project-metadata">
+          {task.project.name ?? "Project name unavailable"} ·{" "}
+          {url ? (
+            <a href={url} target="_blank" rel="noopener noreferrer">
+              {identity(task)}
+              <ArrowUpRight aria-hidden="true" />
+              <span className="sr-only"> (opens GitHub)</span>
+            </a>
+          ) : (
+            identity(task)
+          )}
+        </p>
+        <p className="body task-status">
+          <TaskStateMark task={task} />
+        </p>
+        <TaskFacts task={task} />
+        {task.source && task.source.state !== "open" && (
+          <p className="metadata muted task-source-state">
+            GitHub source: {task.source.state ?? "state unavailable"}
+          </p>
+        )}
+        {request && (
+          <a className="body task-request" href={requestHref(request)}>
+            {requestActionLabel(request.kind)} →
+          </a>
+        )}
+        <p className="metadata task-lead task-card-lead">
+          {lead && (
+            <span className="task-avatar" aria-hidden="true">
+              {lead.slice(0, 1)}
+            </span>
+          )}
+          {lead ? `${lead} · accountable lead` : "No lead configured"}
+          <ArrowUpRight aria-hidden="true" className="task-card-mark" />
+        </p>
       </Card>
     </article>
   );
 }
-export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
-  const [selected, updateSelected] = useState<number>(
-    () => history.state?.board?.selected ?? 0,
-  );
+export function TaskBoard({
+  tasks,
+  columns,
+  initial,
+  requests,
+}: {
+  tasks: TaskListSummary[];
+  columns: readonly TaskColumn[];
+  /** The column a State filter names, shown first unless the operator already chose one. */
+  initial: TaskColumn | "";
+  requests: Requests;
+}) {
+  const [stored, updateSelected] = useState<number>(
+      () =>
+        history.state?.board?.selected ??
+        Math.max(
+          0,
+          columns.findIndex((c) => c === initial),
+        ),
+    ),
+    // The visible columns change with the State filter, so a saved index may point past the end.
+    selected = Math.min(stored, columns.length - 1);
   const board = useRef<HTMLDivElement>(null);
-  const setSelected = (value: number | ((previous: number) => number)) => {
-    updateSelected((previous) => {
-      const next = typeof value === "function" ? value(previous) : value;
-      history.replaceState(
-        {
-          ...history.state,
-          board: { ...history.state?.board, selected: next },
-        },
-        "",
-      );
-      return next;
-    });
+  const counts = columnCounts(tasks);
+  const firstRequest = new Map<string, InboxItem>();
+  for (const item of requests.data?.items ?? [])
+    if (!firstRequest.has(item.taskId)) firstRequest.set(item.taskId, item);
+  const setSelected = (next: number) => {
+    updateSelected(next);
+    history.replaceState(
+      { ...history.state, board: { ...history.state?.board, selected: next } },
+      "",
+    );
   };
   useLayoutEffect(() => {
     if (board.current)
       board.current.scrollLeft = history.state?.board?.scrollLeft ?? 0;
   }, []);
+  const before = columns[selected - 1],
+    after = columns[selected + 1];
   return (
     <div className="task-board">
       <div
@@ -110,7 +218,7 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
           <Button
             key={column}
             type="button"
-            variant={selected === index ? "primary" : "secondary"}
+            variant="ghost"
             className="column-tab"
             aria-pressed={selected === index}
             onClick={() => {
@@ -120,27 +228,9 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
                 ?.scrollIntoView({ block: "nearest", inline: "start" });
             }}
           >
-            {column} ({tasks.filter((t) => taskColumn(t) === column).length})
+            {column} · {counts[column]}
           </Button>
         ))}
-      </div>
-      <div className="phone-column-controls">
-        <Button
-          variant="secondary"
-          onClick={() => setSelected((i) => Math.max(0, i - 1))}
-          disabled={selected === 0}
-        >
-          Previous column
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={() =>
-            setSelected((i) => Math.min(columns.length - 1, i + 1))
-          }
-          disabled={selected === columns.length - 1}
-        >
-          Next column
-        </Button>
       </div>
       <div
         className="board-columns"
@@ -160,30 +250,67 @@ export function TaskBoard({ tasks }: { tasks: TaskListSummary[] }) {
             key={column}
             id={`column-${column}`}
             className={`board-column ${selected === index ? "selected-column" : ""}`}
+            data-empty={counts[column] ? undefined : "true"}
             aria-label={`${column} tasks`}
           >
             <h2 className="small-heading">
-              {column}{" "}
-              <span className="muted">
-                ({tasks.filter((t) => taskColumn(t) === column).length})
-              </span>
+              {column} · {counts[column]}
             </h2>
             {tasks
               .filter((t) => taskColumn(t) === column)
               .map((t) => (
-                <TaskCard key={t.id} task={t} />
+                <TaskCard
+                  key={t.id}
+                  task={t}
+                  request={firstRequest.get(t.id)}
+                />
               ))}
-            {!tasks.some((t) => taskColumn(t) === column) && (
-              <p className="body muted">No tasks</p>
+            {!counts[column] && (
+              <p className="metadata muted">
+                {column === "Ready"
+                  ? "None ready. Held Ready work is in Waiting."
+                  : "No tasks"}
+              </p>
             )}
           </section>
         ))}
       </div>
+      <div className="phone-column-controls">
+        <Button
+          variant="outline"
+          disabled={!before}
+          aria-label={
+            before
+              ? `Previous column: ${before}`
+              : `Previous column: none, column 1 of ${columns.length}`
+          }
+          onClick={() => setSelected(selected - 1)}
+        >
+          {before ? `← ${before}` : `1 of ${columns.length}`}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={!after}
+          aria-label={
+            after
+              ? `Next column: ${after}`
+              : `Next column: none, column ${columns.length} of ${columns.length}`
+          }
+          onClick={() => setSelected(selected + 1)}
+        >
+          {after ? `${after} →` : `${columns.length} of ${columns.length}`}
+        </Button>
+      </div>
+      <p className="metadata muted board-footer">
+        Scroll horizontally or choose a column above. Empty columns are
+        collapsed.
+      </p>
     </div>
   );
 }
 export function TaskViews({
   state,
+  requests,
   refresh,
   workspace,
   path,
@@ -192,6 +319,7 @@ export function TaskViews({
   overview = false,
 }: {
   state: ResourceState<TaskAggregate>;
+  requests: Requests;
   refresh: () => void;
   workspace: Workspace | null;
   path: string;
@@ -205,10 +333,10 @@ export function TaskViews({
     );
   const update = (patch: Partial<TaskFilters>) =>
     navigate(taskFiltersUrl(base, { ...filters, ...patch }));
-  const tasks = filterTasks(state.data?.tasks ?? [], filters, projectId);
-  const attention = tasks.filter((t) => t.attention.count > 0),
-    work = overview ? tasks.filter((t) => t.attention.count === 0) : tasks;
-  const project = workspace?.data.projects.find((p) => p.id === projectId);
+  const all = state.data?.tasks ?? [],
+    tasks = filterTasks(all, filters, projectId);
+  const project = workspace?.data.projects.find((p) => p.id === projectId),
+    scope = projectId || filters.project;
   return (
     <>
       {project?.paused && (
@@ -217,158 +345,39 @@ export function TaskViews({
           held.
         </p>
       )}
-      <div className="task-actions">
-        {projectId && (
-          <ActionLink
-            variant="secondary"
-            href={`/app/projects/${projectId}/settings`}
-          >
-            Project settings
-          </ActionLink>
-        )}
-        {projectId && (
-          <ActionLink variant="secondary" href={`/project/${projectId}`}>
-            Open existing project controls
-          </ActionLink>
-        )}
-        <Button variant="secondary" onClick={refresh} disabled={state.pending}>
-          Refresh tasks
-        </Button>
-      </div>
+      {projectId && (
+        <p className="metadata muted work-project-links">
+          <a href={`/app/projects/${projectId}/settings`}>Project settings</a>
+          <a href={`/project/${projectId}`}>Open existing project controls</a>
+        </p>
+      )}
       {state.status !== "fresh" && (
         <ResourceStatus state={state} retry={refresh} label="Tasks" />
       )}
-      {state.data && (
-        <p className="metadata muted">
-          Task states read{" "}
-          {new Date(state.data.firstObservedAt).toLocaleTimeString()}–
-          {new Date(state.data.lastObservedAt).toLocaleTimeString()}.
-        </p>
+      {overview ? (
+        <AttentionSection requests={requests} retry={refresh} />
+      ) : (
+        <AttentionBar
+          tasks={all.filter((t) => !scope || t.projectId === scope)}
+          requests={requests}
+        />
       )}
-      {overview && (
-        <section aria-label="Needs attention">
-          <Card className="attention-preview">
-            <div className="section-title">
-              <h2 className="section-heading">Needs attention</h2>
-              <a
-                className="control"
-                href="/app/inbox"
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate("/app/inbox");
-                }}
-              >
-                View Inbox
-              </a>
-            </div>
-            {state.data && !attention.length && (
-              <p className="body muted">
-                No action requests in this observation.
-              </p>
-            )}
-            {attention.map((t) => (
-              <TaskRow key={t.id} task={t} />
-            ))}
-          </Card>
-        </section>
-      )}
-      <section aria-label={overview ? "Work" : "Tasks"}>
-        {overview && <h2 className="section-heading">Work</h2>}
-        <div className="task-filters">
-          <label className="field body" htmlFor="task-search">
-            Search tasks
-            <Input
-              id="task-search"
-              value={filters.q}
-              maxLength={512}
-              onChange={(e) => update({ q: e.target.value })}
-            />
-          </label>
-          {!projectId && (
-            <label className="field body" htmlFor="task-project">
-              Project
-              <NativeSelect
-                id="task-project"
-                aria-label="Project"
-                value={filters.project}
-                onChange={(e) => update({ project: e.target.value })}
-              >
-                <option value="">All projects</option>
-                {workspace?.data.projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name ?? "Name unavailable"}
-                  </option>
-                ))}
-              </NativeSelect>
-            </label>
-          )}
-          <label className="field body" htmlFor="task-state">
-            State
-            <NativeSelect
-              id="task-state"
-              aria-label="State"
-              value={filters.state}
-              onChange={(e) => update({ state: e.target.value })}
-            >
-              <option value="">All states</option>
-              {columns.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
-            </NativeSelect>
-          </label>
-          <label className="field body" htmlFor="task-source">
-            Source
-            <NativeSelect
-              id="task-source"
-              aria-label="Source"
-              value={filters.source}
-              onChange={(e) => update({ source: e.target.value })}
-            >
-              <option value="">All sources</option>
-              <option value="local">Local</option>
-              <option value="github">GitHub</option>
-            </NativeSelect>
-          </label>
-          <label className="field body" htmlFor="task-ready">
-            Readiness
-            <NativeSelect
-              id="task-ready"
-              aria-label="Readiness"
-              value={filters.ready}
-              onChange={(e) => update({ ready: e.target.value })}
-            >
-              <option value="">Any readiness</option>
-              <option value="yes">Ready</option>
-              <option value="no">Not Ready</option>
-            </NativeSelect>
-          </label>
-        </div>
-        <div
-          className="view-toggle"
-          role="toolbar"
-          aria-label="Task presentation"
-        >
-          <Button
-            variant={filters.view === "list" ? "primary" : "secondary"}
-            aria-pressed={filters.view === "list"}
-            onClick={() => update({ view: "list" })}
-          >
-            List
-          </Button>
-          <Button
-            variant={filters.view === "board" ? "primary" : "secondary"}
-            aria-pressed={filters.view === "board"}
-            onClick={() => update({ view: "board" })}
-          >
-            Board
-          </Button>
-          <p className="metadata muted">{work.length} tasks</p>
-        </div>
+      <section
+        aria-label={projectId ? "Project tasks" : "Across your projects"}
+      >
+        <TaskToolbar
+          filters={filters}
+          update={update}
+          workspace={workspace}
+          projectId={projectId}
+          overview={overview}
+          count={tasks.length}
+          refresh={refresh}
+          pending={state.pending}
+        />
         {state.data && !tasks.length && (
           <p className="body empty-state">
-            {state.data.tasks.some(
-              (t) => !projectId || t.projectId === projectId,
-            )
+            {all.some((t) => !projectId || t.projectId === projectId)
               ? "No tasks match these filters."
               : workspace?.data.projects.length
                 ? "Ready for your first task. Create an outcome or save a draft."
@@ -376,15 +385,31 @@ export function TaskViews({
           </p>
         )}
         {filters.view === "board" ? (
-          <TaskBoard tasks={work} />
+          <TaskBoard
+            tasks={tasks}
+            columns={visibleColumns(filters.state)}
+            initial={filters.state as TaskColumn | ""}
+            requests={requests}
+          />
         ) : (
-          <div className="task-list">
-            {work.map((t) => (
+          <div
+            className="task-list"
+            data-density={overview ? "compact" : undefined}
+          >
+            {tasks.map((t) => (
               <TaskRow key={t.id} task={t} />
             ))}
           </div>
         )}
+        {state.data && (
+          <p className="metadata muted">
+            Task states read{" "}
+            {new Date(state.data.firstObservedAt).toLocaleTimeString()}–
+            {new Date(state.data.lastObservedAt).toLocaleTimeString()}.
+          </p>
+        )}
       </section>
+      {overview && <CompletedWork tasks={all} project={filters.project} />}
     </>
   );
 }
