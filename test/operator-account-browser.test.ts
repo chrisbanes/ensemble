@@ -404,13 +404,45 @@ test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-
   await page.keyboard.press("ArrowUp");
   await menu.waitFor();
   assert.equal(await focused(), "Sign out", "ArrowUp opens on the last item");
+  // Tab closes the menu and moves on past the trigger; it does not hold focus there.
   await page.keyboard.press("Tab");
   await menu.waitFor({ state: "detached" });
-  assert.equal(
-    await trigger.evaluate((el) => el === document.activeElement),
-    true,
-    "Tab closes the menu and returns focus to the trigger",
+  const position = () =>
+    trigger.evaluate((el) => {
+      const active = document.activeElement;
+      return {
+        isTrigger: active === el,
+        after: Boolean(
+          active &&
+            el.compareDocumentPosition(active) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+        before: Boolean(
+          active &&
+            el.compareDocumentPosition(active) &
+              Node.DOCUMENT_POSITION_PRECEDING,
+        ),
+      };
+    });
+  assert.deepEqual(
+    await position(),
+    { isTrigger: false, after: true, before: false },
+    "Tab lands on the next focusable element after the trigger",
   );
+  // Shift+Tab from a keyboard-opened menu lands on the element before the trigger.
+  await trigger.focus();
+  await page.keyboard.press("ArrowUp");
+  await menu.waitFor();
+  assert.equal(await focused(), "Sign out");
+  await page.keyboard.press("Shift+Tab");
+  await menu.waitFor({ state: "detached" });
+  assert.deepEqual(
+    await position(),
+    { isTrigger: false, after: false, before: true },
+    "Shift+Tab lands on the previous focusable element before the trigger",
+  );
+  assert.equal(await focused(), "New project");
+  await trigger.focus();
   await page.keyboard.press("ArrowDown");
   await menu.waitFor();
   await page.keyboard.press("ArrowDown");

@@ -92,8 +92,7 @@ export function AccountMenu({
       event.preventDefault();
       list[index].click();
     } else if (event.key === "Tab") {
-      // Leave the menu deterministically: back to the trigger, menu closed.
-      event.preventDefault();
+      // Close the menu and let native traversal continue from the trigger, in either direction.
       close(true);
     }
   };
