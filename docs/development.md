@@ -4,9 +4,10 @@ For the product overview, see the [README](../README.md). For macOS service
 operations and backup/restore, see the [operations procedure](operations/standalone-macos.md).
 
 
-Use Node **24.21.0** ([`.node-version`](../.node-version)) and npm **12.2.0** (`package.json`).
-Node **26.9.0** is tested for compatibility (CI job `check-node-26`; see the
-[local evidence](evidence/node-26-compatibility-2026-10-09.md)) but is not the
+Use the Node version in [`.node-version`](../.node-version) and the npm version in
+`packageManager` (`package.json`).
+Node 26 is tested for compatibility (CI job `check-node-26` runs the latest 26.x;
+26.9.0 has [local evidence](evidence/node-26-compatibility-2026-10-09.md)) but is not the
 default baseline. `engines.node` is `>=24` as permissive metadata; Node 25, 27
 and later majors are not qualified.
 
