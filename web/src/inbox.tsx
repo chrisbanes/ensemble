@@ -1,6 +1,7 @@
 import { NativeSelect } from "./ui/native-select.js";
 import { Card } from "./ui/card.js";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,7 +14,14 @@ import {
   type Session,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
-import { ActionLink, Button, ResourceStatus } from "./components.js";
+import { ArrowUpRight } from "lucide-react";
+import {
+  ActionLink,
+  Button,
+  ResourceStatus,
+  StatusBadge,
+} from "./components.js";
+import { useMediaQuery } from "./use-media-query.js";
 import {
   ageLabel,
   clockLabel,
@@ -29,12 +37,29 @@ export class InboxState {
   kind = "";
   scrollTop = 0;
   selected: InboxItem | null = null;
+  /** The request a wide layout opened by itself; not navigation, so no history entry. */
+  auto: InboxItem | null = null;
+  /** Where the phone detail came from, so Back can focus it without selecting anything. */
+  returnFocus: { id: string; index: number } | null = null;
   clear() {
     this.project = "";
     this.kind = "";
     this.scrollTop = 0;
     this.selected = null;
+    this.auto = null;
+    this.returnFocus = null;
   }
+}
+/** What the Inbox asks the shell header to show; the shell only merges it into its props. */
+export interface InboxHeader {
+  subtitle?: string;
+  /** Single-column layout with a request open: a Back link, the request title and one action. */
+  detail?: {
+    title: string;
+    subtitle?: string;
+    back: { href: string; label: string };
+    action: ReactNode;
+  };
 }
 export async function loadInbox(client: OperatorClient, signal: AbortSignal) {
   const items: InboxItem[] = [];
@@ -78,6 +103,7 @@ export function Inbox({
   questions,
   observation,
   onSummary,
+  onHeader,
 }: {
   client: OperatorClient;
   session: Session;
@@ -88,6 +114,8 @@ export function Inbox({
   observation: object | null;
   /** Reports the unresolved total and project count (or null) so the shell matches this list. */
   onSummary?: (summary: ReturnType<typeof inboxSummaryOf>) => void;
+  /** Reports the header content for this view (null on unmount). */
+  onHeader?: (header: InboxHeader | null) => void;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) => loadInbox(client, signal),
@@ -121,29 +149,104 @@ export function Inbox({
     }
   }, [observation]);
   const [, render] = useState(0),
-    queue = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (queue.current) queue.current.scrollTop = state.scrollTop;
-  }, [state]);
+    queue = useRef<HTMLDivElement>(null),
+    single = useMediaQuery("(max-width: 760px)");
   const params = new URLSearchParams(path.split("?")[1] ?? ""),
-    selectedId = params.get("request"),
-    taskId = params.get("task");
-  const current = resource.state.data?.items.find(
-    (item) => item.id === selectedId && item.taskId === taskId,
-  );
-  if (current) state.selected = current;
+    urlId = params.get("request"),
+    urlTask = params.get("task"),
+    // A wide layout without a chosen request shows the one it opened by itself.
+    implicit = !urlId && !single ? state.auto : null,
+    selectedId = urlId ?? implicit?.id ?? null,
+    taskId = urlTask ?? implicit?.taskId ?? null;
+  const items = resource.state.data?.items ?? [],
+    current = items.find(
+      (item) => item.id === selectedId && item.taskId === taskId,
+    );
+  if (current && urlId) state.selected = current;
   const selected = selectedId
     ? (current ??
-      (state.selected?.id === selectedId && state.selected.taskId === taskId
-        ? state.selected
-        : null))
+      (urlId
+        ? state.selected?.id === selectedId && state.selected.taskId === taskId
+          ? state.selected
+          : null
+        : implicit))
     : null;
-  const rows = (resource.state.data?.items ?? []).filter(
+  const rows = items.filter(
     (item) =>
       (!state.project || item.projectId === state.project) &&
       (!state.kind || item.kind === state.kind),
   );
-  const loaded = resource.state.data?.items ?? [],
+  // Open the first request once per visit when the first fresh read arrives on a wide layout.
+  const autoDone = useRef(false);
+  useEffect(() => {
+    if (autoDone.current || resource.state.status !== "fresh") return;
+    autoDone.current = true;
+    const first = rows[0];
+    if (!single && !urlId && !state.selected && !state.auto && first) {
+      state.auto = first;
+      render((v) => v + 1);
+    }
+  });
+  // Keep the queue's own scroll across detail visits (a hidden queue forgets its offset).
+  useLayoutEffect(() => {
+    if (queue.current && !(single && urlId))
+      queue.current.scrollTop = state.scrollTop;
+  }, [state, single, urlId]);
+  // Returning from the phone detail focuses the opened row, or the row now at its place.
+  useLayoutEffect(() => {
+    if (!single || urlId || !state.returnFocus || !queue.current) return;
+    const { id, index } = state.returnFocus,
+      list = [...queue.current.querySelectorAll<HTMLElement>(".inbox-row")],
+      row =
+        list.find((el) => el.dataset.recordId === id) ??
+        list[Math.min(index, list.length - 1)];
+    if (row || resource.state.status === "fresh") state.returnFocus = null;
+    row?.focus({ preventScroll: true });
+  }, [single, urlId, state, resource.state.status]);
+  const position = selected ? rows.findIndex((r) => r.id === selected.id) : -1,
+    heading = selected
+      ? `${requestKindLabel(selected.kind)}${position >= 0 ? ` · ${position + 1} of ${rows.length}` : ""}`
+      : null,
+    leftQueue = Boolean(
+      selected && !current && resource.state.status === "fresh",
+    );
+  const subtitle =
+    count === undefined || projectCount === undefined
+      ? undefined
+      : leftQueue
+        ? `${count} unresolved · confirmation retained`
+        : count === 0
+          ? "0 unresolved across your projects"
+          : `${count} unresolved across ${projectCount} project${projectCount === 1 ? "" : "s"}`;
+  const detailTitle = single && selected ? heading : null,
+    detailSubtitle = selected?.projectName ?? undefined,
+    detailTask = selected?.taskId;
+  useEffect(() => {
+    onHeader?.(
+      detailTitle && detailTask
+        ? {
+            ...(subtitle ? { subtitle } : {}),
+            detail: {
+              title: detailTitle,
+              ...(detailSubtitle ? { subtitle: detailSubtitle } : {}),
+              back: { href: "/app/inbox", label: "Inbox" },
+              action: (
+                <ActionLink
+                  variant="secondary"
+                  href={`/app/tasks/${detailTask}`}
+                >
+                  Open task
+                </ActionLink>
+              ),
+            },
+          }
+        : subtitle
+          ? { subtitle }
+          : null,
+    );
+  }, [onHeader, detailTitle, detailSubtitle, detailTask, subtitle]);
+  useEffect(() => () => onHeader?.(null), [onHeader]);
+  const loaded = items,
     counts = filterCounts(loaded),
     projects = [
       ...new Map(loaded.map((item) => [item.projectId, item.projectName])),
@@ -154,6 +257,13 @@ export function Inbox({
   const now = Date.now();
   const choose = (item: InboxItem) => {
     state.selected = item;
+    state.returnFocus = {
+      id: item.id,
+      index: Math.max(
+        0,
+        rows.findIndex((r) => r.id === item.id),
+      ),
+    };
     navigate(
       `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`,
     );
@@ -291,54 +401,84 @@ export function Inbox({
         </ActionLink>
       </div>
       <section className="inbox-detail" aria-label="Selected request">
-        <Button variant="secondary" onClick={() => navigate("/app/inbox")}>
-          Back to queue
-        </Button>
         {selectedId && taskId ? (
           <>
-            {selected && (
-              <>
-                <h2>{selected.taskTitle ?? "Selected request"}</h2>
-                <p>{selected.reason}</p>
-                {!current && resource.state.status === "fresh" && (
-                  <p role="status">
-                    This request has left the current queue. Its exact detail
-                    remains selected.
+            {heading && selected && (
+              <header className="inbox-detail-header">
+                <StatusBadge>{requestKindLabel(selected.kind)}</StatusBadge>
+                {position >= 0 && (
+                  <span className="metadata muted inbox-position">
+                    {position + 1} of {rows.length}
+                  </span>
+                )}
+                {!single && (
+                  <a
+                    className="inbox-open-task"
+                    href={`/app/tasks/${selected.taskId}`}
+                  >
+                    Open task
+                    <ArrowUpRight aria-hidden="true" />
+                  </a>
+                )}
+              </header>
+            )}
+            <div className="inbox-detail-body">
+              {selected && (
+                <div className="inbox-detail-intro">
+                  <p className="metadata muted">
+                    {selected.projectName ?? "Unavailable project"}
                   </p>
-                )}
-                <ActionLink href={selected.evidence}>Task evidence</ActionLink>
-                {selected.conversation && (
-                  <ActionLink href={selected.conversation}>
-                    Requesting conversation
+                  <h2>{selected.taskTitle ?? "Selected request"}</h2>
+                  <p className="body muted">
+                    Requested by{" "}
+                    {selected.requesterName ?? "Responsibility unknown"}
+                  </p>
+                  <p>{selected.reason ?? "Exact details unavailable"}</p>
+                  {leftQueue && (
+                    <p role="status">
+                      This request has left the current queue. Its exact detail
+                      remains selected.
+                    </p>
+                  )}
+                  <div className="inbox-detail-links">
+                    <ActionLink variant="secondary" href={selected.evidence}>
+                      Task evidence
+                    </ActionLink>
+                    {selected.conversation && (
+                      <ActionLink
+                        variant="secondary"
+                        href={selected.conversation}
+                      >
+                        Requesting conversation
+                      </ActionLink>
+                    )}
+                  </div>
+                </div>
+              )}
+              {selected?.kind === "question" ||
+              (!selected && !selectedId.startsWith("intervention:")) ? (
+                <QuestionResponse
+                  client={client}
+                  session={session}
+                  taskId={taskId}
+                  interactionId={selectedId}
+                  states={questions}
+                  onRecorded={resource.refresh}
+                />
+              ) : selected ? (
+                <>
+                  <p>
+                    Review the exact recorded material and recovery state before
+                    acting.
+                  </p>
+                  <ActionLink href={selected.destination}>
+                    Open exact {selected.kind}
                   </ActionLink>
-                )}
-              </>
-            )}
-            {selected?.kind === "question" ||
-            (!selected &&
-              selectedId &&
-              !selectedId.startsWith("intervention:")) ? (
-              <QuestionResponse
-                client={client}
-                session={session}
-                taskId={taskId}
-                interactionId={selectedId}
-                states={questions}
-                onRecorded={resource.refresh}
-              />
-            ) : selected ? (
-              <>
-                <p>
-                  Review the exact recorded material and recovery state before
-                  acting.
-                </p>
-                <ActionLink href={selected.destination}>
-                  Open exact {selected.kind}
-                </ActionLink>
-              </>
-            ) : (
-              <p>Selected request is unavailable.</p>
-            )}
+                </>
+              ) : (
+                <p>Selected request is unavailable.</p>
+              )}
+            </div>
           </>
         ) : (
           <p>Select a request to review its complete form or exact material.</p>

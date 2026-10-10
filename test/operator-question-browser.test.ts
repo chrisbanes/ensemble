@@ -820,9 +820,8 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
       fullPage: false,
     });
   }
-  await page
-    .getByRole("button", { name: "Back to queue", exact: true })
-    .click();
+  // On a phone the header's Back link returns to the queue.
+  await page.getByRole("link", { name: "Back to Inbox", exact: true }).click();
   assert.equal(
     await page.getByLabel("Request kind", { exact: true }).inputValue(),
     "question",
@@ -941,7 +940,7 @@ test("collision-shaped literal IDs keep unique DOM controls, label activation an
   const focusedId = await errorField.getByRole("textbox").getAttribute("id");
   assert.ok(focusedId);
   await page.getByRole("link", { name: "Inbox", exact: true }).click();
-  await page.locator(".inbox-row").click();
+  // The only request opens by itself on a wide layout; its draft focus is restored.
   await form
     .getByRole("textbox", { name: "Literal x-error", exact: true })
     .waitFor();

@@ -1,4 +1,10 @@
-import { Inbox, InboxState, inboxSummaryOf, loadInbox } from "./inbox.js";
+import {
+  Inbox,
+  InboxState,
+  inboxSummaryOf,
+  loadInbox,
+  type InboxHeader,
+} from "./inbox.js";
 import { QuestionResponseStates } from "./question-response-state.js";
 import {
   useCallback,
@@ -469,6 +475,7 @@ export function App() {
   const onInboxRoute = path.split(/[?#]/)[0] === "/app/inbox";
   const [inboxRouteSummary, setInboxRouteSummary] =
     useState<ReturnType<typeof inboxSummaryOf>>(null);
+  const [inboxHeader, setInboxHeader] = useState<InboxHeader | null>(null);
   const inboxSummary = useOperatorResource(
     session?.authenticated ? session.csrfToken : null,
     inboxLoader,
@@ -693,6 +700,21 @@ export function App() {
     (pathname === "/app/search" &&
       Boolean(new URLSearchParams(query).get("query")));
   const parent = parentRoute(pathname, query, workspace.state.data);
+  // The Inbox reports its own subtitle, and on a phone its request-detail header.
+  const { detail: inboxDetail, subtitle: inboxSubtitle } =
+    (onInboxRoute && inboxHeader) || {};
+  const inboxHeaderProps = inboxDetail
+    ? {
+        title: inboxDetail.title,
+        subtitle: inboxDetail.subtitle,
+        back: inboxDetail.back,
+        menu: undefined,
+        badge: undefined,
+        action: inboxDetail.action,
+      }
+    : inboxSubtitle
+      ? { subtitle: inboxSubtitle }
+      : {};
   async function logout() {
     navigationScope.current = crypto.randomUUID();
     clearPrivateNavigation();
@@ -790,6 +812,7 @@ export function App() {
                 </Button>
               )
             }
+            {...inboxHeaderProps}
           />
           {logoutNotice && (
             <p className="body error-text" role="alert">
@@ -882,6 +905,7 @@ export function App() {
               questions={questionStates.current}
               observation={workspace.state.data}
               onSummary={setInboxRouteSummary}
+              onHeader={setInboxHeader}
             />
           ) : pathname === "/app/search" ? (
             <Search

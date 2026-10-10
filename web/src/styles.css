@@ -1789,9 +1789,75 @@ textarea[data-auto-grow="true"] {
 }
 .inbox-detail {
   grid-area: detail;
-  max-height: min(70dvh, calc(100dvh - 12rem));
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 8rem);
   overflow: auto;
   overscroll-behavior: contain;
+}
+.inbox-detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding-bottom: var(--space-8);
+  background: var(--background);
+}
+.inbox-open-task {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+}
+.inbox-open-task svg {
+  width: 14px;
+  height: 14px;
+}
+.inbox-detail-body {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+.inbox-detail-intro > p,
+.inbox-detail-intro > h2 {
+  margin: 0 0 var(--space-8);
+}
+.inbox-detail-intro h2 {
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
+}
+.inbox-detail-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin-bottom: var(--space-12);
+}
+.inbox-detail-links a {
+  margin: 0;
+}
+/* Short forms keep the submit area at the foot of the pane; long ones scroll under it. */
+.inbox-detail-body > .question-response {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-detail-body > .question-response > form {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-detail .question-content {
+  flex: 1 0 auto;
+}
+.inbox-detail .question-submit {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
 }
 /* The bounded detail is the only scroll owner; a nested bound traps scrolling. */
 .inbox-detail .question-content {
@@ -1809,6 +1875,7 @@ textarea[data-auto-grow="true"] {
   overscroll-behavior: contain;
 }
 .inbox-row {
+  flex: none;
   display: grid;
   gap: var(--space-4);
   padding: var(--space-12) var(--space-16);
@@ -1856,9 +1923,50 @@ textarea[data-auto-grow="true"] {
 .inbox-advanced {
   align-self: flex-start;
 }
+/* Nothing unresolved and nothing open: the card owns the whole body. */
+.action-inbox.inbox-empty {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "filters"
+    "queue";
+}
+.inbox-empty .inbox-detail {
+  display: none;
+}
+.inbox-empty .inbox-rows {
+  justify-content: center;
+}
+.inbox-empty .inbox-empty-card {
+  align-self: center;
+  width: min(100%, 520px);
+}
 .inbox-detail > a {
   display: inline-block;
   margin: 0.5rem 0.75rem 0.5rem 0;
+}
+@media (min-width: 761px) {
+  /* Desktop and tablet: the page never scrolls; the queue and the detail scroll alone. */
+  .page-inbox {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .page-inbox .action-inbox {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .page-inbox .inbox-rows {
+    flex: 1;
+    max-height: none;
+  }
+  .page-inbox .inbox-detail {
+    max-height: none;
+    padding-left: var(--space-24);
+    border-left: 1px solid var(--border);
+  }
 }
 @media (max-width: 760px) {
   .action-inbox {
@@ -1876,6 +1984,10 @@ textarea[data-auto-grow="true"] {
   .inbox-filters select,
   .inbox-advanced {
     min-height: 44px;
+  }
+  /* The phone header already reads "Question · N of M". */
+  .inbox-position {
+    display: none;
   }
   .question-submit button {
     min-height: 44px;

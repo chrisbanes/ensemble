@@ -790,9 +790,11 @@ test("mounted Inbox discovers new requests and holds through timer and header re
       .getAttribute("href"),
     `/coordination/task/${b.taskId}#${approval.interactionId}`,
   );
-  await page
-    .getByRole("button", { name: "Back to queue", exact: true })
-    .click();
+  // A wide layout has no back control: the queue stays beside the detail.
+  assert.equal(
+    await page.getByRole("button", { name: "Back to queue" }).count(),
+    0,
+  );
   assert.equal(
     await page
       .locator(".inbox-row")
