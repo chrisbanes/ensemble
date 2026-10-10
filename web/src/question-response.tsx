@@ -41,6 +41,7 @@ export function QuestionResponse({
   onRecorded,
   requesterName,
   onBack,
+  compactContext = false,
 }: {
   client: OperatorClient;
   session: Session;
@@ -52,6 +53,8 @@ export function QuestionResponse({
   requesterName?: string | null | undefined;
   /** Leaves a recorded confirmation (the Inbox clears its detail). */
   onBack?: () => void;
+  /** The caller's own intro already names the requester and links the conversation. */
+  compactContext?: boolean;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) =>
@@ -160,12 +163,9 @@ export function QuestionResponse({
     );
     state.outcome = disposition === "rejected" ? "failed" : disposition;
     state.failureCode =
-      disposition === "rejected"
-        ? result.state === "recorded"
-          ? "invalid-receipt"
-          : result.code
+      disposition === "rejected" && result.state !== "recorded"
+        ? result.code
         : null;
-    if (disposition === "recorded") state.recordedAt = Date.now();
     state.notice =
       disposition === "recorded"
         ? "Answer recorded. Delivery and admission remain subject to independent holds."
@@ -220,18 +220,21 @@ export function QuestionResponse({
               </span>
             )}
             <p className="metadata muted">
-              Requester: assignment {data.requestingAssignmentId}. Conversation
-              revision {data.conversationRevision}.
+              {compactContext
+                ? ""
+                : `Requester: assignment ${data.requestingAssignmentId}. `}
+              Conversation revision {data.conversationRevision}.
             </p>
-            <ActionLink
-              id={conversationId}
-              className="question-conversation"
-              variant="secondary"
-              onFocus={evidenceFocus(conversationId)}
-              href={`/app/tasks/${taskId}?assignment=${data.requestingAssignmentId}#history`}
-            >
-              Requesting conversation
-            </ActionLink>
+            {!compactContext && (
+              <ActionLink
+                id={conversationId}
+                variant="secondary"
+                onFocus={evidenceFocus(conversationId)}
+                href={`/app/tasks/${taskId}?assignment=${data.requestingAssignmentId}#history`}
+              >
+                Requesting conversation
+              </ActionLink>
+            )}
             <ActionLink
               id={evidenceId}
               variant="secondary"
@@ -529,7 +532,7 @@ function statusNotice(status: string | undefined): Notice | null {
       return {
         title: "Stale request",
         text: "This request was replaced by a newer one. Your answers cannot be submitted to a different revision; review the current request.",
-        label: "Review current request",
+        label: "Refresh request",
         action: "refresh",
       };
     case "cancelled":

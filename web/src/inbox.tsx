@@ -155,8 +155,8 @@ export function Inbox({
   const params = new URLSearchParams(path.split("?")[1] ?? ""),
     urlId = params.get("request"),
     urlTask = params.get("task"),
-    // A wide layout without a chosen request shows the one it opened by itself.
-    implicit = !urlId && !single ? state.auto : null,
+    // A wide layout without a request in the URL shows the last chosen one, else the one it opened itself.
+    implicit = !urlId && !single ? (state.selected ?? state.auto) : null,
     selectedId = urlId ?? implicit?.id ?? null,
     taskId = urlTask ?? implicit?.taskId ?? null;
   const items = resource.state.data?.items ?? [],
@@ -214,7 +214,9 @@ export function Inbox({
   const subtitle =
     count === undefined || projectCount === undefined
       ? undefined
-      : leftQueue
+      : leftQueue &&
+          selected &&
+          questions.recordedHere(selected.taskId, selected.id)
         ? `${count} unresolved · confirmation retained`
         : count === 0
           ? "0 unresolved across your projects"
@@ -472,6 +474,7 @@ export function Inbox({
                   states={questions}
                   onRecorded={resource.refresh}
                   requesterName={selected?.requesterName}
+                  compactContext={Boolean(selected)}
                   onBack={back}
                 />
               ) : selected?.kind === "approval" ? (

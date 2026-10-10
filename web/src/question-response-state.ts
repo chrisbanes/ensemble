@@ -69,7 +69,6 @@ export class QuestionResponseState {
   focusId: string | null = null;
   /** How the last submission ended; null until one settles. */
   outcome: QuestionOutcome | null = null;
-  recordedAt: number | null = null;
   /** The code behind a failed submission, shown beside the retry. */
   failureCode: string | null = null;
   constructor(data: QuestionRead["data"]) {
@@ -124,6 +123,12 @@ export class QuestionResponseStates {
       this.states.set(key, state);
     }
     return state;
+  }
+  /** True once this session recorded the answer (not when another session did). */
+  recordedHere(taskId: string, interactionId: string) {
+    return (
+      this.states.get(`${taskId}:${interactionId}`)?.outcome === "recorded"
+    );
   }
   subscribe(listener: () => void) {
     this.listeners.add(listener);

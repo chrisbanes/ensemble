@@ -128,5 +128,4 @@ test("progress counts valid answers, an empty optional question counts, and the 
   state.answers = { ...state.answers, places: { optionIds: [], text: "" } };
   assert.deepEqual(answerSummary(state.form, state.answers).missing, ["Q3"]);
   assert.equal(state.outcome, null);
-  assert.equal(state.recordedAt, null);
 });

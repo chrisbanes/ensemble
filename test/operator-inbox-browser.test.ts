@@ -25,6 +25,7 @@ async function openInbox<T = undefined>(
   viewport: { width: number; height: number },
   path = "/app/inbox",
   extra?: (f: Fixture) => Promise<T>,
+  fakeClock = false,
 ) {
   const f = await j.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
@@ -51,6 +52,8 @@ async function openInbox<T = undefined>(
   const page = await browser.newPage({ viewport });
   j.observe(page);
   page.setDefaultTimeout(5000);
+  // Installed before the page loads, so the Inbox's 15-second poll runs on the fake clock.
+  if (fakeClock) await page.clock.install();
   await page.goto(`${web.origin}${path}`);
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -235,8 +238,19 @@ const settle = (page: Page) =>
   );
 
 test("a wide Inbox opens the first request by itself without navigating, and keeps it through filters and polls", async (_t, j) => {
-  const { page } = await openInbox(j, 3, { width: 1366, height: 900 });
-  await page.clock.install();
+  const { page } = await openInbox(
+    j,
+    3,
+    { width: 1366, height: 900 },
+    "/app/inbox",
+    undefined,
+    true,
+  );
+  const inboxReads: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/operator/inbox")
+      inboxReads.push(request.url());
+  });
   const rows = page.locator(".inbox-row");
   await rows.nth(2).waitFor();
   const first = rows.first(),
@@ -276,11 +290,13 @@ test("a wide Inbox opens the first request by itself without navigating, and kee
   );
 
   // A poll and a filter change leave the selection where it was.
+  const reads = inboxReads.length;
   const poll = page.waitForResponse(
     (r) => new URL(r.url()).pathname === "/api/operator/inbox" && r.ok(),
   );
   await page.clock.runFor(15000);
   await poll;
+  assert.ok(inboxReads.length > reads, "the poll read the Inbox again");
   await page
     .getByLabel("Request kind", { exact: true })
     .selectOption("question");
@@ -595,6 +611,28 @@ test("an approval shows its exact action, target and independent holds, and deci
     fullPage: false,
   });
   await page.unroute(taskUrl);
+  // A hold that is not a dependency says what it is, and that approving does not clear it.
+  await page.route(taskUrl, async (route) => {
+    const response = await route.fetch(),
+      body = (await response.json()) as TaskRead;
+    body.data.admission.eligible = false;
+    body.data.admission.reasons = ["task-unready"];
+    taskSchema.parse(body);
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  await page.locator(".inbox-row").click();
+  await detail
+    .getByText("Execution held (task not ready)", { exact: true })
+    .waitFor();
+  await detail
+    .getByText("Approving does not clear it.", { exact: true })
+    .waitFor();
+  assert.equal(
+    await detail.getByText("Execution blocked by dependency").count(),
+    0,
+  );
+  await page.unroute(taskUrl);
 
   // When the task cannot be read the holds are unknown and stay in effect.
   await page.route(taskUrl, (route) =>
@@ -653,4 +691,27 @@ test("an intervention shows its recorded reason and links to the execution", asy
   await captureBrowserEvidence(page, "1366-inbox-intervention", {
     fullPage: false,
   });
+});
+
+test("returning to the Inbox restores the request the operator chose, not the one it opened by itself", async (_t, j) => {
+  const { page } = await openInbox(j, 3, { width: 1366, height: 900 });
+  const rows = page.locator(".inbox-row");
+  await rows.nth(2).waitFor();
+  assert.equal(await rows.first().getAttribute("aria-pressed"), "true");
+  const chosen = rows.nth(1),
+    chosenId = await chosen.getAttribute("data-record-id");
+  await chosen.click();
+  await page.getByText("2 of 3", { exact: true }).waitFor();
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.getByRole("link", { name: "Inbox", exact: true }).click();
+  await rows.nth(2).waitFor();
+  await page.getByText("2 of 3", { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .locator(`.inbox-row[data-record-id="${chosenId}"]`)
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.equal(await rows.first().getAttribute("aria-pressed"), "false");
 });

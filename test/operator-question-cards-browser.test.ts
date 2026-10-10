@@ -255,6 +255,15 @@ for (const [name, engine] of engines) {
     await captureBrowserEvidence(page, `${name}-1366-recorded`, {
       fullPage: false,
     });
+    // After a reload this session did not record the answer: neutral header copy, full context.
+    await page.reload();
+    await form.getByRole("heading", { name: "Answer recorded" }).waitFor();
+    assert.equal(
+      await page.locator(".page-header-title p").textContent(),
+      "1 unresolved across 1 project",
+    );
+    await form.getByText(/^Requester: assignment /).waitFor();
+    await form.getByRole("link", { name: "Requesting conversation" }).waitFor();
     await form
       .getByRole("button", { name: "Back to Inbox", exact: true })
       .click();

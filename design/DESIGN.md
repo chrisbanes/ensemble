@@ -1606,3 +1606,11 @@ Inbox and structured questions: implementation differences recorded on 10 Octobe
 - "Recommended by <requester>" appears in the Inbox. The task page (`/app/tasks/:id?request=`) uses the same component but does not pass the requester yet, so it reads "Recommended" until U5 (#839) does.
 - Choice labels use the focus ring on `:focus-within`, because WebKit drops `:focus-visible` on a radio after arrow keys.
 - Entry points that applied: Inbox desktop and phone; the shared `QuestionResponse` at `/app/tasks/:id?request=` (restyled; requester-name gap above); the Overview and task-row attention links (unchanged); the retained HTML coordination page (unchanged). Counterparts: failed answer, Retry answer; stale read, Refresh request; conflict, Review current request; recorded, Back to Inbox; filter, Clear filters; approval, decision at the retained destination.
+- Hold copy in the approval pane, from the task read's `admission.reasons`; each reads "Approval does not clear it" or "Approving does not clear it":
+  - Blocked GitHub dependencies: "Execution blocked by dependency", the open blockers as `owner/repo#n`, and "Source-owned hold … execution still waits for the GitHub blocker."
+  - Unconfirmed dependencies (`imported-blockers-unknown`): "Execution held: dependencies unconfirmed", "GitHub blockers could not be confirmed." It never claims a blocker that was not found.
+  - A source review or hold (`source-held`, which the read folds `source-hold`, `source-unknown` and `source-review-required` into): "Execution held by the source".
+  - Local dependencies: "Execution blocked by dependency" with the unfinished tasks. Project paused: "Project paused. Approval does not resume work."
+  - Any other reason (`task-unready`, `task-not-open`, `project-lead-unconfigured`, `project-lead-revoked`, `admission-blocked`): "Execution held (<reason label>)". An ineligible task with no known reason reads "Execution held".
+- The question-level hold line drawn in frames 06, 19, 10 and 21 ("Task paused. Recording answers does not resume execution…") is not built: the question response does not read the task. It is a remaining gap; the approval pane shows holds.
+- "· confirmation retained" in the Inbox subtitle appears only when this session recorded the answer; a request answered elsewhere that has left the queue keeps the neutral count.

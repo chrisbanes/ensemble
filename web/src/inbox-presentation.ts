@@ -47,29 +47,52 @@ export function filterCounts(items: readonly InboxItem[]) {
 }
 
 export interface HoldNotice {
-  id: "source" | "dependency" | "paused";
+  id: string;
   title: string;
   items: string[];
   detail: string;
 }
 
+type Reason = TaskRead["data"]["admission"]["reasons"][number];
+/** Reasons with no dedicated notice still say what holds execution. */
+const heldLabels: Partial<Record<Reason, string>> = {
+  "task-unready": "task not ready",
+  "task-not-open": "task not open",
+  "project-lead-unconfigured": "project lead not configured",
+  "project-lead-revoked": "project lead revoked",
+  "admission-blocked": "admission blocked",
+};
+
 /** Independent holds an approval does not clear, from the task read's admission facts. */
 export function holdNotices(task: TaskRead["data"]): HoldNotice[] {
   const reasons = new Set(task.admission.reasons),
-    notices: HoldNotice[] = [];
-  if (
-    reasons.has("imported-blockers-blocked") ||
-    reasons.has("imported-blockers-unknown") ||
-    reasons.has("source-held")
-  )
+    notices: HoldNotice[] = [],
+    openBlockers = (task.source?.nativeBlockers ?? [])
+      .filter((blocker) => blocker.state === "open")
+      .map((blocker) => `${blocker.repositoryName}#${blocker.number}`);
+  if (reasons.has("imported-blockers-blocked"))
     notices.push({
-      id: "source",
+      id: "blocked",
       title: "Execution blocked by dependency",
-      items: (task.source?.nativeBlockers ?? [])
-        .filter((blocker) => blocker.state === "open")
-        .map((blocker) => `${blocker.repositoryName}#${blocker.number}`),
+      items: openBlockers,
       detail:
         "Source-owned hold. Approval does not clear it; execution still waits for the GitHub blocker.",
+    });
+  if (reasons.has("imported-blockers-unknown"))
+    notices.push({
+      id: "blockers-unknown",
+      title: "Execution held: dependencies unconfirmed",
+      items: openBlockers,
+      detail:
+        "GitHub blockers could not be confirmed. Approval does not clear this hold.",
+    });
+  if (reasons.has("source-held"))
+    notices.push({
+      id: "source-held",
+      title: "Execution held by the source",
+      items: [],
+      detail:
+        "Source review or hold is unresolved. Approval does not clear it.",
     });
   if (reasons.has("local-dependency"))
     notices.push({
@@ -86,6 +109,23 @@ export function holdNotices(task: TaskRead["data"]): HoldNotice[] {
       title: "Project paused",
       items: [],
       detail: "Approval does not resume work.",
+    });
+  for (const reason of task.admission.reasons) {
+    const label = heldLabels[reason];
+    if (label)
+      notices.push({
+        id: reason,
+        title: `Execution held (${label})`,
+        items: [],
+        detail: "Approving does not clear it.",
+      });
+  }
+  if (!notices.length && !task.admission.eligible)
+    notices.push({
+      id: "held",
+      title: "Execution held",
+      items: [],
+      detail: "Approving does not clear it.",
     });
   return notices;
 }

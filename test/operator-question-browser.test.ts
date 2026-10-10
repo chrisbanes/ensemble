@@ -209,7 +209,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         ),
     );
-    await captureBrowserEvidence(page, `390x${height}-recorded`, {
+    await captureBrowserEvidence(page, `390x${height}-unknown-outcome`, {
       fullPage: false,
     });
     await form

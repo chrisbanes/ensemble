@@ -106,17 +106,27 @@ test("hold notices name each independent hold and what approval does not clear",
       },
     ],
   } as unknown as TaskRead["data"]["source"];
-  const sourceHold = holdNotices(
-    task(["imported-blockers-blocked", "source-held"], { source }),
-  );
-  assert.equal(sourceHold.length, 1);
-  assert.deepEqual(sourceHold[0], {
-    id: "source",
-    title: "Execution blocked by dependency",
-    items: ["acme/design-system#87"],
-    detail:
-      "Source-owned hold. Approval does not clear it; execution still waits for the GitHub blocker.",
-  });
+  const blocked = holdNotices(task(["imported-blockers-blocked"], { source }));
+  assert.deepEqual(blocked, [
+    {
+      id: "blocked",
+      title: "Execution blocked by dependency",
+      items: ["acme/design-system#87"],
+      detail:
+        "Source-owned hold. Approval does not clear it; execution still waits for the GitHub blocker.",
+    },
+  ]);
+  // Unknown blockers never claim a GitHub blocker that was not found.
+  const unknown = holdNotices(task(["imported-blockers-unknown"]));
+  assert.equal(unknown.length, 1);
+  assert.equal(unknown[0]?.title, "Execution held: dependencies unconfirmed");
+  assert.deepEqual(unknown[0]?.items, []);
+  assert.ok(!unknown[0]?.detail.includes("waits for the GitHub blocker"));
+  // A source review or hold is its own hold, not a dependency.
+  const held = holdNotices(task(["source-held"]));
+  assert.equal(held.length, 1);
+  assert.equal(held[0]?.title, "Execution held by the source");
+  assert.ok(!held[0]?.detail.includes("GitHub blocker"));
   const local = holdNotices(
     task(["local-dependency"], {
       localDependencies: [
@@ -133,4 +143,26 @@ test("hold notices name each independent hold and what approval does not clear",
   const paused = holdNotices(task(["project-paused"]));
   assert.equal(paused[0]?.title, "Project paused");
   assert.equal(paused[0]?.detail, "Approval does not resume work.");
+});
+
+test("every other admission reason still produces a hold notice", () => {
+  for (const [reason, label] of [
+    ["task-unready", "task not ready"],
+    ["task-not-open", "task not open"],
+    ["project-lead-unconfigured", "project lead not configured"],
+    ["project-lead-revoked", "project lead revoked"],
+    ["admission-blocked", "admission blocked"],
+  ] as const) {
+    const notices = holdNotices(task([reason]));
+    assert.equal(notices.length, 1, reason);
+    assert.equal(notices[0]?.title, `Execution held (${label})`);
+    assert.equal(notices[0]?.detail, "Approving does not clear it.");
+  }
+  // Several reasons give several notices; an ineligible task with no known reason still says so.
+  assert.equal(holdNotices(task(["task-unready", "project-paused"])).length, 2);
+  const unexplained = holdNotices(
+    task([], { admission: { eligible: false, reasons: [] } }),
+  );
+  assert.equal(unexplained.length, 1);
+  assert.equal(unexplained[0]?.title, "Execution held");
 });

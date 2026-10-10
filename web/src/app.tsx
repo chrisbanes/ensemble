@@ -650,9 +650,7 @@ export function App() {
       ? projectId
         ? "Tasks in this project. Readiness, source status and execution are separate."
         : "Tasks across your projects. Action requests and ordinary progress remain distinct."
-      : onInboxRoute && inboxRouteSummary
-        ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
-        : undefined;
+      : undefined;
   // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
     workspace.refresh();

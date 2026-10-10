@@ -1836,11 +1836,6 @@ nav {
   margin: 0;
   overflow-wrap: anywhere;
 }
-/* The Inbox intro already names the requester and links the conversation. */
-.inbox-detail .question-context > p,
-.inbox-detail .question-conversation {
-  display: none;
-}
 .question-notice,
 .question-recorded {
   margin-bottom: var(--space-12);
@@ -1950,6 +1945,10 @@ textarea[data-auto-grow="true"] {
   outline: none;
 }
 @media (forced-colors: active) {
+  .question-option:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
   .question-option input:checked {
     background: Highlight;
     border-color: Highlight;
@@ -2261,10 +2260,6 @@ textarea[data-auto-grow="true"] {
 .inbox-empty .inbox-empty-card {
   align-self: center;
   width: min(100%, 520px);
-}
-.inbox-detail > a {
-  display: inline-block;
-  margin: 0.5rem 0.75rem 0.5rem 0;
 }
 @media (min-width: 761px) {
   /* Desktop and tablet: the page never scrolls; the queue and the detail scroll alone. */

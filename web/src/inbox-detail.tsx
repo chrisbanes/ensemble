@@ -68,7 +68,7 @@ export function ApprovalDetail({
           </Alert>
         )}
         {holds.map((hold) => (
-          <Alert key={hold.id} role="status" className="inbox-hold">
+          <Alert key={hold.id} role="status">
             <p className="body">
               <strong>{hold.title}</strong>
             </p>
