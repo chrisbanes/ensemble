@@ -9,6 +9,54 @@ import type {
   CommandReceipt,
 } from "../../src/operator/contracts.js";
 import { CommandLifecycle } from "./command-lifecycle.js";
+
+/** Validation issues by question id (`""` for the form), empty when the answers are valid. */
+function answerIssues(form: QuestionForm, answers: QuestionAnswers) {
+  const errors: Record<string, string> = Object.create(null);
+  try {
+    validateQuestionAnswers(form, answers);
+  } catch (error) {
+    const parsed = error as {
+      issues?: Array<{ path: PropertyKey[]; message: string }>;
+    };
+    for (const issue of parsed.issues ?? [])
+      errors[String(issue.path[0] ?? "")] = issue.message;
+    if (!Object.keys(errors).length) errors[""] = "Answer validation failed";
+  }
+  return errors;
+}
+
+/** Questions whose current answer is valid; an empty optional question counts as complete. */
+export function completedQuestionCount(
+  form: QuestionForm,
+  answers: QuestionAnswers,
+) {
+  const errors = answerIssues(form, answers);
+  return form.questions.filter((q) => !(q.id in errors)).length;
+}
+
+/** What the operator selected per question ("Q1 · Red + Home"), and the numbers that still need an answer. */
+export function answerSummary(form: QuestionForm, answers: QuestionAnswers) {
+  const errors = answerIssues(form, answers),
+    lines: string[] = [],
+    missing: string[] = [];
+  form.questions.forEach((q, index) => {
+    const answer = answers[q.id],
+      parts = [
+        ...(q.kind === "free-text"
+          ? []
+          : (answer?.optionIds ?? []).map(
+              (id) => q.options.find((o) => o.id === id)?.label ?? id,
+            )),
+        ...(answer?.text ? [answer.text] : []),
+      ];
+    if (parts.length) lines.push(`Q${index + 1} · ${parts.join(" + ")}`);
+    if (q.id in errors) missing.push(`Q${index + 1}`);
+  });
+  return { lines, missing };
+}
+
+export type QuestionOutcome = "recorded" | "unknown" | "conflict" | "failed";
 export class QuestionResponseState {
   readonly lifecycle = new CommandLifecycle<OperatorCommand>();
   readonly form: QuestionForm;
@@ -19,6 +67,9 @@ export class QuestionResponseState {
   sending = false;
   scrollTop = 0;
   focusId: string | null = null;
+  /** How the last submission ended; null until one settles. */
+  outcome: QuestionOutcome | null = null;
+  recordedAt: number | null = null;
   constructor(data: QuestionRead["data"]) {
     if (!data.form) throw Error("Unavailable form");
     this.form = structuredClone(data.form);
@@ -37,22 +88,8 @@ export class QuestionResponseState {
         );
   }
   validate() {
-    this.errors = Object.create(null);
-    try {
-      validateQuestionAnswers(this.form, this.answers);
-      return true;
-    } catch (error) {
-      const parsed = error as {
-        issues?: Array<{ path: PropertyKey[]; message: string }>;
-      };
-      for (const issue of parsed.issues ?? []) {
-        const id = String(issue.path[0] ?? "");
-        this.errors[id] = issue.message;
-      }
-      if (!Object.keys(this.errors).length)
-        this.errors[""] = "Answer validation failed";
-      return false;
-    }
+    this.errors = answerIssues(this.form, this.answers);
+    return !Object.keys(this.errors).length;
   }
   matches(command: OperatorCommand, receipt: CommandReceipt) {
     return (

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
-import { QuestionResponseStates } from "../web/src/question-response-state.js";
+import {
+  QuestionResponseStates,
+  answerSummary,
+  completedQuestionCount,
+} from "../web/src/question-response-state.js";
 import { mixedForm, mixedAnswers } from "./fixtures/question-data.js";
 import type { QuestionRead } from "../src/operator/contracts.js";
 const data: QuestionRead["data"] = {
@@ -95,4 +99,34 @@ test("missing prototype-shaped IDs retain own field validation errors", () => {
   assert.ok(state.errors.__proto__?.includes("required"));
   state.setAnswer("__proto__", { optionIds: [], text: "Valid" });
   assert.equal(state.validate(), true);
+});
+
+test("progress counts valid answers, an empty optional question counts, and the summary lists what is missing", () => {
+  const states = new QuestionResponseStates(),
+    state = states.forQuestion(data);
+  state.answers = {
+    notes: { optionIds: [], text: "" },
+    color: { optionIds: [], text: "" },
+    places: { optionIds: [], text: "" },
+    optional: { optionIds: [], text: "" },
+  };
+  // Only the optional question is complete while nothing else is answered.
+  assert.equal(completedQuestionCount(state.form, state.answers), 1);
+  state.answers = { ...state.answers, notes: { optionIds: [], text: "Hello" } };
+  assert.equal(completedQuestionCount(state.form, state.answers), 2);
+  state.answers = {
+    ...state.answers,
+    color: { optionIds: ["blue"], text: "" },
+  };
+  assert.equal(completedQuestionCount(state.form, state.answers), 3);
+  state.answers = structuredClone(mixedAnswers);
+  assert.equal(completedQuestionCount(state.form, state.answers), 4);
+  assert.deepEqual(answerSummary(state.form, state.answers), {
+    lines: ["Q1 · Exact text", "Q2 · Blue", "Q3 · Home + Other exact place"],
+    missing: [],
+  });
+  state.answers = { ...state.answers, places: { optionIds: [], text: "" } };
+  assert.deepEqual(answerSummary(state.form, state.answers).missing, ["Q3"]);
+  assert.equal(state.outcome, null);
+  assert.equal(state.recordedAt, null);
 });
