@@ -1822,28 +1822,49 @@ nav {
 
 .question-response {
   min-width: 0;
+  container-type: inline-size;
 }
 .question-context {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--space-8);
   align-items: center;
+  margin-bottom: var(--space-12);
 }
 .question-context p {
   flex-basis: 100%;
+  margin: 0;
   overflow-wrap: anywhere;
+}
+.question-notice,
+.question-recorded {
+  margin-bottom: var(--space-12);
+  align-items: flex-start;
+}
+.question-notice > *,
+.question-recorded > * {
+  margin: 0;
 }
 .question-field {
-  border: 1px solid var(--border);
-  padding: 1rem;
-  margin: 0 0 1rem;
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space-16);
   min-width: 0;
-  border-radius: var(--radius);
+  break-inside: avoid;
 }
 .question-field legend {
-  font-weight: 600;
-  padding: 0 0.5rem;
+  float: left;
+  width: 100%;
+  padding: 0;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
   overflow-wrap: anywhere;
+}
+.question-field legend + * {
+  clear: both;
+}
+.question-constraint {
+  margin: 0 0 var(--space-8);
 }
 .question-field:focus {
   outline: 2px solid var(--ring);
@@ -1856,27 +1877,99 @@ nav {
 textarea[data-auto-grow="true"] {
   resize: none;
 }
+.question-custom {
+  display: grid;
+  gap: var(--space-4);
+  font-size: var(--type-sm);
+}
+.question-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-8);
+  margin-bottom: var(--space-8);
+}
+/* A choice is a card; the native input stays, drawn as a radio or checkbox beside its label. */
 .question-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-8);
   min-height: 44px;
-  padding: 0.75rem 0;
+  padding: var(--space-12);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  font-size: var(--type-sm);
+  line-height: var(--leading-1-25);
   cursor: pointer;
 }
+.question-option:has(input:checked) {
+  border-color: var(--foreground);
+  outline: 2px solid var(--foreground);
+  outline-offset: -2px;
+}
+/* focus-within, not :focus-visible: WebKit drops focus-visible on a radio after arrow keys. */
+.question-option:focus-within {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px var(--ring);
+}
+.question-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.7;
+}
 .question-option input {
-  min-width: 20px;
-  min-height: 20px;
-  margin-top: 0.15rem;
-  accent-color: var(--primary);
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  border: 1px solid var(--muted-foreground);
+  border-radius: 50%;
+  background: transparent;
+}
+.question-option input[type="checkbox"] {
+  border-radius: 4px;
+}
+.question-option input[type="radio"]:checked {
+  border-color: var(--foreground);
+  background: radial-gradient(circle, var(--foreground) 0 40%, transparent 45%);
+}
+.question-option input[type="checkbox"]:checked {
+  border-color: var(--foreground);
+  background:
+    var(--foreground)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230a0a0a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E")
+    center / 12px no-repeat;
+}
+.question-option input:focus-visible {
+  outline: none;
+}
+@media (forced-colors: active) {
+  .question-option:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  .question-option input:checked {
+    background: Highlight;
+    border-color: Highlight;
+  }
+}
+.question-option-text {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.question-option-label {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
 }
 .option-description {
   display: block;
   color: var(--muted-foreground);
 }
 .recommendation {
-  font-size: 0.85em;
-  color: var(--muted-foreground);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
 }
 .question-content {
   overflow: auto;
@@ -1892,14 +1985,32 @@ textarea[data-auto-grow="true"] {
       var(--operator-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))
     );
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: var(--space-8);
   border-top: 1px solid var(--border);
   background: var(--background);
 }
 .question-submit p {
-  flex-basis: 100%;
   margin: 0;
+}
+.question-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+}
+/* Grouped questions read in two columns where the Inbox detail is wide enough. */
+@container (min-width: 640px) {
+  .inbox-detail .question-content-grouped {
+    column-count: 2;
+    column-gap: var(--space-24);
+  }
+}
+.question-content-grouped {
+  counter-reset: question;
+}
+.question-content-grouped .question-field legend::before {
+  counter-increment: question;
+  content: counter(question) ". ";
 }
 @media (max-width: 700px) {
   .question-content {
@@ -1912,71 +2023,287 @@ textarea[data-auto-grow="true"] {
 
 .action-inbox {
   display: grid;
-  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.4fr);
-  gap: 1.5rem;
+  grid-template-columns: 368px minmax(0, 1fr);
+  grid-template-areas:
+    "filters filters"
+    "queue detail";
+  column-gap: var(--space-24);
+  row-gap: var(--space-12);
   align-items: start;
+}
+.inbox-filters {
+  grid-area: filters;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+.inbox-filters > span {
+  width: auto;
+  min-width: 0;
+}
+.inbox-filters select {
+  width: auto;
+  min-height: 36px;
+  max-width: 100%;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+}
+.inbox-filters p {
+  margin: 0;
 }
 .inbox-queue,
 .inbox-detail {
   min-width: 0;
   min-height: 0;
 }
+.inbox-queue {
+  grid-area: queue;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
 .inbox-detail {
-  max-height: min(70dvh, calc(100dvh - 12rem));
+  grid-area: detail;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 8rem);
   overflow: auto;
   overscroll-behavior: contain;
+}
+.inbox-detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding-bottom: var(--space-8);
+  background: var(--background);
+}
+.inbox-open-task {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+}
+.inbox-open-task svg {
+  width: 14px;
+  height: 14px;
+}
+.inbox-detail-body {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+.inbox-detail-intro > p,
+.inbox-detail-intro > h2 {
+  margin: 0 0 var(--space-8);
+}
+.inbox-detail-intro h2 {
+  font-size: var(--type-lg);
+  font-weight: var(--weight-semibold);
+}
+.inbox-detail-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin-bottom: var(--space-12);
+}
+.inbox-detail-links a {
+  margin: 0;
+}
+.inbox-approval {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-approval-body {
+  flex: 1 0 auto;
+}
+.inbox-approval-facts {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-12);
+}
+.inbox-approval-facts dt {
+  margin-top: var(--space-8);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.inbox-approval-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* The decision area keeps the independent holds and the way to decide in view. */
+.inbox-decision {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  padding: var(--space-12) 0
+    calc(
+      var(--space-12) +
+      var(--operator-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))
+    );
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+.inbox-decision p {
+  margin: 0;
+}
+/* Short forms keep the submit area at the foot of the pane; long ones scroll under it. */
+.inbox-detail-body > .question-response {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-detail-body > .question-response > form {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.inbox-detail .question-content {
+  flex: 1 0 auto;
+}
+.inbox-detail .question-submit {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
 }
 /* The bounded detail is the only scroll owner; a nested bound traps scrolling. */
 .inbox-detail .question-content {
   max-height: none;
   overflow: visible;
 }
-.inbox-filters {
-  display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin-block: 1rem;
-}
-.inbox-filters label {
-  display: grid;
-  gap: 0.35rem;
-}
-.inbox-filters select {
-  min-height: 44px;
-  max-width: 100%;
-}
 .inbox-rows {
-  max-height: min(65dvh, calc(100dvh - 16rem));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  /* Phone: the header and compact filters leave about 10rem; the page scrolls to the link below. */
+  max-height: calc(100dvh - 10rem);
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
 }
 .inbox-row {
+  flex: none;
   display: grid;
-  gap: 0.45rem;
-  padding: 1rem;
+  gap: var(--space-4);
+  padding: var(--space-12) var(--space-16);
   border: 1px solid var(--border);
-  background: transparent;
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  color: inherit;
   text-align: left;
   width: 100%;
   min-height: 44px;
-  margin-bottom: 0.75rem;
-  border-radius: 0.5rem;
+  cursor: pointer;
   overflow-wrap: anywhere;
+  font-size: var(--type-sm);
+  line-height: var(--leading-1-25);
 }
 .inbox-row[aria-pressed="true"] {
-  border-color: var(--primary);
+  border-color: var(--foreground);
+  outline: 1px solid var(--foreground);
 }
-.inbox-detail > a {
-  display: inline-block;
-  margin: 0.5rem 0.75rem 0.5rem 0;
+.inbox-row strong {
+  font-weight: var(--weight-semibold);
+}
+.inbox-row-label {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.inbox-row-action {
+  font-weight: var(--weight-medium);
+}
+.inbox-row-meta {
+  font-size: var(--type-xs);
+  color: var(--muted-foreground);
+}
+.inbox-empty-card {
+  align-items: center;
+  text-align: center;
+  padding: var(--space-24);
+}
+.inbox-empty-card > * {
+  margin: 0;
+}
+.inbox-advanced {
+  align-self: flex-start;
+}
+/* Nothing unresolved and nothing open: the card owns the whole body. */
+.action-inbox.inbox-empty {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "filters"
+    "queue";
+}
+.inbox-empty .inbox-detail {
+  display: none;
+}
+.inbox-empty .inbox-rows {
+  justify-content: center;
+}
+.inbox-empty .inbox-empty-card {
+  align-self: center;
+  width: min(100%, 520px);
+}
+@media (min-width: 761px) {
+  /* Desktop and tablet: the page never scrolls; the queue and the detail scroll alone. */
+  .page-inbox {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .page-inbox .action-inbox {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .page-inbox .inbox-rows {
+    flex: 1;
+    max-height: none;
+  }
+  .page-inbox .inbox-detail {
+    max-height: none;
+    padding-left: var(--space-24);
+    border-left: 1px solid var(--border);
+  }
 }
 @media (max-width: 760px) {
   .action-inbox {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "filters"
+      "queue"
+      "detail";
   }
   .action-inbox:not(.inbox-selected) .inbox-detail,
-  .action-inbox.inbox-selected .inbox-queue {
+  .action-inbox.inbox-selected .inbox-queue,
+  .action-inbox.inbox-selected .inbox-filters {
+    display: none;
+  }
+  .inbox-filters select,
+  .inbox-advanced {
+    min-height: 44px;
+  }
+  /* The phone header already reads "Question · N of M". */
+  .inbox-position {
     display: none;
   }
   .question-submit button {

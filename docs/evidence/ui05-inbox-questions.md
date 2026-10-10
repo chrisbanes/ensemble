@@ -149,6 +149,19 @@ fixture database deletion. UI05 does not qualify #736 final assembled visual
 acceptance, #745/#697 provider/release journeys, or #761 cutover. Paused X work,
 installed Haze and native recovery limits remain separate.
 
+## U4 layout update (#838)
+
+U4 changed the Inbox layout and the question controls without changing a
+command, contract or the summary-only queue: request cards replace the old rows,
+the detail pane is the one scroll owner with a sticky header and a sticky
+submit or decision area, the submit button reads "Submit answers" for more than
+one question, a failed answer reads "Answer not recorded" with "Retry answer",
+and a recorded answer replaces the controls with a confirmation card and "Back
+to Inbox". The captures below predate that layout. Current behaviour is covered
+by `operator-inbox-browser`, `operator-question-cards-browser` and the migrated
+`operator-question-browser`, which now also checks the frozen original answer's
+actions at phone heights before it is reconciled.
+
 ## Final inspected capture fingerprints
 
 These production captures are from the final integrated run. Actual paths and

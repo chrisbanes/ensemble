@@ -1594,3 +1594,23 @@ Implementation differences recorded on 9 October 2026 (U2, #836):
 - Unknown `/app/*` addresses are served by the service as the shell with status
   404 so "Page not found" can render. The Not found header has no divider and,
   on a phone, keeps its sentence visible because the screen has no other copy.
+
+Inbox and structured questions: implementation differences recorded on 10 October 2026 (U4, #838):
+
+- Phone Back is the page header's link ("Back to Inbox"), as frames 10, 21 and 27–30 draw it, not an in-body "Back to queue" button. After a recorded answer the confirmation card's button reads "Back to Inbox". A wide layout has no back control.
+- Approvals show the exact action, target, revision, requester, the independent holds (frames 07 and 33) and the bound-decision statement, with one "Review material & decide" link to the retained `/coordination/task/:id#<interaction>` destination. There is no Approve or Deny in the Inbox (frame 32 is not built); an in-app decision would be a new authority surface and a separate scope decision.
+- Evidence stays the existing "Question evidence" and "Task evidence" links; the read has no excerpt field, so frame 27's in-pane excerpt is not drawn. Returning from the task restores the selection, scroll position and the link's focus.
+- A single question's choice cards stay in the reading flow (frame 06 pins them); only the submit area is sticky, inside the one scroll owner `.inbox-detail`, so a pinned option list cannot trap scrolling or cover a field.
+- Queue rows use read-model facts only: "PROJECT / KIND", the task title, the reason, the action ("Answer question", "Review material & decide", "Inspect execution") and "Requester · HH:MM · age". There are no short identifiers (Q-204, A-201: U3 #837), no "Execution uncertain" versus "Intervention problems" subtype (one "Interventions" option), and no grouped-question title on a phone.
+- Kept or omitted on purpose: the shell Refresh stays on the Inbox; the frame's "Today · 11:00" clock and the phone "Search" header action are not built; the header title is 18/600, not the older large title of frames 07 and 08.
+- "Recommended by <requester>" appears in the Inbox. The task page (`/app/tasks/:id?request=`) uses the same component but does not pass the requester yet, so it reads "Recommended" until U5 (#839) does.
+- Choice labels use the focus ring on `:focus-within`, because WebKit drops `:focus-visible` on a radio after arrow keys.
+- Entry points that applied: Inbox desktop and phone; the shared `QuestionResponse` at `/app/tasks/:id?request=` (restyled; requester-name gap above); the Overview and task-row attention links (unchanged); the retained HTML coordination page (unchanged). Counterparts: failed answer, Retry answer; stale read, Refresh request; conflict, Review current request; recorded, Back to Inbox; filter, Clear filters; approval, decision at the retained destination.
+- Hold copy in the approval pane, from the task read's `admission.reasons`; each reads "Approval does not clear it" or "Approving does not clear it":
+  - Blocked GitHub dependencies: "Execution blocked by dependency", the open blockers as `owner/repo#n`, and "Source-owned hold … execution still waits for the GitHub blocker."
+  - Unconfirmed dependencies (`imported-blockers-unknown`): "Execution held: dependencies unconfirmed", "GitHub blockers could not be confirmed." It never claims a blocker that was not found.
+  - A source review or hold (`source-held`, which the read folds `source-hold`, `source-unknown` and `source-review-required` into): "Execution held by the source".
+  - Local dependencies: "Execution blocked by dependency" with the unfinished tasks. Project paused: "Project paused. Approval does not resume work."
+  - Any other reason (`task-unready`, `task-not-open`, `project-lead-unconfigured`, `project-lead-revoked`, `admission-blocked`): "Execution held (<reason label>)". An ineligible task with no known reason reads "Execution held".
+- The question-level hold line drawn in frames 06, 19, 10 and 21 ("Task paused. Recording answers does not resume execution…") is not built: the question response does not read the task. It is a remaining gap; the approval pane shows holds.
+- "· confirmation retained" in the Inbox subtitle appears only when this session recorded the answer; a request answered elsewhere that has left the queue keeps the neutral count.

@@ -32,7 +32,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .waitFor();
   assert.equal(
     f.service.coordinationView().readTask(a.taskId).questions[0]?.status,
@@ -56,7 +56,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
     true,
   );
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .click();
   await captureBrowserEvidence(page, "1366-submit-diagnostic", {
     fullPage: false,
@@ -111,9 +111,19 @@ test("production mixed form preserves literal schema, keyboard input, field erro
     });
   });
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .click();
-  await form.getByText(/Answer failed \(invalid-input\)/).waitFor();
+  await form
+    .getByText(
+      "Answer not recorded. Your selection is retained. The request remains unresolved.",
+      { exact: true },
+    )
+    .waitFor();
+  await form.getByText("Reason: invalid-input", { exact: true }).waitFor();
+  assert.equal(
+    await form.getByRole("button", { name: "Retry answer" }).count(),
+    1,
+  );
   assert.equal(
     await form
       .getByRole("textbox", { name: "Explain", exact: true })
@@ -130,9 +140,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
     await route.fetch();
     await route.abort("failed");
   });
-  await form
-    .getByRole("button", { name: "Submit answer", exact: true })
-    .click();
+  await form.getByRole("button", { name: "Retry answer", exact: true }).click();
   await form.getByText(/Outcome unknown/).waitFor();
   const original = commands.at(-1)!;
   assert.equal(
@@ -144,43 +152,15 @@ test("production mixed form preserves literal schema, keyboard input, field erro
   await captureBrowserEvidence(page, "1366-original-command-unknown", {
     fullPage: false,
   });
-  await page.unroute("**/api/operator/commands");
-  await page.route("**/api/operator/commands", async (route) => {
-    commands.push(route.request().postData() ?? "");
-    await route.continue();
-  });
-  await form
-    .getByRole("button", { name: "Reconcile original answer", exact: true })
-    .click();
-  await form
-    .getByText(
-      "Answer recorded. Delivery and admission remain subject to independent holds.",
-      { exact: true },
-    )
-    .waitFor();
-  assert.equal(commands.at(-1), original);
-  assert.equal(
-    f.service
-      .coordinationView()
-      .readTask(a.taskId)
-      .messages.filter((m) => m.eventType === "question-answer").length,
-    1,
-  );
-  await captureBrowserEvidence(page, "1366-recorded", { fullPage: false });
-  const legacy = await page.request.get(
-    `${web.origin}/coordination/task/${a.taskId}`,
-  );
-  const html = await legacy.text();
-  assert.ok(html.includes(`/app/tasks/${a.taskId}?request=${a.interactionId}`));
-  assert.equal(html.includes("/coordination/control/question/answer"), false);
   for (const height of [844, 480]) {
     await page.setViewportSize({ width: 390, height });
-    await form
-      .getByRole("button", { name: "Submit answer", exact: true })
-      .scrollIntoViewIfNeeded();
-    const rect = await form
-      .getByRole("button", { name: "Submit answer", exact: true })
-      .boundingBox();
+    // The frozen original answer is awaiting reconciliation, so its action is the submit button.
+    const action = form.getByRole("button", {
+      name: "Reconcile original answer",
+      exact: true,
+    });
+    await action.scrollIntoViewIfNeeded();
+    const rect = await action.boundingBox();
     assert.ok(rect && rect.height >= 44);
     const footer = await form.locator(".question-submit").evaluate((el) => ({
       viewport: { width: innerWidth, height: innerHeight },
@@ -229,7 +209,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         ),
     );
-    await captureBrowserEvidence(page, `390x${height}-recorded`, {
+    await captureBrowserEvidence(page, `390x${height}-unknown-outcome`, {
       fullPage: false,
     });
     await form
@@ -256,6 +236,37 @@ test("production mixed form preserves literal schema, keyboard input, field erro
       fullPage: false,
     });
   }
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.unroute("**/api/operator/commands");
+  await page.route("**/api/operator/commands", async (route) => {
+    commands.push(route.request().postData() ?? "");
+    await route.continue();
+  });
+  await form
+    .getByRole("button", { name: "Reconcile original answer", exact: true })
+    .click();
+  await form.getByRole("heading", { name: "Answer recorded" }).waitFor();
+  await form
+    .getByText(
+      "Delivery waits for the requester's next eligible turn; independent holds are unchanged.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(commands.at(-1), original);
+  assert.equal(
+    f.service
+      .coordinationView()
+      .readTask(a.taskId)
+      .messages.filter((m) => m.eventType === "question-answer").length,
+    1,
+  );
+  await captureBrowserEvidence(page, "1366-recorded", { fullPage: false });
+  const legacy = await page.request.get(
+    `${web.origin}/coordination/task/${a.taskId}`,
+  );
+  const html = await legacy.text();
+  assert.ok(html.includes(`/app/tasks/${a.taskId}?request=${a.interactionId}`));
+  assert.equal(html.includes("/coordination/control/question/answer"), false);
   // Sign out is in the sidebar footer; a nested phone screen reaches it only via its parent.
   await page.setViewportSize({ width: 1366, height: 900 });
   await signOutFromSidebar(page);
@@ -617,7 +628,7 @@ test("Inbox queue and selected detail scroll independently at phone heights", as
   const detailBox = await detail.boundingBox();
   assert.ok(detailBox && detailBox.y + detailBox.height <= 480);
   const submit = form.getByRole("button", {
-    name: "Submit answer",
+    name: "Submit answers",
     exact: true,
   });
   // Wheel over the detail, as a reader would, until the action shows.
@@ -731,10 +742,12 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.locator(".inbox-row").first().waitFor();
   assert.equal(await page.locator(".inbox-row").count(), 2);
-  assert.ok(
-    (await page.locator(".inbox-row time").first().innerText()).includes(
-      String(new Date().getFullYear()),
-    ),
+  // The datetime attribute carries the millisecond timestamp the read converted from seconds.
+  assert.equal(
+    new Date(
+      (await page.locator(".inbox-row time").first().getAttribute("datetime"))!,
+    ).getFullYear(),
+    new Date().getFullYear(),
   );
   await page
     .getByLabel("Request kind", { exact: true })
@@ -780,10 +793,10 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
     await page.setViewportSize({ width: 390, height });
     assert.equal(await page.locator(".inbox-queue").isVisible(), false);
     await form
-      .getByRole("button", { name: "Submit answer", exact: true })
+      .getByRole("button", { name: "Submit answers", exact: true })
       .scrollIntoViewIfNeeded();
     const box = await form
-      .getByRole("button", { name: "Submit answer", exact: true })
+      .getByRole("button", { name: "Submit answers", exact: true })
       .boundingBox();
     assert.ok(
       box && box.height >= 44 && box.y >= 0 && box.y + box.height <= height,
@@ -819,9 +832,8 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
       fullPage: false,
     });
   }
-  await page
-    .getByRole("button", { name: "Back to queue", exact: true })
-    .click();
+  // On a phone the header's Back link returns to the queue.
+  await page.getByRole("link", { name: "Back to Inbox", exact: true }).click();
   assert.equal(
     await page.getByLabel("Request kind", { exact: true }).inputValue(),
     "question",
@@ -838,7 +850,7 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
   );
   await form.getByRole("checkbox", { name: "Home", exact: true }).check();
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .click();
   await form
     .getByText(/Answer recorded/)
@@ -910,10 +922,10 @@ test("collision-shaped literal IDs keep unique DOM controls, label activation an
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   const form = page.getByRole("region", { name: "Exact question response" });
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .waitFor();
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .click();
   const uniqueIds = async () => {
     const ids = await form
@@ -940,7 +952,7 @@ test("collision-shaped literal IDs keep unique DOM controls, label activation an
   const focusedId = await errorField.getByRole("textbox").getAttribute("id");
   assert.ok(focusedId);
   await page.getByRole("link", { name: "Inbox", exact: true }).click();
-  await page.locator(".inbox-row").click();
+  // The only request opens by itself on a wide layout; its draft focus is restored.
   await form
     .getByRole("textbox", { name: "Literal x-error", exact: true })
     .waitFor();
@@ -1039,7 +1051,7 @@ test("collision-shaped literal IDs keep unique DOM controls, label activation an
   );
   await captureBrowserEvidence(page, "1366-collision-ids", { fullPage: false });
   await form
-    .getByRole("button", { name: "Submit answer", exact: true })
+    .getByRole("button", { name: "Submit answers", exact: true })
     .click();
   await form
     .getByText(/Answer recorded/)

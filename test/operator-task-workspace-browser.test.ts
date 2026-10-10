@@ -709,7 +709,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
-    .getByText("No matching requests need your action.", { exact: true })
+    .getByText("Nothing needs your attention.", { exact: true })
     .waitFor();
   const question = async (prompt: string) => {
     assert.equal(
@@ -786,13 +786,15 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   );
   assert.equal(
     await page
-      .getByRole("link", { name: "Open exact approval", exact: true })
+      .getByRole("link", { name: "Review material & decide", exact: true })
       .getAttribute("href"),
     `/coordination/task/${b.taskId}#${approval.interactionId}`,
   );
-  await page
-    .getByRole("button", { name: "Back to queue", exact: true })
-    .click();
+  // A wide layout has no back control: the queue stays beside the detail.
+  assert.equal(
+    await page.getByRole("button", { name: "Back to queue" }).count(),
+    0,
+  );
   assert.equal(
     await page
       .locator(".inbox-row")
@@ -827,7 +829,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page
-    .getByText("No matching requests need your action.", { exact: true })
+    .getByText("Nothing needs your attention.", { exact: true })
     .waitFor();
   f.seedPersistedState((db) =>
     new ExecutionState(db).hold(wa.id, "Fixture ownership unknown"),

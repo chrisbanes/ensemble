@@ -199,7 +199,8 @@ test("overview, project list and inbox origins return correctly from Files", asy
     .questions[0]?.interactionId;
   assert.ok(interactionId);
   await page.goto(`${web.origin}/app/inbox`);
-  await page.locator(`[data-record-id="${interactionId}"]`).click();
+  // The first request opens by itself on a wide layout, so address the queue row.
+  await page.locator(`.inbox-row[data-record-id="${interactionId}"]`).click();
   await page.getByRole("link", { name: "Task evidence", exact: true }).click();
   await inspectAndReturn();
   await page.getByRole("region", { name: "Selected request" }).waitFor();
