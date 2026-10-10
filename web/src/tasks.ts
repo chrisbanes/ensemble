@@ -6,17 +6,35 @@ import {
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
 export const columns = [
+  "Ready",
+  "Running",
+  "Waiting",
+  "Paused",
   "Stopping",
   "Uncertain",
-  "Running",
+  "Draft",
   "Done",
   "Cancelled",
-  "Paused",
-  "Draft",
-  "Waiting",
-  "Ready",
 ] as const;
 export type TaskColumn = (typeof columns)[number];
+/** Everything except the terminal columns: unfinished work, Draft included. */
+export const activeColumns: readonly TaskColumn[] = columns.slice(0, 7);
+export const isActiveColumn = (column: TaskColumn) =>
+  activeColumns.includes(column);
+/** `state` is empty (Active tasks), `all`, or one column; a terminal choice adds its column. */
+export function visibleColumns(state: string): readonly TaskColumn[] {
+  if (state === "all") return columns;
+  const extra = columns.find((c) => c === state && !isActiveColumn(c));
+  return extra ? [...activeColumns, extra] : activeColumns;
+}
+export function columnCounts(tasks: readonly TaskListSummary[]) {
+  const counts = Object.fromEntries(columns.map((c) => [c, 0])) as Record<
+    TaskColumn,
+    number
+  >;
+  for (const task of tasks) counts[taskColumn(task)]++;
+  return counts;
+}
 export interface TaskAggregate {
   tasks: TaskListSummary[];
   firstObservedAt: number;
@@ -95,7 +113,7 @@ export function parseTaskFilters(search: string): TaskFilters {
     ready = p.get("ready") ?? "";
   return {
     project: uuid.safeParse(project).success ? project : "",
-    state: columns.some((c) => c === state) ? state : "",
+    state: state === "all" || columns.some((c) => c === state) ? state : "",
     source: source === "local" || source === "github" ? source : "",
     ready: ready === "yes" || ready === "no" ? ready : "",
     q: (p.get("q") ?? "").slice(0, 512),
@@ -118,7 +136,10 @@ export function filterTasks(
     (t) =>
       (!projectId || t.projectId === projectId) &&
       (!f.project || projectId || t.projectId === f.project) &&
-      (!f.state || taskColumn(t) === f.state) &&
+      (f.state === "all" ||
+        (f.state
+          ? taskColumn(t) === f.state
+          : isActiveColumn(taskColumn(t)))) &&
       (!f.source || (f.source === "github") === Boolean(t.source)) &&
       (!f.ready || t.ready === (f.ready === "yes")) &&
       (!query ||
@@ -167,4 +188,71 @@ export function taskReasons(task: TaskListSummary) {
   )
     reasons.push("Capacity currently full; admission rechecks usage");
   return [...new Set(reasons)];
+}
+const nextActions = [
+  ["execution-uncertain", "inspect execution"],
+  ["approval", "review material & decide"],
+  ["question", "answer question"],
+  ["unresolved-result", "resolve result destination"],
+  ["completion-rejected", "review rejected completion"],
+  ["lead-review", "review task"],
+] as const;
+/** One rule for "ownership uncertain", shared by the row, the card and the attention bar. */
+export const isUncertain = (task: TaskListSummary) =>
+  task.attention.codes.includes("execution-uncertain") ||
+  taskColumn(task) === "Uncertain";
+/** Who acts next, from recorded facts only; an attention code always names the operator. */
+export function taskNext(task: TaskListSummary) {
+  const action = nextActions.find(([code]) =>
+    code === "execution-uncertain"
+      ? isUncertain(task)
+      : task.attention.codes.includes(code),
+  );
+  if (action) return `Next: you · ${action[1]}`;
+  const column = taskColumn(task);
+  if (column === "Done") return "Next: none · no decision";
+  if (column === "Cancelled") return "Next: none · history retained";
+  return "No operator decision";
+}
+/** zod's url() also accepts javascript: and data:, so only https links become anchors. */
+export function safeSourceUrl(url: string | null | undefined) {
+  try {
+    return url && new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+export function taskRouteSubtitle(
+  kind: "overview" | "tasks" | "project",
+  tasks: readonly TaskListSummary[] | undefined,
+  workspace: {
+    projects: readonly { id: string; leadProfileId: string | null }[];
+    profiles: readonly { id: string; name: string | null }[];
+  } | null,
+  projectId?: string,
+) {
+  if (kind === "overview")
+    return "Decisions first. Work and completed results stay separate.";
+  if (!tasks) return undefined;
+  const scoped = tasks.filter(
+    (t) =>
+      (kind === "tasks" || t.projectId === projectId) &&
+      isActiveColumn(taskColumn(t)),
+  );
+  const count = plural(scoped.length, "active task");
+  if (kind === "tasks")
+    return `${count} · ${plural(workspace?.projects.length ?? new Set(tasks.map((t) => t.projectId)).size, "project")}`;
+  const leadId = workspace?.projects.find(
+    (p) => p.id === projectId,
+  )?.leadProfileId;
+  if (!leadId) return `${count} · no accountable lead`;
+  const lead = workspace?.profiles.find((p) => p.id === leadId)?.name;
+  return `${count} · accountable lead ${lead ?? "name unavailable"}`;
+}
+/** The one task the persistent attention summary names: uncertain ownership beats Stopping. */
+export function attentionCandidate(tasks: readonly TaskListSummary[]) {
+  const active = tasks.filter((t) => isActiveColumn(taskColumn(t)));
+  const uncertain = active.find(isUncertain);
+  return uncertain ?? active.find((t) => taskColumn(t) === "Stopping") ?? null;
 }

@@ -40,9 +40,13 @@ function layoutProblems(page: Page) {
         );
     }
     // Any squeezed row fact reproduces the original letter-per-line collapse.
+    // The state cell is a single short word, so it only needs room for that word.
     for (const fact of document.querySelectorAll(".task-row > *")) {
       const width = fact.getBoundingClientRect().width;
-      if (fact.textContent?.trim() && width < 100)
+      if (
+        fact.textContent?.trim() &&
+        width < (fact.classList.contains("task-status") ? 56 : 100)
+      )
         problems.push(
           `task row fact "${fact.textContent.trim().slice(0, 30)}" squeezed to ${Math.round(width)}px`,
         );

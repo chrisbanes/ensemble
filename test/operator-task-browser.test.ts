@@ -7,6 +7,11 @@ import {
 const test = browserSuite("ui03");
 import { chromium, type Browser, type Page } from "playwright";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import {
+  openMoreFilters,
+  seedCatalog,
+  until,
+} from "./fixtures/operator-work.js";
 async function screenshot(page: Page, name: string) {
   return captureBrowserEvidence(page, name);
 }
@@ -71,6 +76,7 @@ test("List and Board preserve identical filtered task IDs and never submit comma
   page.on("request", (r) => {
     if (r.method() === "POST") posts++;
   });
+  await openMoreFilters(page);
   await page.getByLabel("Search tasks").fill("Literal");
   const links = () =>
     page.locator("[data-task-id]").evaluateAll((els) =>
@@ -125,7 +131,7 @@ test("List and Board preserve identical filtered task IDs and never submit comma
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Search tasks").inputValue(), "Literal");
   assert.deepEqual(await links(), list);
-  await page.getByRole("button", { name: "Paused (1)", exact: true }).click();
+  await page.getByRole("button", { name: "Paused · 1", exact: true }).click();
   const boardScroll = await page
     .locator(".board-columns")
     .evaluate((el) => el.scrollLeft);
@@ -139,7 +145,7 @@ test("List and Board preserve identical filtered task IDs and never submit comma
   await page.getByRole("heading", { name: "All tasks", exact: true }).waitFor();
   assert.equal(
     await page
-      .getByRole("button", { name: "Paused (1)", exact: true })
+      .getByRole("button", { name: "Paused · 1", exact: true })
       .getAttribute("aria-pressed"),
     "true",
   );
@@ -761,14 +767,6 @@ test("committed lost-response creation survives reload expiry and exact reconcil
 });
 
 import { OperatorApi } from "../src/standalone/operator-api.js";
-import { ExecutionState } from "../src/standalone/state.js";
-async function until(predicate: () => boolean, timeoutMs = 5000) {
-  const end = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > end) throw Error("Fixture timed out");
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
 async function visibleControl(page: Page, name: string) {
   const control = page.getByRole("button", { name, exact: true });
   await control.scrollIntoViewIfNeeded();
@@ -790,252 +788,6 @@ async function visibleControl(page: Page, name: string) {
     `${name} is visible and unobscured`,
   );
 }
-async function seedCatalog(
-  f: Awaited<ReturnType<typeof createOperatorFixture>>,
-) {
-  const d = f.service.domain(),
-    projectId = randomUUID(),
-    profileId = randomUUID();
-  d.execute({
-    type: "profile.create",
-    key: randomUUID(),
-    actor: "operator",
-    profileId,
-    name: "Accountable lead",
-    instructions: "PRIVATE SCENARIO INSTRUCTIONS",
-    capabilities: "coordinate",
-  });
-  d.execute({
-    type: "project.create",
-    key: randomUUID(),
-    actor: "operator",
-    projectId,
-    name: "Service integration",
-    leadProfileId: profileId,
-  });
-  d.execute({
-    type: "project.configure",
-    key: randomUUID(),
-    actor: "operator",
-    projectId,
-    expectedVersion: 1,
-    paused: false,
-  });
-  d.execute({
-    type: "capacity.configure",
-    key: randomUUID(),
-    actor: "operator",
-    globalLimit: 10,
-    projectOverrides: { [projectId]: 10 },
-  });
-  const task = (title: string, ready = false, blockerTaskIds?: string[]) => {
-    const taskId = randomUUID();
-    d.execute({
-      type: "task.create",
-      key: randomUUID(),
-      actor: "operator",
-      projectId,
-      taskId,
-      title,
-      outcome: "A useful result",
-      ready,
-      ...(blockerTaskIds ? { blockerTaskIds } : {}),
-    });
-    return taskId;
-  };
-  const active = async (title: string) => {
-    const id = task(title),
-      before = f.runtime.turns;
-    await f.service.provisionTask(id);
-    d.execute({
-      type: "task.configure",
-      key: randomUUID(),
-      actor: "operator",
-      projectId,
-      taskId: id,
-      expectedVersion: 1,
-      ready: true,
-    });
-    await until(() =>
-      f.service
-        .turnRequests()
-        .some((r) => r.taskId === id && r.state === "active"),
-    );
-    await until(() => f.runtime.turns >= before + 1, 15_000);
-    const request = f.service
-      .turnRequests()
-      .find((r) => r.taskId === id && r.state === "active");
-    assert.ok(request);
-    return { id, request };
-  };
-  const blocker = task("Open dependency"),
-    draft = task("Literal <script>malicious()</script>");
-  const waiting = task("Ready but dependent", true, [blocker]);
-  const done = task("Completed result"),
-    cancelled = task("Cancelled work");
-  for (const [taskId, state] of [
-    [done, "done"],
-    [cancelled, "cancelled"],
-  ] as const)
-    d.execute({
-      type: "task.configure",
-      key: randomUUID(),
-      actor: "operator",
-      projectId,
-      taskId,
-      expectedVersion: 1,
-      state,
-    });
-  const question = await active("Question requiring action"),
-    normal = await active("Normal Stop observation"),
-    uncertainStop = await active("Stop with uncertain ownership"),
-    uncertain = await active("Uncertain execution"),
-    running = await active("Work running normally");
-  const occupied = d.capacityLimits([projectId]).currentUsage.projects[
-    projectId
-  ];
-  assert.equal(occupied, 5);
-  d.execute({
-    type: "capacity.configure",
-    actor: "operator",
-    key: randomUUID(),
-    globalLimit: 10,
-    projectOverrides: { [projectId]: occupied },
-  });
-  const ready = task("Ready selected", true);
-  await f.service.provisionTask(ready);
-  await until(() =>
-    f.service
-      .turnRequests()
-      .some((r) => r.taskId === ready && r.state === "queued"),
-  );
-  assert.equal(d.admission(ready).eligible, true);
-  assert.equal(
-    f.service
-      .turnRequests()
-      .filter((r) => r.taskId === ready && r.state === "active").length,
-    0,
-  );
-  const work = f.service
-    .list()
-    .find((w) => w.workId === question.request.workId);
-  assert.ok(work?.threadId && work.turnId);
-  assert.equal(
-    (
-      await f.runtime.callTool({
-        threadId: work.threadId,
-        turnId: work.turnId,
-        callId: "question",
-        tool: "ensemble_ask_question",
-        arguments: { question: "Which target should be used?" },
-      })
-    ).success,
-    true,
-  );
-  f.seedPersistedState((db) => {
-    const state = new ExecutionState(db);
-    state.stopTask(normal.id);
-    db.prepare(
-      "UPDATE execution_intents SET state='running' WHERE workId=?",
-    ).run(normal.request.workId);
-    db.prepare("UPDATE turn_requests SET state='active' WHERE workId=?").run(
-      normal.request.workId,
-    );
-    state.stopTask(uncertainStop.id);
-    db.prepare("UPDATE execution_intents SET state='held' WHERE workId=?").run(
-      uncertain.request.workId,
-    );
-  });
-  const pausedProject = randomUUID();
-  d.execute({
-    type: "project.create",
-    key: randomUUID(),
-    actor: "operator",
-    projectId: pausedProject,
-    name: "Paused project",
-    leadProfileId: profileId,
-  });
-  const paused = randomUUID();
-  d.execute({
-    type: "task.create",
-    key: randomUUID(),
-    actor: "operator",
-    projectId: pausedProject,
-    taskId: paused,
-    title: "Paused work",
-    outcome: "Work",
-    ready: true,
-  });
-  await f.service.provisionTask(paused);
-  d.execute({
-    type: "github.configure",
-    key: randomUUID(),
-    actor: "operator",
-    projectId,
-    expectedVersion: 1,
-    credentialRef: null,
-    selections: [
-      {
-        id: "repo",
-        kind: "repository",
-        repositoryId: "R-UI03",
-        owner: "fixture",
-        name: "source",
-      },
-    ],
-    readiness: { mode: "all", conditions: [{ kind: "label", name: "ready" }] },
-    repositories: [],
-  });
-  const importedTitle =
-    "Imported task with a deliberately long source title for narrow operator list and board layouts";
-  d.execute({
-    type: "github.activate",
-    key: randomUUID(),
-    actor: "operator",
-    projectId,
-    selectionId: "repo",
-    expectedVersion: 2,
-  });
-  f.service.githubSources().reconcileSelection(projectId, "repo", {
-    complete: true,
-    reason: null,
-    issues: [
-      {
-        providerInstance: "github.com",
-        nodeId: "I-UI03",
-        repositoryId: "R-UI03",
-        repositoryName: "fixture/source",
-        number: 42,
-        title: importedTitle,
-        body: "Source-owned imported outcome",
-        state: "open",
-        labels: ["ready"],
-        projectFields: [],
-      },
-    ],
-  });
-  const imported = d.tasks(projectId).find((t) => t.title === importedTitle);
-  assert.ok(imported);
-  return {
-    projectId,
-    importedTitle,
-    profileId,
-    blocker,
-    draft,
-    waiting,
-    ready,
-    done,
-    cancelled,
-    question,
-    normal,
-    uncertainStop,
-    uncertain,
-    running,
-    paused,
-    importedId: String(imported.id),
-  };
-}
-
 test("populated task List and Board keep the approved hierarchy at responsive widths", async (_t, journey) => {
   const f = await journey.start("fixture.create", () =>
     createOperatorFixture(null, undefined, undefined, journey.fixtureOptions),
@@ -1098,7 +850,10 @@ test("populated task List and Board keep the approved hierarchy at responsive wi
         };
       });
     assert.equal(titleMetrics.text, ids.importedTitle, `${width}px title text`);
-    assert.ok(titleMetrics.width >= 200, `${width}px title has readable width`);
+    assert.ok(
+      titleMetrics.width >= 200,
+      `${width}px title has readable width (${titleMetrics.width}px)`,
+    );
     assert.ok(
       titleMetrics.scrollWidth <= titleMetrics.clientWidth,
       `${width}px long title wraps inside its link`,
@@ -1107,15 +862,12 @@ test("populated task List and Board keep the approved hierarchy at responsive wi
       .locator(".task-project-metadata")
       .innerText();
     assert.match(importedMetadata, /Service integration/);
-    assert.match(importedMetadata, /GitHub fixture\/source #42/);
+    assert.match(importedMetadata, /fixture\/source#42/);
     assert.equal(
       await importedRow.locator(".task-lead").innerText(),
-      "Task lead: Accountable lead",
+      "Accountable lead · lead",
     );
-    assert.equal(
-      await importedRow.locator(".task-source-state").innerText(),
-      "GitHub source: open",
-    );
+    assert.equal(await importedRow.locator(".task-source-state").count(), 0);
     const questionRow = page.locator(
       `.task-list [data-task-id="${ids.question.id}"]`,
     );
@@ -1127,7 +879,7 @@ test("populated task List and Board keep the approved hierarchy at responsive wi
       .getByText("Question needs an answer", { exact: true })
       .waitFor({ state: "visible" });
     await questionRow
-      .getByText("Task lead: Accountable lead", { exact: true })
+      .getByText("Accountable lead · lead", { exact: true })
       .waitFor({ state: "visible" });
     const rowOverflow = await page
       .locator(".task-list .task-row")
@@ -1188,7 +940,7 @@ test("populated task List and Board keep the approved hierarchy at responsive wi
   }
 
   await page.setViewportSize({ width: 800, height: 768 });
-  await page.goto(`${web.origin}/app/tasks`);
+  await page.goto(`${web.origin}/app/tasks?state=all`);
   await page
     .locator(`.task-list [data-task-id="${ids.paused}"]`)
     .waitFor({ state: "visible" });
@@ -1346,13 +1098,17 @@ for (const viewport of [
       .getByRole("link", { name: "Normal Stop observation", exact: true })
       .waitFor();
     const attention = page.getByRole("region", {
-        name: "Needs attention",
+        name: "Needs your attention",
         exact: true,
       }),
-      work = page.getByRole("region", { name: "Work", exact: true });
+      work = page.getByRole("region", {
+        name: "Across your projects",
+        exact: true,
+      });
+    await attention.locator(".work-request").first().waitFor();
     assert.equal(
       await attention
-        .getByRole("link", { name: "Normal Stop observation", exact: true })
+        .getByText("Normal Stop observation", { exact: true })
         .count(),
       0,
     );
@@ -1364,16 +1120,13 @@ for (const viewport of [
     );
     assert.equal(
       await attention
-        .getByRole("link", {
-          name: "Stop with uncertain ownership",
-          exact: true,
-        })
+        .getByText("Stop with uncertain ownership", { exact: true })
         .count(),
       1,
     );
     assert.equal(
       await attention
-        .getByRole("link", { name: "Question requiring action", exact: true })
+        .getByText("Question requiring action", { exact: true })
         .count(),
       1,
     );
@@ -1397,7 +1150,7 @@ for (const viewport of [
       if (r.url().endsWith("/api/operator/commands") && r.method() === "POST")
         commandPosts++;
     });
-    await page.getByRole("link", { name: "View Inbox", exact: true }).click();
+    await page.getByRole("link", { name: "View inbox", exact: true }).click();
     assert.equal(
       await page
         .getByRole("link", {
@@ -1427,7 +1180,7 @@ for (const viewport of [
       0,
     );
     await screenshot(page, `${viewport.width}-list-interventions`);
-    await page.goto(`${web.origin}/app/tasks?view=board`);
+    await page.goto(`${web.origin}/app/tasks?view=board&state=all`);
     await page
       .getByRole("heading", { name: "All tasks", exact: true })
       .waitFor();
@@ -1444,7 +1197,7 @@ for (const viewport of [
     };
     for (const [column, title] of Object.entries(samples)) {
       const tab = page.getByRole("button", {
-        name: new RegExp(`^${column} \\(`),
+        name: new RegExp(`^${column} · `),
       });
       await tab.focus();
       await page.keyboard.press("Enter");
@@ -1491,7 +1244,7 @@ for (const viewport of [
     await page
       .getByRole("button", { name: "Refresh tasks", exact: true })
       .click();
-    await page.getByRole("button", { name: /^Running \(/ }).click();
+    await page.getByRole("button", { name: /^Running · / }).click();
     await page
       .locator(`[data-task-id="${ids.running.id}"]`)
       .getByText("Capacity currently full; admission rechecks usage", {
@@ -1522,21 +1275,21 @@ for (const viewport of [
       .getByText(/Capacity currently full/)
       .waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "Board", exact: true }).click();
-    await page.getByRole("button", { name: /^Ready \(/ }).click();
+    await page.getByRole("button", { name: /^Waiting · / }).click();
     if (viewport.width < 760) {
-      await visibleControl(page, "Previous column");
+      await visibleControl(page, "Previous column: Running");
       await page
-        .getByRole("button", { name: "Previous column", exact: true })
+        .getByRole("button", { name: "Previous column: Running", exact: true })
         .click();
       assert.equal(
         await page
-          .getByRole("button", { name: /^Waiting \(/ })
+          .getByRole("button", { name: /^Running · / })
           .getAttribute("aria-pressed"),
         "true",
       );
-      await visibleControl(page, "Next column");
+      await visibleControl(page, "Next column: Waiting");
       await page
-        .getByRole("button", { name: "Next column", exact: true })
+        .getByRole("button", { name: "Next column: Waiting", exact: true })
         .click();
     }
     await page.getByLabel("State", { exact: true }).selectOption("Stopping");
@@ -1663,6 +1416,7 @@ for (const viewport of [
     await page
       .getByRole("link", { name: "Normal Stop observation", exact: true })
       .waitFor();
+    await openMoreFilters(page);
     await page
       .getByLabel("Search tasks", { exact: true })
       .fill("No matching outcome");

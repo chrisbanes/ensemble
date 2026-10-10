@@ -9,7 +9,8 @@ and private to the operator.
 
 ## Runtime and authentication
 
-Use Node.js `24.21.0` and npm `12.2.0`. Node.js `26.9.0` has passed the checks
+Use the Node.js version in `.node-version` and the npm version in `packageManager`
+(`package.json`). Node.js `26.9.0` has passed the checks
 and the fixture service/operator journey
 ([evidence](../evidence/node-26-compatibility-2026-10-09.md)) but is not the
 deployment baseline; later majors are not qualified. Build from a reviewed

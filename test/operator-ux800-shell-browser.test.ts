@@ -272,10 +272,7 @@ test("shared controls retain visible focus in forced colours and remove optional
   journey.observe(page);
   page.setDefaultTimeout(5000);
   await signIn(page, web.origin, web.password, "/app/tasks");
-  const search = page.getByRole("textbox", {
-    name: "Search tasks",
-    exact: true,
-  });
+  const search = page.getByRole("combobox", { name: "State", exact: true });
   const project = page.getByRole("combobox", { name: "Project", exact: true });
   const list = page.getByRole("button", { name: "List", exact: true });
   await search.waitFor();
@@ -445,7 +442,7 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
   await page.locator("main.page h1").waitFor();
   assert.equal(
     await page.locator(".page-header-title p").textContent(),
-    "Tasks across your projects. Action requests and ordinary progress remain distinct.",
+    "Decisions first. Work and completed results stay separate.",
   );
   assert.equal(
     await page
