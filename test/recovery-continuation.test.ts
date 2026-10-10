@@ -1378,6 +1378,9 @@ test("local review records a message without releasing held recovery; ordinary m
     assert.equal(audit(f.service, f.old.workId), undefined);
 
     const api = new OperatorApi(f.service, [f.directory]);
+    const waiting = (await api.readTask(f.taskId)).data;
+    assert.equal(waiting.leadAssignmentId, f.old.assignmentId);
+    assert.equal(waiting.leadFeedback?.awaitingRecoveryMessage, true);
     const owner = { ownerKey: randomUUID(), current: () => true };
     const draft = (await api.execute(
       {
@@ -1416,11 +1419,20 @@ test("local review records a message without releasing held recovery; ordinary m
       "local review must leave the held continuation batch untouched",
     );
 
+    assert.equal(
+      (await api.readTask(f.taskId)).data.leadFeedback?.awaitingRecoveryMessage,
+      true,
+      "a review never resolves the continuation",
+    );
     const ordinary = await f.service
       .coordinationView()
       .postOperatorMessage(f.message);
     const retained = audit(f.service, f.old.workId);
     assert.ok(retained);
+    assert.equal(
+      (await api.readTask(f.taskId)).data.leadFeedback?.awaitingRecoveryMessage,
+      false,
+    );
     assert.equal(
       coordination.deliveryForWork(f.old.workId)?.state,
       "completed",

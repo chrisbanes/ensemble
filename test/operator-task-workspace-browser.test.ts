@@ -10,6 +10,7 @@ import { CoordinationStore } from "../src/core/coordination.js";
 import { ConversationHistoryStore } from "../src/standalone/conversation-history.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { ExecutionState } from "../src/standalone/state.js";
+import { leadResumeNotice } from "../web/src/lead-feedback.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-workspace");
 test("production workspace retains literal history, pending request, focused reply and exact result through updates and failed reads on desktop and phone", async (_t, j) => {
@@ -534,8 +535,9 @@ test("production workspace retains literal history, pending request, focused rep
   assert.equal(local[0]?.reference?.resultId, r.resultId);
   a.result("Terminal accountable lead result");
   await page.getByRole("button", { name: "Refresh task", exact: true }).click();
+  // A completed lead is resumed by feedback (#828): the line says so and Send stays enabled.
   await page
-    .getByText(/Task lead is completed; local message delivery is unavailable/)
+    .getByText(leadResumeNotice("Task lead"), { exact: true })
     .waitFor();
   await page
     .getByRole("button", { name: "Ask lead about result", exact: true })
@@ -544,7 +546,7 @@ test("production workspace retains literal history, pending request, focused rep
   assert.equal(
     await page
       .getByRole("button", { name: "Send to task lead", exact: true })
-      .isDisabled(),
+      .isEnabled(),
     true,
   );
   assert.equal(replyRequests.length, 2);

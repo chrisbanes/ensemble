@@ -234,11 +234,12 @@ completed turn with neither result nor waiting reason; then hold for attention.
 Persist that allowance and apply normal admission controls. Results arriving while
 their recipient is active wait for its next turn; coalesce continuation wakeups while
 retaining individual acknowledgements. Paused/stopped recipients retain their inbox.
-Operator messages may target only pending or running assignments. Held or completed
-assignments are not implicitly revived; resolve the hold or create explicit follow-up/
-recovery first. Legacy inbox events do not dispatch a completed assignment. The
-approved operator follow-up amendment (9 October 2026, below) lets operator feedback
-to a task's completed lead on an open task create that explicit follow-up.
+Operator messages may target pending or running assignments, and the task's current
+lead when its assignment is completed and the task is open: that message is the
+explicit operator follow-up described in the 9 October 2026 amendment below. Other
+held or completed assignments are not implicitly revived; resolve the hold or create
+explicit follow-up/recovery first. Legacy inbox events do not dispatch a completed
+assignment.
 
 A retained canonical initial assignment request positively refused for captured task or
 assignment revision mismatch before runtime admission can be continued by posting a
@@ -711,7 +712,9 @@ state and never substitute other bytes.
   draft had text or anchors, and clears on the next draft save. Unrelated task,
   profile or configuration version changes do not remove a draft.
 - `review.send` freezes one operation for the named project lead, who must be
-  the task's pending or running lead assignment. Any outcome without a receipt
+  the task's current lead assignment: pending or running, or completed on an
+  open task, which the review resumes as an operator follow-up (amendment
+  below). Any outcome without a receipt
   is unknown. The draft read exposes the owning session's frozen operation, and
   the browser keeps only its identity, never comment text. Reconciliation uses
   `review.send.reconcile` with the same key and material. A rejected or
@@ -734,23 +737,25 @@ state and never substitute other bytes.
   never listed. Both reads apply the current session and access policy.
 - Definitive no-delivery outcomes keep the draft editable. A frozen operation
   whose anchor is unavailable when sent is rejected with `anchor-unavailable`
-  (an excluded anchor with `excluded-anchor`). When the named recipient is no
-  longer the lead's pending or running assignment, the send is refused with
-  `local-review-recipient-unavailable` (409) before any operation exists.
-- Review delivery queues one local operator message and receipt. It never calls
-  GitHub or changes approval, readiness, completion, merge authority or holds.
-  As with ordinary messages, a lead that has completed its assignment cannot
-  receive a review.
+  (an excluded anchor with `excluded-anchor`). When the named recipient is not
+  the task's current lead, the lead is held, the task is not open, or a
+  completed lead's latest result is not its newest unambiguous work, the send
+  is refused with `local-review-recipient-unavailable` (409) before any
+  operation exists.
+- Review delivery queues one local operator message and receipt; to a
+  completed lead it queues one operator follow-up instead. It never calls
+  GitHub or changes approval, readiness, merge authority or holds, and it never
+  reopens or completes a task.
 - Read-only inspection rechecks may reuse a successful Git worktree identity
   read for up to 1 second while the worktree root and its `.git` entry keep the
   same filesystem identity. Execution admission always rereads Git.
 
 #### Operator follow-up to a completed lead — approved amendment, 9 October 2026
 
-Chris approved this amendment during triage of #828. It is approved behaviour,
-not yet implemented; until it ships, the #782 rules above still describe the
-running service. It relaxes #782's rule that a review cannot change completion
-state, only as described here.
+Chris approved this amendment during triage of #828. It was implemented on
+9 October 2026 for #828; the #782 rules above describe the shipped result. It
+relaxes #782's rule that a review cannot change completion state, only as
+described here.
 
 - Addressing feedback to the lead is the request to resume it. An ordinary or
   contextual operator message, or a local review, sent to the task's current
@@ -778,6 +783,49 @@ state, only as described here.
   says that sending the review will not resume the lead and that an ordinary
   message is needed.
 - Task conversations with agent @mentions are a separate idea tracked in #842.
+
+Implemented contract details:
+
+- The follow-up reuses the agent follow-up mechanism: one
+  `assignment-follow-up` inbox event whose `instructions` are the message or
+  the rendered review (with any contextual `reference`), and one
+  `coordination_follow_ups` row whose `requester` is `operator`. The resumed
+  turn's new work revision is allocated at admission, as for agent follow-ups.
+- The `message` command's `coordination` receipt, the `review.send` and
+  `review.send.reconcile` `local-review-operation` receipts and the local review
+  operation read carry `resumedLead: true` when the send resumed the lead.
+  Replay returns the same receipt.
+- Refusals for a completed lead are definitive 409s: `conflict` for messages
+  (`Follow-up unavailable: task is not open`, `Follow-up unavailable: latest
+  result is not the newest unambiguous work`, or the existing
+  pending-or-running refusal for a held lead or non-lead) and
+  `local-review-recipient-unavailable` for reviews. A defensive guard also
+  refuses a result that already has a follow-up (`Follow-up unavailable: latest
+  result already has a follow-up`); every follow-up advances the assignment
+  version, so this is not expected to occur.
+- The operator task read adds optional `leadFeedback`: `mode` is `receives`,
+  `resumes` or `unavailable`, computed by the same rule that accepts the send,
+  and `awaitingRecoveryMessage` is true while an ordinary operator message to
+  the lead would record a waiting recovery continuation. A follow-up never
+  records a recovery continuation.
+- The task Reply composer (including contextual "Ask lead about …" drafts) and
+  the Local review panel show one status line from `web/src/lead-feedback.ts`:
+  "<Lead> has completed its assignment and will resume to address this
+  feedback." A resumed send reports "Receipt recorded. <Lead> resumed with this
+  feedback." in the composer and "<Lead> was resumed with this review as a
+  follow-up." in Local review. Local review shows the recovery-continuation
+  copy while `awaitingRecoveryMessage` is true; Send stays enabled.
+- "Newest" is judged within the lead's current conversation: work revisions
+  restart after a conversation replacement, and a result from an earlier
+  conversation is never resumed.
+- Follow-up messages in the operator task read carry `requester`
+  (`assignment` or `operator`), shown in the task message history.
+- Remaining gap: the legacy server-rendered `/coordination/...` task and
+  assignment pages still offer message forms only for pending or running
+  assignments. A direct `POST /coordination/control/message` follows the same
+  rule as the API. Those pages list follow-up events without their
+  instructions, because they do not apply the operator API's exclusion
+  redaction.
 
 ### Task overview and evidence — design direction, 3 October 2026
 

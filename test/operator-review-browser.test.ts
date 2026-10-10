@@ -11,6 +11,7 @@ import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { TaskReviewStore } from "../src/core/task-review.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
+import { leadResumeNotice } from "../web/src/lead-feedback.js";
 const test = browserSuite("ui04-review");
 test("exact S1 R2 R3 S2 review retains scoped outcomes, captured context, comparison identities and local artifact feedback on desktop and phone", async (_t, j) => {
   const f = await j.start("fixture.create", () =>
@@ -818,4 +819,135 @@ test("bounded captured context warns with exact omitted count while pinning an o
   await captureBrowserEvidence(page, "390-context-coverage", {
     fullPage: false,
   });
+});
+
+test("every lead composer shows the same resume line for a completed lead and keeps refused drafts", async (_t, j) => {
+  const f = await j.start("fixture.create", () =>
+    createOperatorFixture(null, undefined, undefined, j.fixtureOptions),
+  );
+  let browser: Browser | undefined;
+  j.cleanup(
+    (primary) => f.close(browser, primary),
+    "fixture.close",
+    () => f.lifecycle.steps,
+  );
+  const a = await seedReviewTask(f, "Completed lead feedback");
+  a.result("Lead finished", {
+    sourceId: a.source.sourceId,
+    artifacts: [
+      {
+        artifactId: randomUUID(),
+        label: "Lead screenshot",
+        role: "evidence",
+        revision: 1,
+        availability: "unavailable",
+      },
+    ],
+  });
+  assert.equal(
+    f.service.domain().assignment(a.assignmentId).state,
+    "completed",
+  );
+  const web = await j.start("fixture.web", () => f.startWeb());
+  browser = await j.start("browser.launch", () => chromium.launch());
+  const page = await browser.newPage({
+    viewport: { width: 1366, height: 900 },
+  });
+  j.observe(page);
+  page.setDefaultTimeout(10_000);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto(`${web.origin}/app/tasks/${a.taskId}`);
+  await page.getByLabel("Password").fill(web.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+  const expected = leadResumeNotice("Task lead");
+  const line = page.getByText(expected, { exact: true });
+  const reply = page.getByLabel("Editable reply");
+  const sendButton = page.getByRole("button", {
+    name: "Send to task lead",
+    exact: true,
+  });
+  // Task composer, then contextual drafts from the result and the artifact.
+  await page
+    .getByRole("button", { name: "Message task lead", exact: true })
+    .click();
+  const seen = [await line.first().textContent()];
+  for (const name of ["Ask lead about result", "Ask lead about artifact"]) {
+    await reply.fill("");
+    await page.getByRole("button", { name, exact: true }).first().click();
+    await page.getByText(/^Immutable reference:/).waitFor();
+    seen.push(await line.first().textContent());
+  }
+  // The Local review panel renders the same leadResumeNotice (operator-local-review-browser).
+  assert.deepEqual(seen, [expected, expected, expected]);
+  assert.equal(await sendButton.isEnabled(), true);
+
+  // A held lead refuses definitively and keeps the contextual draft.
+  f.seedPersistedState((db) =>
+    db
+      .prepare("UPDATE domain_assignments SET state='held' WHERE id=?")
+      .run(a.assignmentId),
+  );
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/operator/commands") &&
+        response.status() === 409,
+    ),
+    sendButton.click(),
+  ]);
+  await page.getByText(/conflict: conflict.*Draft retained/).waitFor();
+  assert.ok(await reply.isEditable());
+  assert.equal(
+    await reply.inputValue(),
+    "Please review evidence artifact Lead screenshot.",
+  );
+  f.seedPersistedState((db) =>
+    db
+      .prepare("UPDATE domain_assignments SET state='completed' WHERE id=?")
+      .run(a.assignmentId),
+  );
+  // A done task refuses too, with the draft kept.
+  f.seedPersistedState((db) =>
+    db.prepare("UPDATE domain_tasks SET state='done' WHERE id=?").run(a.taskId),
+  );
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/operator/commands") &&
+        response.status() === 409,
+    ),
+    sendButton.click(),
+  ]);
+  await page.getByText(/conflict: conflict.*Draft retained/).waitFor();
+  assert.equal(
+    await reply.inputValue(),
+    "Please review evidence artifact Lead screenshot.",
+  );
+  f.seedPersistedState((db) =>
+    db.prepare("UPDATE domain_tasks SET state='open' WHERE id=?").run(a.taskId),
+  );
+
+  await sendButton.click();
+  await page
+    .getByText("Receipt recorded. Task lead resumed with this feedback.", {
+      exact: true,
+    })
+    .waitFor();
+  const followUp = f.service
+    .coordinationView()
+    .readTask(a.taskId)
+    .messages.find((m) => m.eventType === "assignment-follow-up");
+  assert.equal(
+    followUp?.text,
+    "Please review evidence artifact Lead screenshot.",
+  );
+  assert.ok(followUp?.reference?.artifactId);
+  await page
+    .getByText(/assignment-follow-up · requested by operator ·/)
+    .first()
+    .waitFor();
+  assert.equal(f.service.domain().task(a.taskId).state, "open");
+  assert.deepEqual(pageErrors, []);
 });

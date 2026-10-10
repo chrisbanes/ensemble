@@ -4,6 +4,8 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { materialDigest } from "../src/core/delivery.js";
+import { LocalReviewRecipientUnavailableError } from "../src/core/local-review.js";
+import { ExecutionState } from "../src/standalone/state.js";
 import { localReviewListReadSchema } from "../src/operator/contracts.js";
 import { localReviewDraftReadSchema } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
@@ -1114,7 +1116,7 @@ test("an unavailable anchor at send is a definitive rejection that keeps the dra
   );
 });
 
-test("a lead that can no longer receive reviews is a definitive rejection before any operation", async (t) => {
+test("a lead completed without a recorded result is a definitive rejection before any operation", async (t) => {
   const f = await createOperatorFixture();
   t.after(() => f.close());
   const task = await seedReviewTask(f, "Lead no longer active");
@@ -1147,6 +1149,309 @@ test("a lead that can no longer receive reviews is a definitive rejection before
   const after = await api.readLocalReviewDraft(task.taskId, owner);
   assert.equal(after.data.state, "editable");
   assert.deepEqual(after.data.draft, draft.draft);
+});
+
+function followUpState(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  taskId: string,
+) {
+  let state = {
+    followUps: [] as Array<{ resultId: string; requester: string }>,
+    events: [] as Array<{ eventId: string; payload: string }>,
+  };
+  f.seedPersistedState((db) => {
+    state = {
+      followUps: (
+        db
+          .prepare(
+            "SELECT resultId, requester FROM coordination_follow_ups WHERE taskId=? ORDER BY createdAt",
+          )
+          .all(taskId) as typeof state.followUps
+      ).map((row) => ({ ...row })),
+      events: db
+        .prepare(
+          "SELECT eventId, payload FROM coordination_inbox_events WHERE taskId=? AND eventType='assignment-follow-up' ORDER BY sequence",
+        )
+        .all(taskId) as typeof state.events,
+    };
+  });
+  return state;
+}
+
+/** Binds a later work revision of the lead's conversation that has no result yet. */
+function addNewerLeadWork(
+  f: Awaited<ReturnType<typeof createOperatorFixture>>,
+  task: Awaited<ReturnType<typeof seedReviewTask>>,
+) {
+  const workId = randomUUID();
+  f.seedPersistedState((db) => {
+    db.prepare(
+      "INSERT INTO execution_intents(id,workId,prompt,workspace,state,threadId,turnId,accountType,sandbox,approval) VALUES(?,?,'fixture','/tmp/fixture','running',?,?,'chatgpt','workspaceWrite','never')",
+    ).run(randomUUID(), workId, workId, workId);
+    new ExecutionState(db).bindTask(workId, {
+      taskId: task.taskId,
+      assignmentId: task.assignmentId,
+      assignmentVersion: Number(
+        f.service.domain().assignment(task.assignmentId).version,
+      ),
+      instructionsRevision: 1,
+      profileRevision: 1,
+    });
+    db.prepare(
+      "INSERT INTO task_work_revisions(workId,assignmentId,conversationRevision,workRevision) SELECT ?,assignmentId,conversationRevision,MAX(workRevision)+1 FROM task_work_revisions WHERE assignmentId=?",
+    ).run(workId, task.assignmentId);
+  });
+}
+
+test("a review to a completed lead resumes it as one follow-up with exact anchors", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Completed lead review");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["followup.txt"]);
+  const { resultId } = task.result("Lead finished");
+  const lead = f.service.domain().assignment(task.assignmentId);
+  assert.equal(lead.state, "completed");
+  const version = Number(lead.version);
+  const key = randomUUID();
+  const command = requestFor(task, key, draft.version, version);
+  const receipt = (await api.execute(command, owner)) as { state: string };
+  assert.equal(receipt.state, "recorded");
+  const store = f.service.localReviews();
+  assert.equal(store.operationMaterial(key)?.response.resumedLead, true);
+  const resumed = f.service.domain().assignment(task.assignmentId);
+  assert.equal(resumed.state, "pending");
+  assert.equal(Number(resumed.version), version + 1);
+  const state = followUpState(f, task.taskId);
+  assert.deepEqual(state.followUps, [{ resultId, requester: "operator" }]);
+  assert.equal(state.events.length, 1);
+  const payload = JSON.parse(String(state.events[0]?.payload)) as {
+    instructions: string;
+    requester: string;
+  };
+  assert.equal(payload.requester, "operator");
+  assert.match(payload.instructions, /Check context 1\./);
+  assert.match(payload.instructions, /followup\.txt/);
+  assert.match(payload.instructions, /lines 1-1/);
+  assert.match(payload.instructions, /\| review context 1/);
+  const operation = await api.readLocalReviewOperation(task.taskId, key, owner);
+  assert.equal(operation.data.state, "recorded");
+  const anchorIds =
+    operation.data.groups?.flatMap((g) => g.anchors.map((a) => a.anchorId)) ??
+    [];
+  assert.equal(anchorIds.length, 1);
+  for (const anchorId of anchorIds)
+    assert.match(
+      payload.instructions,
+      new RegExp(`retained anchor ${anchorId}`),
+    );
+  assert.deepEqual(counts(f, task.taskId, key), {
+    events: 0,
+    receipts: 1,
+    continuations: 0,
+    submissions: 1,
+  });
+
+  // Exact replay and reconciliation return the recorded resume without a second one.
+  assert.deepEqual(await api.execute(command, owner), receipt);
+  assert.deepEqual(
+    await api.execute({ ...command, type: "review.send.reconcile" }, owner),
+    receipt,
+  );
+  assert.equal(store.operationMaterial(key)?.response.resumedLead, true);
+  assert.equal(followUpState(f, task.taskId).events.length, 1);
+  assert.equal(
+    Number(f.service.domain().assignment(task.assignmentId).version),
+    version + 1,
+  );
+});
+
+test("a review composed while the lead ran is delivered as a follow-up after it completes", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Lead completes mid-send");
+  const api = new OperatorApi(f.service, []);
+  const owner = session();
+  const draft = await stageDraft(f, api, task, owner, ["race.txt"]);
+  const key = randomUUID();
+  const command = requestFor(
+    task,
+    key,
+    draft.version,
+    Number(f.service.domain().assignment(task.assignmentId).version),
+  );
+  const originalPolicy = api.retainedEvidencePolicy.bind(api);
+  let completed = false;
+  api.retainedEvidencePolicy = async (taskId) => {
+    // prepareSend has frozen the operation before the first policy read.
+    if (!completed) {
+      completed = true;
+      assert.equal(
+        f.service.localReviews().operationMaterial(key)?.response.state,
+        "prepared",
+      );
+      task.result("Lead finished while the review was sending");
+    }
+    return originalPolicy(taskId);
+  };
+  const receipt = (await api.execute(command, owner)) as { state: string };
+  assert.equal(completed, true);
+  assert.equal(receipt.state, "recorded");
+  assert.equal(
+    f.service.localReviews().operationMaterial(key)?.response.resumedLead,
+    true,
+  );
+  assert.equal(followUpState(f, task.taskId).followUps.length, 1);
+});
+
+test("reconciling a prepared review fences against the completed lead's version", async (t) => {
+  const f = await createOperatorFixture();
+  t.after(() => f.close());
+  const task = await seedReviewTask(f, "Reconcile completed lead");
+  const api = new OperatorApi(f.service, []);
+  const store = f.service.localReviews();
+  const prepare = async (owner: OperatorReviewSessionContext) => {
+    const saved = (await api.execute(
+      {
+        type: "review.draft.save",
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: 0,
+        draft: { summary: "Reconcile me", comments: [] },
+      },
+      owner,
+    )) as { version: number };
+    const command = requestFor(
+      task,
+      randomUUID(),
+      saved.version,
+      Number(f.service.domain().assignment(task.assignmentId).version),
+    );
+    const { type: _type, ...material } = command;
+    const { key: _key, ...hashed } = material;
+    const prepared = store.prepareSend({
+      request: material,
+      ownerKey: owner.ownerKey,
+      requestHash: materialDigest(hashed),
+    });
+    assert.equal(prepared.response.state, "prepared");
+    return command;
+  };
+  const owner = session();
+  const first = await prepare(owner);
+  task.result("Lead finished");
+  const notRecorded = (await api.execute(
+    { ...first, type: "review.send.reconcile" },
+    owner,
+  )) as { state: string };
+  assert.equal(notRecorded.state, "not-recorded");
+
+  const other = session();
+  const second = await prepare(other);
+  await api.execute({
+    type: "message",
+    key: randomUUID(),
+    taskId: task.taskId,
+    recipientAssignmentId: task.assignmentId,
+    expectedAssignmentVersion: second.expectedAssignmentVersion,
+    message: "A different follow-up resumed the lead first.",
+  });
+  const rejected = (await api.execute(
+    { ...second, type: "review.send.reconcile" },
+    other,
+  )) as { state: string };
+  assert.equal(rejected.state, "rejected");
+  assert.equal(
+    store.operationMaterial(second.key)?.response.reason,
+    "recipient-changed",
+  );
+  assert.equal(followUpState(f, task.taskId).followUps.length, 1);
+});
+
+test("held, done, non-lead and newer-work recipients refuse a review before any operation", async () => {
+  const cases: Array<{
+    name: string;
+    arrange: (
+      f: Awaited<ReturnType<typeof createOperatorFixture>>,
+      task: Awaited<ReturnType<typeof seedReviewTask>>,
+    ) => string | undefined;
+  }> = [
+    {
+      name: "held lead",
+      arrange: (f, task) => {
+        f.seedPersistedState((db) =>
+          db
+            .prepare("UPDATE domain_assignments SET state='held' WHERE id=?")
+            .run(task.assignmentId),
+        );
+        return undefined;
+      },
+    },
+    {
+      name: "done task",
+      arrange: (f, task) => {
+        f.seedPersistedState((db) =>
+          db
+            .prepare("UPDATE domain_tasks SET state='done' WHERE id=?")
+            .run(task.taskId),
+        );
+        return undefined;
+      },
+    },
+    {
+      name: "completed non-lead",
+      arrange: (_f, task) => task.delegatedResult("Delegate done").assignmentId,
+    },
+    {
+      name: "newer lead work",
+      arrange: (f, task) => {
+        addNewerLeadWork(f, task);
+        return undefined;
+      },
+    },
+  ];
+  for (const testCase of cases) {
+    const f = await createOperatorFixture();
+    try {
+      const task = await seedReviewTask(f, `Refusal ${testCase.name}`);
+      const api = new OperatorApi(f.service, []);
+      const owner = session();
+      const draft = await stageDraft(f, api, task, owner, ["refused.txt"]);
+      task.result("Lead finished");
+      const recipient = testCase.arrange(f, task) ?? task.assignmentId;
+      const request = {
+        key: randomUUID(),
+        taskId: task.taskId,
+        expectedDraftVersion: draft.version,
+        recipientAssignmentId: recipient,
+        expectedAssignmentVersion: Number(
+          f.service.domain().assignment(recipient).version,
+        ),
+      };
+      const { key: _key, ...hashed } = request;
+      assert.throws(
+        () =>
+          f.service.localReviews().prepareSend({
+            request,
+            ownerKey: owner.ownerKey,
+            requestHash: materialDigest(hashed),
+          }),
+        LocalReviewRecipientUnavailableError,
+        testCase.name,
+      );
+      assert.equal(
+        f.service.localReviews().operationMaterial(request.key),
+        undefined,
+      );
+      const after = await api.readLocalReviewDraft(task.taskId, owner);
+      assert.equal(after.data.state, "editable", testCase.name);
+      assert.deepEqual(after.data.draft, draft.draft, testCase.name);
+      assert.equal(followUpState(f, task.taskId).followUps.length, 0);
+    } finally {
+      await f.close();
+    }
+  }
 });
 
 test("an anchor excerpt that becomes excluded removes the draft and blocks a stale save", async (t) => {

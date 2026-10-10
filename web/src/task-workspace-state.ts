@@ -201,6 +201,8 @@ export type LocalReviewSend = {
   recipientName: string;
   status: "sending" | "unknown" | "recorded" | "rejected" | "not-recorded";
   reason?: string;
+  /** The recorded review resumed a completed lead as a follow-up. */
+  resumedLead?: true;
 };
 
 /** Client view of the session-owned server draft; private text is never persisted here. */

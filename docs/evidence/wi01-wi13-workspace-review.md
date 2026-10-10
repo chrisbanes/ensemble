@@ -54,9 +54,11 @@ extension or notification inspection entry points exist, and none were added.
 - Empty drafts produced a permanent "unsent draft removed" notice; send
   outcomes without a receipt could show as "not delivered"; and an unknown send
   could be recovered only from the original tab. All three are fixed.
-- A lead that has completed its assignment cannot receive a local review,
-  matching ordinary messages. The reduced live journey therefore sends no
-  review; review delivery is qualified offline.
+- At the time of this record, a lead that had completed its assignment could
+  not receive a local review, matching ordinary messages, so the reduced live
+  journey sends no review and review delivery is qualified offline. #828 later
+  made feedback to a completed lead resume it as an operator follow-up (see
+  `docs/SPEC.md`).
 
 ## Actual-runtime journey
 

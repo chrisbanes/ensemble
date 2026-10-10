@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  commandReceiptSchema,
+  localReviewOperationReadSchema,
   operatorCommandSchema,
   materialSchema,
   workspaceSchema,
@@ -176,4 +178,68 @@ test("all supported command variants validate exact revisions and bounded materi
   let deep: unknown = "value";
   for (let i = 0; i < 13; i++) deep = [deep];
   assert.equal(materialSchema.safeParse(deep).success, false);
+});
+
+test("receipts record a resumed lead only as a literal true", () => {
+  const coordination = {
+    kind: "coordination",
+    key,
+    recorded: true,
+    eventId: key,
+    taskId: key,
+    recipientAssignmentId: key,
+    eventType: "assignment-follow-up",
+    createdAt: 1,
+  };
+  const review = {
+    kind: "local-review-operation",
+    key,
+    taskId: key,
+    reviewId: key,
+    state: "recorded",
+    eventId: key,
+    recipientAssignmentId: key,
+  };
+  const operation = {
+    data: {
+      operationId: key,
+      taskId: key,
+      reviewId: key,
+      state: "recorded",
+      eventId: key,
+      recipientAssignmentId: key,
+      recordedAt: 1,
+    },
+    observedAt: 1,
+  };
+  for (const receipt of [coordination, review]) {
+    assert.equal(commandReceiptSchema.safeParse(receipt).success, true);
+    assert.equal(
+      commandReceiptSchema.safeParse({ ...receipt, resumedLead: true }).success,
+      true,
+    );
+    assert.equal(
+      commandReceiptSchema.safeParse({ ...receipt, resumedLead: false })
+        .success,
+      false,
+    );
+  }
+  assert.equal(
+    localReviewOperationReadSchema.safeParse(operation).success,
+    true,
+  );
+  assert.equal(
+    localReviewOperationReadSchema.safeParse({
+      ...operation,
+      data: { ...operation.data, resumedLead: true },
+    }).success,
+    true,
+  );
+  assert.equal(
+    localReviewOperationReadSchema.safeParse({
+      ...operation,
+      data: { ...operation.data, resumedLead: false },
+    }).success,
+    false,
+  );
 });

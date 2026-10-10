@@ -393,7 +393,9 @@ export interface FollowUpRequest {
   followUpId: string;
   resultId: string;
   taskId: string;
-  requestingAssignmentId: string;
+  requester: "assignment" | "operator";
+  /** Null for operator follow-ups; `requester` is authoritative. */
+  requestingAssignmentId: string | null;
   targetAssignmentId: string;
   priorWorkId: string;
   priorWorkRevision: number;
@@ -460,14 +462,10 @@ export class CoordinationStore {
 
   localReviews(): LocalReviewStore {
     return new LocalReviewStore(this.db, this.retainedEvidence(), {
-      createMessage: (taskId, recipientAssignmentId, message) =>
-        this.newEvent(
-          taskId,
-          recipientAssignmentId,
-          "operator-message",
-          null,
-          JSON.stringify({ message }),
-        ),
+      recipient: (taskId, assignmentId) =>
+        this.feedbackRecipient(taskId, assignmentId),
+      deliverFeedback: (taskId, recipientAssignmentId, message) =>
+        this.deliverOperatorFeedback(taskId, recipientAssignmentId, message),
       saveReceipt: (key, request, eventId) =>
         this.saveOperatorReceipt("local-review-send", key, request, eventId),
       readEvent: (eventId) =>
@@ -690,6 +688,13 @@ export class CoordinationStore {
       if (!interactionColumns.some((column) => column.name === "materialJson"))
         this.db.exec(
           "ALTER TABLE coordination_interactions ADD COLUMN materialJson TEXT",
+        );
+      const followUpColumns = this.db
+        .prepare("PRAGMA table_info(coordination_follow_ups)")
+        .all() as Row[];
+      if (!followUpColumns.some((column) => column.name === "requester"))
+        this.db.exec(
+          "ALTER TABLE coordination_follow_ups ADD COLUMN requester TEXT NOT NULL DEFAULT 'assignment' CHECK(requester IN ('assignment','operator'))",
         );
       this.migrateRuntimeQuestionIdentity();
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS coordination_one_interaction_event
@@ -2129,7 +2134,12 @@ export class CoordinationStore {
         throw new Error("Message recipient belongs to another task");
       if (Number(assignment.version) !== command.expectedAssignmentVersion)
         throw new Error("Message recipient assignment version conflict");
-      if (assignment.state !== "pending" && assignment.state !== "running")
+      // A completed lead's resumability is checked once, in deliverOperatorFeedback.
+      if (
+        assignment.state !== "pending" &&
+        assignment.state !== "running" &&
+        !(assignment.state === "completed" && this.isTaskLead(assignment))
+      )
         throw new Error("Message recipient must be pending or running");
       if (command.reference) {
         const lead = this.one(
@@ -2144,15 +2154,11 @@ export class CoordinationStore {
           command.taskId,
           command.reference,
         );
-      const event = this.newEvent(
+      const { event, resumedLead } = this.deliverOperatorFeedback(
         command.taskId,
         command.recipientAssignmentId,
-        "operator-message",
-        null,
-        JSON.stringify({
-          message: command.message,
-          ...(command.reference ? { reference: command.reference } : {}),
-        }),
+        command.message,
+        command.reference,
       );
       this.saveOperatorReceipt(
         "operator-message",
@@ -2160,7 +2166,13 @@ export class CoordinationStore {
         payload,
         event.eventId,
       );
-      this.recordRecoveryContinuation(event, command.key, payloadHash(payload));
+      // A follow-up resumes a completed lead; it never resolves a recovery continuation.
+      if (!resumedLead)
+        this.recordRecoveryContinuation(
+          event,
+          command.key,
+          payloadHash(payload),
+        );
       return event;
     });
   }
@@ -2222,35 +2234,10 @@ export class CoordinationStore {
       }
       const caller = this.currentBinding(call.threadId, call.turnId);
       if (!caller) throw new Error("Follow-up is not bound to current work");
-      const result = this.required(
-        `SELECT result.resultId, result.taskId,
-        result.assignmentId, result.workId, result.workRevision,
-        result.assignmentVersion, result.summary, result.recipientAssignmentId,
-        result.destinationDisposition, assignment.requesterAssignmentId,
-        assignment.projectId, assignment.version, assignment.state,
-        revision.conversationRevision
-        FROM coordination_results result
-        JOIN domain_assignments assignment ON assignment.id = result.assignmentId
-        JOIN task_work_revisions revision ON revision.workId = result.workId
-        JOIN assignment_conversations conversation
-          ON conversation.assignmentId = assignment.id
-          AND conversation.revision = revision.conversationRevision
-        WHERE result.resultId = ? AND assignment.taskId = result.taskId
-          AND assignment.version = result.assignmentVersion
-          AND assignment.state = 'completed'
-          AND NOT EXISTS (
-            SELECT 1 FROM task_work_revisions newer
-            WHERE newer.assignmentId = revision.assignmentId
-              AND newer.conversationRevision = revision.conversationRevision
-              AND newer.workRevision > revision.workRevision
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM task_work_revision_ambiguities ambiguous
-            WHERE ambiguous.assignmentId = revision.assignmentId
-              AND ambiguous.conversationRevision = revision.conversationRevision
-          )`,
-        call.arguments.resultId,
-      );
+      const result = this.resumableResult({
+        resultId: call.arguments.resultId,
+      });
+      if (!result) throw new Error("Unknown coordination record");
       if (result.destinationDisposition !== "resolved")
         throw new Error("Cannot follow up an unresolved result destination");
       const taskLead = this.one(
@@ -2263,11 +2250,12 @@ export class CoordinationStore {
       )
         throw new Error("Caller is not the result requester or task lead");
       const prior = this.one(
-        "SELECT followUpId, requestingAssignmentId, instructions FROM coordination_follow_ups WHERE resultId = ?",
+        "SELECT followUpId, requester, requestingAssignmentId, instructions FROM coordination_follow_ups WHERE resultId = ?",
         call.arguments.resultId,
       );
       if (prior) {
         if (
+          prior.requester !== "assignment" ||
           prior.requestingAssignmentId !== caller.assignmentId ||
           prior.instructions !== call.arguments.instructions
         )
@@ -2279,45 +2267,12 @@ export class CoordinationStore {
         this.insertToolReceipt(call, caller, response);
         return response;
       }
-      const nextVersion = Number(result.version) + 1;
-      const updated = this.db
-        .prepare(`UPDATE domain_assignments
-        SET version = ?, state = 'pending'
-        WHERE id = ? AND version = ? AND state = 'completed' RETURNING id`)
-        .get(nextVersion, String(result.assignmentId), Number(result.version));
-      if (!updated) throw new Error("Follow-up target assignment changed");
-      const followUpId = randomUUID();
-      this.db
-        .prepare(`INSERT INTO coordination_follow_ups
-        (followUpId, resultId, taskId, requestingAssignmentId, targetAssignmentId,
-          priorWorkId, priorWorkRevision, priorAssignmentVersion,
-          nextAssignmentVersion, instructions, revision)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
-        .run(
-          followUpId,
-          call.arguments.resultId,
-          String(result.taskId),
-          String(caller.assignmentId),
-          String(result.assignmentId),
-          String(result.workId),
-          Number(result.workRevision),
-          Number(result.assignmentVersion),
-          nextVersion,
-          call.arguments.instructions,
-        );
-      this.newEvent(
-        String(result.taskId),
-        String(result.assignmentId),
-        "assignment-follow-up",
-        null,
-        JSON.stringify({
-          followUpId,
-          resultId: result.resultId,
-          workId: result.workId,
-          workRevision: result.workRevision,
-          assignmentVersion: nextVersion,
-          instructions: call.arguments.instructions,
-        }),
+      const { followUpId } = this.resumeCompletedAssignment(
+        result,
+        "assignment",
+        String(caller.assignmentId),
+        call.arguments.instructions,
+        {},
       );
       const response = {
         text: `Follow-up queued ${followUpId}`,
@@ -2328,9 +2283,76 @@ export class CoordinationStore {
     });
   }
 
+  /**
+   * How operator feedback reaches this task's current lead: delivered to a
+   * pending or running lead, or resuming a completed one as a follow-up.
+   */
+  feedbackRecipient(
+    taskId: string,
+    assignmentId: string,
+  ): { version: number; mode: "receives" | "resumes" } | undefined {
+    const assignment = this.one(
+      "SELECT id, taskId, version, state FROM domain_assignments WHERE id = ? AND taskId = ?",
+      assignmentId,
+      taskId,
+    );
+    if (!assignment || !this.isTaskLead(assignment)) return undefined;
+    const version = Number(assignment.version);
+    if (assignment.state === "pending" || assignment.state === "running")
+      return { version, mode: "receives" };
+    if (
+      assignment.state === "completed" &&
+      "result" in this.resumable(taskId, assignmentId)
+    )
+      return { version, mode: "resumes" };
+    return undefined;
+  }
+
+  /**
+   * Delivers operator feedback the caller already validated: an ordinary
+   * message to a pending or running recipient, or a follow-up that resumes a
+   * completed lead. Must run inside the caller's transaction.
+   */
+  deliverOperatorFeedback(
+    taskId: string,
+    assignmentId: string,
+    message: string,
+    reference?: z.infer<typeof feedbackReferenceSchema>,
+  ): { event: InboxEvent; resumedLead: boolean } {
+    const assignment = this.required(
+      "SELECT id, taskId, state FROM domain_assignments WHERE id = ? AND taskId = ?",
+      assignmentId,
+      taskId,
+    );
+    if (assignment.state !== "completed")
+      return {
+        event: this.newEvent(
+          taskId,
+          assignmentId,
+          "operator-message",
+          null,
+          JSON.stringify({ message, ...(reference ? { reference } : {}) }),
+        ),
+        resumedLead: false,
+      };
+    if (!this.isTaskLead(assignment))
+      throw new Error("Message recipient must be pending or running");
+    const resumable = this.resumable(taskId, assignmentId);
+    if ("refusal" in resumable) throw new Error(resumable.refusal);
+    const { result } = resumable;
+    const { event } = this.resumeCompletedAssignment(
+      result,
+      "operator",
+      assignmentId,
+      message,
+      { requester: "operator", ...(reference ? { reference } : {}) },
+    );
+    return { event, resumedLead: true };
+  }
+
   followUps(taskId?: string): FollowUpRequest[] {
     const sql =
-      "SELECT followUpId, resultId, taskId, requestingAssignmentId, " +
+      "SELECT followUpId, resultId, taskId, requester, requestingAssignmentId, " +
       "targetAssignmentId, priorWorkId, priorWorkRevision, priorAssignmentVersion, " +
       "nextAssignmentVersion, instructions, revision, createdAt " +
       "FROM coordination_follow_ups" +
@@ -3309,18 +3331,31 @@ export class CoordinationStore {
     return JSON.stringify(material);
   }
 
-  private recordRecoveryContinuation(
-    event: InboxEvent,
-    commandKey: string,
-    commandHash: string,
-  ): void {
-    if (!this.reconciledAssignmentProof) return;
+  /**
+   * True while the next ordinary operator message to this assignment would
+   * record a recovery continuation: a held request has a valid reconciled
+   * proof and no continuation yet. Follow-ups and reviews never record one.
+   */
+  awaitsRecoveryContinuation(taskId: string, assignmentId: string): boolean {
+    return this.recoveryContinuationCandidates(taskId, assignmentId).length > 0;
+  }
+
+  private recoveryContinuationCandidates(
+    taskId: string,
+    assignmentId: string,
+  ): Array<{
+    workId: string;
+    proof: ReconciledAssignmentProof;
+    batch: InboxDelivery | undefined;
+  }> {
+    if (!this.reconciledAssignmentProof) return [];
     const requests = this.db
       .prepare(`SELECT workId FROM turn_requests
       WHERE taskId = ? AND assignmentId = ? AND state = 'held' ORDER BY sequence`)
-      .all(event.taskId, event.recipientAssignmentId) as Array<{
+      .all(taskId, assignmentId) as Array<{
       workId: string;
     }>;
+    const candidates = [];
     for (const { workId } of requests) {
       if (
         this.one(
@@ -3332,8 +3367,8 @@ export class CoordinationStore {
       const proof = this.reconciledAssignmentProof(workId);
       if (
         !proof ||
-        proof.taskId !== event.taskId ||
-        proof.assignmentId !== event.recipientAssignmentId
+        proof.taskId !== taskId ||
+        proof.assignmentId !== assignmentId
       )
         continue;
       const batch = this.deliveryForWork(workId);
@@ -3345,6 +3380,20 @@ export class CoordinationStore {
           batch.assignmentVersion !== proof.assignmentVersion)
       )
         continue;
+      candidates.push({ workId, proof, batch });
+    }
+    return candidates;
+  }
+
+  private recordRecoveryContinuation(
+    event: InboxEvent,
+    commandKey: string,
+    commandHash: string,
+  ): void {
+    for (const { workId, proof, batch } of this.recoveryContinuationCandidates(
+      event.taskId,
+      event.recipientAssignmentId,
+    )) {
       this.db
         .prepare(`INSERT INTO coordination_recovery_continuations
         (workId, receiptId, taskId, assignmentId, proofMaterial, operatorCommandKey, operatorPayloadHash,
@@ -3987,12 +4036,160 @@ export class CoordinationStore {
     };
   }
 
+  private isTaskLead(assignment: Row): boolean {
+    return (
+      this.one(
+        "SELECT assignmentId FROM task_lead_bindings WHERE taskId = ?",
+        String(assignment.taskId),
+      )?.assignmentId === assignment.id
+    );
+  }
+
+  /** The completed lead's resumable result, or the definitive refusal. */
+  private resumable(
+    taskId: string,
+    assignmentId: string,
+  ): { result: Row } | { refusal: string } {
+    if (
+      this.one("SELECT state FROM domain_tasks WHERE id = ?", taskId)?.state !==
+      "open"
+    )
+      return { refusal: "Follow-up unavailable: task is not open" };
+    const result = this.resumableResult({ assignmentId });
+    if (!result)
+      return {
+        refusal:
+          "Follow-up unavailable: latest result is not the newest unambiguous work",
+      };
+    // Defensive: a follow-up advances the version, so its result is no longer resumable.
+    if (
+      this.one(
+        "SELECT 1 AS prior FROM coordination_follow_ups WHERE resultId = ?",
+        String(result.resultId),
+      )
+    )
+      return {
+        refusal: "Follow-up unavailable: latest result already has a follow-up",
+      };
+    return { result };
+  }
+
+  /**
+   * A completed assignment's result that a follow-up may resume: the
+   * assignment's newest, unambiguous work at its current version. The
+   * assignment form selects the newest result of the current conversation.
+   */
+  private resumableResult(
+    target: { resultId: string } | { assignmentId: string },
+  ): Row | undefined {
+    const [filter, parameter] =
+      "resultId" in target
+        ? ["result.resultId = ?", target.resultId]
+        : [
+            // Work revisions restart per conversation: take the newest in the current one.
+            `result.resultId = (SELECT newest.resultId FROM coordination_results newest
+            JOIN task_work_revisions newestRevision ON newestRevision.workId = newest.workId
+            JOIN assignment_conversations current
+              ON current.assignmentId = newest.assignmentId
+              AND current.revision = newestRevision.conversationRevision
+            WHERE newest.assignmentId = ?
+            ORDER BY newestRevision.workRevision DESC LIMIT 1)`,
+            target.assignmentId,
+          ];
+    return this.one(
+      `SELECT result.resultId, result.taskId,
+        result.assignmentId, result.workId, result.workRevision,
+        result.assignmentVersion, result.summary, result.recipientAssignmentId,
+        result.destinationDisposition, assignment.requesterAssignmentId,
+        assignment.projectId, assignment.version, assignment.state,
+        revision.conversationRevision
+        FROM coordination_results result
+        JOIN domain_assignments assignment ON assignment.id = result.assignmentId
+        JOIN task_work_revisions revision ON revision.workId = result.workId
+        JOIN assignment_conversations conversation
+          ON conversation.assignmentId = assignment.id
+          AND conversation.revision = revision.conversationRevision
+        WHERE ${filter} AND assignment.taskId = result.taskId
+          AND assignment.version = result.assignmentVersion
+          AND assignment.state = 'completed'
+          AND NOT EXISTS (
+            SELECT 1 FROM task_work_revisions newer
+            WHERE newer.assignmentId = revision.assignmentId
+              AND newer.conversationRevision = revision.conversationRevision
+              AND newer.workRevision > revision.workRevision
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM task_work_revision_ambiguities ambiguous
+            WHERE ambiguous.assignmentId = revision.assignmentId
+              AND ambiguous.conversationRevision = revision.conversationRevision
+          )`,
+      parameter,
+    );
+  }
+
+  /** Reopens a completed assignment at a new version with one follow-up event. */
+  private resumeCompletedAssignment(
+    result: Row,
+    requester: "assignment" | "operator",
+    requestingAssignmentId: string,
+    instructions: string,
+    extraPayload: Record<string, unknown>,
+  ): { followUpId: string; event: InboxEvent } {
+    const nextVersion = Number(result.version) + 1;
+    const updated = this.db
+      .prepare(`UPDATE domain_assignments
+        SET version = ?, state = 'pending'
+        WHERE id = ? AND version = ? AND state = 'completed' RETURNING id`)
+      .get(nextVersion, String(result.assignmentId), Number(result.version));
+    if (!updated) throw new Error("Follow-up target assignment changed");
+    const followUpId = randomUUID();
+    this.db
+      .prepare(`INSERT INTO coordination_follow_ups
+        (followUpId, resultId, taskId, requester, requestingAssignmentId, targetAssignmentId,
+          priorWorkId, priorWorkRevision, priorAssignmentVersion,
+          nextAssignmentVersion, instructions, revision)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+      .run(
+        followUpId,
+        String(result.resultId),
+        String(result.taskId),
+        requester,
+        requestingAssignmentId,
+        String(result.assignmentId),
+        String(result.workId),
+        Number(result.workRevision),
+        Number(result.assignmentVersion),
+        nextVersion,
+        instructions,
+      );
+    const event = this.newEvent(
+      String(result.taskId),
+      String(result.assignmentId),
+      "assignment-follow-up",
+      null,
+      JSON.stringify({
+        followUpId,
+        resultId: result.resultId,
+        workId: result.workId,
+        workRevision: result.workRevision,
+        assignmentVersion: nextVersion,
+        instructions,
+        ...extraPayload,
+      }),
+    );
+    return { followUpId, event };
+  }
+
   private parseFollowUp(row: Row): FollowUpRequest {
     return {
       followUpId: String(row.followUpId),
       resultId: String(row.resultId),
       taskId: String(row.taskId),
-      requestingAssignmentId: String(row.requestingAssignmentId),
+      requester: z.enum(["assignment", "operator"]).parse(row.requester),
+      requestingAssignmentId:
+        row.requester === "operator"
+          ? null
+          : String(row.requestingAssignmentId),
       targetAssignmentId: String(row.targetAssignmentId),
       priorWorkId: String(row.priorWorkId),
       priorWorkRevision: Number(row.priorWorkRevision),

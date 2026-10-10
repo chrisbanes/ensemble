@@ -32,6 +32,7 @@ import { Textarea } from "./ui/textarea.js";
 import { TaskFiles } from "./task-files.js";
 import { TaskWorkspaceChanges } from "./inspection-changes.js";
 import { RetainedResultEvidence } from "./retained-evidence.js";
+import { leadFeedbackMode, leadResumeNotice } from "./lead-feedback.js";
 import { LocalReviewPanel, LocalReviewProvider } from "./local-review.js";
 
 type Reference = z.infer<typeof feedbackReferenceSchema>;
@@ -754,7 +755,10 @@ export function TaskWorkspace({
       state.notice =
         outcome.receipt.kind === "delivery"
           ? `${outcome.receipt.state}: ${outcome.receipt.reason ?? "provider receipt recorded"}`
-          : "Receipt recorded";
+          : outcome.receipt.kind === "coordination" &&
+              outcome.receipt.resumedLead
+            ? `Receipt recorded. ${data?.lead?.name ?? "Project lead"} resumed with this feedback.`
+            : "Receipt recorded";
       if (
         outcome.receipt.kind === "coordination" ||
         (outcome.receipt.kind === "delivery" &&
@@ -816,7 +820,9 @@ export function TaskWorkspace({
       : data.results.at(-1),
     meta = review?.results.find((r) => r.resultId === selected?.resultId);
   const leadId = data.leadAssignmentId,
-    lead = data.assignments.find((a) => a.assignmentId === leadId);
+    lead = data.assignments.find((a) => a.assignmentId === leadId),
+    leadName = data.lead?.name ?? "Project lead",
+    leadMode = leadFeedbackMode(data, lead?.state);
   const openRequests = [...data.questions, ...data.approvals].filter(
     (q) => q.status === "open",
   );
@@ -877,8 +883,11 @@ export function TaskWorkspace({
           ? {
               assignmentId: lead.assignmentId,
               version: lead.version,
-              name: data.lead?.name ?? "Project lead",
+              name: leadName,
               state: lead.state,
+              feedbackMode: leadMode,
+              awaitingRecoveryMessage:
+                data.leadFeedback?.awaitingRecoveryMessage ?? false,
             }
           : null
       }
@@ -1557,7 +1566,11 @@ export function TaskWorkspace({
           {data.messages.map((m) => (
             <div key={m.eventId} data-record-id={m.eventId}>
               <p>
-                {m.eventType} · {m.deliveryState} · {date(m.createdAt)}
+                {m.eventType}
+                {m.requester
+                  ? ` · requested by ${m.requester === "assignment" ? "agent" : "operator"}`
+                  : ""}{" "}
+                · {m.deliveryState} · {date(m.createdAt)}
               </p>
               <Literal text={m.text} />
               {m.questionAnswers &&
@@ -1608,6 +1621,9 @@ export function TaskWorkspace({
           </p>
           {state.destination === "lead" && state.reference && (
             <p>Immutable reference: {JSON.stringify(state.reference)}</p>
+          )}
+          {state.destination === "lead" && lead && leadMode === "resumes" && (
+            <p role="status">{leadResumeNotice(leadName)}</p>
           )}
           <label htmlFor="workspace-reply">Editable reply</label>
           <Textarea
@@ -1665,7 +1681,7 @@ export function TaskWorkspace({
               pending ||
               !state.draft.trim() ||
               (state.destination === "lead" &&
-                (!lead || !["pending", "running"].includes(lead.state)) &&
+                (!lead || leadMode === "unavailable") &&
                 !state.uncertain) ||
               (state.destination === "github" &&
                 (!data.commentPolicy?.available ||
@@ -1686,7 +1702,7 @@ export function TaskWorkspace({
           {auxNotice && <p role="status">{auxNotice}</p>}
           {state.destination === "lead" &&
             lead &&
-            !["pending", "running"].includes(lead.state) && (
+            leadMode === "unavailable" && (
               <p>
                 Task lead is {lead.state}; local message delivery is
                 unavailable. The exact-reference draft remains editable.

@@ -1377,6 +1377,8 @@ test("follow-up reuses the completed assignment and binds the exact result", () 
     assert.equal(f.coordination.requestFollowUp(call).text, response.text);
     const followUp = f.coordination.followUps(taskA)[0];
     assert.ok(followUp);
+    assert.equal(followUp.requester, "assignment");
+    assert.equal(followUp.requestingAssignmentId, leadId);
     assert.equal(followUp.resultId, result.resultId);
     assert.equal(followUp.priorWorkId, "work-child-a");
     assert.equal(followUp.priorWorkRevision, 1);
@@ -1386,12 +1388,18 @@ test("follow-up reuses the completed assignment and binds the exact result", () 
     assert.equal(assignment.version, 2);
     assert.equal(assignment.state, "pending");
     assert.equal(assignment.profileId, workerProfile);
-    assert.equal(
-      f.coordination
-        .inboxEvents(childA)
-        .filter((event) => event.eventType === "assignment-follow-up").length,
-      1,
-    );
+    const followUpEvents = f.coordination
+      .inboxEvents(childA)
+      .filter((event) => event.eventType === "assignment-follow-up");
+    assert.equal(followUpEvents.length, 1);
+    assert.deepEqual(JSON.parse(String(followUpEvents[0]?.payload)), {
+      followUpId: followUp.followUpId,
+      resultId: result.resultId,
+      workId: "work-child-a",
+      workRevision: 1,
+      assignmentVersion: 2,
+      instructions: "Add regression coverage.",
+    });
     f.reopen();
     assert.equal(f.coordination.followUps(taskA).length, 1);
     assert.equal(
@@ -1399,6 +1407,351 @@ test("follow-up reuses the completed assignment and binds the exact result", () 
         .inboxEvents(childA)
         .filter((event) => event.eventType === "assignment-follow-up").length,
       1,
+    );
+  } finally {
+    f.close();
+  }
+});
+
+function completeLead(f: ReturnType<typeof fixture>) {
+  const lead = String(f.leadAssignment(taskA)?.id);
+  f.addWork(lead, "work-lead-a", "thread-lead-a", "turn-lead-a");
+  const { result } = f.coordination.recordResult(
+    report("thread-lead-a", "turn-lead-a", "call-lead-result"),
+  );
+  const version = Number(f.domain.assignment(lead).version);
+  assert.equal(f.domain.assignment(lead).state, "completed");
+  const message = (
+    text: string,
+    extra: Partial<
+      Parameters<CoordinationStore["postOperatorMessage"]>[0]
+    > = {},
+  ) =>
+    f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: version,
+      message: text,
+      ...extra,
+    });
+  const snapshot = () => ({
+    assignment: f.domain.assignment(lead),
+    events: f.coordination.inboxEvents(lead).length,
+    followUps: f.coordination.followUps(taskA).length,
+  });
+  return { lead, result, version, message, snapshot };
+}
+
+test("an operator message to a completed lead resumes it as one follow-up", () => {
+  const f = fixture();
+  try {
+    const { lead, result, version, snapshot } = completeLead(f);
+    assert.deepEqual(f.coordination.feedbackRecipient(taskA, lead), {
+      version,
+      mode: "resumes",
+    });
+    const command = {
+      actor: "operator" as const,
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: version,
+      message: "Please also cover the empty state.",
+    };
+    const event = f.coordination.postOperatorMessage(command);
+    assert.equal(event.eventType, "assignment-follow-up");
+    const assignment = f.domain.assignment(lead);
+    assert.equal(assignment.state, "pending");
+    assert.equal(assignment.version, version + 1);
+    const [followUp, ...others] = f.coordination.followUps(taskA);
+    assert.ok(followUp);
+    assert.equal(others.length, 0);
+    assert.equal(followUp.requester, "operator");
+    assert.equal(followUp.requestingAssignmentId, null);
+    assert.equal(followUp.targetAssignmentId, lead);
+    assert.equal(followUp.resultId, result.resultId);
+    assert.equal(followUp.priorWorkId, "work-lead-a");
+    assert.equal(followUp.nextAssignmentVersion, version + 1);
+    const payload = JSON.parse(event.payload) as Record<string, unknown>;
+    assert.equal(payload.instructions, command.message);
+    assert.equal(payload.requester, "operator");
+    assert.equal(payload.followUpId, followUp.followUpId);
+    assert.equal(payload.workRevision, 1);
+    assert.equal(payload.resultId, result.resultId);
+    assert.equal("reference" in payload, false);
+    assert.deepEqual(f.coordination.feedbackRecipient(taskA, lead), {
+      version: version + 1,
+      mode: "receives",
+    });
+    const before = snapshot();
+    assert.equal(
+      f.coordination.postOperatorMessage(command).eventId,
+      event.eventId,
+    );
+    f.reopen();
+    assert.equal(
+      f.coordination.postOperatorMessage(command).eventId,
+      event.eventId,
+    );
+    assert.deepEqual(snapshot(), before);
+  } finally {
+    f.close();
+  }
+});
+
+test("a message composed while the lead ran becomes a follow-up after it completes", () => {
+  const f = fixture();
+  try {
+    const lead = String(f.leadAssignment(taskA)?.id);
+    f.addWork(lead, "work-lead-a", "thread-lead-a", "turn-lead-a");
+    const composed = Number(f.domain.assignment(lead).version);
+    assert.equal(
+      f.coordination.feedbackRecipient(taskA, lead)?.mode,
+      "receives",
+    );
+    f.coordination.recordResult(
+      report("thread-lead-a", "turn-lead-a", "call-lead-result"),
+    );
+    const event = f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: composed,
+      message: "Composed while running.",
+    });
+    assert.equal(event.eventType, "assignment-follow-up");
+    assert.equal(f.domain.assignment(lead).version, composed + 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("operator follow-ups refuse closed tasks, held leads and stale or ambiguous work", () => {
+  const cases: Array<{
+    name: string;
+    arrange: (
+      f: ReturnType<typeof fixture>,
+      lead: ReturnType<typeof completeLead>,
+    ) => void;
+    send?: (lead: ReturnType<typeof completeLead>) => unknown;
+    error: RegExp;
+  }> = [
+    {
+      name: "done task",
+      arrange: (f) =>
+        f.db
+          .prepare("UPDATE domain_tasks SET state='done' WHERE id=?")
+          .run(taskA),
+      error: /task is not open/,
+    },
+    {
+      name: "cancelled task",
+      arrange: (f) =>
+        f.db
+          .prepare("UPDATE domain_tasks SET state='cancelled' WHERE id=?")
+          .run(taskA),
+      error: /task is not open/,
+    },
+    {
+      name: "held lead",
+      arrange: (f, { lead }) =>
+        f.db
+          .prepare("UPDATE domain_assignments SET state='held' WHERE id=?")
+          .run(lead),
+      error: /pending or running/,
+    },
+    {
+      name: "newer work revision",
+      arrange: (f, { lead }) => {
+        f.db
+          .prepare(
+            "INSERT INTO execution_intents (id, workId, prompt, workspace, state, reason, threadId, turnId, accountType, sandbox, approval) VALUES (?, 'work-lead-newer', 'work', '/tmp/work', 'running', NULL, 'thread-lead-a', 'turn-lead-b', 'chatgpt', 'workspaceWrite', 'never')",
+          )
+          .run(nextCommand());
+        const assignment = f.domain.assignment(lead);
+        f.state.bindTask("work-lead-newer", {
+          taskId: taskA,
+          assignmentId: lead,
+          assignmentVersion: Number(assignment.version),
+          instructionsRevision: Number(assignment.instructionsRevision),
+          profileRevision: Number(assignment.profileRevision),
+        });
+        f.db
+          .prepare(
+            "INSERT INTO task_work_revisions (workId, assignmentId, conversationRevision, workRevision) SELECT 'work-lead-newer', assignmentId, conversationRevision, 2 FROM task_work_revisions WHERE workId='work-lead-a'",
+          )
+          .run();
+      },
+      error: /newest unambiguous work/,
+    },
+    {
+      name: "ambiguous work",
+      arrange: (f) =>
+        f.db
+          .prepare(
+            "INSERT INTO task_work_revision_ambiguities (workId, assignmentId, conversationRevision, reason) SELECT workId, assignmentId, conversationRevision, 'test' FROM task_work_revisions WHERE workId='work-lead-a'",
+          )
+          .run(),
+      error: /newest unambiguous work/,
+    },
+    {
+      name: "stale version",
+      arrange: () => undefined,
+      send: ({ message, version }) =>
+        message("Stale", { expectedAssignmentVersion: version + 1 }),
+      error: /version conflict/,
+    },
+    {
+      name: "fabricated reference",
+      arrange: () => undefined,
+      send: ({ message }) =>
+        message("Fabricated", {
+          reference: { resultId: "70000000-0000-4000-8000-000000000001" },
+        }),
+      error: /Feedback result unavailable/,
+    },
+  ];
+  for (const testCase of cases) {
+    const f = fixture();
+    try {
+      const lead = completeLead(f);
+      testCase.arrange(f, lead);
+      const before = lead.snapshot();
+      assert.throws(
+        () => (testCase.send ?? ((l) => l.message("Refused")))(lead),
+        testCase.error,
+        testCase.name,
+      );
+      assert.deepEqual(lead.snapshot(), before, testCase.name);
+      if (!testCase.send)
+        assert.equal(
+          f.coordination.feedbackRecipient(taskA, lead.lead),
+          undefined,
+          testCase.name,
+        );
+    } finally {
+      f.close();
+    }
+  }
+});
+
+test("a lead completed without a recorded result cannot be resumed", () => {
+  const f = fixture();
+  try {
+    const lead = String(f.leadAssignment(taskA)?.id);
+    f.db
+      .prepare("UPDATE domain_assignments SET state='completed' WHERE id=?")
+      .run(lead);
+    assert.equal(f.coordination.feedbackRecipient(taskA, lead), undefined);
+    assert.throws(
+      () =>
+        f.coordination.postOperatorMessage({
+          actor: "operator",
+          key: nextCommand(),
+          taskId: taskA,
+          recipientAssignmentId: lead,
+          expectedAssignmentVersion: 1,
+          message: "No result",
+        }),
+      /newest unambiguous work/,
+    );
+    assert.equal(f.coordination.inboxEvents(lead).length, 0);
+    assert.equal(f.coordination.followUps(taskA).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+/** The lead's first conversation reaches work revision 5 and is then replaced. */
+function replaceLeadConversation(f: ReturnType<typeof fixture>) {
+  const lead = String(f.leadAssignment(taskA)?.id);
+  f.addWork(lead, "work-lead-old", "thread-lead-old", "turn-lead-old");
+  f.db
+    .prepare(
+      "UPDATE task_work_revisions SET workRevision = 5 WHERE workId = 'work-lead-old'",
+    )
+    .run();
+  f.coordination.recordResult(
+    report("thread-lead-old", "turn-lead-old", "call-lead-old"),
+  );
+  f.db
+    .prepare(
+      "UPDATE execution_intents SET state = 'completed' WHERE workId = 'work-lead-old'",
+    )
+    .run();
+  f.state.replaceConversation(lead);
+  return lead;
+}
+
+test("a completed lead resumes from its current conversation after a replacement", () => {
+  const f = fixture();
+  try {
+    const lead = replaceLeadConversation(f);
+    // The new conversation restarts at work revision 1, below the old 5.
+    f.addWork(lead, "work-lead-new", "thread-lead-new", "turn-lead-new");
+    // The old result's self-addressed event is delivered with the new work.
+    if (f.coordination.bindDeliveryBatch(lead, "work-lead-new"))
+      f.coordination.completeDeliveryBatch("work-lead-new");
+    const { result } = f.coordination.recordResult(
+      report("thread-lead-new", "turn-lead-new", "call-lead-new"),
+    );
+    const version = Number(f.domain.assignment(lead).version);
+    assert.equal(
+      f.coordination.feedbackRecipient(taskA, lead)?.mode,
+      "resumes",
+    );
+    const event = f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: version,
+      message: "Continue from the new conversation.",
+    });
+    assert.equal(event.eventType, "assignment-follow-up");
+    assert.equal(f.coordination.followUps(taskA)[0]?.resultId, result.resultId);
+  } finally {
+    f.close();
+  }
+});
+
+test("a replaced conversation without its own result cannot be resumed from the old one", () => {
+  const f = fixture();
+  try {
+    const lead = replaceLeadConversation(f);
+    assert.equal(f.domain.assignment(lead).state, "completed");
+    assert.equal(f.coordination.feedbackRecipient(taskA, lead), undefined);
+    assert.throws(
+      () =>
+        f.coordination.postOperatorMessage({
+          actor: "operator",
+          key: nextCommand(),
+          taskId: taskA,
+          recipientAssignmentId: lead,
+          expectedAssignmentVersion: Number(f.domain.assignment(lead).version),
+          message: "Old conversation only.",
+        }),
+      /newest unambiguous work/,
+    );
+    assert.equal(f.coordination.followUps(taskA).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test("contextual feedback to a completed lead carries its reference on the follow-up", () => {
+  const f = fixture();
+  try {
+    const { result, message } = completeLead(f);
+    const reference = { resultId: result.resultId, workId: "work-lead-a" };
+    const event = message("About this result", { reference });
+    assert.equal(event.eventType, "assignment-follow-up");
+    assert.deepEqual(
+      (JSON.parse(event.payload) as { reference: unknown }).reference,
+      reference,
     );
   } finally {
     f.close();

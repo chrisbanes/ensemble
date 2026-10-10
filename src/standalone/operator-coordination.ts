@@ -477,7 +477,11 @@ function messageSection(
   const messages = view.messages
     .map((message) => {
       const recipient = `<a href="${assignmentHref(message.recipientAssignmentId)}">${escapeHtml(assignmentLabel(message.recipientAssignmentId, domain))}</a>`;
-      const text = message.text ? `: ${escapeHtml(message.text)}` : "";
+      // Legacy pages lack exclusion redaction, so follow-up instructions stay API-only.
+      const text =
+        message.text && message.eventType !== "assignment-follow-up"
+          ? `: ${escapeHtml(message.text)}`
+          : "";
       return `<li>${escapeHtml(message.eventType)} to ${recipient}; ${escapeHtml(message.deliveryState)}${text}.</li>`;
     })
     .join("");
@@ -615,7 +619,7 @@ function assignmentPage(
     .filter((item) => item.recipientAssignmentId === assignmentId)
     .map(
       (item) =>
-        `<li>${escapeHtml(item.eventType)} — ${escapeHtml(item.deliveryState)}${item.text ? `: ${escapeHtml(item.text)}` : ""}.</li>`,
+        `<li>${escapeHtml(item.eventType)} — ${escapeHtml(item.deliveryState)}${item.text && item.eventType !== "assignment-follow-up" ? `: ${escapeHtml(item.text)}` : ""}.</li>`,
     )
     .join("");
   const interactions = [...view.questions, ...view.approvals]
