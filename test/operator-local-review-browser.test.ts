@@ -311,7 +311,11 @@ test("production local review composes exact multi-origin anchors and sends one 
     .getByRole("button", { name: "Save comment", exact: true })
     .click();
   await review.getByText("Unsent private note").waitFor();
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  // Desktop sign-out is in the sidebar account menu.
+  await page
+    .getByRole("button", { name: "Operator account", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
   await signIn(
     page,
     web.origin,

@@ -5,6 +5,7 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { signOutFromSidebar } from "./fixtures/operator-account.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 const test = browserSuite("ui04-search");
 test("shared Search preserves exact historical target, dates, selected focus and both navigation origins across Back/Forward, failures and phone entry", async (_t, j) => {
@@ -313,7 +314,7 @@ test("shared Search preserves exact historical target, dates, selected focus and
         await route.fetch();
         await route.abort("failed");
       });
-    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await signOutFromSidebar(page);
     await page.getByLabel("Password").waitFor();
     assert.equal(new URL(page.url()).search, "");
     await page.getByLabel("Password").fill(web.password);

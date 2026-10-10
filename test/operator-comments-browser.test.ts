@@ -6,6 +6,7 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { signOutFromSidebar } from "./fixtures/operator-account.js";
 
 const test = browserSuite("ui04-comments");
 test("approval-mode exact operator review and unknown remote comment retain original intent through viewing and provider read reconciliation", async (_t, j) => {
@@ -1023,7 +1024,7 @@ test("approval-mode exact operator review and unknown remote comment retain orig
     .getByRole("button", { name: "Refresh source observation", exact: true })
     .evaluate((el) => (el as HTMLElement).click());
   await lateSourceEntry;
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOutFromSidebar(page);
   await page.getByLabel("Password").waitFor();
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();

@@ -1574,3 +1574,23 @@ Consistency pass on 8 October 2026 across `h23qD`–`g5wmIu`:
 
 The file was saved in Pen, reopened and read back. Only the intended scroll
 regions `wHhpl` and `fTREM` clip.
+
+Implementation differences recorded on 9 October 2026 (U2, #836):
+
+- The account label is "Operator" with initials "OP", not a person's name. A
+  session carries no operator name, and the frames' name is an example. The
+  trigger's accessible name is "Operator account".
+- The expired-session entry is the sign-in screen with a status notice rather
+  than a separate screen. It keeps frame `OwZka`'s headline and "Private state
+  cleared" card but not its review-recovery paragraph (that belongs to the
+  review flow). The card's detail adds one sentence: unfinished task input is
+  offered for recovery on this device, because the composer keeps it in the
+  tab under its own recovery prompt.
+- Failed sign-in text uses the brighter destructive foreground so it reads at
+  4.5:1 against the page; the frame's tint is lower contrast.
+- The phone drawer shows the account group as navigation rows plus a Sign out
+  button, with no nested popup. Only the desktop popup is drawn. Sign out from a
+  nested phone screen needs Back first.
+- Unknown `/app/*` addresses are served by the service as the shell with status
+  404 so "Page not found" can render. The Not found header has no divider and,
+  on a phone, keeps its sentence visible because the screen has no other copy.
