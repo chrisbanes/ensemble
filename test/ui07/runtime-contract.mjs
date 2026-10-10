@@ -753,7 +753,7 @@ export async function runQualification(options = {}) {
       await page
         .getByRole("button", { name: "Submit answer", exact: true })
         .click();
-      await page.getByText(/Answer recorded\./).waitFor();
+      await page.getByRole("heading", { name: "Answer recorded" }).waitFor();
     }, "browser-submit-native-answer");
     const sent = commands.filter((c) => c.type === "question.native.answer");
     assert.equal(sent.length, 1);
@@ -851,19 +851,16 @@ export async function runQualification(options = {}) {
             { exact: true },
           )
           .waitFor();
+        // The confirmation card replaces the controls and keeps the exact retained answer.
+        await form.getByText(`Q1 · ${expected}`, { exact: true }).waitFor();
         assert.equal(
           await form
             .getByRole("button", { name: "Submit answer", exact: true })
-            .isDisabled(),
-          true,
+            .count(),
+          0,
         );
-        if (nativeCall.request.questions[0].isOther)
-          assert.equal(await form.getByRole("textbox").inputValue(), expected);
-        else
-          assert.equal(
-            await form.getByRole("radio", { name: /^Local/ }).isChecked(),
-            true,
-          );
+        assert.equal(await form.getByRole("radio").count(), 0);
+        assert.equal(await form.getByRole("textbox").count(), 0);
       }
       assert.equal(commands.length, commandCount);
       evidence.closedQuestionProjection = {
