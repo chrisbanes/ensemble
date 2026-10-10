@@ -19,7 +19,7 @@ jobs:
             runtime: node24
           - job: check-node-26
             runtime: node26
-            node-version: "26.9.0"
+            node-version: "26"
     steps:
       - name: Prepare writable test directories
         env:
@@ -36,7 +36,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           node-version-file: .node-version
           cache: npm
-      - run: npm install --global npm@12.2.0
+      - run: npm install --global "$(node -p 'require("./package.json").packageManager')"
       - run: node --version && npm --version
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit
