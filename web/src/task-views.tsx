@@ -31,6 +31,7 @@ import {
 } from "./task-attention.js";
 import { TaskToolbar } from "./task-filters.js";
 import {
+  columns as allColumns,
   columnCounts,
   filterTasks,
   parseTaskFilters,
@@ -176,16 +177,13 @@ export function TaskBoard({
   tasks: TaskListSummary[];
   columns: readonly TaskColumn[];
   /** The column a State filter names, shown first unless the operator already chose one. */
-  initial: TaskColumn | "";
+  initial: TaskColumn | undefined;
   requests: Requests;
 }) {
   const [stored, updateSelected] = useState<number>(
       () =>
         history.state?.board?.selected ??
-        Math.max(
-          0,
-          columns.findIndex((c) => c === initial),
-        ),
+        (initial ? Math.max(0, columns.indexOf(initial)) : 0),
     ),
     // The visible columns change with the State filter, so a saved index may point past the end.
     selected = Math.min(stored, columns.length - 1);
@@ -302,8 +300,11 @@ export function TaskBoard({
         </Button>
       </div>
       <p className="metadata muted board-footer">
-        Scroll horizontally or choose a column above. Empty columns are
-        collapsed.
+        <span className="board-footer-wide">
+          Scroll horizontally or choose a column above.{" "}
+        </span>
+        <span className="board-footer-narrow">Choose a column above. </span>
+        Empty columns are collapsed.
       </p>
     </div>
   );
@@ -386,9 +387,11 @@ export function TaskViews({
         )}
         {filters.view === "board" ? (
           <TaskBoard
+            // A new State filter picks its column again; other filters keep the operator's tab.
+            key={filters.state}
             tasks={tasks}
             columns={visibleColumns(filters.state)}
-            initial={filters.state as TaskColumn | ""}
+            initial={allColumns.find((c) => c === filters.state)}
             requests={requests}
           />
         ) : (

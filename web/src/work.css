@@ -312,10 +312,8 @@
 }
 
 .task-list[data-density="compact"] .task-row {
-  grid-template-columns: minmax(100px, max-content) 7rem minmax(0, 1fr) minmax(
-      100px,
-      auto
-    ) 16px;
+  /* Fixed tracks so state, next and lead line up from row to row. */
+  grid-template-columns: 14rem 7rem minmax(0, 1fr) 9.5rem 16px;
   grid-template-areas:
     "title title title lead chevron"
     "meta status detail lead chevron";
@@ -328,6 +326,10 @@
   grid-area: chevron;
   width: 16px;
   height: 16px;
+}
+
+.task-list[data-density="compact"] .task-status {
+  align-self: start;
 }
 
 .task-list[data-density="compact"] .task-detail {
@@ -477,6 +479,10 @@
   margin: var(--space-4) 0 0;
 }
 
+.board-footer-narrow {
+  display: none;
+}
+
 /* Between the phone and the sidebar layouts the title keeps at least 200px. */
 @media (min-width: 760px) and (max-width: 1120px) {
   .task-row {
@@ -488,7 +494,7 @@
   }
 
   .task-list[data-density="compact"] .task-row {
-    grid-template-columns: minmax(200px, 1fr) 6rem minmax(7rem, auto) 16px;
+    grid-template-columns: minmax(200px, 1fr) 6rem 9.5rem 16px;
     grid-template-areas:
       "title status lead chevron"
       "meta status lead chevron"
@@ -612,5 +618,13 @@
 
   .phone-column-controls [data-slot="button"] {
     flex: 0 1 auto;
+  }
+
+  .board-footer-wide {
+    display: none;
+  }
+
+  .board-footer-narrow {
+    display: inline;
   }
 }

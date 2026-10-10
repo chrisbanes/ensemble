@@ -16,7 +16,12 @@ import {
   requestMeta,
 } from "./request-presentation.js";
 import type { ResourceState } from "./resource.js";
-import { attentionCandidate, taskColumn, taskDetailHref } from "./tasks.js";
+import {
+  attentionCandidate,
+  isUncertain,
+  taskColumn,
+  taskDetailHref,
+} from "./tasks.js";
 
 export type InboxRead = Awaited<ReturnType<typeof loadInbox>>;
 export type Requests = ResourceState<InboxRead>;
@@ -141,9 +146,11 @@ export function AttentionBar({
 }) {
   const task = attentionCandidate(tasks);
   if (!task) return null;
-  const uncertain =
-      task.attention.codes.includes("execution-uncertain") ||
-      taskColumn(task) === "Uncertain",
+  const uncertain = isUncertain(task),
+    // The same requester the Overview and the Inbox name; never the task lead.
+    requester = requests.data?.items.find(
+      (i) => i.taskId === task.id,
+    )?.requesterName,
     title = task.title ?? "Title unavailable",
     count = inboxSummaryOf(requests)?.count;
   return (
@@ -155,7 +162,7 @@ export function AttentionBar({
         </p>
         <p className="metadata muted">
           {uncertain
-            ? `${task.lead?.name ?? "Responsibility unknown"} · execution may still be active; ownership stays held.`
+            ? `${requester ?? "Responsibility unknown"} · execution may still be active; ownership stays held.`
             : "Next: runtime · confirm execution ended. No operator request recorded."}
         </p>
       </div>

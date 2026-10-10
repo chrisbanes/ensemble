@@ -130,6 +130,10 @@ test("the next actor is derived from recorded attention and state only", () => {
   assert.equal(next({ state: "done" }), "Next: none · no decision");
   assert.equal(next({ state: "cancelled" }), "Next: none · history retained");
   assert.equal(next({}), "No operator decision");
+  // The Uncertain column alone (no attention code) reads the same in the row and the bar.
+  const columnOnly = summary({ execution: "uncertain" });
+  assert.equal(taskNext(columnOnly), "Next: you · inspect execution");
+  assert.equal(attentionCandidate([summary(), columnOnly]), columnOnly);
 });
 
 test("only https source links become anchors", () => {

@@ -86,7 +86,9 @@ export function TaskToolbar({
           </NativeSelect>
         </span>
         {!overview && (
-          <p className="metadata muted work-count">{count} tasks</p>
+          <p className="metadata muted work-count">
+            {count} task{count === 1 ? "" : "s"}
+          </p>
         )}
         <Button
           variant="secondary"

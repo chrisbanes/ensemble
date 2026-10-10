@@ -197,10 +197,16 @@ const nextActions = [
   ["completion-rejected", "review rejected completion"],
   ["lead-review", "review task"],
 ] as const;
+/** One rule for "ownership uncertain", shared by the row, the card and the attention bar. */
+export const isUncertain = (task: TaskListSummary) =>
+  task.attention.codes.includes("execution-uncertain") ||
+  taskColumn(task) === "Uncertain";
 /** Who acts next, from recorded facts only; an attention code always names the operator. */
 export function taskNext(task: TaskListSummary) {
   const action = nextActions.find(([code]) =>
-    task.attention.codes.includes(code),
+    code === "execution-uncertain"
+      ? isUncertain(task)
+      : task.attention.codes.includes(code),
   );
   if (action) return `Next: you · ${action[1]}`;
   const column = taskColumn(task);
@@ -247,10 +253,6 @@ export function taskRouteSubtitle(
 /** The one task the persistent attention summary names: uncertain ownership beats Stopping. */
 export function attentionCandidate(tasks: readonly TaskListSummary[]) {
   const active = tasks.filter((t) => isActiveColumn(taskColumn(t)));
-  const uncertain = active.find(
-    (t) =>
-      t.attention.codes.includes("execution-uncertain") ||
-      taskColumn(t) === "Uncertain",
-  );
+  const uncertain = active.find(isUncertain);
   return uncertain ?? active.find((t) => taskColumn(t) === "Stopping") ?? null;
 }

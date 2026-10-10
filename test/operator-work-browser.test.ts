@@ -255,6 +255,7 @@ test("task rows show state, next actor and lead from recorded facts without raw 
     .waitFor();
   assert.doesNotMatch(await mainText(page), uuidText);
   // The whole row is the title link's target.
+  await row(ids.running.id).scrollIntoViewIfNeeded();
   const box = (await row(ids.running.id).boundingBox())!;
   const at = [box.x + box.width - 8, box.y + box.height / 2] as const;
   assert.equal(
@@ -635,14 +636,17 @@ test("board shows a link bar with every count, collapsed empty columns and drawn
       body: JSON.stringify({ error: { code: "unavailable", message: "x" } }),
     }),
   );
-  await page.reload();
-  await card.waitFor();
-  await card.getByText("Question needs an answer", { exact: true }).waitFor();
-  assert.equal(
-    await card.getByRole("link", { name: "Answer question" }).count(),
-    0,
-  );
-  await page.unroute("**/api/operator/inbox**");
+  try {
+    await page.reload();
+    await card.waitFor();
+    await card.getByText("Question needs an answer", { exact: true }).waitFor();
+    assert.equal(
+      await card.getByRole("link", { name: "Answer question" }).count(),
+      0,
+    );
+  } finally {
+    await page.unroute("**/api/operator/inbox**");
+  }
 
   // Active tasks with only Done added shows the terminal column the filter names.
   await page.goto(`${web.origin}/app/tasks?view=board&state=Done`);
@@ -652,6 +656,32 @@ test("board shows a link bar with every count, collapsed empty columns and drawn
     await bar.getByRole("button", { name: /^Done · 1$/ }).count(),
     1,
   );
+  // Nothing but Done matches, so every other column is empty and collapsed.
+  const empties = await page
+    .locator(".board-column")
+    .evaluateAll((es) =>
+      es.map(
+        (e) =>
+          [
+            e.id,
+            e.getAttribute("data-empty"),
+            e.getBoundingClientRect().width,
+          ] as const,
+      ),
+    );
+  assert.equal(empties.length, 8);
+  for (const [id, empty, width] of empties)
+    if (id === "column-Done") assert.equal(empty, null);
+    else {
+      assert.equal(empty, "true", id);
+      assert.ok(width <= 160, `${id} collapses to ${width}px`);
+    }
+  assert.equal(
+    await page.locator("#column-Ready p").innerText(),
+    "None ready. Held Ready work is in Waiting.",
+  );
+  assert.equal(await page.locator("#column-Paused p").innerText(), "No tasks");
+  await shot(page, "1366-board-collapsed-empty");
   assert.equal(commands(), 0);
 
   await page.setViewportSize(phone);
@@ -708,6 +738,34 @@ test("board shows a link bar with every count, collapsed empty columns and drawn
   assert.equal(await last.innerText(), "9 of 9");
   await bar.getByRole("button", { name: /^Uncertain · / }).click();
   await shot(page, "390-board-uncertain");
+
+  // Choosing a State on an open Board selects that column without a reload; with the
+  // same filter the operator's own tab choice stays.
+  const visible = () =>
+    page
+      .locator(".board-column")
+      .evaluateAll((es) =>
+        es
+          .filter((e) => getComputedStyle(e).display !== "none")
+          .map((e) => e.id),
+      );
+  await page
+    .getByRole("combobox", { name: "State", exact: true })
+    .selectOption("Waiting");
+  await page.waitForURL((u) => u.searchParams.get("state") === "Waiting");
+  assert.deepEqual(await visible(), ["column-Waiting"]);
+  assert.equal(
+    await bar
+      .getByRole("button", { name: /^Waiting · / })
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  await bar.getByRole("button", { name: /^Draft · / }).click();
+  await page
+    .getByRole("combobox", { name: "Project", exact: true })
+    .selectOption(ids.projectId);
+  await page.waitForURL((u) => u.searchParams.get("project") === ids.projectId);
+  assert.deepEqual(await visible(), ["column-Draft"]);
 });
 
 test("attention summary names the uncertain or stopping task and links to the Inbox", async (_t, journey) => {
@@ -719,7 +777,9 @@ test("attention summary names the uncertain or stopping task and links to the In
   await summary.waitFor();
   const text = await summary.innerText();
   assert.match(text, /^Inspect execution · /);
-  assert.match(text, /Responsibility unknown|Accountable lead/);
+  // The requester of the matching Inbox request, as on Overview; never the task lead.
+  assert.match(text, /Responsibility unknown/);
+  assert.doesNotMatch(text, /Accountable lead/);
   assert.equal(await summary.locator("[data-task-id]").count(), 0);
   const action = summary.getByRole("link", {
     name: "Inspect execution",
