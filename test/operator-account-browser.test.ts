@@ -197,6 +197,16 @@ for (const viewport of viewports)
       .getByText("Your session expired. Sign in to continue.")
       .waitFor();
     await notice.getByText("Private state cleared", { exact: true }).waitFor();
+    await notice
+      .getByText(
+        "Unsent local drafts and private reading/navigation state were cleared under the existing session rules.",
+      )
+      .waitFor();
+    await notice
+      .getByText(
+        "Unfinished task input is offered for recovery on this device.",
+      )
+      .waitFor();
     assert.equal(new URL(page.url()).pathname, "/app/tasks/new");
     assert.doesNotMatch(await page.content(), /Private draft title/);
     await captureBrowserEvidence(page, `${viewport.name}-signin-expired`);
@@ -270,6 +280,37 @@ for (const viewport of viewports)
     assert.equal(new URL(page.url()).pathname, "/app");
   });
 
+test("a malformed project id renders Page not found without a task action", async (_t, journey) => {
+  const { web, page } = await launch(journey, viewports[0]);
+  await page.goto(`${web.origin}/app`);
+  await submitPassword(page, web.password);
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.goto(`${web.origin}/app/projects/not-a-uuid`);
+  await page
+    .getByRole("heading", { name: "Page not found", exact: true })
+    .waitFor();
+  await page
+    .getByRole("link", { name: "Go to Overview", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByRole("link", { name: "New task", exact: true }).count(),
+    0,
+  );
+});
+
+test("an unknown settings address keeps the phone menu header, not a detail header", async (_t, journey) => {
+  const { web, page } = await launch(journey, viewports[1]);
+  await page.goto(`${web.origin}/app`);
+  await submitPassword(page, web.password);
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.goto(`${web.origin}/app/settings/typo`);
+  await page
+    .getByRole("heading", { name: "Page not found", exact: true })
+    .waitFor();
+  await page.getByRole("button", { name: "Projects and navigation" }).waitFor();
+  assert.equal(await page.getByRole("link", { name: /^Back to/ }).count(), 0);
+});
+
 test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-out", async (_t, journey) => {
   const { web, page } = await launch(journey, viewports[0]);
   await page.goto(`${web.origin}/app`);
@@ -319,6 +360,13 @@ test("desktop account menu: pointer, keyboard, pending and unknown-outcome sign-
   await captureBrowserEvidence(page, "desktop-account-menu");
   await page.locator("main h1").click();
   await menu.waitFor({ state: "detached" });
+
+  // A pointer-opened menu keeps focus on the trigger; Tab leaves it and closes the menu.
+  await trigger.click();
+  await menu.waitFor();
+  await page.keyboard.press("Tab");
+  await menu.waitFor({ state: "detached" });
+  assert.equal(await trigger.getAttribute("aria-expanded"), "false");
 
   // Keyboard.
   await page.getByRole("link", { name: "New project", exact: true }).focus();
