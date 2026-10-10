@@ -9,7 +9,7 @@
   "packageRules": [
     {
       "description": "Auto-merge non-major updates once required checks pass",
-      "matchUpdateTypes": ["minor", "patch", "digest", "lockFileMaintenance"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
       "automerge": true
     }
   ]
