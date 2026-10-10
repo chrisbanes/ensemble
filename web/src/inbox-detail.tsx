@@ -18,15 +18,19 @@ export function ApprovalDetail({
   client,
   session,
   item,
+  observedAt,
 }: {
   client: OperatorClient;
   session: Session;
   item: InboxItem;
+  /** The Inbox's last successful read; each poll or Refresh rereads the holds. */
+  observedAt: number | null;
 }) {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: observedAt rereads the holds whenever the Inbox poll or Refresh succeeds.
   const loader = useCallback(
       (signal: AbortSignal) =>
         client.read(`/api/operator/tasks/${item.taskId}`, taskSchema, signal),
-      [client, item.taskId],
+      [client, item.taskId, observedAt],
     ),
     resource = useOperatorResource(
       `${session.csrfToken}:inbox-approval:${item.taskId}`,

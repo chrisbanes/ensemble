@@ -532,8 +532,9 @@ function statusNotice(status: string | undefined): Notice | null {
       return {
         title: "Stale request",
         text: "This request was replaced by a newer one. Your answers cannot be submitted to a different revision; review the current request.",
-        label: "Refresh request",
-        action: "refresh",
+        // The stale read cannot name its replacement; the task lists its open requests.
+        label: "Review current requests",
+        action: "task",
       };
     case "cancelled":
       return {

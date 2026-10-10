@@ -482,6 +482,7 @@ export function Inbox({
                   client={client}
                   session={session}
                   item={selected}
+                  observedAt={resource.state.fetchedAt}
                 />
               ) : selected ? (
                 <InterventionDetail item={selected} />

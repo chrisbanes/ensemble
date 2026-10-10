@@ -620,8 +620,8 @@ test("an approval shows its exact action, target and independent holds, and deci
     taskSchema.parse(body);
     await route.fulfill({ response, json: body });
   });
-  await page.reload();
-  await page.locator(".inbox-row").click();
+  // The open approval rereads its holds when the Inbox refreshes, without reselecting it.
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await detail
     .getByText("Execution held (task not ready)", { exact: true })
     .waitFor();
