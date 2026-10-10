@@ -1822,28 +1822,54 @@ nav {
 
 .question-response {
   min-width: 0;
+  container-type: inline-size;
 }
 .question-context {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--space-8);
   align-items: center;
+  margin-bottom: var(--space-12);
 }
 .question-context p {
   flex-basis: 100%;
+  margin: 0;
   overflow-wrap: anywhere;
+}
+/* The Inbox intro already names the requester and links the conversation. */
+.inbox-detail .question-context > p,
+.inbox-detail .question-conversation {
+  display: none;
+}
+.question-notice,
+.question-recorded {
+  margin-bottom: var(--space-12);
+  align-items: flex-start;
+}
+.question-notice > *,
+.question-recorded > * {
+  margin: 0;
 }
 .question-field {
-  border: 1px solid var(--border);
-  padding: 1rem;
-  margin: 0 0 1rem;
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space-16);
   min-width: 0;
-  border-radius: var(--radius);
+  break-inside: avoid;
 }
 .question-field legend {
-  font-weight: 600;
-  padding: 0 0.5rem;
+  float: left;
+  width: 100%;
+  padding: 0;
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
   overflow-wrap: anywhere;
+}
+.question-field legend + * {
+  clear: both;
+}
+.question-constraint {
+  margin: 0 0 var(--space-8);
 }
 .question-field:focus {
   outline: 2px solid var(--ring);
@@ -1856,27 +1882,90 @@ nav {
 textarea[data-auto-grow="true"] {
   resize: none;
 }
+.question-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-8);
+  margin-bottom: var(--space-8);
+}
+/* A choice is a card; the native input stays, drawn as a radio or checkbox beside its label. */
 .question-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-8);
   min-height: 44px;
-  padding: 0.75rem 0;
+  padding: var(--space-12);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  font-size: var(--type-sm);
+  line-height: var(--leading-1-25);
   cursor: pointer;
 }
+.question-option:has(input:checked) {
+  border-color: var(--foreground);
+  outline: 2px solid var(--foreground);
+  outline-offset: -2px;
+}
+/* focus-within, not :focus-visible: WebKit drops focus-visible on a radio after arrow keys. */
+.question-option:focus-within {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px var(--ring);
+}
+.question-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.7;
+}
 .question-option input {
-  min-width: 20px;
-  min-height: 20px;
-  margin-top: 0.15rem;
-  accent-color: var(--primary);
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  border: 1px solid var(--muted-foreground);
+  border-radius: 50%;
+  background: transparent;
+}
+.question-option input[type="checkbox"] {
+  border-radius: 4px;
+}
+.question-option input[type="radio"]:checked {
+  border-color: var(--foreground);
+  background: radial-gradient(circle, var(--foreground) 0 40%, transparent 45%);
+}
+.question-option input[type="checkbox"]:checked {
+  border-color: var(--foreground);
+  background:
+    var(--foreground)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230a0a0a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E")
+    center / 12px no-repeat;
+}
+.question-option input:focus-visible {
+  outline: none;
+}
+@media (forced-colors: active) {
+  .question-option input:checked {
+    background: Highlight;
+    border-color: Highlight;
+  }
+}
+.question-option-text {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.question-option-label {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
 }
 .option-description {
   display: block;
   color: var(--muted-foreground);
 }
 .recommendation {
-  font-size: 0.85em;
-  color: var(--muted-foreground);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-medium);
 }
 .question-content {
   overflow: auto;
@@ -1892,14 +1981,32 @@ textarea[data-auto-grow="true"] {
       var(--operator-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))
     );
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: var(--space-8);
   border-top: 1px solid var(--border);
   background: var(--background);
 }
 .question-submit p {
-  flex-basis: 100%;
   margin: 0;
+}
+.question-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+}
+/* Grouped questions read in two columns where the Inbox detail is wide enough. */
+@container (min-width: 640px) {
+  .inbox-detail .question-content-grouped {
+    column-count: 2;
+    column-gap: var(--space-24);
+  }
+}
+.question-content-grouped {
+  counter-reset: question;
+}
+.question-content-grouped .question-field legend::before {
+  counter-increment: question;
+  content: counter(question) ". ";
 }
 @media (max-width: 700px) {
   .question-content {

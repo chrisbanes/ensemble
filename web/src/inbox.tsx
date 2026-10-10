@@ -269,6 +269,12 @@ export function Inbox({
       `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`,
     );
   };
+  /** After a recorded answer: leave the confirmation without opening another request. */
+  const back = () => {
+    state.selected = null;
+    state.auto = null;
+    navigate("/app/inbox");
+  };
   const clear = () => {
     state.project = "";
     state.kind = "";
@@ -465,6 +471,8 @@ export function Inbox({
                   interactionId={selectedId}
                   states={questions}
                   onRecorded={resource.refresh}
+                  requesterName={selected?.requesterName}
+                  onBack={back}
                 />
               ) : selected?.kind === "approval" ? (
                 <ApprovalDetail

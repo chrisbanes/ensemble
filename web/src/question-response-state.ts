@@ -70,6 +70,8 @@ export class QuestionResponseState {
   /** How the last submission ended; null until one settles. */
   outcome: QuestionOutcome | null = null;
   recordedAt: number | null = null;
+  /** The code behind a failed submission, shown beside the retry. */
+  failureCode: string | null = null;
   constructor(data: QuestionRead["data"]) {
     if (!data.form) throw Error("Unavailable form");
     this.form = structuredClone(data.form);
