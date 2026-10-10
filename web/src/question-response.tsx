@@ -332,7 +332,7 @@ export function QuestionResponse({
                       )}
                       {q.kind === "free-text" ? (
                         <label htmlFor={`${qid}-text`}>
-                          {q.label}
+                          <span className="sr-only">{q.label}</span>
                           <Textarea
                             id={`${qid}-text`}
                             autoGrow
@@ -399,7 +399,10 @@ export function QuestionResponse({
                             ))}
                           </div>
                           {canSupplyCustomText(q) && (
-                            <label htmlFor={`${qid}-custom`}>
+                            <label
+                              htmlFor={`${qid}-custom`}
+                              className="question-custom"
+                            >
                               Custom answer: {q.label}
                               <Textarea
                                 id={`${qid}-custom`}

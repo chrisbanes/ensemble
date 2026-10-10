@@ -1882,6 +1882,11 @@ nav {
 textarea[data-auto-grow="true"] {
   resize: none;
 }
+.question-custom {
+  display: grid;
+  gap: var(--space-4);
+  font-size: var(--type-sm);
+}
 .question-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
