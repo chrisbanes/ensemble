@@ -4,7 +4,7 @@
 the guarded #780 T5 journey at source commit
 `b5b4663da2bd88c801015a1849fd560110fd0a1f`. It follows the
 [published #780 plan](https://github.com/chrisbanes/ensemble/issues/780#issuecomment-6050732630)
-and the [server comparison and turn-capture contract](../SPEC.md#780-server-comparison-and-turn-capture).
+and the [server comparison and turn-capture contract](../SPEC.md#comparisons-and-turn-capture).
 
 ## Source and runtime
 

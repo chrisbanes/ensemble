@@ -4,11 +4,10 @@ status: accepted
 
 # Add Claude Code as a second execution harness
 
-Chris confirmed these decisions on 8 October 2026 under
-[epic #777](https://github.com/chrisbanes/ensemble/issues/777). They amend
-[ADR-1004](1004-standalone-service.md), which deferred Claude for agent execution.
-This records target contracts, not implemented behaviour. Delivery slices,
-sequencing and status live in the epic's sub-issues.
+This amends [ADR-1004](1004-standalone-service.md), which deferred Claude for agent
+execution. These are target contracts; the Claude harness is not implemented.
+Delivery scope and status live under
+[epic #777](https://github.com/chrisbanes/ensemble/issues/777).
 
 ## Selection
 

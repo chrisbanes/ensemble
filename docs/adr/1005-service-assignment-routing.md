@@ -4,9 +4,8 @@ status: accepted
 
 # Route assignments in the service while the project lead retains accountability
 
-On 28 September 2026 Chris confirmed that the project lead remains accountable for
-all task outcomes, using separate per-task conversations with the same lead profile.
-Defer a separate task-owner role. Ensemble service code invokes TypeSafe directly
+The project lead remains accountable for all task outcomes, using separate per-task
+conversations with the same lead profile. Defer a separate task-owner role. Ensemble service code invokes TypeSafe directly
 to recommend assignment assignees from eligible profiles using their capabilities
 and project routing guidance. This avoids a PA agent turn and allows routine
 initial allocation without waking the lead, at the cost of a separate optional
@@ -23,9 +22,8 @@ This supersedes ADR-1001's separate task-owner role and lead-only initial alloca
 as retained by ADR-1004. It does not introduce required development stages or
 weaken admission, permission, writer, completion or recovery rules. TypeSafe access
 requires configured credentials and explicit project opt-in; it does not replace
-Codex's existing operator login. Routing belongs in the first standalone release
-after S01 qualification. The [specification](../SPEC.md),
-[routing design](../design/assignment-routing.md) and
-[acceptance plan](../acceptance.md) define the behavior and required evidence.
-These are accepted requirements, not implemented capabilities or authorization to
-enable API access, run paid inference or alter the installed prototype.
+Codex's existing operator login. Routing belongs in the first standalone release.
+The [specification](../SPEC.md), [routing design](../design/assignment-routing.md)
+and [acceptance plan](../acceptance.md) define the behavior and required evidence.
+This decision does not authorize enabling API access, running paid inference or
+altering the installed prototype.

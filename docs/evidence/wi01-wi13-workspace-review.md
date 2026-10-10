@@ -3,7 +3,7 @@
 **Status: deterministic service and production-browser evidence and the
 granted bounded actual-runtime journey are recorded.** This record follows the
 [#782 implementation plan](https://github.com/chrisbanes/ensemble/issues/782#issuecomment-6059477544)
-and the [#782 implemented behaviour](../SPEC.md#782-workspace-inspection-and-local-review--implemented-behaviour).
+and the [#782 implemented behaviour](../SPEC.md#local-review).
 No release, deployment or cutover is implied.
 
 ## Deterministic evidence

@@ -43,7 +43,7 @@ not assert that every probe ran against one identical configuration.
 
 “Observed” below means reported bounded runtime/fixture evidence. “Failed” retains
 the original tested requirement. “Unproved” means missing qualifying evidence.
-The [28 September contract reset](../adr/1004-standalone-service.md#amendments--28-september-2026)
+The [28 September contract reset](../adr/1004-standalone-service.md#execution-guarantees)
 changes required guarantees, not historical outcomes. The source report's demand
 for outside-read denial and its proposed new login were not adopted by the reset.
 

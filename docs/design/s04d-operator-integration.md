@@ -1,9 +1,8 @@
 # S04d operator integration
 
-Issue [#694](https://github.com/chrisbanes/ensemble/issues/694) completes the
-runtime and coordination operator routes on top of the authenticated local UI
-foundation in [S04c](s04c-operator-ui.md). The production `operator` command
-registers both named route slots with the same `LocalOperatorHttp` instance;
+The runtime and coordination operator routes sit on top of the authenticated
+local UI foundation in [S04c](s04c-operator-ui.md). The production `operator`
+command registers both named route slots with the same `LocalOperatorHttp` instance;
 they therefore inherit its login, exact-Origin, CSRF, input parsing, safe
 redirect and response-header behavior. The adapters receive service/domain
 interfaces, not raw HTTP request or response objects.
@@ -42,7 +41,7 @@ an allowed same-task requester or lead. No live steering is exposed. Operator
 content remains task-scoped and does not display runtime prompts, private
 instructions, workspace paths or credential references.
 
-Approval callbacks now retain canonical JSON material, bounded to 8 KiB, beside
+Approval callbacks retain canonical JSON material, bounded to 8 KiB, beside
 its digest. A decision must match the exact stored material and revision before
 it is recorded. The additive nullable SQLite column preserves legacy open
 approvals; missing legacy material cannot be approved and may only be denied.
@@ -82,13 +81,13 @@ process cleanup. It does not use TypeSafe, alter shared Codex configuration,
 delete provider thread records, deploy, or authorize cutover. Evidence is
 recorded in [`s04d-operator-2026-09-30.md`](../evidence/s04d-operator-2026-09-30.md).
 
-The extended [`test/s04c/private-access.mjs`](../../test/s04c/private-access.mjs)
-also checks the new private Runtime/Coordination reads and a same-origin,
+The [`test/s04c/private-access.mjs`](../../test/s04c/private-access.mjs) proof
+also checks the private Runtime/Coordination reads and a same-origin,
 replayed capacity write, restoring the disposable project's original effective
 limit afterward. It requires an explicitly provisioned disposable HTTPS/Tailscale
 fixture and a passing run from the fixture host through its canonical Tailscale
 HTTPS URL. This proves the private route and browser boundary from that host; it
 does not establish reachability from a separate device. If the fixture or route
-is absent, the proof is unproved and #694 remains incomplete. The test does not
+is absent, the proof is unproved. The test does not
 create, replace or remove persistent Tailscale Serve configuration; neither this
 proof nor the loopback proof authorizes deployment or cutover.

@@ -1,28 +1,21 @@
 ---
 status: accepted
-partially_superseded_by: [ADR-1004, ADR-1005]
+partially_superseded_by: [ADR-1003, ADR-1004, ADR-1005]
 ---
 
 # Build Ensemble around agent coordination
 
-BB ownership and integration choices below are superseded by
-[ADR-1004](1004-standalone-service.md). Other product policies remain in force.
-The following text records the earlier decision.
-
-The intermediate host-independent-core decision is recorded in
-[ADR-1003](1003-host-independent-core.md). ADR-1004 subsequently removes BB;
-use the current specification for retained product policies.
+Superseded in part: [ADR-1003](1003-host-independent-core.md) and
+[ADR-1004](1004-standalone-service.md) replace the BB hosting, identity and
+integration choices; [ADR-1005](1005-service-assignment-routing.md) replaces the
+separate task-owner role and lead-only initial allocation. Other product policies
+remain in force.
 
 Ensemble is a BB plugin where agents organise work through instructions
 and runtime tools. Agents decide how to plan, implement, review, and revise work;
 Ensemble owns durable coordination and its recovery; BB provides agent execution. This
 allows the process to adapt to each task, at the cost of a predetermined sequence
 of steps.
-
-The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
-separate task-owner accountability and lead-only initial allocation where described
-here. Project leads retain accountability; the service may route assignments
-directly. Existing admission, execution and recovery obligations remain.
 
 ## Product shape
 
@@ -180,13 +173,10 @@ Build from a minimal scaffold in the existing repository, retaining Git history
 and the Apache-2.0 license. Pipeline assumptions span the previous execution,
 recovery, approvals, and publication code; an incremental replacement would carry
 those assumptions forward or require maintaining two execution models. The
-previous implementation is preserved on `cb/pipeline-implementation` at `272adb7`;
-new work is on `cb/agent-coordination`. Reuse code only when concrete needs justify it.
+previous implementation is preserved on `cb/pipeline-implementation` at `272adb7`.
+Reuse code only when concrete needs justify it.
 
 Existing configuration and persisted runs have no compatibility requirement.
 Finish or explicitly retire existing runs before operational cutover. Select
 Node.js and tooling versions, persistence schemas, plugin packaging and protocols,
 and credential handling during implementation design, without recreating a configured process graph.
-
-This is the accepted target architecture. See the README and
-[BB prototype](../bb-prototype.md) for implemented scope and validation limits.

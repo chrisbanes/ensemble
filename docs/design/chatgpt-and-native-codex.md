@@ -1,17 +1,15 @@
 # ChatGPT and native Codex integration
 
-The 1 October 2026 amendment to
-[ADR-1006](../adr/1006-chatgpt-and-native-codex.md) defers X01–X05 after the standalone
-MVP and supersedes the original first-release requirement. Planning, probes and
-implementation are paused until Chris explicitly reopens the work and current
-APIs, requirements and dependencies are revalidated. This document retains future
-behaviour and evidence gaps. Neither integration is implemented or qualified;
-X01–X08 do not gate MVP release or cutover. GitHub issues under
-[epic #734](https://github.com/chrisbanes/ensemble/issues/734) own
-delivery sequencing and slice completion; this document is not a delivery plan.
-[Native feasibility #724](https://github.com/chrisbanes/ensemble/issues/724) owns
-the bounded proof; [integration qualification #728](https://github.com/chrisbanes/ensemble/issues/728)
-owns the future assembled integration evidence.
+[ADR-1006](../adr/1006-chatgpt-and-native-codex.md) defers both integrations
+until after the standalone MVP. Planning, probes and implementation are paused
+until Chris explicitly reopens the work and current APIs, requirements and
+dependencies are revalidated. This document retains future behaviour and evidence
+gaps. Neither integration is implemented or qualified; X01–X08 do not gate MVP
+release or cutover. GitHub issues under
+[epic #734](https://github.com/chrisbanes/ensemble/issues/734) own delivery scope;
+[native feasibility #724](https://github.com/chrisbanes/ensemble/issues/724) owns
+the bounded proof and [integration qualification #728](https://github.com/chrisbanes/ensemble/issues/728)
+the assembled integration evidence.
 
 ## Operator experience
 
@@ -77,7 +75,7 @@ service integration. GitHub inbound discovery webhooks remain deferred.
 
 ## Native Codex tasks and ownership
 
-Saved Codex project placement/linkage is optional under Chris's 1 October amendment.
+Saved Codex project placement/linkage is optional.
 No saved-project create/list/select/assign API is required. A task keeps
 its Ensemble identity and main lead conversation; assignments bind to worker
 threads and may continue across replacement conversations. Preserve native host,
@@ -102,12 +100,12 @@ report the limitation instead of claiming that a UI button enforces ownership.
 
 ## Feasibility boundary
 
-At the initial investigation on 30 September, App Server documented persistent
-thread creation with cwd, history and lifecycle notifications, but did not establish
-a saved desktop-project API or native placement of independently created threads.
-Its thread listing distinguishes appServer sources from the default interactive
-sources. Codex's project-aware app tools are host-mediated; their presence in an
-agent session does not establish a supported standalone API.
+When last investigated, App Server documented persistent thread creation with cwd,
+history and lifecycle notifications, but did not establish a saved desktop-project
+API or native placement of independently created threads. Its thread listing
+distinguishes appServer sources from the default interactive sources. Codex's
+project-aware app tools are host-mediated; their presence in an agent session does
+not establish a supported standalone API.
 
 When reopened, the bounded native proof must create a new task in a disposable
 local repository/worktree, verify actual native visibility/opening and worker

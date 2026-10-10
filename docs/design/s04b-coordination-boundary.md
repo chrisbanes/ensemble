@@ -1,10 +1,10 @@
 # S04b coordination boundary
 
-S04b connects the standalone domain, scheduler, execution state, Codex dynamic
-tools, and a task-scoped operator-facing facade. The service owns durable
-coordination effects; runtime history is not used to infer results, recipients,
-approvals, or completion. The deterministic contract is covered by SQLite-backed
-tests. The [bounded live probe](../evidence/s04b-live-runtime-2026-09-29.md)
+The coordination boundary connects the standalone domain, scheduler, execution
+state, Codex dynamic tools, and a task-scoped operator-facing facade. The service
+owns durable coordination effects; runtime history is not used to infer results,
+recipients, approvals, or completion. The deterministic contract is covered by
+SQLite-backed tests. The [bounded live probe](../evidence/s04b-live-runtime-2026-09-29.md)
 observed registered tools on resumed lead and worker threads after service/App
 Server restart. This establishes the tested journey only, not universal runtime
 reattachment.
@@ -92,9 +92,10 @@ dispatch; if routing commits first, the scheduler's ordinary admission recheck
 still prevents a held turn from starting.
 
 TypeSafe is called only through an injected narrow client and explicit project
-opt-in. Routing remains disabled when credentials/client are unavailable; this
-slice requires neither credentials nor a paid provider call. The deterministic
-fake proves routing contracts, not provider quality, calibration, or cost.
+opt-in. Routing remains disabled when credentials/client are unavailable, so the
+deterministic contract needs neither credentials nor a paid provider call. The
+deterministic fake proves routing contracts, not provider quality, calibration,
+or cost.
 
 ## Operator-facing boundary and evidence
 
@@ -102,8 +103,9 @@ fake proves routing contracts, not provider quality, calibration, or cost.
 does not own HTTP, authentication, sessions, or shared navigation. The
 `test/s04b/local-view.mjs` probe starts a read-only ephemeral loopback server with
 a disposable database and fake runtime; it is test-only and does not add a
-production route. `src/standalone/operator.ts` remains outside S04b ownership;
-#703 owns shared authentication and UI, and #694 owns final runtime/UI assembly.
+production route. Authentication, sessions and shared navigation belong to the
+operator HTTP layer ([S04c](s04c-operator-ui.md)); the production runtime and
+coordination routes are assembled in [S04d](s04d-operator-integration.md).
 
 The opt-in `npm run s04b:live` probe uses the real Codex App Server, a temporary
 service database/workspace, disabled routing, and no TypeSafe client. It records

@@ -1,13 +1,18 @@
 # UI03 task views and composer
 
-Delivery UI03 #741 adds the `/app` attention preview, `/app/tasks` and `/app/projects/:id` List/Board views, and `/app/tasks/new`. One complete aggregate feeds both presentations and their shared URL filters. Rows and cards open the existing `/task/:id`; Inbox links `/coordination`. Project controls, local task configuration, Runtime and Coordination remain operational. UI04 #742, UI05 #743 and UI06 #744 retain their replacement responsibilities; UI07 and parent #736 acceptance remain separate.
+The React operator provides the `/app` attention overview, `/app/tasks` and
+`/app/projects/:id` List/Board views, and the `/app/tasks/new` composer. One
+complete aggregate feeds both presentations and their shared URL filters. Rows and
+cards open the task workspace at `/app/tasks/:id`; Inbox is `/app/inbox`. Project
+controls, local task configuration, Runtime and Coordination remain reachable at
+their retained destinations.
 
-The 3 October 2026 [operator UX refinement](../SPEC.md#operator-interface-and-human-requests)
-adds requirements for evidence-backed next actors, separate attention and work
-state, and progressive composer disclosure. The [reviewed design handoff](../../design/DESIGN.md#approved-refinement-brief--3-october-2026)
-records the completed Pen revision and its static review. The delivery record below and existing evidence
-do not establish implementation or qualification of those refinements. The board
-mapping and command/admission contracts remain unchanged.
+The [operator interface requirements](../SPEC.md#operator-interface-and-human-requests)
+call for evidence-backed next actors, separate attention and work state, and
+progressive composer disclosure; the [design handoff](../../design/DESIGN.md)
+records the static Pen design. The qualification evidence for the views below does
+not establish implementation or qualification of those refinements. The board
+mapping and command/admission contracts are unchanged by them.
 
 ## Creation and admission
 
@@ -25,7 +30,7 @@ The client rejects malformed pages, changed fingerprints, duplicate/nonadvancing
 
 `GET /api/operator/projects/:id/composer-options` projects the current safe project lead, active permitted profiles, existing same-project dependency candidates, capacity observations and routing mode. Project switching clears selections and aborts obsolete options. The server validates policy again at submission, so a revoked choice fails atomically while input remains editable.
 
-New projections reuse global retained-revision and task-specific private exclusions, including the existing 128-revision lookup budget. Unavailable privacy context omits prose while retaining safe identities/status. Task lead uses the retained same-task/project binding and its captured profile revision/name; only an absent binding falls back to the current configured project lead. Renaming/reconfiguring a project does not change that task identity or result recipient.
+Projections reuse global retained-revision and task-specific private exclusions, including the existing 128-revision lookup budget. Unavailable privacy context omits prose while retaining safe identities/status. Task lead uses the retained same-task/project binding and its captured profile revision/name; only an absent binding falls back to the current configured project lead. Renaming/reconfiguring a project does not change that task identity or result recipient.
 
 ## Attention and Board
 
@@ -41,8 +46,8 @@ Every first or deliberate reconciliation POST requires successful frozen-record 
 
 Pending/unknown input cannot edit, rekey, change project or start another creation. Unknown survives subsequent authentication, permission, availability, validation and conflict failures. Only an exact original receipt matching kind/key/task/project/open/ready/final-version confirms it. No automatic replay occurs. Restoration happens after authentication; expiry/sign-out unmount private UI. This is same-tab on-device recovery, not durable Ensemble work or cross-device storage. No credential, session/CSRF token or fetched API cache is stored.
 
-The existing guarded listener owns Host, exact Origin, sessions, CSRF, strict JSON/byte bounds and same-origin assets/APIs. This delivery adds no deployment, credentials, actual model call, native structured-input availability or release/cutover claim. Qualification is recorded in [UI03 evidence](../evidence/ui03-tasks.md).
+The existing guarded listener owns Host, exact Origin, sessions, CSRF, strict JSON/byte bounds and same-origin assets/APIs. The task views and composer make no deployment, credential, model-call, native structured-input or release/cutover claim. Qualification is recorded in [UI03 evidence](../evidence/ui03-tasks.md).
 
 ## Shared command implementation
 
-The composer and private configuration now share immutable submission ownership, send admission and outcome settlement. Task receipt identity and verified same-tab recovery remain composer policy. Unmounting invalidates completion effects while leaving the frozen unknown record available to the next authenticated mount; reconciliation remains deliberate. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.
+The composer and private configuration share immutable submission ownership, send admission and outcome settlement. Task receipt identity and verified same-tab recovery remain composer policy. Unmounting invalidates completion effects while leaving the frozen unknown record available to the next authenticated mount; reconciliation remains deliberate. See [command lifecycle evidence](../evidence/ui-command-lifecycle.md) for executed proofs and limits.

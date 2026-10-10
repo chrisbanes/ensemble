@@ -1,16 +1,15 @@
 # Run GitHub Project
 
-Project metadata is retained from the previous implementation. Verify it and merge
-requirements against live GitHub state before execution. The TypeScript implementation runs the `check` job in `.github/workflows/ci.yml`;
-required checks must still be verified from the target branch's live protection
-rules and rulesets.
+Verify this Project metadata and the merge requirements against live GitHub state
+before execution. The TypeScript implementation runs the `check` job in
+`.github/workflows/ci.yml`; required checks must still be verified from the target
+branch's live protection rules and rulesets.
 
 The [standalone delivery issues](https://github.com/chrisbanes/ensemble/issues/649) own current
 scope, sequencing and slice completion criteria; native dependencies govern dispatch.
-They supersede the BB delivery architecture. Do not maintain a parallel repo delivery plan.
-Before dispatching a historical T01–T12 ticket, reconcile its live scope and
-capability dependencies with S01–S08. A stale ready label does not authorize
-implementing the retired BB path. This note does not change remote Project state.
+Do not maintain a parallel repo delivery plan. A stale ready label on a historical
+T01–T12 ticket does not authorize implementing the retired BB path: reconcile its
+live scope and capability dependencies with the delivery issues before dispatch.
 
 ## Repository
 
@@ -71,7 +70,6 @@ implementing the retired BB path. This note does not change remote Project state
 - Required checks: Resolve from the target branch's live protection rules and
   rulesets before execution; do not assume an empty set while new CI is pending.
 - Done automation: `set-status`
-- Automation description: Enabled Project workflows `Item closed` and
-  `Pull request merged`; verified that merged-and-closed issue #182 moved from
-  `In progress` to `Done` through `github-project-automation` and remained
-  unarchived.
+- Automation description: Project workflows `Item closed` and `Pull request merged`
+  are enabled; a merged-and-closed issue moves from `In progress` to `Done`
+  through `github-project-automation` and remains unarchived.

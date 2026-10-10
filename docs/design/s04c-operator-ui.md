@@ -1,19 +1,15 @@
-# S04c authenticated operator UI foundation
+# S04c authenticated operator foundation
 
-This document records the #703 starting boundary. Issue #694 supersedes its
-statements that runtime and coordination pages are unavailable; the current
-production integration and bounded evidence are described in
-[`s04d-operator-integration.md`](s04d-operator-integration.md).
-
-Issue [#703](https://github.com/chrisbanes/ensemble/issues/703) implements the
-independent login, session and request boundary, a shared server-rendered shell,
-and the initial project/profile/routing/local-task forms. This is a bounded
-operator foundation, not the complete first-release operator UI in
-[`SPEC.md`](../SPEC.md) or [`acceptance.md`](../acceptance.md). The standalone
-service already provides local scheduler admission and execution supervision
-through S03b; this #703 slice adds no operator scheduler controls, runtime
-history, or coordination presentation. Its task forms configure readiness and
-project pause, while the scheduler continues to enforce those settings.
+This document covers the operator login, session and request boundary and the
+shared server-rendered shell with the project/profile/routing/local-task forms.
+The runtime and coordination pages registered on the same listener are described
+in [`s04d-operator-integration.md`](s04d-operator-integration.md); the React
+operator served at `/app` is described in [`ui02-foundation.md`](ui02-foundation.md).
+This is the authentication and request contract, not the complete first-release
+operator UI in [`SPEC.md`](../SPEC.md) or [`acceptance.md`](../acceptance.md).
+Task forms configure readiness and project pause, while the scheduler continues to
+enforce those settings; configuration eligibility does not prove runtime
+admission or execution.
 
 ## Login and session lifecycle
 
@@ -76,18 +72,14 @@ redirect and receive the shared response headers and shell.
 
 The HTTP `/command` allowlist is deliberately limited to
 `project.create/configure`, `profile.create/configure`, `routing.configure`, and
-`task.create/configure`. Assignment, dependency, imported-blocker, execution,
-recovery and other #694 controls are not web commands. The underlying domain
-service retains its own command contract; this allowlist is the boundary for the
-operator web surface, not a duplicate domain or command implementation.
+`task.create/configure`. Assignment, dependency, imported-blocker, execution and
+recovery controls are not `/command` commands; runtime and coordination controls
+use their own guarded extension routes. The underlying domain service retains its
+own command contract; this allowlist is the boundary for the operator web
+surface, not a duplicate domain or command implementation.
 
-At the #703 boundary, views supported project/profile setup, routing
-configuration, and local-task create/edit/read. Credential references were not
-rendered back. Runtime and coordination pages, assignment history, dependency
-controls and recovery presentation were unavailable. Issue #694 adds those
-operator routes without changing this original slice's authentication
-contract. Task readiness and configuration eligibility still do not prove
-runtime admission or execution.
+The built-in views support project/profile setup, routing configuration, and
+local-task create/edit/read. Credential references are never rendered back.
 
 ## Verification boundary
 

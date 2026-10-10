@@ -5,14 +5,11 @@ partially_superseded_by: [ADR-1004, ADR-1005]
 
 # Keep Ensemble's core independent of its host
 
-The 28 September [ADR-1005](1005-service-assignment-routing.md) supersedes
-separate task-owner accountability and lead-only initial allocation where described
-here. Project leads retain accountability; the service may route assignments
-directly. Existing admission, execution and recovery obligations remain.
-
-BB ownership and integration choices below are superseded by
-[ADR-1004](1004-standalone-service.md). Other product policies remain in force.
-The following text records the earlier decision.
+Superseded in part: [ADR-1004](1004-standalone-service.md) removes BB and the
+host-adapter model for execution, workspaces, UI, capacity and cleanup;
+[ADR-1005](1005-service-assignment-routing.md) replaces the separate task-owner
+role and lead-only initial allocation. The portable identities, SQLite ownership
+and other product policies remain in force.
 
 Ensemble owns project and task identities, assignments, policy, durable
 coordination, results, and recovery decisions in a host-independent core. BB
@@ -55,7 +52,3 @@ model, reasoning, permission, or environment choices have universal equivalents.
 This supersedes ADR-1001's choice to use BB project identities as Ensemble's
 identities and its framing of the product as intrinsically a BB plugin. Its
 agent-led coordination model and other product policies remain in force.
-This is an accepted design direction, not an implementation claim or permission
-to resume product implementation. The technical design, acceptance plan, and
-delivery plan describe the target boundaries; detailed implementation and live
-capability evidence remain subject to the existing planning and release gates.
