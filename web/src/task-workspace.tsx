@@ -1567,8 +1567,10 @@ export function TaskWorkspace({
             <div key={m.eventId} data-record-id={m.eventId}>
               <p>
                 {m.eventType}
-                {m.requester ? ` · requested by ${m.requester}` : ""} ·{" "}
-                {m.deliveryState} · {date(m.createdAt)}
+                {m.requester
+                  ? ` · requested by ${m.requester === "assignment" ? "agent" : "operator"}`
+                  : ""}{" "}
+                · {m.deliveryState} · {date(m.createdAt)}
               </p>
               <Literal text={m.text} />
               {m.questionAnswers &&

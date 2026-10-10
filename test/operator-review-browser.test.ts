@@ -944,6 +944,10 @@ test("every lead composer shows the same resume line for a completed lead and ke
     "Please review evidence artifact Lead screenshot.",
   );
   assert.ok(followUp?.reference?.artifactId);
+  await page
+    .getByText(/assignment-follow-up · requested by operator ·/)
+    .first()
+    .waitFor();
   assert.equal(f.service.domain().task(a.taskId).state, "open");
   assert.deepEqual(pageErrors, []);
 });

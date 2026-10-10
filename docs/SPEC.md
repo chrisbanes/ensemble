@@ -797,10 +797,12 @@ Implemented contract details:
   Replay returns the same receipt.
 - Refusals for a completed lead are definitive 409s: `conflict` for messages
   (`Follow-up unavailable: task is not open`, `Follow-up unavailable: latest
-  result is not the newest unambiguous work`, `Follow-up unavailable: latest
-  result already has a follow-up`, or the existing pending-or-running
-  refusal for a held lead or non-lead) and `local-review-recipient-unavailable`
-  for reviews.
+  result is not the newest unambiguous work`, or the existing
+  pending-or-running refusal for a held lead or non-lead) and
+  `local-review-recipient-unavailable` for reviews. A defensive guard also
+  refuses a result that already has a follow-up (`Follow-up unavailable: latest
+  result already has a follow-up`); every follow-up advances the assignment
+  version, so this is not expected to occur.
 - The operator task read adds optional `leadFeedback`: `mode` is `receives`,
   `resumes` or `unavailable`, computed by the same rule that accepts the send,
   and `awaitingRecoveryMessage` is true while an ordinary operator message to

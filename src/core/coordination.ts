@@ -4061,6 +4061,7 @@ export class CoordinationStore {
         refusal:
           "Follow-up unavailable: latest result is not the newest unambiguous work",
       };
+    // Defensive: a follow-up advances the version, so its result is no longer resumable.
     if (
       this.one(
         "SELECT 1 AS prior FROM coordination_follow_ups WHERE resultId = ?",
