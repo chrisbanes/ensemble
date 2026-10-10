@@ -5,6 +5,7 @@ import {
   captureBrowserEvidence,
   type BrowserJourney,
 } from "./fixtures/browser-diagnostics.js";
+import { signOutFromSidebar } from "./fixtures/operator-account.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { taskSchema, type TaskRead } from "../src/operator/contracts.js";
 import {
@@ -477,7 +478,7 @@ test("sign-out clears the Inbox filters and in-memory selection; the header is n
     await page.locator(".page-header-title p").textContent(),
     "3 unresolved across 3 projects",
   );
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOutFromSidebar(page);
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();

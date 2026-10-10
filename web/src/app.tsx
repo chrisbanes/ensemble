@@ -13,11 +13,11 @@ import {
   useMemo,
   useState,
   useRef,
-  type FormEvent,
   type ReactNode,
 } from "react";
 import {
   Folder,
+  Gauge,
   InboxIcon,
   LayoutDashboard,
   ListChecks,
@@ -36,7 +36,6 @@ import { useOperatorResource } from "./resource.js";
 import {
   ActionLink,
   Button,
-  TextField,
   StatusBadge,
   ResourceStatus,
   MobileNavigation,
@@ -58,6 +57,9 @@ import { Search, SearchState } from "./search.js";
 import { TaskWorkspace } from "./task-workspace.js";
 import { TaskWorkspaceStates } from "./task-workspace-state.js";
 import { TaskViews } from "./task-views.js";
+import { Login, SignInBootstrap } from "./sign-in.js";
+import { NotFound, notFoundSubtitle } from "./not-found.js";
+import { AccountMenu, OPERATOR_LABEL } from "./account-menu.js";
 function RouteLink({
   href,
   current,
@@ -217,29 +219,39 @@ function ProjectNavigation({
     </nav>
   );
 }
-function AccountFooter({
+/** Phone drawer account group: always visible rows, since no popup is nested in the Sheet. */
+function AccountRows({
   path,
   navigate,
-  row,
   pending,
   onSignOut,
 }: {
   path: string;
   navigate: (path: string) => void;
-  row: boolean;
   pending: boolean;
   onSignOut: () => void;
 }) {
+  const pathname = path.split(/[?#]/)[0];
   return (
-    <section className="account-footer" aria-label="Account">
+    <section className="account-rows" aria-label="Account">
+      <p className="metadata muted">Signed in as {OPERATOR_LABEL}</p>
       <RouteLink
         href="/app/settings"
-        current={path.split("?")[0] === "/app/settings"}
+        current={pathname === "/app/settings"}
         navigate={navigate}
         icon={<Settings {...navIcon} />}
-        row={row}
+        row
       >
         Settings
+      </RouteLink>
+      <RouteLink
+        href="/app/settings/runtime"
+        current={pathname === "/app/settings/runtime"}
+        navigate={navigate}
+        icon={<Gauge {...navIcon} />}
+        row
+      >
+        Runtime
       </RouteLink>
       <Button variant="secondary" disabled={pending} onClick={onSignOut}>
         <LogOut aria-hidden="true" />
@@ -276,60 +288,29 @@ function parentRoute(
     return { href: "/app/settings", label: "Settings" };
   return null;
 }
-export function Login({
-  client,
-  session,
-  onSignedIn,
-}: {
-  client: OperatorClient;
-  session: Session;
-  onSignedIn: (s: Session) => void;
-}) {
-  const [password, setPassword] = useState(""),
-    [pending, setPending] = useState(false),
-    [error, setError] = useState(false);
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    setPending(true);
-    setError(false);
-    try {
-      onSignedIn(await client.login(password, session.csrfToken));
-      setPassword("");
-    } catch {
-      setError(true);
-      setPassword("");
-    } finally {
-      setPending(false);
-    }
-  }
+/**
+ * Whether an `/app` address matches a client route; mirrors the view chosen in `App` and the
+ * service's `shell()` routes. Task ids are not checked here: the task workspace owns its own
+ * not-found state for a malformed id.
+ */
+function knownRoute(pathname: string) {
+  const id = "[a-f0-9-]{36}";
   return (
-    <main className="login">
-      <div className="login-content">
-        <p className="wordmark feature-heading">Ensemble</p>
-        <h1 className="page-heading">Sign in</h1>
-        <p className="introduction muted">Your operator workspace.</p>
-        <form onSubmit={submit}>
-          <TextField
-            label="Password"
-            id="password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            disabled={pending}
-          />
-          {error && (
-            <p className="body error-text" role="alert">
-              Sign in failed. Try again.
-            </p>
-          )}
-          <Button type="submit" disabled={pending}>
-            {pending ? "Signing in…" : "Sign in"}
-          </Button>
-        </form>
-      </div>
-    </main>
+    [
+      "/app",
+      "/app/tasks",
+      "/app/tasks/new",
+      "/app/inbox",
+      "/app/search",
+      "/app/settings",
+      "/app/settings/runtime",
+      "/app/settings/projects/new",
+      "/app/settings/profiles/new",
+    ].includes(pathname) ||
+    /^\/app\/tasks\/[^/]+$/.test(pathname) ||
+    new RegExp(`^/app/projects/${id}$`).test(pathname) ||
+    new RegExp(`^/app/assignments/${id}/recovery$`).test(pathname) ||
+    new RegExp(`^/app/(?:projects|profiles)/${id}/settings$`).test(pathname)
   );
 }
 export function App() {
@@ -356,7 +337,8 @@ export function App() {
     [navigationVersion, setNavigationVersion] = useState(0),
     [drawer, setDrawer] = useState(false),
     [logoutPending, setLogoutPending] = useState(false),
-    [logoutNotice, setLogoutNotice] = useState<string | null>(null);
+    [logoutNotice, setLogoutNotice] = useState<string | null>(null),
+    [expiredNotice, setExpiredNotice] = useState(false);
   const searchState = useRef(new Map<string, SearchState>());
   const taskStates = useRef(new TaskWorkspaceStates());
   const questionStates = useRef(new QuestionResponseStates());
@@ -374,6 +356,7 @@ export function App() {
     inboxState.current.clear();
     searchState.current.clear();
     setSession(null);
+    setExpiredNotice(true);
     setBootstrap((v) => v + 1);
     setDrawer(false);
   }, []);
@@ -408,6 +391,7 @@ export function App() {
         acceptedIdentity.current = identity;
         setLogoutPending(false);
       }
+      if (next.authenticated) setExpiredNotice(false);
       setSession(next);
     },
     [client],
@@ -556,7 +540,16 @@ export function App() {
     document.addEventListener("click", click);
     return () => document.removeEventListener("click", click);
   }, []);
-  const pathname = path.split(/[?#]/)[0] ?? "/app";
+  const addressPath = path.split(/[?#]/)[0] ?? "/app";
+  // A signed-in visit to /login lands on Overview, like the legacy server's redirect.
+  const pathname =
+    addressPath === "/login" && session?.authenticated ? "/app" : addressPath;
+  useEffect(() => {
+    if (pathname !== addressPath) {
+      history.replaceState({ ...history.state }, "", "/app");
+      setPath("/app");
+    }
+  }, [pathname, addressPath]);
   const navigate = (next: string) => {
     history.replaceState({ ...history.state, scrollY }, "");
     history.pushState(
@@ -583,25 +576,10 @@ export function App() {
   };
   if (!session)
     return (
-      <main className="login">
-        <div className="login-content">
-          <h1 className="page-heading">Ensemble</h1>
-          {bootstrapError ? (
-            <>
-              <p role="alert" className="body">
-                Sign-in service unavailable.
-              </p>
-              <Button onClick={() => setBootstrap((v) => v + 1)}>
-                Try again
-              </Button>
-            </>
-          ) : (
-            <p role="status" className="body">
-              Loading sign-in…
-            </p>
-          )}
-        </div>
-      </main>
+      <SignInBootstrap
+        unavailable={bootstrapError}
+        retry={() => setBootstrap((v) => v + 1)}
+      />
     );
   if (!session.authenticated)
     return (
@@ -610,6 +588,7 @@ export function App() {
           key={session.csrfToken}
           client={client}
           session={session}
+          expired={expiredNotice}
           onSignedIn={(next) => {
             if (pathname === "/login") {
               history.replaceState(null, "", "/app");
@@ -631,12 +610,14 @@ export function App() {
     activeSearch = new SearchState();
     searchState.current.set(entryKey, activeSearch);
   }
-  const projectId = pathname.match(/^\/app\/projects\/([^/]+)$/)?.[1];
+  const projectId = pathname.match(/^\/app\/projects\/([a-f0-9-]{36})$/)?.[1];
   const project = workspace.state.data?.data.projects.find(
     (p) => p.id === projectId,
   );
-  const title =
-    pathname === "/app/search"
+  const unknownRoute = !knownRoute(pathname);
+  const title = unknownRoute
+    ? "Page not found"
+    : pathname === "/app/search"
       ? "Search"
       : pathname === "/app"
         ? "Overview"
@@ -654,23 +635,7 @@ export function App() {
                   : pathname.startsWith("/app/settings") ||
                       pathname.endsWith("/settings")
                     ? "Settings"
-                    : projectId
-                      ? (project?.name ?? "Project")
-                      : "Page not found";
-  const destination =
-    projectId && project
-      ? `/project/${project.id}`
-      : pathname === "/app/inbox"
-        ? "/coordination"
-        : "/";
-  const description =
-    pathname === "/app/inbox"
-      ? "Questions, approvals and task coordination are available in the existing operator."
-      : pathname === "/app/settings"
-        ? "Project, profile, routing and source settings are available in the existing operator."
-        : projectId
-          ? "Task and project controls are available in the existing operator."
-          : "Choose a project to open its current controls.";
+                    : (project?.name ?? "Project");
   const query = path.includes("?") ? path.slice(path.indexOf("?")) : "";
   const inboxCount =
     (onInboxRoute ? inboxRouteSummary : inboxSummaryOf(inboxSummary.state))
@@ -679,13 +644,15 @@ export function App() {
   const taskRoute =
     pathname === "/app" || pathname === "/app/tasks" || Boolean(projectId);
   const newTaskHref = `/app/tasks/new${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
-  const headerSubtitle = taskRoute
-    ? projectId
-      ? "Tasks in this project. Readiness, source status and execution are separate."
-      : "Tasks across your projects. Action requests and ordinary progress remain distinct."
-    : onInboxRoute && inboxRouteSummary
-      ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
-      : undefined;
+  const headerSubtitle = unknownRoute
+    ? notFoundSubtitle
+    : taskRoute
+      ? projectId
+        ? "Tasks in this project. Readiness, source status and execution are separate."
+        : "Tasks across your projects. Action requests and ordinary progress remain distinct."
+      : onInboxRoute && inboxRouteSummary
+        ? `${inboxRouteSummary.count} unresolved across ${inboxRouteSummary.projects} project${inboxRouteSummary.projects === 1 ? "" : "s"}`
+        : undefined;
   // The Inbox route refreshes its own list (and so the count) when the workspace read changes.
   const refreshAll = () => {
     workspace.refresh();
@@ -693,13 +660,16 @@ export function App() {
   };
   // These pages own a refresh that already re-reads their data.
   const ownsRefresh =
+    unknownRoute ||
     pathname === "/app" ||
     pathname === "/app/tasks" ||
     Boolean(projectId) ||
     (/^\/app\/tasks\/[^/]+$/.test(pathname) && pathname !== "/app/tasks/new") ||
     (pathname === "/app/search" &&
       Boolean(new URLSearchParams(query).get("query")));
-  const parent = parentRoute(pathname, query, workspace.state.data);
+  const parent = unknownRoute
+    ? null
+    : parentRoute(pathname, query, workspace.state.data);
   // The Inbox reports its own subtitle, and on a phone its request-detail header.
   const { detail: inboxDetail, subtitle: inboxSubtitle } =
     (onInboxRoute && inboxHeader) || {};
@@ -757,13 +727,24 @@ export function App() {
         inboxCount={inboxCount}
         row={row}
       />
-      <AccountFooter
-        path={path}
-        navigate={navigate}
-        row={row}
-        pending={logoutPending}
-        onSignOut={() => void logout()}
-      />
+      {row ? (
+        <AccountRows
+          path={path}
+          navigate={navigate}
+          pending={logoutPending}
+          onSignOut={() => void logout()}
+        />
+      ) : (
+        <div className="account-footer">
+          <AccountMenu
+            key={navigationVersion}
+            path={path}
+            navigate={navigate}
+            pending={logoutPending}
+            onSignOut={() => void logout()}
+          />
+        </div>
+      )}
     </>
   );
   return (
@@ -780,6 +761,7 @@ export function App() {
           <PageHeader
             title={title}
             subtitle={headerSubtitle}
+            plain={unknownRoute}
             badge={
               onInboxRoute && inboxCount !== null
                 ? `${inboxCount} unresolved`
@@ -827,7 +809,9 @@ export function App() {
           {workspace.state.status !== "fresh" && (
             <ResourceStatus state={workspace.state} retry={workspace.refresh} />
           )}
-          {pathname === "/app/settings/runtime" ? (
+          {unknownRoute ? (
+            <NotFound />
+          ) : pathname === "/app/settings/runtime" ? (
             <RuntimeSettings
               client={client}
               session={session}
@@ -932,7 +916,7 @@ export function App() {
                 entryKey,
               )}
             />
-          ) : pathname === "/app" || pathname === "/app/tasks" || projectId ? (
+          ) : (
             <TaskViews
               state={tasks.state}
               refresh={() => {
@@ -945,24 +929,6 @@ export function App() {
               {...(projectId ? { projectId } : {})}
               overview={pathname === "/app"}
             />
-          ) : (
-            <>
-              <p className="introduction muted">{description}</p>
-              <ActionLink
-                variant="primary"
-                className="action-link"
-                href={destination}
-              >
-                Open existing{" "}
-                {pathname === "/app/inbox"
-                  ? "coordination controls"
-                  : "operator controls"}
-              </ActionLink>
-              <p className="metadata muted">
-                Task detail, complete Inbox and settings controls remain
-                available in the existing operator.
-              </p>
-            </>
           )}
         </main>
       </div>

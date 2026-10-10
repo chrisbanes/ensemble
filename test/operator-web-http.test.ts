@@ -299,13 +299,28 @@ test("one guarded listener serves shell and authenticated JSON with rotated CSRF
   for (const path of [
     "/assets/no.js",
     "/assets/main.js/extra",
-    "/app/unknown",
     "/api/not-real",
-  ])
+  ]) {
+    const missing = await fetch(`${origin}${path}`, { headers: { cookie } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.headers.get("content-type") ?? "", /json/);
+  }
+  // An unknown address under /app gets the public shell with 404 so the client renders "Page not found".
+  const shell = await fetch(`${origin}/app`);
+  const shellBody = await shell.text();
+  for (const path of ["/app/unknown", "/app/", "/app/tasks/not-a-uuid"]) {
+    const unknown = await fetch(`${origin}${path}`, { headers: { cookie } });
+    assert.equal(unknown.status, 404, path);
+    assert.match(unknown.headers.get("content-type") ?? "", /^text\/html/);
     assert.equal(
-      (await fetch(`${origin}${path}`, { headers: { cookie } })).status,
-      404,
+      unknown.headers.get("content-security-policy"),
+      shell.headers.get("content-security-policy"),
     );
+    assert.equal(await unknown.text(), shellBody);
+  }
+  const unknownHead = await fetch(`${origin}/app/unknown`, { method: "HEAD" });
+  assert.equal(unknownHead.status, 404);
+  assert.equal(await unknownHead.text(), "");
   now += 1001;
   for (const path of reads)
     assert.equal(

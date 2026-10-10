@@ -5,6 +5,7 @@ import {
   captureBrowserEvidence,
 } from "./fixtures/browser-diagnostics.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
+import { signOutFromSidebar } from "./fixtures/operator-account.js";
 import { seedOwnQuestion } from "./fixtures/questions.js";
 const test = browserSuite("ui05-questions");
 test("production mixed form preserves literal schema, keyboard input, field errors and original unknown command across task navigation", async (_t, j) => {
@@ -257,7 +258,7 @@ test("production mixed form preserves literal schema, keyboard input, field erro
   }
   // Sign out is in the sidebar footer; a nested phone screen reaches it only via its parent.
   await page.setViewportSize({ width: 1366, height: 900 });
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOutFromSidebar(page);
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   assert.equal(
     await page.getByText("Exact typed answer", { exact: true }).count(),

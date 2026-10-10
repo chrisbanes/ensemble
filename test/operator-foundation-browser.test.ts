@@ -103,7 +103,7 @@ test("retained HTML routes share the production foundation and native interactio
   await desktop.getByLabel("Password", { exact: true }).fill(web.password);
   await desktop.getByRole("button", { name: "Sign in", exact: true }).click();
   await desktop
-    .getByRole("button", { name: "Sign out", exact: true })
+    .getByRole("button", { name: "Operator account", exact: true })
     .waitFor();
   // #835: the global fallback link is gone; contextual links reach the retained pages.
   assert.equal(

@@ -1286,12 +1286,19 @@ export class LocalOperatorHttp {
         deny(405, "method-not-allowed");
         return true;
       }
-      const asset = web.bundle.asset(web.shell(path) ? "/app" : path);
+      // An unknown address under /app gets the public shell with 404, so the client can render "Page not found".
+      const unknownApp = !web.shell(path) && path.startsWith("/app/");
+      const asset = web.bundle.asset(
+        web.shell(path) || unknownApp ? "/app" : path,
+      );
       if (!asset) {
         deny(404, "not-found");
         return true;
       }
-      response.writeHead(200, { ...headers, "content-type": asset.type });
+      response.writeHead(unknownApp ? 404 : 200, {
+        ...headers,
+        "content-type": asset.type,
+      });
       response.end(method === "HEAD" ? undefined : asset.body);
       return true;
     }
