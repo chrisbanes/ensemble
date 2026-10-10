@@ -61,10 +61,12 @@ export function ApprovalDetail({
         ) : null}
       </div>
       <div className="inbox-decision">
-        {resource.state.error && !task && (
+        {resource.state.error && (
           <Alert variant="destructive" role="alert">
             <p className="body">
-              Independent holds could not be read; they remain in effect.
+              {task
+                ? `Independent holds could not be refreshed; showing the last read from ${new Date(resource.state.fetchedAt ?? 0).toLocaleTimeString()}.`
+                : "Independent holds could not be read; they remain in effect."}
             </p>
             <Button variant="secondary" onClick={resource.refresh}>
               Retry
