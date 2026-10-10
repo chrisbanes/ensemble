@@ -427,6 +427,8 @@ test("desktop shell lists the designed destinations, an honest Inbox count and a
     .evaluateAll((links) => links.map((link) => link.textContent?.trim()));
   assert.deepEqual(current, ["Tasks"]);
   await page.goto(`${web.origin}/app/tasks`);
+  // goto resolves before the shell mounts; evaluateAll does not auto-wait.
+  await sidebar.locator('a[aria-current="page"]').first().waitFor();
   assert.deepEqual(
     await sidebar
       .locator('a[aria-current="page"]')
