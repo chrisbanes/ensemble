@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   taskSchema,
   type InboxItem,
@@ -26,11 +26,10 @@ export function ApprovalDetail({
   /** The Inbox's last successful read; each poll or Refresh rereads the holds. */
   observedAt: number | null;
 }) {
-  // biome-ignore lint/correctness/useExhaustiveDependencies: observedAt rereads the holds whenever the Inbox poll or Refresh succeeds.
   const loader = useCallback(
       (signal: AbortSignal) =>
         client.read(`/api/operator/tasks/${item.taskId}`, taskSchema, signal),
-      [client, item.taskId, observedAt],
+      [client, item.taskId],
     ),
     resource = useOperatorResource(
       `${session.csrfToken}:inbox-approval:${item.taskId}`,
@@ -42,6 +41,15 @@ export function ApprovalDetail({
     ),
     holds = task ? holdNotices(task) : [],
     unavailable = Boolean(task && (!approval || approval.materialUnavailable));
+  const current = useRef(resource),
+    seen = useRef(observedAt);
+  current.current = resource;
+  useEffect(() => {
+    if (seen.current === observedAt) return;
+    seen.current = observedAt;
+    // A slow hold read settles before the next poll replaces it.
+    if (!current.current.state.pending) void current.current.refresh();
+  }, [observedAt]);
   return (
     <div className="inbox-approval">
       <div className="inbox-approval-body">
