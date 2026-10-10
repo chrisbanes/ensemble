@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { taskSchema } from "../src/operator/contracts.js";
 import { OperatorApi } from "../src/standalone/operator-api.js";
+import { ExecutionState } from "../src/standalone/state.js";
 import { createOperatorFixture } from "./fixtures/operator-web.js";
 import { seedReviewTask } from "./fixtures/task-review.js";
 
@@ -170,6 +171,7 @@ test("a message to a completed lead resumes its conversation through the schedul
     (message) => message.eventType === "assignment-follow-up",
   );
   assert.equal(followUp?.text, command.message);
+  assert.equal(followUp?.requester, "operator");
   // Holds, approval, readiness and merge authority are untouched.
   assert.equal(read.data.task.state, "open");
   assert.equal(read.data.task.ready, true);
@@ -321,6 +323,41 @@ test("feedback refusals for a completed lead are definitive conflicts with no ev
             .prepare("UPDATE domain_assignments SET state='held' WHERE id=?")
             .run(task.assignmentId),
         );
+        return undefined;
+      },
+    },
+    {
+      name: "cancelled task",
+      arrange: (task) => {
+        f.seedPersistedState((db) =>
+          db
+            .prepare("UPDATE domain_tasks SET state='cancelled' WHERE id=?")
+            .run(task.taskId),
+        );
+        return undefined;
+      },
+    },
+    {
+      name: "newer lead work",
+      arrange: (task) => {
+        const workId = randomUUID();
+        f.seedPersistedState((db) => {
+          db.prepare(
+            "INSERT INTO execution_intents(id,workId,prompt,workspace,state,threadId,turnId,accountType,sandbox,approval) VALUES(?,?,'fixture','/tmp/fixture','running',?,?,'chatgpt','workspaceWrite','never')",
+          ).run(randomUUID(), workId, workId, workId);
+          new ExecutionState(db).bindTask(workId, {
+            taskId: task.taskId,
+            assignmentId: task.assignmentId,
+            assignmentVersion: Number(
+              f.service.domain().assignment(task.assignmentId).version,
+            ),
+            instructionsRevision: 1,
+            profileRevision: 1,
+          });
+          db.prepare(
+            "INSERT INTO task_work_revisions(workId,assignmentId,conversationRevision,workRevision) SELECT ?,assignmentId,conversationRevision,MAX(workRevision)+1 FROM task_work_revisions WHERE assignmentId=?",
+          ).run(workId, task.assignmentId);
+        });
         return undefined;
       },
     },

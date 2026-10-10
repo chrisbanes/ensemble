@@ -977,9 +977,12 @@ export function LocalReviewPanel() {
           {review.lead?.feedbackMode === "resumes" && (
             <p role="status">{leadResumeNotice(review.lead.name)}</p>
           )}
-          {review.lead?.awaitingRecoveryMessage && (
-            <p role="status">{leadAwaitingRecoveryNotice(review.lead.name)}</p>
-          )}
+          {review.lead?.awaitingRecoveryMessage &&
+            review.lead.feedbackMode !== "resumes" && (
+              <p role="status">
+                {leadAwaitingRecoveryNotice(review.lead.name)}
+              </p>
+            )}
           {review.lead && !leadAccepts(review.lead) && (
             <p role="status">
               The project lead's assignment is {review.lead.state} and cannot

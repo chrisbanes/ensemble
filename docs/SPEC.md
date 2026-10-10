@@ -797,7 +797,8 @@ Implemented contract details:
   Replay returns the same receipt.
 - Refusals for a completed lead are definitive 409s: `conflict` for messages
   (`Follow-up unavailable: task is not open`, `Follow-up unavailable: latest
-  result is not the newest unambiguous work`, or the existing pending-or-running
+  result is not the newest unambiguous work`, `Follow-up unavailable: latest
+  result already has a follow-up`, or the existing pending-or-running
   refusal for a held lead or non-lead) and `local-review-recipient-unavailable`
   for reviews.
 - The operator task read adds optional `leadFeedback`: `mode` is `receives`,
@@ -812,10 +813,17 @@ Implemented contract details:
   feedback." in the composer and "<Lead> was resumed with this review as a
   follow-up." in Local review. Local review shows the recovery-continuation
   copy while `awaitingRecoveryMessage` is true; Send stays enabled.
+- "Newest" is judged within the lead's current conversation: work revisions
+  restart after a conversation replacement, and a result from an earlier
+  conversation is never resumed.
+- Follow-up messages in the operator task read carry `requester`
+  (`assignment` or `operator`), shown in the task message history.
 - Remaining gap: the legacy server-rendered `/coordination/...` task and
   assignment pages still offer message forms only for pending or running
   assignments. A direct `POST /coordination/control/message` follows the same
-  rule as the API.
+  rule as the API. Those pages list follow-up events without their
+  instructions, because they do not apply the operator API's exclusion
+  redaction.
 
 ### Task overview and evidence — design direction, 3 October 2026
 

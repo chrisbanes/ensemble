@@ -1024,6 +1024,7 @@ const message = z
     questionAnswers: questionAnswersSchema.optional(),
     interactionId: uuid.optional(),
     reference: feedbackReferenceSchema.optional(),
+    requester: z.enum(["assignment", "operator"]).optional(),
   })
   .strict();
 const result = z

@@ -1665,6 +1665,83 @@ test("a lead completed without a recorded result cannot be resumed", () => {
   }
 });
 
+/** The lead's first conversation reaches work revision 5 and is then replaced. */
+function replaceLeadConversation(f: ReturnType<typeof fixture>) {
+  const lead = String(f.leadAssignment(taskA)?.id);
+  f.addWork(lead, "work-lead-old", "thread-lead-old", "turn-lead-old");
+  f.db
+    .prepare(
+      "UPDATE task_work_revisions SET workRevision = 5 WHERE workId = 'work-lead-old'",
+    )
+    .run();
+  f.coordination.recordResult(
+    report("thread-lead-old", "turn-lead-old", "call-lead-old"),
+  );
+  f.db
+    .prepare(
+      "UPDATE execution_intents SET state = 'completed' WHERE workId = 'work-lead-old'",
+    )
+    .run();
+  f.state.replaceConversation(lead);
+  return lead;
+}
+
+test("a completed lead resumes from its current conversation after a replacement", () => {
+  const f = fixture();
+  try {
+    const lead = replaceLeadConversation(f);
+    // The new conversation restarts at work revision 1, below the old 5.
+    f.addWork(lead, "work-lead-new", "thread-lead-new", "turn-lead-new");
+    // The old result's self-addressed event is delivered with the new work.
+    if (f.coordination.bindDeliveryBatch(lead, "work-lead-new"))
+      f.coordination.completeDeliveryBatch("work-lead-new");
+    const { result } = f.coordination.recordResult(
+      report("thread-lead-new", "turn-lead-new", "call-lead-new"),
+    );
+    const version = Number(f.domain.assignment(lead).version);
+    assert.equal(
+      f.coordination.feedbackRecipient(taskA, lead)?.mode,
+      "resumes",
+    );
+    const event = f.coordination.postOperatorMessage({
+      actor: "operator",
+      key: nextCommand(),
+      taskId: taskA,
+      recipientAssignmentId: lead,
+      expectedAssignmentVersion: version,
+      message: "Continue from the new conversation.",
+    });
+    assert.equal(event.eventType, "assignment-follow-up");
+    assert.equal(f.coordination.followUps(taskA)[0]?.resultId, result.resultId);
+  } finally {
+    f.close();
+  }
+});
+
+test("a replaced conversation without its own result cannot be resumed from the old one", () => {
+  const f = fixture();
+  try {
+    const lead = replaceLeadConversation(f);
+    assert.equal(f.domain.assignment(lead).state, "completed");
+    assert.equal(f.coordination.feedbackRecipient(taskA, lead), undefined);
+    assert.throws(
+      () =>
+        f.coordination.postOperatorMessage({
+          actor: "operator",
+          key: nextCommand(),
+          taskId: taskA,
+          recipientAssignmentId: lead,
+          expectedAssignmentVersion: Number(f.domain.assignment(lead).version),
+          message: "Old conversation only.",
+        }),
+      /newest unambiguous work/,
+    );
+    assert.equal(f.coordination.followUps(taskA).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
 test("contextual feedback to a completed lead carries its reference on the follow-up", () => {
   const f = fixture();
   try {

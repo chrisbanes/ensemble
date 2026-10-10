@@ -290,6 +290,7 @@ const conflicts = new Set([
   "Message recipient must be pending or running",
   "Follow-up unavailable: task is not open",
   "Follow-up unavailable: latest result is not the newest unambiguous work",
+  "Follow-up unavailable: latest result already has a follow-up",
   "Result destination is already reconciled",
   "Result destination revision conflict",
 ]);
@@ -2417,6 +2418,7 @@ export class OperatorApi {
         ? { questionAnswers: m.questionAnswers }
         : {}),
       ...(m.reference ? { reference: m.reference } : {}),
+      ...(m.requester ? { requester: m.requester } : {}),
       ...(m.interactionId === undefined
         ? {}
         : { interactionId: m.interactionId }),

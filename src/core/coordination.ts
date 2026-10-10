@@ -2134,9 +2134,12 @@ export class CoordinationStore {
         throw new Error("Message recipient belongs to another task");
       if (Number(assignment.version) !== command.expectedAssignmentVersion)
         throw new Error("Message recipient assignment version conflict");
-      if (assignment.state === "completed" && this.isTaskLead(assignment))
-        this.requireResumable(String(assignment.taskId), String(assignment.id));
-      else if (assignment.state !== "pending" && assignment.state !== "running")
+      // A completed lead's resumability is checked once, in deliverOperatorFeedback.
+      if (
+        assignment.state !== "pending" &&
+        assignment.state !== "running" &&
+        !(assignment.state === "completed" && this.isTaskLead(assignment))
+      )
         throw new Error("Message recipient must be pending or running");
       if (command.reference) {
         const lead = this.one(
@@ -2299,7 +2302,7 @@ export class CoordinationStore {
       return { version, mode: "receives" };
     if (
       assignment.state === "completed" &&
-      this.resumeRefusal(taskId, assignmentId) === undefined
+      "result" in this.resumable(taskId, assignmentId)
     )
       return { version, mode: "resumes" };
     return undefined;
@@ -2334,7 +2337,9 @@ export class CoordinationStore {
       };
     if (!this.isTaskLead(assignment))
       throw new Error("Message recipient must be pending or running");
-    const result = this.requireResumable(taskId, assignmentId);
+    const resumable = this.resumable(taskId, assignmentId);
+    if ("refusal" in resumable) throw new Error(resumable.refusal);
+    const { result } = resumable;
     const { event } = this.resumeCompletedAssignment(
       result,
       "operator",
@@ -4040,39 +4045,38 @@ export class CoordinationStore {
     );
   }
 
-  private resumeRefusal(
+  /** The completed lead's resumable result, or the definitive refusal. */
+  private resumable(
     taskId: string,
     assignmentId: string,
-  ): string | undefined {
+  ): { result: Row } | { refusal: string } {
     if (
       this.one("SELECT state FROM domain_tasks WHERE id = ?", taskId)?.state !==
       "open"
     )
-      return "Follow-up unavailable: task is not open";
+      return { refusal: "Follow-up unavailable: task is not open" };
     const result = this.resumableResult({ assignmentId });
+    if (!result)
+      return {
+        refusal:
+          "Follow-up unavailable: latest result is not the newest unambiguous work",
+      };
     if (
-      !result ||
       this.one(
         "SELECT 1 AS prior FROM coordination_follow_ups WHERE resultId = ?",
         String(result.resultId),
       )
     )
-      return "Follow-up unavailable: latest result is not the newest unambiguous work";
-    return undefined;
-  }
-
-  private requireResumable(taskId: string, assignmentId: string): Row {
-    const refusal = this.resumeRefusal(taskId, assignmentId);
-    if (refusal) throw new Error(refusal);
-    const result = this.resumableResult({ assignmentId });
-    if (!result) throw new Error("Unknown coordination record");
-    return result;
+      return {
+        refusal: "Follow-up unavailable: latest result already has a follow-up",
+      };
+    return { result };
   }
 
   /**
    * A completed assignment's result that a follow-up may resume: the
    * assignment's newest, unambiguous work at its current version. The
-   * assignment form selects that assignment's newest result.
+   * assignment form selects the newest result of the current conversation.
    */
   private resumableResult(
     target: { resultId: string } | { assignmentId: string },
@@ -4081,8 +4085,14 @@ export class CoordinationStore {
       "resultId" in target
         ? ["result.resultId = ?", target.resultId]
         : [
+            // Work revisions restart per conversation: take the newest in the current one.
             `result.resultId = (SELECT newest.resultId FROM coordination_results newest
-            WHERE newest.assignmentId = ? ORDER BY newest.workRevision DESC LIMIT 1)`,
+            JOIN task_work_revisions newestRevision ON newestRevision.workId = newest.workId
+            JOIN assignment_conversations current
+              ON current.assignmentId = newest.assignmentId
+              AND current.revision = newestRevision.conversationRevision
+            WHERE newest.assignmentId = ?
+            ORDER BY newestRevision.workRevision DESC LIMIT 1)`,
             target.assignmentId,
           ];
     return this.one(

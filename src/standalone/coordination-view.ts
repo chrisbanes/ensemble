@@ -120,6 +120,8 @@ export interface CoordinationViewMessage {
   questionAnswers?: QuestionAnswers;
   interactionId?: string;
   reference?: z.infer<typeof feedbackReferenceSchema>;
+  /** Who requested a follow-up: an agent assignment or the operator. */
+  requester?: "assignment" | "operator";
 }
 
 export interface CoordinationInteractionAttention {
@@ -827,11 +829,13 @@ export class CoordinationView {
           .object({
             instructions: z.string(),
             reference: feedbackReferenceSchema.optional(),
+            requester: z.literal("operator").optional(),
           })
           .parse(JSON.parse(event.payload));
         return {
           ...base,
           text: payload.instructions,
+          requester: payload.requester ?? "assignment",
           ...(payload.reference ? { reference: payload.reference } : {}),
         };
       }

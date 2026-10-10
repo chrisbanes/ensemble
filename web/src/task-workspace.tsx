@@ -1566,7 +1566,9 @@ export function TaskWorkspace({
           {data.messages.map((m) => (
             <div key={m.eventId} data-record-id={m.eventId}>
               <p>
-                {m.eventType} · {m.deliveryState} · {date(m.createdAt)}
+                {m.eventType}
+                {m.requester ? ` · requested by ${m.requester}` : ""} ·{" "}
+                {m.deliveryState} · {date(m.createdAt)}
               </p>
               <Literal text={m.text} />
               {m.questionAnswers &&
