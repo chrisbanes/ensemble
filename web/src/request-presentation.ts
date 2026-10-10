@@ -22,6 +22,13 @@ export const requestHref = (item: Request) =>
   item.kind === "question"
     ? `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`
     : item.destination;
+/** Who is responsible for an uncertain execution: only an intervention request names that. */
+export const interventionRequester = (
+  items: readonly Pick<InboxItem, "taskId" | "kind" | "requesterName">[],
+  taskId: string,
+) =>
+  items.find((i) => i.taskId === taskId && i.kind === "intervention")
+    ?.requesterName ?? null;
 const two = (n: number) => String(n).padStart(2, "0");
 export function requestTime(createdAt: number | null) {
   if (createdAt === null) return "Age unknown";

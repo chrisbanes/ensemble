@@ -19,6 +19,7 @@ import {
   visibleColumns,
 } from "../web/src/tasks.js";
 import {
+  interventionRequester,
   requestActionLabel,
   requestHref,
   requestKindLabel,
@@ -250,4 +251,28 @@ test("request wording is exhaustive and links match the Inbox selection", () => 
     "Intervention · Responsibility unknown · Age unknown",
   );
   assert.equal(requestTime(null), "Age unknown");
+  // Only an intervention names who is responsible for execution; a question's requester does not.
+  const other = { taskId, kind: "question", requesterName: "Nora" } as const;
+  assert.equal(interventionRequester([other], taskId), null);
+  assert.equal(
+    interventionRequester(
+      [other, { ...other, kind: "intervention", requesterName: "Jonas" }],
+      taskId,
+    ),
+    "Jonas",
+  );
+  assert.equal(
+    interventionRequester(
+      [{ ...other, kind: "intervention", requesterName: null }],
+      taskId,
+    ),
+    null,
+  );
+  assert.equal(
+    interventionRequester(
+      [{ ...other, kind: "intervention", taskId: randomUUID() }],
+      taskId,
+    ),
+    null,
+  );
 });

@@ -11,6 +11,7 @@ import type {
 import { ActionLink, ResourceStatus, StatusBadge } from "./components.js";
 import { inboxSummaryOf, type loadInbox } from "./inbox.js";
 import {
+  interventionRequester,
   requestActionLabel,
   requestHref,
   requestMeta,
@@ -148,9 +149,7 @@ export function AttentionBar({
   if (!task) return null;
   const uncertain = isUncertain(task),
     // The same requester the Overview and the Inbox name; never the task lead.
-    requester = requests.data?.items.find(
-      (i) => i.taskId === task.id,
-    )?.requesterName,
+    requester = interventionRequester(requests.data?.items ?? [], task.id),
     title = task.title ?? "Title unavailable",
     count = inboxSummaryOf(requests)?.count;
   return (

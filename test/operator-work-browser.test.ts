@@ -656,6 +656,15 @@ test("board shows a link bar with every count, collapsed empty columns and drawn
     await bar.getByRole("button", { name: /^Done · 1$/ }).count(),
     1,
   );
+  // The filtered column is on screen without a tab click, and the page itself did not scroll.
+  await page.waitForFunction(() => {
+    const area = document
+        .querySelector(".board-columns")!
+        .getBoundingClientRect(),
+      column = document.querySelector("#column-Done")!.getBoundingClientRect();
+    return column.left >= area.left - 1 && column.right <= area.right + 1;
+  });
+  assert.equal(await page.evaluate(() => scrollY), 0);
   // Nothing but Done matches, so every other column is empty and collapsed.
   const empties = await page
     .locator(".board-column")

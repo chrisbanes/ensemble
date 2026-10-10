@@ -203,6 +203,30 @@ export function TaskBoard({
     if (board.current)
       board.current.scrollLeft = history.state?.board?.scrollLeft ?? 0;
   }, []);
+  // A State filter has no saved scroll position: bring its column into view once tasks
+  // have been laid out. Only the board scrolls, never the page.
+  const placed = useRef(false);
+  useLayoutEffect(() => {
+    const area = board.current,
+      column = area?.querySelector<HTMLElement>(
+        `[id="column-${columns[selected]}"]`,
+      );
+    if (
+      placed.current ||
+      !area ||
+      !column ||
+      !initial ||
+      !tasks.length ||
+      history.state?.board?.scrollLeft !== undefined
+    )
+      return;
+    placed.current = true;
+    const a = area.getBoundingClientRect(),
+      c = column.getBoundingClientRect();
+    if (c.right > a.right)
+      area.scrollLeft += Math.min(c.right - a.right, c.left - a.left);
+    else if (c.left < a.left) area.scrollLeft -= a.left - c.left;
+  }, [tasks.length, initial, columns, selected]);
   const before = columns[selected - 1],
     after = columns[selected + 1];
   return (
