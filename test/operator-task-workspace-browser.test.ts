@@ -709,7 +709,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   await page.getByLabel("Password").fill(web.password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
-    .getByText("No matching requests need your action.", { exact: true })
+    .getByText("Nothing needs your attention.", { exact: true })
     .waitFor();
   const question = async (prompt: string) => {
     assert.equal(
@@ -827,7 +827,7 @@ test("mounted Inbox discovers new requests and holds through timer and header re
   });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page
-    .getByText("No matching requests need your action.", { exact: true })
+    .getByText("Nothing needs your attention.", { exact: true })
     .waitFor();
   f.seedPersistedState((db) =>
     new ExecutionState(db).hold(wa.id, "Fixture ownership unknown"),

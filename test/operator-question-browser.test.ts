@@ -730,10 +730,12 @@ test("action Inbox preserves drafts across exact task entry, filter and phone qu
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.locator(".inbox-row").first().waitFor();
   assert.equal(await page.locator(".inbox-row").count(), 2);
-  assert.ok(
-    (await page.locator(".inbox-row time").first().innerText()).includes(
-      String(new Date().getFullYear()),
-    ),
+  // The datetime attribute carries the millisecond timestamp the read converted from seconds.
+  assert.equal(
+    new Date(
+      (await page.locator(".inbox-row time").first().getAttribute("datetime"))!,
+    ).getFullYear(),
+    new Date().getFullYear(),
   );
   await page
     .getByLabel("Request kind", { exact: true })

@@ -1,4 +1,5 @@
 import { NativeSelect } from "./ui/native-select.js";
+import { Card } from "./ui/card.js";
 import {
   useCallback,
   useEffect,
@@ -12,12 +13,14 @@ import {
   type Session,
 } from "../../src/operator/contracts.js";
 import type { OperatorClient } from "./api.js";
+import { ActionLink, Button, ResourceStatus } from "./components.js";
 import {
-  ActionLink,
-  Button,
-  ResourceStatus,
-  StatusBadge,
-} from "./components.js";
+  ageLabel,
+  clockLabel,
+  filterCounts,
+  requestActionLabel,
+  requestKindLabel,
+} from "./inbox-presentation.js";
 import { useOperatorResource, type ResourceState } from "./resource.js";
 import { QuestionResponse } from "./question-response.js";
 import type { QuestionResponseStates } from "./question-response-state.js";
@@ -140,69 +143,75 @@ export function Inbox({
       (!state.project || item.projectId === state.project) &&
       (!state.kind || item.kind === state.kind),
   );
-  const projects = [
-    ...new Map(
-      (resource.state.data?.items ?? []).map((item) => [
-        item.projectId,
-        item.projectName,
-      ]),
-    ).entries(),
-  ];
+  const loaded = resource.state.data?.items ?? [],
+    counts = filterCounts(loaded),
+    projects = [
+      ...new Map(loaded.map((item) => [item.projectId, item.projectName])),
+    ],
+    filtered = Boolean(state.project || state.kind),
+    complete = Boolean(resource.state.data?.complete),
+    empty = complete && !loaded.length;
+  const now = Date.now();
   const choose = (item: InboxItem) => {
     state.selected = item;
     navigate(
       `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`,
     );
   };
+  const clear = () => {
+    state.project = "";
+    state.kind = "";
+    render((v) => v + 1);
+  };
   return (
     <section
-      className={`action-inbox ${selectedId ? "inbox-selected" : ""}`}
+      className={`action-inbox ${selectedId ? "inbox-selected" : ""} ${empty && !selectedId ? "inbox-empty" : ""}`}
       aria-label="Action Inbox"
     >
+      <div className="inbox-filters">
+        <NativeSelect
+          aria-label="Project"
+          value={state.project}
+          onChange={(e) => {
+            state.project = e.target.value;
+            render((v) => v + 1);
+          }}
+        >
+          <option value="">All projects · {counts.total}</option>
+          {projects.map(([id, name]) => (
+            <option key={id} value={id}>
+              {name ?? "Unavailable project"} · {counts.project[id] ?? 0}
+            </option>
+          ))}
+        </NativeSelect>
+        <NativeSelect
+          aria-label="Request kind"
+          value={state.kind}
+          onChange={(e) => {
+            state.kind = e.target.value;
+            render((v) => v + 1);
+          }}
+        >
+          <option value="">All request types · {counts.total}</option>
+          <option value="question">
+            Questions · {counts.kind.question ?? 0}
+          </option>
+          <option value="approval">
+            Approvals · {counts.kind.approval ?? 0}
+          </option>
+          <option value="intervention">
+            Interventions · {counts.kind.intervention ?? 0}
+          </option>
+        </NativeSelect>
+        <p className="metadata muted">Intervention first · then oldest</p>
+      </div>
       <div className="inbox-queue">
-        <h2>Action Inbox</h2>
-        <ActionLink href="/coordination">
-          Advanced coordination controls
-        </ActionLink>
-        <p>Questions, approvals and recorded interventions across projects.</p>
         <ResourceStatus state={resource.state} retry={resource.refresh} />
         {resource.state.data && !resource.state.data.complete && (
           <p role="alert">
             Queue coverage is incomplete. Unavailable requests may remain.
           </p>
         )}
-        <div className="inbox-filters">
-          <label htmlFor="inbox-project">Project</label>
-          <NativeSelect
-            id="inbox-project"
-            value={state.project}
-            onChange={(e) => {
-              state.project = e.target.value;
-              render((v) => v + 1);
-            }}
-          >
-            <option value="">All projects</option>
-            {projects.map(([id, name]) => (
-              <option key={id} value={id}>
-                {name ?? "Unavailable project"}
-              </option>
-            ))}
-          </NativeSelect>
-          <label htmlFor="inbox-kind">Request kind</label>
-          <NativeSelect
-            id="inbox-kind"
-            value={state.kind}
-            onChange={(e) => {
-              state.kind = e.target.value;
-              render((v) => v + 1);
-            }}
-          >
-            <option value="">All requests</option>
-            <option value="question">Questions</option>
-            <option value="approval">Approvals</option>
-            <option value="intervention">Interventions</option>
-          </NativeSelect>
-        </div>
         <div
           className="inbox-rows"
           ref={queue}
@@ -219,28 +228,67 @@ export function Inbox({
               aria-pressed={selectedId === item.id}
               onClick={() => choose(item)}
             >
-              <StatusBadge>{item.kind}</StatusBadge>
-              <strong>{item.taskTitle ?? "Unavailable task"}</strong>
-              <span>
-                {item.projectName ?? "Unavailable project"} ·{" "}
-                {item.requesterName ?? "Responsibility unknown"}
+              <span className="inbox-row-label">
+                {item.projectName ?? "Unavailable project"} /{" "}
+                {requestKindLabel(item.kind)}
               </span>
+              <strong>{item.taskTitle ?? "Unavailable task"}</strong>
               <span>{item.reason ?? "Exact details unavailable"}</span>
-              <time>
-                {item.createdAt === null
-                  ? "Age unknown"
-                  : new Date(item.createdAt).toLocaleString()}
-              </time>
+              <span className="inbox-row-action">
+                {requestActionLabel(item.kind)} →
+              </span>
+              <span className="inbox-row-meta">
+                {item.requesterName ?? "Responsibility unknown"} ·{" "}
+                {item.createdAt === null ? (
+                  <time>{ageLabel(null, now)}</time>
+                ) : (
+                  <time dateTime={new Date(item.createdAt).toISOString()}>
+                    {clockLabel(item.createdAt)} ·{" "}
+                    {ageLabel(item.createdAt, now)}
+                  </time>
+                )}
+              </span>
             </button>
           ))}
           {!rows.length && resource.state.status === "fresh" && (
-            <p>
-              {resource.state.data?.complete
-                ? "No matching requests need your action."
-                : "No requests visible in available coverage."}
-            </p>
+            <Card className="inbox-empty-card">
+              {!complete ? (
+                <p>No requests visible in available coverage.</p>
+              ) : filtered && loaded.length ? (
+                <>
+                  <h2 className="small-heading">No matching requests.</h2>
+                  <p className="body muted">
+                    Nothing matches these filters. There are still{" "}
+                    {loaded.length} unresolved items across all projects.
+                  </p>
+                  <Button variant="secondary" onClick={clear}>
+                    Clear filters
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <h2 className="small-heading">
+                    Nothing needs your attention.
+                  </h2>
+                  <p className="body muted">
+                    Questions, approvals and execution problems will appear
+                    here. Routine progress and completed work stay in Overview.
+                  </p>
+                  <ActionLink variant="secondary" href="/app">
+                    Back to overview
+                  </ActionLink>
+                </>
+              )}
+            </Card>
           )}
         </div>
+        <ActionLink
+          variant="secondary"
+          className="inbox-advanced"
+          href="/coordination"
+        >
+          Advanced coordination controls
+        </ActionLink>
       </div>
       <section className="inbox-detail" aria-label="Selected request">
         <Button variant="secondary" onClick={() => navigate("/app/inbox")}>

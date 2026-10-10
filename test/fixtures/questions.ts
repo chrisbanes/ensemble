@@ -15,8 +15,9 @@ export async function seedOwnQuestion(
   f: Awaited<ReturnType<typeof createOperatorFixture>>,
   form: QuestionForm = mixedForm,
   title = "Choose full form",
+  projectName = "Question project",
 ) {
-  const a = await seedReviewTask(f, "Question project", title),
+  const a = await seedReviewTask(f, projectName, title),
     d = f.service.domain();
   const priorTurns = f.runtime.turns;
   d.execute({
