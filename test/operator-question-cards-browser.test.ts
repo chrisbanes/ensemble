@@ -500,6 +500,16 @@ for (const [name, engine] of engines) {
         true,
       );
       await page.unroute(readUrl);
+      if (status === "stale") {
+        // A superseded read cannot name its replacement; the task lists the open requests.
+        assert.equal(
+          await form
+            .getByRole("link", { name: "Review current requests", exact: true })
+            .getAttribute("href"),
+          `/app/tasks/${group.taskId}`,
+        );
+        continue;
+      }
       await form
         .getByRole("button", {
           name: /Refresh request|Review current request|Check connection/,

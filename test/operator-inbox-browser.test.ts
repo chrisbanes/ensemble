@@ -620,8 +620,8 @@ test("an approval shows its exact action, target and independent holds, and deci
     taskSchema.parse(body);
     await route.fulfill({ response, json: body });
   });
-  await page.reload();
-  await page.locator(".inbox-row").click();
+  // The open approval rereads its holds when the Inbox refreshes, without reselecting it.
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await detail
     .getByText("Execution held (task not ready)", { exact: true })
     .waitFor();
@@ -632,6 +632,24 @@ test("an approval shows its exact action, target and independent holds, and deci
     await detail.getByText("Execution blocked by dependency").count(),
     0,
   );
+  await page.unroute(taskUrl);
+  // A failed automatic reread keeps the last holds and says they may be out of date.
+  await page.route(taskUrl, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unavailable" } }),
+    }),
+  );
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await detail
+    .getByText(
+      /^Independent holds could not be refreshed; showing the last read from /,
+    )
+    .waitFor();
+  await detail
+    .getByText("Execution held (task not ready)", { exact: true })
+    .waitFor();
   await page.unroute(taskUrl);
 
   // When the task cannot be read the holds are unknown and stay in effect.

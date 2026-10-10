@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   taskSchema,
   type InboxItem,
@@ -18,10 +18,13 @@ export function ApprovalDetail({
   client,
   session,
   item,
+  observedAt,
 }: {
   client: OperatorClient;
   session: Session;
   item: InboxItem;
+  /** The Inbox's last successful read; each poll or Refresh rereads the holds. */
+  observedAt: number | null;
 }) {
   const loader = useCallback(
       (signal: AbortSignal) =>
@@ -38,6 +41,15 @@ export function ApprovalDetail({
     ),
     holds = task ? holdNotices(task) : [],
     unavailable = Boolean(task && (!approval || approval.materialUnavailable));
+  const current = useRef(resource),
+    seen = useRef(observedAt);
+  current.current = resource;
+  useEffect(() => {
+    if (seen.current === observedAt) return;
+    seen.current = observedAt;
+    // A slow hold read settles before the next poll replaces it.
+    if (!current.current.state.pending) void current.current.refresh();
+  }, [observedAt]);
   return (
     <div className="inbox-approval">
       <div className="inbox-approval-body">
@@ -57,10 +69,12 @@ export function ApprovalDetail({
         ) : null}
       </div>
       <div className="inbox-decision">
-        {resource.state.error && !task && (
+        {resource.state.error && (
           <Alert variant="destructive" role="alert">
             <p className="body">
-              Independent holds could not be read; they remain in effect.
+              {task
+                ? `Independent holds could not be refreshed; showing the last read from ${new Date(resource.state.fetchedAt ?? 0).toLocaleTimeString()}.`
+                : "Independent holds could not be read; they remain in effect."}
             </p>
             <Button variant="secondary" onClick={resource.refresh}>
               Retry
