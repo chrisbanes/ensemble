@@ -12,10 +12,8 @@ composition uses Radix Slot; Sheet wraps the already installed Radix Dialog.
 `web/src/lib/utils.ts` provides the small `cn` helper using clsx and
 tailwind-merge. Tailwind v4 is integrated through its Vite plugin. The owned
 sources adapt shadcn/ui's Radix button, native select, badge, alert, card, and
-sheet patterns; no shadcn runtime package or init CLI is used. Installed exact versions are `class-variance-authority` 0.7.1, `clsx` 2.1.1,
-`tailwind-merge` 3.7.0, `@radix-ui/react-slot` 1.3.3,
-`@fontsource/geist-sans` 5.3.0, `@fontsource/geist-mono` 5.3.0,
-`lucide-react` 1.51.0, and `tailwindcss` / `@tailwindcss/vite` 4.3.3.
+sheet patterns; no shadcn runtime package or init CLI is used. Exact dependency
+versions are pinned in [`package.json`](../../package.json).
 The component source follows the official [shadcn/ui Vite setup](https://ui.shadcn.com/docs/installation/vite),
 [Button](https://ui.shadcn.com/docs/components/radix/button),
 [Native Select](https://ui.shadcn.com/docs/components/radix/native-select),
