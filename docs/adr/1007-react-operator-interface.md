@@ -17,8 +17,8 @@ Browser state never establishes execution, persistence or external-write success
 This decision adds a frontend build and an API presentation boundary; it does not
 replace the coordination core or require a separate production frontend service.
 
-The foundation uses the Dark / Neutral / Default token set with self-hosted Inter
-and JetBrains Mono, owned Button/Input/Textarea/NativeSelect/Badge/Alert/Card/Sheet
+The foundation uses the Dark / Neutral / Default token set with self-hosted Geist
+and Geist Mono, owned Button/Input/Textarea/NativeSelect/Badge/Alert/Card/Sheet
 source, and Tailwind v4 build integration. The same validated bundle stylesheet
 styles retained server-rendered HTML through the existing document wrapper without
 hydrating those pages or changing their forms. See the
