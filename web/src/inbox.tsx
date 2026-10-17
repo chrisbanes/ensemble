@@ -44,6 +44,8 @@ import {
   useInboxTask,
 } from "./inbox-detail.js";
 import { InboxContext } from "./inbox-context.js";
+import { inboxSelectionHref } from "../../src/operator/attention.js";
+import { closeResolvedNotifications } from "./notifications.js";
 import { QuestionResponse } from "./question-response.js";
 import type { QuestionResponseStates } from "./question-response-state.js";
 import "./inbox.css";
@@ -78,6 +80,8 @@ export interface InboxHeader {
   };
 }
 export async function loadInbox(client: OperatorClient, signal: AbortSignal) {
+  // A notification that arrives while this read is in flight is newer than what it saw.
+  const startedAt = Date.now();
   const items: InboxItem[] = [];
   let cursor: string | null = null;
   const seen = new Set<string>();
@@ -88,13 +92,17 @@ export async function loadInbox(client: OperatorClient, signal: AbortSignal) {
       signal,
     );
     items.push(...page.data.items);
-    if (!page.data.nextCursor)
+    if (!page.data.nextCursor) {
+      // Both callers (the shell's summary and this route) pass through here, so a notification
+      // whose request is no longer waiting closes after whichever read happens.
+      void closeResolvedNotifications(items, page.data.complete, startedAt);
       return {
         items,
         complete: page.data.complete,
         unavailable: page.data.unavailable,
         observedAt: page.observedAt,
       };
+    }
     if (seen.has(page.data.nextCursor)) throw Error("unavailable");
     seen.add(page.data.nextCursor);
     cursor = page.data.nextCursor;
@@ -331,11 +339,7 @@ export function Inbox({
         rows.findIndex((r) => r.id === item.id),
       ),
     };
-    navigate(
-      item.kind === "runtime"
-        ? `/app/inbox?request=${encodeURIComponent(item.id)}`
-        : `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`,
-    );
+    navigate(inboxSelectionHref(item));
   };
   /** After a recorded answer: leave the confirmation without opening another request. */
   const back = () => {

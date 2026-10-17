@@ -18,6 +18,8 @@ material invalidates approval".
 - Home "Needs you" card.
 - Inbox queue row.
 - Task detail decision card.
+- Browser notification (opt-in, Settings → Notifications): opens the exact Inbox
+  selection after sign-in. It is outside the budget below, and it never approves.
 - Operator CLI `approval decide`.
 
 ## Steps

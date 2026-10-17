@@ -10,6 +10,7 @@ import type {
   RuntimeInboxItem,
   TaskInboxItem,
 } from "../../src/operator/contracts.js";
+import { inboxSelectionHref } from "../../src/operator/attention.js";
 import { requestActionLabel, requestKindLabel } from "./inbox-presentation.js";
 export { requestActionLabel, requestKindLabel };
 /** One symbol per request kind, shared by the Inbox and the Overview cards. */
@@ -30,9 +31,7 @@ type Request =
  * which for a runtime is its settings.
  */
 export const requestHref = (item: Request) =>
-  item.kind === "question"
-    ? `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`
-    : item.destination;
+  item.kind === "question" ? inboxSelectionHref(item) : item.destination;
 /** Who is responsible for an uncertain execution: only an intervention request names that. */
 export const interventionRequester = (
   items: readonly (

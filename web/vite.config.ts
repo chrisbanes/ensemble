@@ -5,7 +5,8 @@ export default defineConfig({
   plugins: [tailwindcss()],
   root: fileURLToPath(new URL(".", import.meta.url)),
   base: "/",
-  publicDir: false,
+  // Only service-worker.js: it is copied verbatim to the bundle root and served at /app/.
+  publicDir: "public",
   build: {
     outDir: "../dist/operator",
     emptyOutDir: true,

@@ -711,7 +711,8 @@ disabling it or stopping the service cancels pending retries. After the third fa
 attempt Ensemble stops retrying and raises one runtime item in the attention inbox. The
 item is derived from in-memory state, appears under All projects only and clears as soon
 as the runtime recovers; turning the runtime off and on, or restarting the service,
-starts a fresh schedule. Restart state is never persisted. The Runtime page, the shell
+starts a fresh schedule. The item is also delivered to subscribed browsers as one
+notification per exhaustion episode. Restart state is never persisted. The Runtime page, the shell
 alert and `runtime list` show "Restarting · attempt N of 3 · next at HH:MM" or "Retries
 exhausted", and a failure is described by one of four fixed reasons, never by runtime
 error text. Disabling takes effect at once for new
@@ -1421,7 +1422,26 @@ uncertain execution. Recovery must not imply that Resume can clear unresolved
 ownership or force a capacity release.
 
 The durable attention inbox is the notification source of truth; suppress unchanged
-alerts. OS/push delivery is optional. Subscribed ChatGPT events belong to the
+alerts. Browser notifications are opt-in Web Push, turned on per browser in Settings →
+Notifications; nothing is sent until then. While a browser is subscribed the service
+reads the same Inbox every 15 seconds and sends one push per newly seen alert to each
+active browser: a question or approval once per interaction, an intervention once per
+task and problem, and a runtime whose restarts ran out once per exhaustion episode,
+naming only the runtime. An alert already in the Inbox when the first browser subscribes
+sends nothing (the first complete Inbox read, or the third partial read in a row, ends that
+silent start), an unchanged alert is never sent again, and a request that resolves and
+later returns is new. An alert is recorded before it is sent, so a crash can lose a push
+but never repeats one. A push carries only a title ("Question in Relay: 2 waiting",
+"Codex runtime unavailable") and an Inbox link, never question or approval text, a
+reason, task content, error text or a credential; opening it shows that request after
+sign-in, and it never answers, approves or changes anything. Pushes go over HTTPS only to
+browser vendors' push services, encrypted with a key kept in an owner-only file beside
+the operator auth file, with bounded concurrency, timeouts and retries; a push service
+that reports a subscription gone revokes it. The operator can send a test, turn off this
+browser, and revoke any other from Settings, and a revoked browser turns on again. Where
+the platform allows, the page closes a notification once its request leaves the Inbox.
+Delivery is qualified on the host's browser only; phone and other-device delivery is not
+qualified. Subscribed ChatGPT events belong to the
 deferred post-MVP integration and are not an MVP release gate. Credentials must not
 appear in UI payloads or exposed transcripts. The operator login, session and
 request boundary is defined in the [operator UI foundation](design/s04c-operator-ui.md).

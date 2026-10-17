@@ -418,6 +418,66 @@
   overflow-wrap: anywhere;
 }
 
+/* Frames 181–185: the Notifications panel. The device list reuses the credentials list and .settings-row. */
+.settings-notify-info {
+  display: grid;
+  gap: var(--space-8);
+}
+
+.settings-notify-info p,
+.settings-notify-title {
+  margin: 0;
+}
+
+.settings-notify-info strong {
+  color: var(--foreground);
+  font-weight: var(--weight-medium);
+}
+
+.settings-notify-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-12);
+  border-radius: var(--radius-lg);
+  background: var(--secondary);
+}
+
+.settings-notify-state > div:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.settings-notify-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  font-weight: var(--weight-medium);
+}
+
+.settings-notify-state p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-notify-ok {
+  color: var(--ok);
+}
+
+.settings-notify-fail {
+  color: var(--risk);
+}
+
+.attention-text {
+  margin: 0;
+  color: var(--attn);
+}
+
 @media (max-width: 759px) {
   .page-title-full {
     display: none;

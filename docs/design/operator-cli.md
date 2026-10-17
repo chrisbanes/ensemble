@@ -248,7 +248,11 @@ a valid token outside its scope receives `insufficient-scope` 403. Lifetimes are
 endpoints, not receipted commands, so a receipt replay cannot re-reveal a token.
 An explicit server-side route-authority table classifies every JSON API route as
 read, write or session-only and denies unknown routes; bearer requests never reach
-cookie sessions, legacy HTML or slot routes. `GET /api/operator/cli` returns the
+cookie sessions, legacy HTML or slot routes. The browser-push routes are session-only
+too (`GET /api/operator/notifications` and `POST` to `/api/operator/notifications/subscriptions`
+and `…/subscriptions/<id>/revoke|test`): no CLI command lists, creates or revokes a
+subscription, and a bearer request receives the same `forbidden` refusal as credential
+management. `GET /api/operator/cli` returns the
 API version, capabilities, the service's persistent installation identity and the
 calling credential's metadata. A connection records the installation identity at
 login; a later mismatch fails as `service-identity-changed`.

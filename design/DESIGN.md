@@ -199,7 +199,8 @@ dimensions.
   to Ensemble" in the same place (text variant of `42-phone-provider-closed`). List/Board is a presentation
   switch, not a status mutation; no drag-and-drop is depicted.
 - **Settings (`114-settings-index`):** in-page section navigation (Projects, Runtime
-  & recovery, Profiles, Routing, GitHub discovery, CLI credentials, Readiness)
+  & recovery, Profiles, Routing, GitHub discovery, CLI credentials, Notifications,
+  Readiness)
   beside one column of bordered sections in the same order. Until a task starts a
   turn, Readiness comes first in the page and in the navigation (`114c-settings-first-run`);
   afterwards it is last. The order is the reading order: nothing is reordered with CSS. The
@@ -207,7 +208,9 @@ dimensions.
   button replaces it (`179a-phone-settings-index`): choosing an option never
   navigates, because arrow keys on a closed select fire change on some platforms; Go
   jumps, and the same section again lands again. Project configuration adds General, Routing, GitHub
-  source and Sync & placement tabs.
+  source and Sync & placement tabs. The navigation entry is drawn on the four index frames
+  (`114`, `114c`, `179a`, `180a`); the section frames that predate it keep their earlier
+  list of seven.
 
 ## Shared components
 
@@ -313,8 +316,10 @@ details that the canvas illustrates:
   flow, Execution, Stop and recovery remain reachable from every task view.
   Independent source and execution holds remain independent of approval, checks
   and merge.
-- No context-menu, extension, notification or deep-link surface is designed.
-  Native Codex/ChatGPT work is outside this design.
+- No context-menu, extension or deep-link surface is designed. The one notification
+  surface is the opt-in browser notification controlled in Settings → Notifications
+  (`181`–`185`); it opens the Inbox and never changes a task. Native Codex/ChatGPT work is
+  outside this design.
 
 ## Fixtures and journeys
 
@@ -372,7 +377,7 @@ carried into [Interaction notes](#interaction-notes), not drawn.
 | 05 Assignment, delivery & search | `67-assignment-context`, `69-changes-delivery`, `71-delivery-alternatives`, `73-search`, `75-search-states`, `68-phone-assignment-context`, `70-phone-changes-delivery`, `72-phone-delivery-alternatives`, `74-phone-search`, `76-phone-search-states` |
 | 06 Workspace inspection | `78-files-current-observation`, `79-files-generated-markdown`, `81-changes-comparison-alternatives`, `82-result-r3-retained-files`, `83-review-complete-draft`, `84-last-turn-capture-states`, `85-generated-output-previews`, `86-inspection-capture-states`, `87-review-anchor-states`, `104-review-sent-original-comments`, `105-result-r3-retained-diff`, `106-keyboard-review-journey`, `77-workspace-inspection-specimen`, `107-editor-inspection-specimen`, `88-phone-task-files-list`, `89-phone-deleted-side-range-selection`, `90-phone-edit-anchored-draft-comment`, `91-phone-complete-review-first-scroll`, `92-phone-complete-review-summary-scroll`, `93-phone-generated-markdown-preview`, `94-phone-review-sending`, `95-phone-review-confirmed-failure`, `96-phone-review-unknown-outcome`, `97-phone-review-sent`, `98-phone-retained-result-bytes`, `99-phone-generated-pdf-preview`, `100-phone-generated-raster-preview`, `101-phone-local-base-selection`, `102-phone-unsettled-turn-missing-file`, `103-phone-auth-expired-private-state-cleared` |
 | 07 Tasks, composer & tablet | `24-all-projects-list`, `23-atlas-project-board`, `23b-atlas-project-paused`, `02-composer-optional-expanded`, `800a-tablet-overview-list`, `800b-tablet-inbox-question`, `800c-tablet-task-evidence`, `800d-tablet-search-result`, `800e-tablet-composer-validation`, `800f-tablet-all-projects-board`, `25-phone-board-waiting`, `25b-phone-board-uncertain`, `34-phone-composer-collapsed`, `35-phone-optional-settings-error`, `35b-phone-collapsed-validation`, `800h-phone-composer-short` |
-| 08 Settings, sign-in & recovery | `133-settings-cli-credentials-empty`, `134-settings-cli-credentials-list`, `135-settings-cli-credentials-name-error`, `136-settings-cli-credentials-unconfirmed`, `137-settings-cli-credentials-token`, `138-settings-cli-credentials-rotation`, `139-settings-cli-credentials-revoke-failed`, `122-profile-create`, `123-profile-revoked`, `123b-profile-instructions-revealed`, `124-routing-relay-unsaved`, `125-routing-relay-saved`, `126-runtime-capacity-recovery`, `126b-runtime-switches-specimen`, `126c-runtime-disable-confirm-specimen`, `127-assignment-recovery-relay`, `129-page-not-found`, `108-signin-desktop`, `109-signin-failed`, `113-account-menu`, `114b-settings-discovery-credential`, `115-project-setup`, `116-project-setup-field-error`, `116b-project-setup-duplicate-name`, `116c-project-name-suffix-specimen`, `117-first-project-setup`, `117b-first-setup-discovery-unavailable`, `117c-first-setup-add-repository`, `131-project-setup-choose-folder`, `118-project-config-general`, `118b-project-instructions-revealed`, `119-project-config-github-source`, `119b-project-source-credential-change`, `119c-source-credential-clear-unknown`, `119d-github-source-import-ready`, `119e-github-source-imported`, `120-project-config-sync-placement`, `120b-sync-credential-unusable`, `140-phone-cli-credentials`, `141-phone-cli-credentials-token`, `142-phone-cli-credentials-revoke`, `128-phone-assignment-recovery`, `110-phone-signin`, `111-phone-signin-pending`, `112-phone-signin-failed`, `121-phone-atlas-configuration` |
+| 08 Settings, sign-in & recovery | `133-settings-cli-credentials-empty`, `134-settings-cli-credentials-list`, `135-settings-cli-credentials-name-error`, `136-settings-cli-credentials-unconfirmed`, `137-settings-cli-credentials-token`, `138-settings-cli-credentials-rotation`, `139-settings-cli-credentials-revoke-failed`, `122-profile-create`, `123-profile-revoked`, `123b-profile-instructions-revealed`, `124-routing-relay-unsaved`, `125-routing-relay-saved`, `126-runtime-capacity-recovery`, `126b-runtime-switches-specimen`, `126c-runtime-disable-confirm-specimen`, `127-assignment-recovery-relay`, `129-page-not-found`, `108-signin-desktop`, `109-signin-failed`, `113-account-menu`, `114b-settings-discovery-credential`, `115-project-setup`, `116-project-setup-field-error`, `116b-project-setup-duplicate-name`, `116c-project-name-suffix-specimen`, `117-first-project-setup`, `117b-first-setup-discovery-unavailable`, `117c-first-setup-add-repository`, `131-project-setup-choose-folder`, `118-project-config-general`, `118b-project-instructions-revealed`, `119-project-config-github-source`, `119b-project-source-credential-change`, `119c-source-credential-clear-unknown`, `119d-github-source-import-ready`, `119e-github-source-imported`, `120-project-config-sync-placement`, `120b-sync-credential-unusable`, `140-phone-cli-credentials`, `141-phone-cli-credentials-token`, `142-phone-cli-credentials-revoke`, `181-settings-notifications-off`, `182-settings-notifications-on`, `183-settings-notifications-blocked`, `184-settings-notifications-revoke`, `185-phone-settings-notifications`, `128-phone-assignment-recovery`, `110-phone-signin`, `111-phone-signin-pending`, `112-phone-signin-failed`, `121-phone-atlas-configuration` |
 | 09 First run & onboarding | `143-home-getting-started`, `143b-home-checklist-runtime-regressed`, `145-setup-inline-lead-profile`, `145b-setup-profile-created`, `146-setup-ready-check`, `146b-setup-ready-check-blocked`, `148-composer-project-paused`, `149-task-waiting-project-paused`, `149b-task-fix-resume-confirm`, `151-settings-readiness`, `114c-settings-first-run`, `152-runtime-add-claude`, `152b-runtime-claude-token-unavailable`, `149c-wait-reasons-specimen`, `151b-readiness-no-runtime-specimen`, `144-phone-getting-started`, `147-phone-setup-ready-check`, `150-phone-task-waiting-fix` |
 | 10 Action feedback | `154-project-configuration-saved`, `154b-project-configuration-details-expanded`, `155-routing-saved`, `156-project-configuration-field-error`, `157-project-configuration-changed-elsewhere`, `158-project-configuration-unknown-outcome`, `159-change-list-remove-last-repository`, `160-discovery-credential-saved`, `161-composer-created-project-paused`, `162-grouped-questions-answered`, `162b-grouped-questions-send-failed`, `163-task-reply-sent`, `164-stop-confirmation`, `165-cli-credential-revoked`, `ds-action-feedback`, `166a-phone-project-configuration-saved`, `166b-phone-unknown-outcome-locked`, `166c-phone-task-created-project-paused` |
 | 11 Settings, recovery & responsive states | `167-profile-field-error`, `168-routing-field-error`, `169-runtime-capacity-field-error`, `178-profile-revoke-available`, `170-source-config-changed-elsewhere`, `170b-source-config-latest-loaded`, `171-source-config-unknown-outcome`, `172-routing-typesafe-unavailable`, `173-recovery-evidence-unavailable`, `174-recovery-no-admitted-generation`, `175-recovery-pre-turn-witness`, `176-recovery-no-turn-witness`, `177-project-setup-ref-open`, `180a-tablet-settings-index`, `180b-tablet-project-setup`, `180c-tablet-profile`, `180d-tablet-routing`, `180e-tablet-runtime`, `179a-phone-settings-index`, `179b-phone-project-setup`, `179c-phone-profile`, `179d-phone-routing`, `179e-phone-runtime` |
@@ -520,10 +525,71 @@ without an artboard use the desktop copy.
 - Settings (account menu → `/app/settings`) is the only entry point, and the
   page-title Refresh re-reads the list (the phone frames draw only the top-level
   header). No deep link, context menu, extension or notification surface
-  applies, and the legacy HTML UI has no credential controls.
+  applies to credentials (browser notifications are the separate Notifications
+  section below), and the legacy HTML UI has no credential controls.
 - Phone inputs, selects and buttons, dialog actions included, are 44 px tall. Token
   values are fictional fixtures. Loading, a busy create button and an
   expiring-soon cue are not drawn.
+
+### Notifications
+
+Artboards 181–185 show Settings with Notifications selected in the section
+navigation, between CLI credentials and Readiness; the four index frames (`114`,
+`114c`, `179a`, `180a`) draw that entry. On phone, 185 shows the panel under the phone
+header; phone states without an artboard use the desktop copy.
+
+| State | Desktop | Phone |
+| --- | --- | --- |
+| Off in this browser, permission not asked, no browsers listed | `181-settings-notifications-off` | — |
+| On, with a test result, Turn off for this browser and the browsers list | `182-settings-notifications-on` | `185-phone-settings-notifications` |
+| This browser's other states in place of Turn on: blocked, unsupported or insecure address, unavailable on the service, removed from the list, set up with an old key | `183-settings-notifications-blocked` (text specimen) | — |
+| Revoke confirmation with a failed or unknown request | `184-settings-notifications-revoke` | — |
+
+- The section opens with three plain lines. **What it says:** "Kind, project and
+  waiting count, or which runtime is unavailable, with a link. No question text, task
+  content or error details." **What triggers one:** "A new question, approval, problem
+  or runtime whose restarts ran out." **What it opens:** that request in the Inbox,
+  after sign-in; a notification never answers or approves anything.
+- Notifications are off until the operator turns them on in a browser. **Turn on
+  notifications** is the only place the browser's permission prompt can come from;
+  nothing is requested on page load. Each browser is turned on separately.
+- Two forms of notification exist and no others. A task item reads "Question in
+  <project>: <n> waiting" (Question, Approval or Intervention, the Inbox's own kind
+  label; <n> counts task items of that project and never a runtime). A runtime item
+  reads "Codex runtime unavailable" (or Claude), names no project or error, and opens
+  `/app/inbox?request=runtime%3Acodex`. A runtime notifies once per exhaustion episode.
+- On: the status reads "● On", **Send test notification** reports "Test notification
+  sent." or the failure in plain words, and **Turn off for this browser** stops this
+  browser and revokes its row. Turning on again restores it.
+- The list is "Browsers", active first, oldest first, then revoked rows. A row shows the
+  label, a badge, Push service (the host only), Added and Last delivered (or Revoked).
+  Active is the emerald ● badge and **This browser** marks the row of the browser being
+  used; that row has no Revoke because Turn off is its control. A failed delivery adds
+  one attention line ("▲ Last delivery failed: push service unavailable", "…push service
+  rejected it" or "…push service timed out") and leaves the row Active. Another active
+  browser has **Revoke**, which asks first ("Revoke <label>?", `184`) and can be undone
+  by that browser turning notifications on again. The service allows 20 active browsers.
+- Revoked rows keep their reason: rose ✕ "Revoked" (the operator revoked it), neutral ◼
+  "Removed by the push service" (the push service reported the subscription gone) and
+  neutral ◼ "Key changed — turn on again" (the service's notification key was replaced).
+  Revoked rows have no actions, and the newest 20 are kept.
+- A failed or unconfirmed revoke stays inside the dialog as text without a button, as
+  CLI credentials do, and the list reloads below.
+- This browser's state replaces the Turn on area (`183`): blocked in the browser's
+  settings (with **Check again**), unsupported or not a secure address, unavailable on
+  the service (the rest of Settings keeps working), removed from the list (revoked
+  elsewhere or removed by the push service; **Turn on again**) and set up with an old key
+  (**Turn on again**). Turning on again replaces the old subscription. Permission
+  withdrawn after turning on shows the blocked state.
+- Settings (account menu → `/app/settings`) is the only control surface. A notification
+  click opens or focuses Ensemble at the exact Inbox selection, signing in first at the
+  same address if the session has ended. Where the platform allows, the page closes a
+  notification once its request is no longer in a complete Inbox read; notifications are
+  never sent to close one.
+- No Readiness check or Home checklist item is designed: notifications are optional,
+  and an operator who leaves them off has nothing to fix. Loading and busy states are not
+  drawn. Phone buttons and selects are 44 px tall. Names, hosts and times are fictional
+  fixtures.
 
 ### First run and onboarding
 
@@ -1180,7 +1246,8 @@ file sizes/page counts illustrate metadata, not configured limits.
 | Assignment context `67-assignment-context` / `68-phone-assignment-context`, delivery `69-changes-delivery` / `70-phone-changes-delivery` | Carry the selected assignment/result into retained evidence; return to the same expanded disclosure and reading position. Current inspection is explicitly labelled. |
 | Direct task/file/comparison/result/review links | Resolve authorised task and exact requested context. Direct historical links stay historical. If missing or forbidden, explain the unavailable destination; never substitute current bytes. Without an in-session origin, offer the task/project as fallback. Exact URL syntax is an implementation choice. |
 | Retained advanced execution, approval and recovery routes | Reachable through task controls / Holds on phone. Keep the original task/request/result return anchor. Inspection never resolves ownership or execution uncertainty. |
-| Context menus, extensions and notifications | No applicable entry points are established by the current design. Native Codex/ChatGPT work is outside this design. |
+| Context menus and extensions | No applicable entry points are established by the current design. Native Codex/ChatGPT work is outside this design. |
+| Browser notifications (opt-in, Settings → Notifications `181`–`185`) | A click opens or focuses Ensemble at the exact Inbox selection (`/app/inbox?task=<task>&request=<request>` for a task item, `/app/inbox?request=runtime%3Acodex` for a runtime) after sign-in, and keeps that address through sign-in. It answers, approves and mutates nothing. A resolved request shows its existing state, as a resolved question does. |
 
 ### Desktop, phone and keyboard behaviour
 
@@ -1933,7 +2000,7 @@ Production Inbox and shared question response
 - "Recommended by <requester>" appears in the Inbox and on the task page (`/app/tasks/:id?request=`), which passes the requesting assignment's name.
 - Choice labels use the focus ring on `:focus-within`, because WebKit drops `:focus-visible` on a radio after arrow keys.
 - Entry points that apply: Inbox desktop three-pane, tablet two-pane and phone, and the `/app/inbox?task=&request=` deep link (it opens the request pane and the inspector); the shared `QuestionResponse` at `/app/tasks/:id?request=` (it shows the holds an answer does not clear, in the answering wording); Overview question cards, which answer a pending single-choice question through the same shared `QuestionResponse` (other forms link to the Inbox), and task-row attention links (unchanged); the retained HTML coordination page (unchanged). Counterparts: failed answer, Retry answer; stale read, Try again (or the page Refresh); conflict, Review current request; recorded, Back to Inbox; filter, Clear filters; approval, decision at the retained destination.
-- Runtime item (`02b-inbox-runtime-exhausted`): selected by `/app/inbox?request=runtime%3Acodex` with no `task` parameter, from the "Runtime" request type or the queue; the Overview card and the phone queue open the same item. Not drawn, same layout: the phone runtime detail (header Back to Inbox, "Runtime · N of M", no Open task), the compact tablet Inbox (`800b-tablet-inbox-question`) and the runtime rows of `179e-phone-runtime` and `180e-tablet-runtime`, which carry the Fix text of `126`. Previous and Next request stay wide-layout tools. The detail has no task-context inspector at any width.
+- Runtime item (`02b-inbox-runtime-exhausted`): selected by `/app/inbox?request=runtime%3Acodex` with no `task` parameter, from the "Runtime" request type, the queue or a browser notification (`181`); the Overview card and the phone queue open the same item. Not drawn, same layout: the phone runtime detail (header Back to Inbox, "Runtime · N of M", no Open task), the compact tablet Inbox (`800b-tablet-inbox-question`) and the runtime rows of `179e-phone-runtime` and `180e-tablet-runtime`, which carry the Fix text of `126`. Previous and Next request stay wide-layout tools. The detail has no task-context inspector at any width.
 - Open approvals as holds: every hold surface passes the approval in view and omits only that one. Any other open approval on the task is listed as "Execution held (approval needs a decision)" in the surface's wording. The task-page decision card and inspector already list every open approval as its own row ("Your decision · approval pending", "Approval pending"), so they list that hold only for the other open approvals when `?request=` selects an approval, and none when no approval is selected, rather than repeating every approval as a hold. The Overview approval card and the Inbox approval pane omit their own approval; the Inbox and Overview question footers list every open approval as a hold, since no approval is in view.
 - Hold copy in the approval pane, from the task read's `admission.reasons`; each reads "Approval does not clear it" or "Approving does not clear it":
   - Blocked GitHub dependencies: "Execution blocked by dependency", the open blockers as `owner/repo#n`, and "Source-owned hold … execution still waits for the GitHub blocker."
@@ -1974,7 +2041,8 @@ Production Overview, List and Board
   recorded answer is not reversible, as in the Inbox; its confirmation stays on
   the card until Overview is left. Grouped, multiple-choice and free-text forms,
   and a failed question read, link to the Inbox. Overview has no notification,
-  deep-link or context-menu entry for answering.
+  deep-link or context-menu entry for answering (a browser notification opens the
+  Inbox instead).
 - "Next: you" reads in the attention colour on every task row and card (Overview,
   List and Board), as the token table assigns it.
 - The work table has no Updated column and the Projects panel no sync time: the
@@ -2042,7 +2110,7 @@ Production Overview, List and Board
   work panel). List/Board is a reversible presentation switch: no status mutation
   and no drag and drop. Search results, task Back and Inbox "Open task" return to it
   with filters, column and scroll restored. It has no notification, deep-link or
-  context-menu surface.
+  context-menu surface of its own (a browser notification opens the Inbox).
 - "Refresh tasks" and "More filters" (Filter tasks, Source, Readiness) are existing
   capabilities the frames do not draw.
 - There is no phone Overview or phone List frame; both phone layouts are
@@ -2363,7 +2431,7 @@ only deep link). The retained
 `/task/:id`, `/runtime/task/:id` and `/coordination/task/:id` pages are unchanged
 and linked from Execution (`/runtime/task/:id`) and the History tab's Approval and
 delivery forms (`/coordination/task/:id`, which links `/task/:id`). No
-context menu, extension or notification surface applies. Counterparts: Stop →
+context menu or extension surface applies, and a browser notification never opens the composer. Counterparts: Stop →
 Execution → Resume (retained); Keep running and Escape send nothing; a tab switch
 sends nothing and keeps drafts, and Refresh task only re-reads; Optional
 settings collapse ↔ expand keeps values; a failed create keeps values and the

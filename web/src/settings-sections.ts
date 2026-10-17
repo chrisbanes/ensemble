@@ -9,6 +9,7 @@ export const SETTINGS_SECTIONS = [
   { id: "routing", label: "Routing" },
   { id: "github-discovery", label: "GitHub discovery" },
   { id: "cli-credentials", label: "CLI credentials" },
+  { id: "notifications", label: "Notifications" },
   { id: "readiness", label: "Readiness" },
 ] as const;
 

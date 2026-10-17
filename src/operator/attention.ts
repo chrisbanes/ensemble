@@ -1,4 +1,9 @@
 import { z } from "zod";
+import type {
+  InboxItem,
+  RuntimeInboxItem,
+  TaskInboxItem,
+} from "./contracts.js";
 
 /** A task's attention codes, in the precedence that names who acts next. */
 export const attentionCodes = [
@@ -101,3 +106,52 @@ export const interventionCode = (codes: readonly AttentionCode[]) =>
       attentionNext[c].operator &&
       codes.includes(c),
   );
+
+/** One label per Inbox kind; the record keeps every kind visible if the enum grows. */
+export const kindLabels: Record<InboxItem["kind"], string> = {
+  question: "Question",
+  approval: "Approval",
+  intervention: "Intervention",
+  runtime: "Runtime",
+};
+
+/**
+ * The identity of one alert: what the Inbox shows, what a push notification is tagged with and
+ * what the page keeps open. A question or approval is its interaction (a later delivery code is
+ * not new), an intervention is its task and problem, and a runtime is one exhaustion episode.
+ */
+export function inboxAlertKey(item: InboxItem): string {
+  switch (item.kind) {
+    case "question":
+    case "approval":
+      return item.id;
+    case "intervention":
+      return `${item.id}:${item.attentionCode ?? ""}`;
+    case "runtime":
+      return `${item.id}:${item.since}`;
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
+  }
+}
+
+/** The Inbox address that selects one request, used by the page's queue and by push links. */
+export function inboxSelectionHref(
+  item:
+    | Pick<TaskInboxItem, "id" | "kind" | "taskId">
+    | Pick<RuntimeInboxItem, "id" | "kind">,
+): string {
+  switch (item.kind) {
+    case "question":
+    case "approval":
+    case "intervention":
+      return `/app/inbox?task=${item.taskId}&request=${encodeURIComponent(item.id)}`;
+    case "runtime":
+      return `/app/inbox?request=${encodeURIComponent(item.id)}`;
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
+  }
+}

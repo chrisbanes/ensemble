@@ -5,7 +5,11 @@ import type {
   TaskRead,
 } from "../../src/operator/contracts.js";
 import { type WaitCode, waitLabels } from "../../src/operator/wait-reasons.js";
-import { attentionNext, nextAttention } from "../../src/operator/attention.js";
+import {
+  attentionNext,
+  kindLabels,
+  nextAttention,
+} from "../../src/operator/attention.js";
 import {
   retriesExhausted,
   runtimeSettingsAction,
@@ -14,13 +18,6 @@ import { clockLabel, midSentence } from "./presentation.js";
 import { taskColumnOf } from "./task-overview.js";
 import { nextActor } from "./tasks.js";
 
-/** One label per request kind; the record keeps every kind visible if the enum grows. */
-const kindLabels: Record<InboxItem["kind"], string> = {
-  question: "Question",
-  approval: "Approval",
-  intervention: "Intervention",
-  runtime: "Runtime",
-};
 export const requestKindLabel = (kind: InboxItem["kind"]) => kindLabels[kind];
 
 /** The request's action: its attention code's when it has one, otherwise its kind's. */

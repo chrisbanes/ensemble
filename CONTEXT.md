@@ -17,6 +17,13 @@ A cross-project collection of unresolved questions, approvals and problems requi
 Routine progress and completed work that needs no decision belong outside this inbox.
 _Avoid_: Notification feed or conversation history
 
+**Push subscription**:
+A browser's opt-in to attention notifications, created in Settings → Notifications and
+revocable there. Each new Inbox alert, including an exhausted runtime, becomes one
+minimal push to every active subscription: a title and a link to the Inbox, never its
+content. The Inbox stays the only source of truth.
+_Avoid_: Notification feed
+
 **Project**:
 A container for tasks, optional linked repositories, agent profiles, instructions, and permissions.
 Its identity belongs to Ensemble and is independent of the application hosting it.

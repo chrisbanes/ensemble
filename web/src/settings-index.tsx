@@ -28,6 +28,7 @@ import {
   DiscoveryCredentialRow,
 } from "./discovery-credential.js";
 import { runtimeSummary } from "./execution-runtime.js";
+import { NotificationsSection } from "./notifications.js";
 import { OperatorCredentialsSection } from "./operator-credentials.js";
 import { ReadinessPanel } from "./readiness.js";
 import { useMediaQuery } from "./use-media-query.js";
@@ -440,6 +441,11 @@ export function SettingsWorkspace(
     "cli-credentials": (
       <div id="cli-credentials">
         <OperatorCredentialsSection {...p} />
+      </div>
+    ),
+    notifications: (
+      <div id="notifications">
+        <NotificationsSection {...p} />
       </div>
     ),
     readiness: (

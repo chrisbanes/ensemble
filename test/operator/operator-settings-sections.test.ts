@@ -16,6 +16,7 @@ const designed = [
   "routing",
   "github-discovery",
   "cli-credentials",
+  "notifications",
   "readiness",
 ];
 
@@ -28,6 +29,7 @@ test("first run orders Readiness first and established installs keep the designe
     "routing",
     "github-discovery",
     "cli-credentials",
+    "notifications",
   ]);
   assert.deepEqual(settingsSectionOrder(true), designed);
   assert.deepEqual(settingsSectionOrder(undefined), designed);

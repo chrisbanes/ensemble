@@ -5,6 +5,9 @@ import {
   operatorCredentialIssuedSchema,
   operatorCredentialListSchema,
   operatorCredentialSchema,
+  pushNotificationsReadSchema,
+  pushSubscriptionResultSchema,
+  pushTestResultSchema,
   sourceObservationSchema,
   apiErrorSchema,
   type sourceCredentialReasonSchema,
@@ -218,6 +221,44 @@ export class OperatorClient {
     return this.post(
       `/api/operator/credentials/${encodeURIComponent(id)}/revoke`,
       z.object({ credential: operatorCredentialSchema }).strict(),
+      {},
+      csrfToken,
+    );
+  }
+  notifications(signal?: AbortSignal) {
+    return this.read(
+      "/api/operator/notifications",
+      pushNotificationsReadSchema,
+      signal,
+    );
+  }
+  subscribeNotifications(
+    input: {
+      endpoint: string;
+      keys: { p256dh: string; auth: string };
+      label: string;
+    },
+    csrfToken: string,
+  ) {
+    return this.post(
+      "/api/operator/notifications/subscriptions",
+      pushSubscriptionResultSchema,
+      input,
+      csrfToken,
+    );
+  }
+  revokeNotification(id: string, csrfToken: string) {
+    return this.post(
+      `/api/operator/notifications/subscriptions/${encodeURIComponent(id)}/revoke`,
+      pushSubscriptionResultSchema,
+      {},
+      csrfToken,
+    );
+  }
+  testNotification(id: string, csrfToken: string) {
+    return this.post(
+      `/api/operator/notifications/subscriptions/${encodeURIComponent(id)}/test`,
+      pushTestResultSchema,
       {},
       csrfToken,
     );

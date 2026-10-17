@@ -141,6 +141,21 @@ export class OperatorWebBundle {
       if (!type) throw Error("Unsupported operator build asset");
       files.set(`/assets/${name}`, { body: await readFile(path), type });
     }
+    // The push worker is served at /app/service-worker.js so its scope is /app/. A build without
+    // one serves none: the worker route answers 404 and turning notifications on fails in the browser.
+    const workerPath = join(directory, "service-worker.js"),
+      worker = await lstat(workerPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+    if (worker) {
+      if (!worker.isFile() || worker.isSymbolicLink())
+        throw Error("Unsafe operator build asset");
+      files.set("/app/service-worker.js", {
+        body: await readFile(workerPath),
+        type: mime.js ?? "text/javascript; charset=utf-8",
+      });
+    }
     for (const match of html
       .toString("utf8")
       .matchAll(/(?:src|href)="([^"]+)"/g)) {

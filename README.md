@@ -91,6 +91,12 @@ owns delivery scope and status.
   storage, with current exclusions reapplied when history is read. This is a bounded
   diagnostic view, not a complete transcript or ownership-release proof, and missing
   history does not change admission or completion gates.
+- **Browser notifications.** Opt-in Web Push, turned on per browser in Settings →
+  Notifications: one minimal encrypted push per new Inbox alert (a question, an
+  approval, an intervention or an exhausted runtime) with a link that opens the exact
+  request after sign-in, a test notification, and revocation. It is qualified on the
+  host's own browser only; phone delivery is not qualified
+  ([#1150](https://github.com/chrisbanes/ensemble/issues/1150)).
 - **Settings.** Guided paused-project setup (GitHub discovery of repositories, refs
   and Projects with a typed fallback, a service folder picker and checkout
   verification, one create command) and profile setup, explicit private

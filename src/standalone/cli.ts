@@ -10,6 +10,8 @@ import {
 } from "./service.js";
 import { LocalOperatorHttp, LocalOperatorUi } from "./operator.js";
 import { OperatorAuth } from "./operator-auth.js";
+import { OperatorPush } from "./operator-push.js";
+import { dirname, join } from "node:path";
 import { coordinationOperatorRoutes } from "./operator-coordination.js";
 import { OperatorRouteRegistry } from "./operator-routes.js";
 import { runtimeOperatorRoutes } from "./operator-runtime.js";
@@ -145,6 +147,12 @@ export async function main(
       const authFile = process.env.ENSEMBLE_OPERATOR_AUTH_FILE ?? "";
       const api = new OperatorApi(service, [dataDir, authFile]);
       const readiness = serviceReadiness(service, api, { dataDir, authFile });
+      // The VAPID key sits beside the operator auth file; an unusable one only turns push off.
+      const push = await OperatorPush.open({
+        store: service.operatorPush(),
+        keyFile: join(dirname(authFile), "operator-push-vapid.json"),
+        readInbox: (query) => api.readInbox(query),
+      });
       const ui = new LocalOperatorHttp(
         new LocalOperatorUi(
           service.domain(),
@@ -157,6 +165,7 @@ export async function main(
         {
           routes,
           credentials: service.operatorCredentials(),
+          push,
           web: new OperatorWebBoundary(bundle, api, readiness),
         },
       );

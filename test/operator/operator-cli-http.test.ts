@@ -427,6 +427,10 @@ test("every known API route has an explicit authority", () => {
     "/api/operator/credentials",
     `/api/operator/credentials/${id}/rotate`,
     `/api/operator/credentials/${id}/revoke`,
+    "/api/operator/notifications",
+    "/api/operator/notifications/subscriptions",
+    `/api/operator/notifications/subscriptions/${id}/revoke`,
+    `/api/operator/notifications/subscriptions/${id}/test`,
     `/api/operator/projects/${id}/configuration`,
     `/api/operator/profiles/${id}/configuration`,
     `/api/operator/projects/${id}`,
@@ -499,6 +503,23 @@ test("every known API route has an explicit authority", () => {
       path,
     );
   }
+  // Browser push controls belong to the operator's browser session alone.
+  for (const [method, path] of [
+    ["GET", "/api/operator/notifications"],
+    ["POST", "/api/operator/notifications/subscriptions"],
+    ["POST", `/api/operator/notifications/subscriptions/${id}/revoke`],
+    ["POST", `/api/operator/notifications/subscriptions/${id}/test`],
+  ] as const)
+    assert.equal(operatorRouteAuthority(method, path), "session-only", path);
+  for (const [method, path] of [
+    ["POST", "/api/operator/notifications"],
+    ["GET", "/api/operator/notifications/subscriptions"],
+    ["GET", `/api/operator/notifications/subscriptions/${id}/revoke`],
+    ["DELETE", `/api/operator/notifications/subscriptions/${id}`],
+    ["DELETE", "/api/operator/notifications"],
+    ["POST", `/api/operator/notifications/subscriptions/${id}/other`],
+  ] as const)
+    assert.equal(operatorRouteAuthority(method, path), undefined, path);
   assert.equal(
     operatorRouteAuthority("GET", "/api/operator/future"),
     undefined,

@@ -17,6 +17,7 @@ directory. The defaults are:
 | State (`STATE`) | `~/Library/Application Support/Ensemble` |
 | Data | `STATE/data` |
 | Operator auth | `STATE/auth/operator-auth.json` |
+| Notification key | `STATE/auth/operator-push-vapid.json` |
 | Snapshots | `STATE/snapshots` |
 | Install records | `STATE/launchd/<label>.json` |
 | Releases | `STATE/versions/<version>` |
@@ -439,7 +440,9 @@ a fresh one and begins a new schedule; if it stays unavailable, the same
 `kickstart -k` recovers it. Turning the runtime off cancels pending retries.
 Restart state lives in memory, so a service restart starts afresh. The "next at"
 time is the service's local time on the `/runtime` page and the browser's or
-CLI's local time elsewhere.
+CLI's local time elsewhere. A browser subscribed to
+[notifications](#browser-notifications) gets one notification when a runtime's retries
+run out, and none again for the same episode.
 
 The LaunchAgent in `~/Library/LaunchAgents` is meant to start the service when
 the user logs into the GUI session; it does not start before login. The
@@ -699,6 +702,52 @@ the row shows the token unavailable. To rotate, write the new token to a new mod
 `0600` file in the same directory and `mv` it over the old one; the next turn uses
 it without a restart. A launchd-installed Claude turn with a real token is
 untested; the bounded live journeys ran the service outside launchd.
+
+### Browser notifications
+
+Settings → Notifications turns on browser notifications, one browser at a time.
+Nothing is sent or read, and no subscription is stored, until the operator does that. While at least one browser
+is subscribed, the operator process reads the same Inbox as the UI every 15 seconds and
+sends one encrypted Web Push per newly seen alert to each active browser; with none, it
+reads nothing. A push carries a title ("Question in Relay: 2 waiting", "Codex runtime
+unavailable") and an Inbox link, no question text, task content, error text or credential.
+Opening it shows that request after sign-in. It never answers or approves anything.
+Alerts already in the Inbox when a first browser subscribes are recorded silently; that
+start ends with the first complete Inbox read, or after three partial reads in a row.
+
+- **Key.** The operator process creates `STATE/auth/operator-push-vapid.json` (mode `0600`,
+  owner-only, beside the operator auth file) when it first starts. It is the same for
+  a LaunchAgent and a [LaunchDaemon](#launchdaemon-mode) install, a fresh or an upgraded
+  one: the daemon runs as the same non-root account and uses the same auth directory, so
+  nothing changes in either plist. A key file
+  that is a symbolic link, owned by another user, readable by others, oversized or corrupt
+  is refused: Settings → Notifications then reads "Unavailable on the service" and the rest
+  of the operator UI keeps running. The private key lives only in this file, never in the
+  database, the environment, logs or any API response.
+- **Rotation.** There is no command. Stop the service, delete the key file, start the
+  service, then turn notifications on again in each browser. At startup, subscriptions
+  made under the old key are marked revoked ("Key changed — turn on again").
+- **Network.** The service makes outbound HTTPS requests only to the browsers' push
+  services: `fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `web.push.apple.com` and subdomains of `push.apple.com` and `notify.windows.com`. It
+  accepts no other host, port, IP address or redirect, sends at most four requests at a
+  time with a 10-second timeout, and retries a throttled or unavailable push service after
+  30 seconds and 2 minutes. A push service that says a subscription no longer exists
+  (404 or 410) revokes it; a request it rejects (400, 401, 403, 413) is recorded on the
+  device and retried never.
+- **Limits.** Delivery is at most once: an alert is recorded before it is sent, so a crash
+  between the two loses that push and never repeats one, and the retry queue is in memory.
+  The Inbox remains the source of truth. A browser that rotates its push endpoint is not
+  followed; its next push answers 404 or 410, the row is revoked as removed by the push
+  service, and Settings offers Turn on again. Runtime restart state is in memory too, so a
+  runtime that fails again after a service restart is a new episode and notifies again.
+- **Backups.** A snapshot holds the subscriptions (the push endpoint and keys are needed to
+  send) and the record of alerts already sent, not the key file. Restored on a host
+  without the key file, the service creates a new key and revokes the restored
+  subscriptions as key changed.
+- **Qualification.** The [host browser check](../evidence/2026-10-17-web-push-host-browser.md)
+  covers Chrome on the host only. Phone delivery and other-device delivery are not qualified
+  ([#1150](https://github.com/chrisbanes/ensemble/issues/1150)).
 
 ## Execution diagnostic retention
 

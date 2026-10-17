@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { OperatorApi } from "../../src/standalone/operator-api.js";
 import { serviceReadiness } from "../../src/standalone/readiness.js";
 import { OperatorAuth } from "../../src/standalone/operator-auth.js";
+import type { OperatorPush } from "../../src/standalone/operator-push.js";
 import { OperatorRouteRegistry } from "../../src/standalone/operator-routes.js";
 import { runtimeOperatorRoutes } from "../../src/standalone/operator-runtime.js";
 import type { Runtime } from "../../src/standalone/codex.js";
@@ -31,6 +32,8 @@ type ServeOptions = {
   setup?: ConstructorParameters<typeof OperatorApi>[4];
   /** A controllable session clock and idle timeout, to expire a signed-in session. */
   auth?: { now: () => number; idleTimeoutMs: number };
+  /** Browser push for the notification routes. */
+  push?: OperatorPush;
 };
 type Fixture = Awaited<ReturnType<typeof createOperatorFixture>>;
 
@@ -132,6 +135,7 @@ export async function serveCli<F extends Fixture>(
       {
         routes,
         credentials: f.service.operatorCredentials(),
+        ...(options.push ? { push: options.push } : {}),
         web: new OperatorWebBoundary(
           bundle,
           api,

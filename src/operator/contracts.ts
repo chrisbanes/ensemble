@@ -3166,6 +3166,72 @@ export const operatorCredentialIssuedSchema = z
     token: operatorCredentialTokenSchema,
   })
   .strict();
+/** Push subscription label: 1 to 64 characters, no control characters. */
+export const pushSubscriptionLabelSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine((value) => !/[\p{Cc}\u2028\u2029]/u.test(value));
+/** The browser's PushSubscription JSON. Hosts, key lengths and curve points are checked server-side. */
+export const pushSubscribeRequestSchema = z
+  .object({
+    endpoint: z.string().min(1).max(2048),
+    keys: z
+      .object({
+        p256dh: z.string().min(1).max(128),
+        auth: z.string().min(1).max(64),
+      })
+      .strict(),
+    label: pushSubscriptionLabelSchema,
+  })
+  .strict();
+export const pushRevokedReasonSchema = z.enum([
+  "operator",
+  "gone",
+  "key-changed",
+]);
+export const pushFailureSchema = z.enum(["rejected", "unavailable", "timeout"]);
+/** Metadata only: never the endpoint, p256dh or auth. */
+export const pushSubscriptionSchema = z
+  .object({
+    id: uuid,
+    label: pushSubscriptionLabelSchema,
+    serviceHost: z.string().min(1).max(253),
+    endpointDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    createdAt: time,
+    lastSuccessAt: time.nullable(),
+    lastFailure: pushFailureSchema.nullable(),
+    state: z.enum(["active", "revoked"]),
+    revokedAt: time.nullable(),
+    revokedReason: pushRevokedReasonSchema.nullable(),
+  })
+  .strict();
+export type PushSubscriptionRecord = z.infer<typeof pushSubscriptionSchema>;
+export const pushNotificationsReadSchema = envelope(
+  z
+    .object({
+      available: z.boolean(),
+      publicKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{87}$/)
+        .nullable(),
+      subscriptions: z.array(pushSubscriptionSchema).max(100),
+    })
+    .strict(),
+);
+export const pushSubscriptionResultSchema = z
+  .object({ subscription: pushSubscriptionSchema })
+  .strict();
+export const pushTestOutcomeSchema = z.enum([
+  "sent",
+  "gone",
+  "rejected",
+  "unavailable",
+  "timeout",
+]);
+export const pushTestResultSchema = z
+  .object({ outcome: pushTestOutcomeSchema })
+  .strict();
 export const cliIdentitySchema = z
   .object({
     apiVersion: z.number().int().positive().safe(),

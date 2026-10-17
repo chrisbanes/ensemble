@@ -222,6 +222,16 @@ export function operatorRouteAuthority(
       path,
     );
   if (sessionOnly) return "session-only";
+  // Browser push controls: the operator's own browser session, never a CLI credential.
+  if (method === "GET" && path === "/api/operator/notifications")
+    return "session-only";
+  if (
+    method === "POST" &&
+    /^\/api\/operator\/notifications\/subscriptions(?:\/[^/]+\/(?:revoke|test))?$/.test(
+      path,
+    )
+  )
+    return "session-only";
   if (method === "POST")
     return path === "/api/operator/commands" ||
       path === "/api/operator/source-refresh"

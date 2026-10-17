@@ -14,6 +14,9 @@ import {
   operatorCredentialIssueRequestSchema,
   operatorCredentialIssuedSchema,
   operatorCredentialListSchema,
+  pushNotificationsReadSchema,
+  pushSubscriptionResultSchema,
+  pushTestResultSchema,
   sessionSchema,
 } from "../operator/contracts.js";
 import {
@@ -22,6 +25,8 @@ import {
   type OperatorCredentialStore,
   type VerifiedOperatorCredential,
 } from "./operator-credentials.js";
+import type { OperatorPush } from "./operator-push.js";
+import { PushError } from "./web-push.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -798,11 +803,15 @@ type OperatorHttpOptions = {
   routes?: OperatorRouteRegistry;
   web?: OperatorWebBoundary;
   credentials?: OperatorCredentialStore;
+  /** Opt-in browser push; absent, the notification routes answer 404. */
+  push?: OperatorPush;
 };
 
 const SESSION_COOKIE = "ensemble_operator_session";
 const CREDENTIAL_ACTION =
   /^\/api\/operator\/credentials\/([^/]+)\/(rotate|revoke)$/;
+const PUSH_ACTION =
+  /^\/api\/operator\/notifications\/subscriptions\/([^/]+)\/(revoke|test)$/;
 const MAX_FORM_BYTES = 64 * 1024;
 const MAX_FORM_FIELDS = 128;
 const MAX_FORM_VALUE_LENGTH = 8 * 1024;
@@ -916,6 +925,16 @@ function apiFailure(
   if (error instanceof OperatorCredentialError)
     error = new OperatorApiError(
       error.code === "not-found" ? 404 : 409,
+      error.code,
+    );
+  if (error instanceof PushError)
+    error = new OperatorApiError(
+      {
+        "invalid-input": 400,
+        "not-found": 404,
+        conflict: 409,
+        unavailable: 503,
+      }[error.code],
       error.code,
     );
   const status =
@@ -1171,6 +1190,7 @@ export class LocalOperatorHttp {
   private readonly secureCookie: boolean;
   private readonly web: OperatorWebBoundary | undefined;
   private readonly credentials: OperatorCredentialStore | undefined;
+  private readonly push: OperatorPush | undefined;
 
   constructor(
     private readonly ui: LocalOperatorUi,
@@ -1179,6 +1199,7 @@ export class LocalOperatorHttp {
   ) {
     this.web = options.web;
     this.credentials = options.credentials;
+    this.push = options.push;
     this.routes = options.routes ?? new OperatorRouteRegistry();
     this.secureCookie = new URL(auth.origin).protocol === "https:";
   }
@@ -1492,12 +1513,14 @@ export class LocalOperatorHttp {
     const address = server.address();
     if (!address || typeof address === "string")
       throw new Error("Unexpected operator UI address");
+    this.push?.start();
     return address.port;
   }
 
   async stop(): Promise<void> {
     const server = this.server;
     this.server = undefined;
+    await this.push?.stop();
     if (server)
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -1594,7 +1617,8 @@ export class LocalOperatorHttp {
         return true;
       }
       // An unknown address under /app gets the public shell with 404, so the client can render "Page not found".
-      const unknownApp = !web.shell(path) && path.startsWith("/app/");
+      const unknownApp =
+        !web.shell(path) && path.startsWith("/app/") && !web.bundle.asset(path);
       const asset = web.bundle.asset(
         web.shell(path) || unknownApp ? "/app" : path,
       );
@@ -1624,7 +1648,10 @@ export class LocalOperatorHttp {
                 "/api/operator/source-refresh",
                 "/api/operator/setup/folders",
                 "/api/operator/setup/verify-checkout",
-              ].includes(path) || CREDENTIAL_ACTION.test(path)
+              ].includes(path) ||
+              CREDENTIAL_ACTION.test(path) ||
+              path === "/api/operator/notifications/subscriptions" ||
+              PUSH_ACTION.test(path)
             ? ["POST"]
             : ["GET"];
       if (!expected.includes(method ?? "")) {
@@ -1735,6 +1762,36 @@ export class LocalOperatorHttp {
           json(200, data);
           return true;
         }
+        if (path.startsWith("/api/operator/notifications")) {
+          const push = this.push;
+          if (!push) {
+            deny(404, "not-found");
+            return true;
+          }
+          const action = PUSH_ACTION.exec(path);
+          const id = decodeSegment(action?.[1] ?? "") ?? "";
+          let data: unknown;
+          if (!action)
+            data = pushSubscriptionResultSchema.parse({
+              subscription: push.subscribe(body),
+            });
+          else if (action[2] === "revoke") {
+            z.object({}).strict().parse(body);
+            data = pushSubscriptionResultSchema.parse({
+              subscription: push.revoke(id),
+            });
+          } else {
+            z.object({}).strict().parse(body);
+            const outcome = await push.test(id);
+            if (!this.currentSession(session)) {
+              deny(401, "unauthenticated");
+              return true;
+            }
+            data = pushTestResultSchema.parse({ outcome });
+          }
+          json(200, data);
+          return true;
+        }
         if (path === "/api/operator/source-refresh") {
           z.object({}).strict().parse(body);
           const data = await web.api.refreshSources();
@@ -1768,6 +1825,21 @@ export class LocalOperatorHttp {
           200,
           operatorCredentialListSchema.parse({
             data: { credentials: this.credentials.list() },
+            observedAt: Date.now(),
+          }),
+        );
+        return true;
+      }
+      if (path === "/api/operator/notifications") {
+        if ([...url.searchParams].length || !this.push)
+          throw new OperatorApiError(
+            this.push ? 400 : 404,
+            this.push ? "invalid-input" : "not-found",
+          );
+        json(
+          200,
+          pushNotificationsReadSchema.parse({
+            data: this.push.read(),
             observedAt: Date.now(),
           }),
         );

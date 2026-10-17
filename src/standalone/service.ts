@@ -127,6 +127,7 @@ import {
   managedAssignmentEnvironment,
   OperatorCredentialStore,
 } from "./operator-credentials.js";
+import { OperatorPushStore } from "./operator-push.js";
 import {
   CaffeinateAssertion,
   ExecutionPower,
@@ -439,6 +440,7 @@ interface Started {
   workspaceBindings: SqliteWorkspaceBindingStore;
   workspaceComparisons: SqliteWorkspaceComparisonStore;
   operatorCredentials: OperatorCredentialStore;
+  operatorPush: OperatorPushStore;
   schedulerStore: SchedulerStore;
   wakeQueries: SchedulerWakeQueries;
   inboxStartup: InboxStartupReconciliation;
@@ -657,6 +659,7 @@ export class StandaloneService {
       new Store(db).ensureHost("standalone-codex");
       const workspaceComparisons = new SqliteWorkspaceComparisonStore(db);
       const operatorCredentials = new OperatorCredentialStore(db);
+      const operatorPush = new OperatorPushStore(db);
       const conversationHistory = new ConversationHistoryStore(db);
       let diagnostics: ExecutionDiagnosticsStore | undefined;
       try {
@@ -1178,6 +1181,7 @@ export class StandaloneService {
         workspaceBindings,
         workspaceComparisons,
         operatorCredentials,
+        operatorPush,
         schedulerStore,
         wakeQueries,
         inboxStartup,
@@ -2720,6 +2724,10 @@ export class StandaloneService {
 
   operatorCredentials(): OperatorCredentialStore {
     return this.started().operatorCredentials;
+  }
+
+  operatorPush(): OperatorPushStore {
+    return this.started().operatorPush;
   }
 
   githubSources(): GitHubSourceStore {

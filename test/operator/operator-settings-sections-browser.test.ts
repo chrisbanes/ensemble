@@ -23,6 +23,7 @@ const sections = [
   ["Routing", "routing", "Routing"],
   ["GitHub discovery", "github-discovery", "GitHub discovery"],
   ["CLI credentials", "cli-credentials", "CLI credentials"],
+  ["Notifications", "notifications", "Notifications"],
   ["Readiness", "readiness", "Readiness"],
 ] as const;
 const designedHeadings = sections.map(([, , heading]) => heading);
@@ -217,7 +218,7 @@ test("first run puts Readiness first and an established install keeps the design
     await first.page
       .locator(".settings-index > *")
       .evaluateAll((es) => es.map((e) => getComputedStyle(e).order)),
-    Array(7).fill("0"),
+    Array(sections.length).fill("0"),
   );
   assert.deepEqual(await current(first.page), ["Readiness"]);
   for (const viewport of [desktop, phone]) {
@@ -323,7 +324,7 @@ test("Settings section navigation is reachable by keyboard in order", async (_t,
     await page.keyboard.press("Tab");
   }
   const names = ["Projects"];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 1; i < sections.length; i++) {
     await page.keyboard.press("Tab");
     names.push(await label());
   }

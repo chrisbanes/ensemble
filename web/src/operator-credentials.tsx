@@ -35,7 +35,7 @@ const lifetimes = [7, 30, 60, 90];
 // A rotation keeps the name, so the short id tells the two apart.
 const scopeLabel = (s: Scope) => (s === "read" ? "Read-only" : "Read-write");
 
-function When({ at }: { at: number }) {
+export function When({ at }: { at: number }) {
   return (
     <time dateTime={new Date(at).toISOString()}>
       {new Date(at).toLocaleString([], {
